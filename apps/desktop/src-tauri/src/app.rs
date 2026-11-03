@@ -1,47 +1,72 @@
+use std::sync::OnceLock;
+
+use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
+use tauri_plugin_deep_link::DeepLinkExt;
 
-use crate::{commands, sink};
+use crate::{cli, commands, policy, sink, update};
+
+static APP: OnceLock<AppHandle> = OnceLock::new();
+
+/// Broadcast an event to every window (no-op before the UI is up or in headless roles).
+pub fn emit<S: Serialize + Clone>(event: &str, payload: S) {
+    if let Some(app) = APP.get() {
+        let _ = app.emit(event, payload);
+    }
+}
 
 /// What this process was started for.
 enum Mode {
     Main,
     /// Host side: incoming-connection manager, spawned by the `--server` process.
     Cm,
-    /// Viewer opened directly from argv (`--connect <id> [password]`).
-    Connect { peer: String, conn: String, password: Option<String> },
+    /// Viewer opened from the command line or a `tether://` link (`cli.rs`).
+    Connect { c: cli::Connect, password: Option<String> },
 }
 
 fn mode(args: &[String]) -> Mode {
-    match args.first().map(String::as_str) {
-        Some("--cm") => Mode::Cm,
-        Some(c @ ("--connect" | "--file-transfer" | "--view-camera" | "--terminal"))
-            if args.len() > 1 =>
-        {
-            Mode::Connect {
-                peer: args[1].clone(),
-                conn: c.trim_start_matches("--").replace("connect", "default"),
-                password: args.get(2).filter(|p| !p.starts_with("--")).cloned(),
-            }
-        }
-        _ => Mode::Main,
+    if args.first().map(String::as_str) == Some("--cm") {
+        return Mode::Cm;
+    }
+    match cli::take_connect() {
+        Some((c, password)) => Mode::Connect { c, password },
+        None => Mode::Main,
     }
 }
 
 pub fn run(args: Vec<String>) {
     let mode = mode(&args);
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(commands::handler())
         .setup(move |app| {
             sink::install(app.handle().clone());
+            let _ = APP.set(app.handle().clone());
             match &mode {
                 Mode::Main => {
                     librustdesk::ui::api::start_status_sync();
                     main_window(app.handle())?;
                     tray(app.handle())?;
+                    policy::start(true);
+                    update::start();
+                    // macOS delivers tether:// links to the running app; Windows starts a new
+                    // process with the link as argument (cli.rs).
+                    let handle = app.handle().clone();
+                    app.deep_link().on_open_url(move |ev| {
+                        for url in ev.urls() {
+                            match cli::parse_uri(url.as_str()).and_then(|c| policy::check_outgoing().map(|_| c)) {
+                                Ok(c) => {
+                                    let _ = open_session(&handle, &c.peer, &c.conn);
+                                }
+                                Err(e) => hbb_common::log::warn!("link refused: {e}"),
+                            }
+                        }
+                    });
                     // Debug builds only: lets automated tests set a known permanent password.
                     #[cfg(debug_assertions)]
                     if let Ok(pw) = std::env::var("TETHER_DEV_PASSWORD") {
@@ -55,9 +80,10 @@ pub fn run(args: Vec<String>) {
                 Mode::Cm => {
                     librustdesk::ui::cm::start();
                     cm_window(app.handle())?;
+                    refuse_incoming_while_update_required();
                 }
-                Mode::Connect { peer, conn, password } => {
-                    let key = open_session(app.handle(), peer, conn)?;
+                Mode::Connect { c, password } => {
+                    let key = open_session_with(app.handle(), c)?;
                     if let Some(pw) = password {
                         sink::get().map(|s| s.set_pending_password(&key, pw.clone()));
                     }
@@ -133,11 +159,42 @@ fn cm_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     Ok(w)
 }
 
+/// Incoming sessions are refused while this version must be updated first: every connection the
+/// CM sees is closed. Policy and update state come from the caches (`policy::init`, `update.rs`).
+fn refuse_incoming_while_update_required() {
+    if !update::blocked() {
+        return;
+    }
+    hbb_common::log::warn!("update required: refusing incoming sessions");
+    std::thread::spawn(|| loop {
+        for c in sink::get().map(|s| s.cm_clients()).unwrap_or_default() {
+            if let Some(id) = c.get("id").and_then(|v| v.as_i64()) {
+                librustdesk::ui::cm::close(id as i32);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    });
+}
+
 pub fn open_session(app: &AppHandle, peer: &str, conn: &str) -> tauri::Result<String> {
+    let c = cli::Connect { peer: peer.to_owned(), conn: conn.to_owned(), ..Default::default() };
+    open_session_with(app, &c)
+}
+
+/// `view_only`/`relay` are passed to the session page as `&view_only=1&relay=1`.
+pub fn open_session_with(app: &AppHandle, c: &cli::Connect) -> tauri::Result<String> {
+    let (peer, conn) = (&c.peer, &c.conn);
     let key = uuid::Uuid::new_v4().simple().to_string();
     let label = sink::session_label(&key);
-    let route = format!("/session/{key}?peer={peer}&conn={conn}");
+    let mut route = format!("/session/{key}?peer={peer}&conn={conn}");
+    if c.view_only {
+        route.push_str("&view_only=1");
+    }
+    if c.relay {
+        route.push_str("&relay=1");
+    }
     let w = base(app, &label, &route)?
+        .fullscreen(c.fullscreen)
         .inner_size(1280.0, 800.0)
         .min_inner_size(640.0, 400.0)
         .center()

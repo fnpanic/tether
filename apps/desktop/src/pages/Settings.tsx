@@ -1,18 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 import qrcode from "qrcode-generator";
-import { Info, KeyRound, Lock, Monitor, Moon, Network, Palette, Shield, Sun, X } from "lucide-react";
+import { Activity, Info, KeyRound, Lock, Monitor, Moon, Network, Palette, Shield, Sun, X } from "lucide-react";
 import { api, type Status } from "../lib/ipc";
+import { errorText, isHidden, isLocked, isOn, usePolicy } from "../lib/policy";
+import { Diagnostics } from "./Diagnostics";
+import { updateApi, type UpdateStatus } from "../components/UpdateCard";
 import { getThemePref, setThemePref, type ThemePref } from "../lib/theme";
 import { Button, IconButton, Segmented, TextField, Toggle } from "../components/ui";
 import { passwordStrength } from "../lib/security";
 
-type Section = "security" | "access" | "appearance" | "network" | "about";
+type Section = "security" | "access" | "appearance" | "network" | "diagnostics" | "about";
 
 const NAV: { id: Section; label: string; icon: typeof Shield }[] = [
   { id: "security", label: "Security", icon: Shield },
   { id: "access", label: "Unattended access", icon: KeyRound },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "network", label: "Network", icon: Network },
+  { id: "diagnostics", label: "Diagnostics", icon: Activity },
   { id: "about", label: "About", icon: Info },
 ];
 
@@ -28,23 +32,38 @@ function useOption(key: string, def = "") {
   return [v, set] as const;
 }
 
-function Row({ title, desc, children }: { title: string; desc?: string; children: React.ReactNode }) {
+function Managed() {
+  return (
+    <span className="mt-1 inline-flex items-center gap-1 text-footnote text-muted">
+      <Lock size={12} /> Managed by your organisation
+    </span>
+  );
+}
+
+/** Policy feature gate: hidden features are not rendered, locked ones are disabled with a badge. */
+function Row({ title, desc, feature, children }: { title: string; desc?: string; feature?: string; children: React.ReactNode }) {
+  const eff = usePolicy();
+  if (feature && isHidden(eff, feature)) return null;
+  const locked = !!feature && isLocked(eff, feature);
   return (
     <div className="flex items-center gap-6 border-b border-hairline py-4 last:border-0">
       <div className="min-w-0 flex-1">
         <div className="text-callout">{title}</div>
         {desc && <div className="mt-0.5 text-caption leading-relaxed text-muted">{desc}</div>}
+        {locked && <Managed />}
       </div>
-      {children}
+      <fieldset disabled={locked} className={`min-w-0 ${locked ? "opacity-60" : ""}`}>
+        {children}
+      </fieldset>
     </div>
   );
 }
 
-function BoolOption({ k, title, desc }: { k: string; title: string; desc?: string }) {
+function BoolOption({ k, f, title, desc }: { k: string; f: string; title: string; desc?: string }) {
   // Core options use "N" to disable and empty for the default (enabled).
   const [v, set] = useOption(k, "Y");
   return (
-    <Row title={title} desc={desc}>
+    <Row title={title} desc={desc} feature={f}>
       <Toggle label={title} checked={v !== "N"} onChange={(on) => set(on ? "Y" : "N")} />
     </Row>
   );
@@ -61,7 +80,7 @@ function Security() {
           that cannot be encrypted are refused, and the relay server cannot see your screen, keystrokes or files.
         </div>
       </div>
-      <Row title="How others get in" desc="Choose whether incoming sessions need you to click Accept, a password, or either.">
+      <Row title="How others get in" desc="Choose whether incoming sessions need you to click Accept, a password, or either." feature="security.approve-mode">
         <Segmented
           value={approve as "both" | "click" | "password"}
           onChange={setApprove}
@@ -72,10 +91,10 @@ function Security() {
           ]}
         />
       </Row>
-      <BoolOption k="enable-keyboard" title="Allow control" desc="Remote users can use mouse and keyboard." />
-      <BoolOption k="enable-clipboard" title="Allow clipboard" />
-      <BoolOption k="enable-file-transfer" title="Allow file transfer" />
-      <BoolOption k="enable-audio" title="Share audio" />
+      <BoolOption k="enable-keyboard" f="permission.control" title="Allow control" desc="Remote users can use mouse and keyboard." />
+      <BoolOption k="enable-clipboard" f="permission.clipboard" title="Allow clipboard" />
+      <BoolOption k="enable-file-transfer" f="permission.file-transfer" title="Allow file transfer" />
+      <BoolOption k="enable-audio" f="permission.audio" title="Share audio" />
     </>
   );
 }
@@ -85,6 +104,7 @@ function Access({ status }: { status: Status | null }) {
   const [pw2, setPw2] = useState("");
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [verify, setVerify] = useOption("verification-method", "both");
+  const eff = usePolicy();
   const st = passwordStrength(pw);
   const match = pw === pw2;
   return (
@@ -93,7 +113,8 @@ function Access({ status }: { status: Status | null }) {
         Unattended access lets you reach this device any time with a permanent password, without anyone in front of it.
         {status && !status.installed && " Installing Tether as a service also lets you reach the sign-in screen and administrator prompts."}
       </div>
-      <Row title="Permanent password" desc={st.hint}>
+      {isOn(eff, "security.permanent-password") ? (
+      <Row title="Permanent password" desc={st.hint} feature="security.permanent-password">
         <form
           className="flex w-[280px] flex-col gap-2"
           onSubmit={async (e) => {
@@ -104,7 +125,7 @@ function Access({ status }: { status: Status | null }) {
               setPw("");
               setPw2("");
             } catch (err) {
-              setMsg({ ok: false, text: String(err) });
+              setMsg({ ok: false, text: errorText(err) });
             }
           }}
         >
@@ -125,7 +146,14 @@ function Access({ status }: { status: Status | null }) {
           {msg && <div className={`text-footnote ${msg.ok ? "text-ok" : "text-danger"}`}>{msg.text}</div>}
         </form>
       </Row>
-      <Row title="Accepted passwords">
+      ) : (
+        !isHidden(eff, "security.permanent-password") && (
+          <Row title="Permanent password" desc="Your organisation does not allow a permanent password on this device.">
+            <Managed />
+          </Row>
+        )
+      )}
+      <Row title="Accepted passwords" feature="security.verification-method">
         <Segmented
           value={verify as "both" | "use-temporary-password" | "use-permanent-password"}
           onChange={setVerify}
@@ -137,8 +165,8 @@ function Access({ status }: { status: Status | null }) {
         />
       </Row>
       <TwoFactor />
-      {status && !status.installed && (
-        <Row title="Install as service" desc="Starts with the computer and stays reachable when nobody is logged in. Requires administrator rights.">
+      {status && !status.installed && isOn(eff, "security.unattended") && (
+        <Row title="Install as service" desc="Starts with the computer and stays reachable when nobody is logged in. Requires administrator rights." feature="security.unattended">
           <Button size="sm" onClick={() => api.installService()}>
             Install
           </Button>
@@ -266,12 +294,15 @@ function NetworkSection() {
   const [relay, setRelay] = useOption("relay-server");
   const [key, setKey] = useOption("key");
   const [draft, setDraft] = useState<{ server: string; relay: string; key: string } | null>(null);
+  const eff = usePolicy();
+  const allowed = isOn(eff, "settings.server", false);
   const d = draft ?? { server, relay, key };
   const field = (label: string, k: keyof typeof d, ph: string) => (
     <label className="block">
       <span className="text-caption text-muted">{label}</span>
       <input
         value={d[k]}
+        disabled={!allowed}
         spellCheck={false}
         onChange={(e) => setDraft({ ...d, [k]: e.target.value })}
         placeholder={ph}
@@ -283,6 +314,11 @@ function NetworkSection() {
     <>
       <div className="rounded-2xl bg-parchment p-4 text-caption leading-relaxed text-muted">
         Tether uses your organisation's built-in server. Override it only if your administrator asked you to.
+        {!allowed && (
+          <div>
+            <Managed />
+          </div>
+        )}
       </div>
       <div className="mt-4 space-y-3">
         {field("ID server", "server", "built-in")}
@@ -298,7 +334,7 @@ function NetworkSection() {
         <Button
           size="sm"
           variant="primary"
-          disabled={!draft}
+          disabled={!draft || !allowed}
           onClick={() => {
             setServer(d.server.trim());
             setRelay(d.relay.trim());
@@ -314,10 +350,30 @@ function NetworkSection() {
 }
 
 function About({ status }: { status: Status | null }) {
+  const eff = usePolicy();
+  const [up, setUp] = useState<UpdateStatus | string | null>(null);
   return (
     <div className="space-y-3 text-caption leading-relaxed text-muted">
       <div>
         <span className="text-ink">Tether</span> {status?.version ?? ""}
+      </div>
+      {eff && (
+        <div>
+          Policy {eff.serial ? `serial ${eff.serial}` : "defaults"}
+          {eff.group ? `, group ${eff.group}` : ""} · {eff.sources.join(", ")}
+        </div>
+      )}
+      <div className="flex items-center gap-3">
+        <Button
+          size="sm"
+          onClick={() => {
+            setUp("Checking…");
+            updateApi.check().then(setUp).catch((e) => setUp(errorText(e)));
+          }}
+        >
+          Check for updates
+        </Button>
+        {up && <span>{typeof up === "string" ? up : up.version ? `Version ${up.version} is available.` : "Tether is up to date."}</span>}
       </div>
       <p>Fast, private remote desktop. Built on the RustDesk open-source core.</p>
       <p>
@@ -330,6 +386,8 @@ function About({ status }: { status: Status | null }) {
 
 export function Settings({ onClose, status }: { onClose: () => void; status: Status | null }) {
   const [sec, setSec] = useState<Section>("security");
+  const eff = usePolicy();
+  const nav = NAV.filter((n) => n.id !== "diagnostics" || isOn(eff, "diagnostics.page"));
   useEffect(() => {
     const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", k);
@@ -345,7 +403,7 @@ export function Settings({ onClose, status }: { onClose: () => void; status: Sta
       >
         <nav className="flex w-56 shrink-0 flex-col gap-0.5 border-r border-hairline bg-parchment p-3">
           <div className="px-3 pb-3 pt-2 text-callout font-semibold">Settings</div>
-          {NAV.map(({ id, label, icon: Icon }) => (
+          {nav.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => setSec(id)}
@@ -368,6 +426,7 @@ export function Settings({ onClose, status }: { onClose: () => void; status: Sta
             {sec === "access" && <Access status={status} />}
             {sec === "appearance" && <Appearance />}
             {sec === "network" && <NetworkSection />}
+            {sec === "diagnostics" && <Diagnostics />}
             {sec === "about" && <About status={status} />}
           </div>
         </div>
