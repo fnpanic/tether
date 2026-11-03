@@ -96,6 +96,7 @@ threads), 20 s window drag, `apps/desktop/e2e/bench-drag.mjs`:
 | 0.3.0 as reported (refresh storm) | 3–4 | 1.6 s, or frozen until a lucky key frame | 1.2 s |
 | 0.3.0, meter v2 | 16–19 | ~500 ms (barcode) | ~90 ms |
 | **0.4.0** | **20 / 23** | **90 ms** (0 gaps > 100 ms) | **88 / 55 ms** |
+| **0.4.0, proxy verified** (VM egress only via the TLS-inspecting proxy) | **20.1 / 22.9** | **99 / 79 ms** (0 gaps > 100 ms) | **66 / 59 ms** |
 
 The barcode-based "freeze" figure in `drag.json` (446–486 ms) counts frames whose probe barcode
 is too blurred to decode during motion (81 of ~460 frames) as missing; the canvas draw gaps

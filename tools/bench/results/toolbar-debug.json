@@ -1,7 +1,7 @@
 {
-  "started": "2026-11-03T21:06:49.099Z",
+  "started": "2026-11-03T23:29:09.430Z",
   "flavor": "debug",
-  "viewer": "C:\\cargo-target\\ux\\debug\\tether.exe",
+  "viewer": "C:\\vms\\builds\\0.4.0-test\\tether.exe",
   "tests": [
     {
       "name": "single instance: second start exits, still one main window",
@@ -13,7 +13,7 @@
       "ok": true,
       "exit": 0,
       "windows": 1,
-      "ms_to_first_frame": 1621
+      "ms_to_first_frame": 1319
     },
     {
       "name": "safety gate: host revoked keyboard/mouse and restart for the session",
@@ -72,7 +72,7 @@
     {
       "name": "10 MB upload completes, SHA-256 matches, one job_done event, one row",
       "ok": true,
-      "seconds": 13.396
+      "seconds": 4.78
     },
     {
       "name": "no duplicate connections; each window gets only its own events",
@@ -81,7 +81,7 @@
       "any_target_would_have_leaked": {
         "folder_files": 3,
         "job_done": 1,
-        "job_progress": 4
+        "job_progress": 3
       }
     },
     {
@@ -93,9 +93,9 @@
       "ok": true
     },
     {
-      "name": "TetherQS: second start exits, first window stays the only one",
+      "name": "TetherQS single instance (skipped: set QS_EXE)",
       "ok": true,
-      "exit": 0
+      "skipped": true
     }
   ]
 }

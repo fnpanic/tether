@@ -19,8 +19,8 @@ alive when one of them fails. Adds a macOS build and an OS-aware download page.
   - Hosts with 4 GB of RAM or less keep AV1 instead of falling back to VP8, which managed ~3
     fps on screen content.
   - Software encoders use up to 4 cores instead of half of the idle ones.
-  - Measured during a window drag (corporate-proxy VM): 20–23 fps, a new picture at least
-    every 90 ms, latency p95 55–88 ms. Before: 3–4 fps and freezes of 1.6 s or longer. See
+  - Measured during a window drag in the VM, egress only through the TLS-inspecting proxy:
+    20–23 fps, a new picture at least every 99 ms, latency p95 59–66 ms. Before: 3–4 fps and freezes of 1.6 s or longer. See
     `docs/performance.md`.
 - **Session toolbar:**
   - Every action now either works or shows why not.
@@ -56,9 +56,9 @@ alive when one of them fails. Adds a macOS build and an OS-aware download page.
   - Hosts register with every relay.
   - Viewers race their requests across relays.
   - Each relay hands out the least-loaded healthy relay (`/readyz`).
-  - Measured with two production relays: the session's relay crashing costs 0.6–0.8 s; a
-    whole relay node going down costs 0.6–1.6 s; then the session continues through the
-    other relay.
+  - Measured with two production relays, the viewer behind the proxy: the session's relay
+    crashing costs 0.6–0.8 s; a whole relay node going down costs 0.6–1.6 s; the session
+    continues through the other relay.
 - **Second production relay** `tether-desk2.duckdns.org` (Oracle Always Free, same server key).
 - **Graceful relay drain:** on stop, hbbr refuses new sessions but keeps running ones for up to
   `DRAIN_TIMEOUT` (300 s). hbbs and hbbr expose `/healthz` and `/readyz`.

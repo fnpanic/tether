@@ -1893,5 +1893,369 @@
         "fps 26 shown / 26 recv latency 27 ms decode 6.5 ms stall 62 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 159.88kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c"
       ]
     }
+  },
+  {
+    "label": "0.4.0 test build, corp-proxy, auto(AV1) #1",
+    "at": "2026-11-03T22:32:50.761Z",
+    "offset_ms": -0.7,
+    "idle": {
+      "samples": 230,
+      "distinct_remote_frames_per_s": 28.8,
+      "latency_ms": {
+        "mean": 36.3,
+        "median": 35.30000019073486,
+        "p95": 44.30000019073486,
+        "max": 61.30000019073486
+      },
+      "freeze_ms": {
+        "max": 80,
+        "p99": 61,
+        "over_300ms": 0,
+        "over_100ms": 0
+      },
+      "drawn_per_s": 28.8,
+      "draw_gap_ms": {
+        "max": 80,
+        "p99": 61,
+        "over_300ms": 0,
+        "over_100ms": 0
+      },
+      "undecodable": 0
+    },
+    "drag": {
+      "samples": 403,
+      "distinct_remote_frames_per_s": 20,
+      "latency_ms": {
+        "mean": 61.9,
+        "median": 57.30000019073486,
+        "p95": 88.30000019073486,
+        "max": 185.30000019073486
+      },
+      "freeze_ms": {
+        "max": 446,
+        "p99": 419,
+        "over_300ms": 10,
+        "over_100ms": 11
+      },
+      "drawn_per_s": 24.1,
+      "draw_gap_ms": {
+        "max": 144,
+        "p99": 85,
+        "over_300ms": 0,
+        "over_100ms": 2
+      },
+      "undecodable": 73
+    },
+    "overlay": {
+      "idle": [
+        "fps 30 shown / 30 recv latency 29 ms decode 3.4 ms stall 55 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.95kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 29 shown / 29 recv latency 28 ms decode 4.2 ms stall 54 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.67kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 29 shown / 29 recv latency 37 ms decode 6.4 ms stall 55 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.67kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 27 shown / 27 recv latency 28 ms decode 6.4 ms stall 61 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.39kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 30 shown / 30 recv latency 27 ms decode 6.9 ms stall 81 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.39kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 29 shown / 29 recv latency 28 ms decode 6.5 ms stall 52 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.27kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 28 shown / 28 recv latency 33 ms decode 7.1 ms stall 60 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.27kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 30 shown / 30 recv latency 28 ms decode 7.1 ms stall 52 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.43kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c"
+      ],
+      "drag": [
+        "fps 27 shown / 27 recv latency 27 ms decode 7.3 ms stall 53 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.34kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 24 shown / 24 recv latency 29 ms decode 6.9 ms stall 146 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 208.70kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 26 shown / 26 recv latency 30 ms decode 7 ms stall 144 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 205.58kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 26 shown / 26 recv latency 28 ms decode 7 ms stall 85 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 205.58kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 27 shown / 27 recv latency 28 ms decode 8.7 ms stall 61 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 103.63kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 28 shown / 28 recv latency 27 ms decode 7.6 ms stall 59 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 103.63kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 26 shown / 26 recv latency 44 ms decode 7.3 ms stall 57 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 186.89kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 28 shown / 28 recv latency 27 ms decode 7.3 ms stall 67 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 186.89kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 24 shown / 24 recv latency 44 ms decode 7.1 ms stall 71 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 173.35kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 22 shown / 22 recv latency 79 ms decode 8.1 ms stall 70 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 173.35kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 25 shown / 25 recv latency 30 ms decode 5.4 ms stall 74 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 182.30kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 19 shown / 19 recv latency 29 ms decode 3.8 ms stall 104 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 182.30kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 23 shown / 23 recv latency 29 ms decode 3.3 ms stall 77 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 156.08kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 18 shown / 18 recv latency 52 ms decode 3.8 ms stall 86 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 180.92kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 25 shown / 25 recv latency 42 ms decode 3.3 ms stall 84 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 180.92kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 25 shown / 25 recv latency 27 ms decode 3.5 ms stall 66 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 178.12kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 22 shown / 22 recv latency 30 ms decode 3.6 ms stall 77 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 178.12kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 26 shown / 26 recv latency 44 ms decode 3 ms stall 51 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 192.10kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 23 shown / 23 recv latency 28 ms decode 3.7 ms stall 69 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 184.91kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 25 shown / 25 recv latency 136 ms decode 3.6 ms stall 146 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 184.91kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 23 shown / 23 recv latency 94 ms decode 3.7 ms stall 70 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 172.08kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 27 shown / 27 recv latency 113 ms decode 3.3 ms stall 64 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 172.08kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 26 shown / 26 recv latency 98 ms decode 4.4 ms stall 70 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 200.44kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 24 shown / 24 recv latency 79 ms decode 4.9 ms stall 100 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 172.47kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c"
+      ]
+    }
+  },
+  {
+    "label": "0.4.0 test build, corp-proxy, auto(AV1) #2",
+    "at": "2026-11-03T22:33:37.625Z",
+    "offset_ms": -0.688,
+    "idle": {
+      "samples": 233,
+      "distinct_remote_frames_per_s": 29.1,
+      "latency_ms": {
+        "mean": 92.9,
+        "median": 80.3120002746582,
+        "p95": 219.3120002746582,
+        "max": 399.3120002746582
+      },
+      "freeze_ms": {
+        "max": 327,
+        "p99": 173,
+        "over_300ms": 1,
+        "over_100ms": 7
+      },
+      "drawn_per_s": 29.1,
+      "draw_gap_ms": {
+        "max": 327,
+        "p99": 173,
+        "over_300ms": 1,
+        "over_100ms": 7
+      },
+      "undecodable": 0
+    },
+    "drag": {
+      "samples": 462,
+      "distinct_remote_frames_per_s": 23.1,
+      "latency_ms": {
+        "mean": 46.1,
+        "median": 45.3120002746582,
+        "p95": 55.3120002746582,
+        "max": 75.3120002746582
+      },
+      "freeze_ms": {
+        "max": 486,
+        "p99": 380,
+        "over_300ms": 8,
+        "over_100ms": 10
+      },
+      "drawn_per_s": 27.6,
+      "draw_gap_ms": {
+        "max": 90,
+        "p99": 65,
+        "over_300ms": 0,
+        "over_100ms": 0
+      },
+      "undecodable": 81
+    },
+    "overlay": {
+      "idle": [
+        "fps 28 shown / 28 recv latency 133 ms decode 4.9 ms stall 90 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.75kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 28 shown / 28 recv latency 104 ms decode 6.2 ms stall 94 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.82kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 27 shown / 27 recv latency 88 ms decode 5.4 ms stall 106 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.82kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 31 shown / 31 recv latency 98 ms decode 7.7 ms stall 101 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.73kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 26 shown / 26 recv latency 114 ms decode 7.9 ms stall 110 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.73kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 28 shown / 29 recv latency 102 ms decode 8.6 ms stall 132 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.66kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 31 shown / 31 recv latency 87 ms decode 9.6 ms stall 101 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.66kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 31 shown / 30 recv latency 104 ms decode 8.5 ms stall 102 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.32kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c"
+      ],
+      "drag": [
+        "fps 27 shown / 27 recv latency 29 ms decode 7.3 ms stall 69 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.36kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 25 shown / 25 recv latency 27 ms decode 7 ms stall 181 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 127.49kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 25 shown / 24 recv latency 29 ms decode 8.5 ms stall 206 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 127.49kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 22 shown / 22 recv latency 28 ms decode 7 ms stall 86 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 132.57kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 26 shown / 26 recv latency 28 ms decode 6.7 ms stall 76 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 166.81kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 24 shown / 24 recv latency 26 ms decode 7.8 ms stall 68 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 166.81kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 27 shown / 27 recv latency 27 ms decode 6.8 ms stall 68 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 185.01kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 28 shown / 28 recv latency 27 ms decode 7.1 ms stall 65 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 185.01kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 29 shown / 29 recv latency 27 ms decode 6.3 ms stall 64 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 194.52kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 29 shown / 29 recv latency 41 ms decode 6.6 ms stall 61 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 194.52kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 27 shown / 27 recv latency 42 ms decode 6.3 ms stall 61 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 186.33kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 29 shown / 29 recv latency 43 ms decode 7.1 ms stall 67 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 197.11kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 27 shown / 27 recv latency 37 ms decode 7 ms stall 67 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 205.10kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 28 shown / 28 recv latency 32 ms decode 7.1 ms stall 66 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 205.10kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 27 shown / 27 recv latency 31 ms decode 6.3 ms stall 50 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 209.03kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 29 shown / 29 recv latency 27 ms decode 6.9 ms stall 55 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 155.61kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 28 shown / 28 recv latency 42 ms decode 6.8 ms stall 66 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 155.61kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 27 shown / 27 recv latency 35 ms decode 6.9 ms stall 61 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 195.11kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 29 shown / 29 recv latency 41 ms decode 7.3 ms stall 67 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 225.32kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 31 shown / 31 recv latency 28 ms decode 7.4 ms stall 47 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 225.32kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 23 shown / 23 recv latency 31 ms decode 6.5 ms stall 64 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 213.12kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 27 shown / 27 recv latency 27 ms decode 6.6 ms stall 91 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 213.12kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 27 shown / 27 recv latency 29 ms decode 7.1 ms stall 63 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 208.40kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c",
+        "fps 29 shown / 29 recv latency 40 ms decode 7.4 ms stall 53 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 208.40kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint b56a 7790 cd71 a289 f0c"
+      ]
+    }
+  },
+  {
+    "label": "0.4.0, corp-proxy (verified), auto(AV1) #1",
+    "at": "2026-11-03T23:51:57.451Z",
+    "offset_ms": -5.35,
+    "idle": {
+      "samples": 226,
+      "distinct_remote_frames_per_s": 28.3,
+      "latency_ms": {
+        "mean": 33.6,
+        "median": 32.64999961853027,
+        "p95": 41.64999961853027,
+        "max": 58.64999961853027
+      },
+      "freeze_ms": {
+        "max": 64,
+        "p99": 60,
+        "over_300ms": 0,
+        "over_100ms": 0
+      },
+      "drawn_per_s": 28.3,
+      "draw_gap_ms": {
+        "max": 64,
+        "p99": 60,
+        "over_300ms": 0,
+        "over_100ms": 0
+      },
+      "undecodable": 0
+    },
+    "drag": {
+      "samples": 406,
+      "distinct_remote_frames_per_s": 20.1,
+      "latency_ms": {
+        "mean": 49.2,
+        "median": 47.64999961853027,
+        "p95": 65.64999961853027,
+        "max": 104.64999961853027
+      },
+      "freeze_ms": {
+        "max": 471,
+        "p99": 393,
+        "over_300ms": 9,
+        "over_100ms": 9
+      },
+      "drawn_per_s": 23.1,
+      "draw_gap_ms": {
+        "max": 99,
+        "p99": 83,
+        "over_300ms": 0,
+        "over_100ms": 0
+      },
+      "undecodable": 49
+    },
+    "overlay": {
+      "idle": [
+        "fps 30 shown / 30 recv latency 37 ms decode 2.7 ms stall 54 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.67kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 27 shown / 27 recv latency 32 ms decode 3.4 ms stall 58 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.67kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 28 shown / 28 recv latency 33 ms decode 4.4 ms stall 55 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.98kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 29 shown / 29 recv latency 35 ms decode 6.4 ms stall 55 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 4.01kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 28 shown / 28 recv latency 35 ms decode 6.4 ms stall 54 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 4.01kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 28 shown / 28 recv latency 33 ms decode 6.3 ms stall 60 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.52kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 29 shown / 29 recv latency 39 ms decode 7.4 ms stall 54 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.52kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 28 shown / 28 recv latency 31 ms decode 6.8 ms stall 61 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.58kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd"
+      ],
+      "drag": [
+        "fps 30 shown / 30 recv latency 33 ms decode 6.6 ms stall 53 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 84.20kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 23 shown / 24 recv latency 46 ms decode 6.6 ms stall 144 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 237.33kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 23 shown / 22 recv latency 30 ms decode 8.3 ms stall 144 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 237.33kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 26 shown / 26 recv latency 36 ms decode 7 ms stall 65 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 67.77kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 24 shown / 24 recv latency 45 ms decode 7.1 ms stall 71 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 67.77kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 24 shown / 24 recv latency 47 ms decode 6.8 ms stall 64 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 102.81kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 24 shown / 24 recv latency 45 ms decode 7.1 ms stall 65 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 118.01kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 21 shown / 21 recv latency 35 ms decode 7.3 ms stall 78 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 118.01kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 20 shown / 20 recv latency 42 ms decode 7.9 ms stall 89 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 165.52kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 23 shown / 23 recv latency 36 ms decode 7.1 ms stall 71 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 182.10kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 19 shown / 19 recv latency 41 ms decode 7.4 ms stall 85 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 182.10kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 24 shown / 24 recv latency 37 ms decode 6.7 ms stall 76 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 174.57kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 26 shown / 26 recv latency 43 ms decode 6.9 ms stall 63 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 149.52kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 23 shown / 23 recv latency 33 ms decode 7 ms stall 76 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 149.52kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 23 shown / 23 recv latency 51 ms decode 7.1 ms stall 62 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 182.53kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 24 shown / 24 recv latency 34 ms decode 7.3 ms stall 84 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 182.53kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 18 shown / 18 recv latency 49 ms decode 9 ms stall 87 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 170.01kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 23 shown / 23 recv latency 35 ms decode 7 ms stall 77 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 228.54kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 27 shown / 27 recv latency 45 ms decode 7.4 ms stall 58 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 228.54kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 24 shown / 24 recv latency 36 ms decode 8.3 ms stall 62 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 188.78kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 18 shown / 18 recv latency 50 ms decode 8.7 ms stall 98 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 145.05kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 23 shown / 23 recv latency 36 ms decode 8.2 ms stall 68 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 145.05kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 25 shown / 25 recv latency 33 ms decode 6.5 ms stall 71 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 167.66kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 25 shown / 25 recv latency 50 ms decode 7.6 ms stall 72 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 167.66kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd"
+      ]
+    }
+  },
+  {
+    "label": "0.4.0, corp-proxy (verified), auto(AV1) #2",
+    "at": "2026-11-03T23:52:46.395Z",
+    "offset_ms": -0.109,
+    "idle": {
+      "samples": 233,
+      "distinct_remote_frames_per_s": 29.1,
+      "latency_ms": {
+        "mean": 38.6,
+        "median": 36.89099979400635,
+        "p95": 48.89099979400635,
+        "max": 62.89099979400635
+      },
+      "freeze_ms": {
+        "max": 73,
+        "p99": 62,
+        "over_300ms": 0,
+        "over_100ms": 0
+      },
+      "drawn_per_s": 29.1,
+      "draw_gap_ms": {
+        "max": 73,
+        "p99": 62,
+        "over_300ms": 0,
+        "over_100ms": 0
+      },
+      "undecodable": 0
+    },
+    "drag": {
+      "samples": 459,
+      "distinct_remote_frames_per_s": 22.9,
+      "latency_ms": {
+        "mean": 48.9,
+        "median": 47.89099979400635,
+        "p95": 58.89099979400635,
+        "max": 75.89099979400635
+      },
+      "freeze_ms": {
+        "max": 468,
+        "p99": 353,
+        "over_300ms": 9,
+        "over_100ms": 10
+      },
+      "drawn_per_s": 26.4,
+      "draw_gap_ms": {
+        "max": 79,
+        "p99": 70,
+        "over_300ms": 0,
+        "over_100ms": 0
+      },
+      "undecodable": 62
+    },
+    "overlay": {
+      "idle": [
+        "fps 27 shown / 27 recv latency 38 ms decode 4.1 ms stall 62 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.72kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 29 shown / 29 recv latency 33 ms decode 5.2 ms stall 54 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.72kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 29 shown / 29 recv latency 34 ms decode 7 ms stall 58 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.84kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 28 shown / 28 recv latency 43 ms decode 7.3 ms stall 56 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.42kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 30 shown / 30 recv latency 46 ms decode 7.8 ms stall 55 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.64kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 27 shown / 27 recv latency 34 ms decode 7 ms stall 68 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.64kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 29 shown / 29 recv latency 41 ms decode 6.2 ms stall 74 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.45kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 30 shown / 30 recv latency 31 ms decode 6 ms stall 62 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.45kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd"
+      ],
+      "drag": [
+        "fps 29 shown / 29 recv latency 32 ms decode 6.8 ms stall 67 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.57kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 23 shown / 23 recv latency 40 ms decode 6.5 ms stall 108 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 3.57kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 27 shown / 27 recv latency 33 ms decode 6.5 ms stall 64 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 100.16kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 22 shown / 22 recv latency 34 ms decode 7 ms stall 71 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 237.71kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 27 shown / 27 recv latency 47 ms decode 6.3 ms stall 69 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 70.99kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 28 shown / 28 recv latency 44 ms decode 7 ms stall 61 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 70.99kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 26 shown / 26 recv latency 31 ms decode 7.4 ms stall 71 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 192.78kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 30 shown / 30 recv latency 31 ms decode 6.7 ms stall 60 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 192.78kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 26 shown / 26 recv latency 30 ms decode 7.1 ms stall 71 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 186.93kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 27 shown / 27 recv latency 34 ms decode 7.4 ms stall 69 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 181.56kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 28 shown / 28 recv latency 33 ms decode 7.3 ms stall 61 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 181.56kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 30 shown / 30 recv latency 45 ms decode 6.8 ms stall 50 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 215.81kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 27 shown / 27 recv latency 56 ms decode 7.3 ms stall 57 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 215.81kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 24 shown / 24 recv latency 39 ms decode 7.3 ms stall 73 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 210.27kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 25 shown / 25 recv latency 60 ms decode 8 ms stall 80 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 210.27kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 26 shown / 26 recv latency 46 ms decode 7.5 ms stall 55 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 190.97kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 22 shown / 22 recv latency 78 ms decode 6.8 ms stall 75 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 190.97kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 28 shown / 28 recv latency 31 ms decode 7.1 ms stall 66 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 203.51kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 23 shown / 23 recv latency 79 ms decode 6.7 ms stall 70 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 234.98kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 28 shown / 28 recv latency 31 ms decode 6.8 ms stall 58 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 234.98kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 28 shown / 28 recv latency 34 ms decode 7.1 ms stall 80 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 198.26kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 25 shown / 25 recv latency 42 ms decode 6.6 ms stall 64 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 164.54kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 25 shown / 25 recv latency 43 ms decode 6.9 ms stall 67 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 164.54kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd",
+        "fps 26 shown / 26 recv latency 40 ms decode 6.6 ms stall 67 ms max gap · 0 key req · 0 dropped codec AV1 bitrate 1.4 Mbps speed 186.03kB/s frame 1920×1080 (coded 1920×1080) route relay encryption end-to-end fingerprint 12f5 f436 8ab4 29bf 9bd"
+      ]
+    }
   }
 ]
