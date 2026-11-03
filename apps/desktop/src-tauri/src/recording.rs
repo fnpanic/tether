@@ -37,10 +37,11 @@ impl Settings {
     }
 }
 
-/// `recording.folder` with `%VAR%` expanded; default `%USERPROFILE%\Videos\Tether`.
+/// `recording.folder` with `%VAR%` expanded; default `%USERPROFILE%\Videos\Tether` (macOS `~/Movies/Tether`).
 pub fn folder() -> PathBuf {
     let f = policy::get("recording.folder");
-    let f = if f.trim().is_empty() { r"%USERPROFILE%\Videos\Tether".to_owned() } else { f };
+    let default = if cfg!(target_os = "macos") { "%HOME%/Movies/Tether" } else { r"%USERPROFILE%\Videos\Tether" };
+    let f = if f.trim().is_empty() { default.to_owned() } else { f };
     PathBuf::from(expand_env(&f, |k| std::env::var(k).ok()))
 }
 

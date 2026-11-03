@@ -87,8 +87,9 @@ defaults and make no policy/heartbeat requests.
 ## Updates (portable, no installer)
 
 At start and every `update.check-hours` (if `update.enabled`): fetch
-`https://<relay>/download/<update.channel>/customer/windows-x86_64/latest.json` (Tauri updater
-format, docs/api.md). If the version is newer:
+`https://<relay>/download/<update.channel>/customer/windows-x86_64/latest.json` (macOS:
+`…/customer/darwin-universal/latest.json`, a zipped `.app`, see [updates.md](updates.md)) (Tauri
+updater format, docs/api.md). If the version is newer:
 
 - The exe is downloaded (https only, ≤ 200 MiB) and its minisign signature is verified against the
   compiled-in `TETHER_UPDATER_PUB_KEY` (Tauri format: `signature` is base64 of the `.sig` file text;
@@ -115,6 +116,10 @@ cd src-tauri
 cargo build --release --features custom-protocol
 # → <target>/release/TetherQS.exe (the only artifact; Tauri bundling is off)
 ```
+
+macOS: `bash scripts/build-macos.sh` builds a universal `TetherQS.app` (bundling switched on for
+that build only) and zips it as `dist/macos/TetherQS-<version>-universal.zip`; see
+[macos.md](macos.md).
 
 ## Known limits
 

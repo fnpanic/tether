@@ -1,36 +1,74 @@
 //! Update manifests (`latest.json`, docs/api.md) and the download page.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const PLATFORM: &str = "windows-x86_64";
+pub const WINDOWS: &str = "windows-x86_64";
+/// macOS builds are universal (Apple silicon + Intel); the technician app asks for this target.
+pub const MAC: &str = "darwin-universal";
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Platform {
     pub signature: String,
     pub url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Manifest {
     pub version: String,
+    #[serde(default)]
     pub notes: String,
+    #[serde(default)]
     pub pub_date: String,
+    #[serde(default)]
     pub platforms: BTreeMap<String, Platform>,
+    #[serde(default)]
     pub mandatory: bool,
-    #[serde(rename = "minimumVersion")]
+    #[serde(rename = "minimumVersion", default)]
     pub minimum_version: String,
+    #[serde(default)]
     pub forced: bool,
 }
 
-/// Remote file name and directory for a release kind.
-pub fn target(kind: &str, version: &str) -> Result<(String, String), String> {
-    match kind {
-        "technician" => Ok((format!("technician/{PLATFORM}"), format!("Tether_{version}_x64-setup.exe"))),
-        // Versioned: an upload never replaces the file the current latest.json points to.
-        "customer" => Ok((format!("customer/{PLATFORM}"), format!("TetherQS-{version}.exe"))),
-        _ => Err(format!("unknown release kind {kind:?}")),
+/// Remote directory and file name of a release. Versioned names: an upload never replaces the
+/// file the current latest.json points to.
+pub fn target(kind: &str, platform: &str, version: &str) -> Result<(String, String), String> {
+    let name = match (kind, platform) {
+        ("technician", WINDOWS) => format!("Tether_{version}_x64-setup.exe"),
+        ("customer", WINDOWS) => format!("TetherQS-{version}.exe"),
+        ("technician", MAC) => format!("Tether_{version}_universal.app.tar.gz"),
+        ("customer", MAC) => format!("TetherQS-{version}-universal.zip"),
+        _ => return Err(format!("unknown release kind {kind:?} or platform {platform:?}")),
+    };
+    Ok((format!("{kind}/{platform}"), name))
+}
+
+/// The technician app's manual-download disk image, stored next to the updater archive.
+pub fn dmg_name(version: &str) -> String {
+    format!("Tether_{version}_universal.dmg")
+}
+
+/// Manifest keys a release is listed under. A universal mac build also answers the per-arch keys,
+/// so any Tauri updater on a Mac finds it whichever `{{target}}` it asks for.
+pub fn platform_keys(platform: &str) -> &'static [&'static str] {
+    if platform == MAC {
+        &[MAC, "darwin-aarch64", "darwin-x86_64"]
+    } else {
+        &[WINDOWS]
     }
+}
+
+/// Platforms for a new manifest: entries of the `existing` one for the same version are kept, so
+/// publishing one OS never drops another OS's build of that version. Another version's entries
+/// are dropped (they would point at other files).
+pub fn merge_platforms(existing: Option<&[u8]>, version: &str, new: BTreeMap<String, Platform>) -> BTreeMap<String, Platform> {
+    let mut out = existing
+        .and_then(|b| serde_json::from_slice::<Manifest>(b).ok())
+        .filter(|m| m.version == version)
+        .map(|m| m.platforms)
+        .unwrap_or_default();
+    out.extend(new);
+    out
 }
 
 pub fn valid_version(v: &str) -> bool {
@@ -67,19 +105,53 @@ fn esc(s: &str) -> String {
 pub struct Offer {
     pub label: &'static str,
     pub detail: String,
-    pub href: String,
+    /// `None`: no release for this OS yet.
+    pub href: Option<String>,
 }
 
-/// Self-contained page in the DESIGN.md look: no external resources, light and dark.
-pub fn download_page(title: &str, intro: &str, offers: &[Offer]) -> String {
-    let cards: String = offers
+pub struct OsSection {
+    /// `windows` or `macos`: element id, switch target, and what the page script detects.
+    pub id: &'static str,
+    pub name: &'static str,
+    pub offers: Vec<Offer>,
+}
+
+/// Picks the visitor's OS and wires the switch. Without it every section stays visible and the
+/// switch tabs jump to them, so all downloads work without JavaScript.
+const SCRIPT: &str = r#"(function(){var d=document.documentElement,u=navigator.userAgentData,p=(u&&u.platform)||navigator.platform||navigator.userAgent||"";
+var mine=/mac/i.test(p)?"macos":/win/i.test(p)?"windows":"";
+var tabs=document.querySelectorAll(".switch a");
+function pick(os){d.setAttribute("data-os",os);for(var i=0;i<tabs.length;i++){tabs[i].setAttribute("aria-current",tabs[i].getAttribute("data-os")===os?"true":"false")}}
+for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){e.preventDefault();pick(this.getAttribute("data-os"))})}
+if(mine&&document.getElementById(mine)){d.setAttribute("data-mine",mine);pick(mine)}})();"#;
+
+/// Self-contained page in the DESIGN.md look: no external resources, light and dark. One section
+/// per OS; the inline script shows the visitor's and marks it, the switch shows the other.
+pub fn download_page(title: &str, intro: &str, sections: &[OsSection]) -> String {
+    let card = |o: &Offer| match &o.href {
+        Some(href) => format!(
+            "<a class=\"card\" href=\"{}\"><span class=\"label\">{}</span><span class=\"detail\">{}</span><span class=\"cta\">Download</span></a>",
+            esc(href),
+            esc(o.label),
+            esc(&o.detail)
+        ),
+        None => format!("<div class=\"card off\"><span class=\"label\">{}</span><span class=\"detail\">Not available yet</span></div>", esc(o.label)),
+    };
+    let switch: String = sections.iter().map(|s| format!("<a href=\"#{0}\" data-os=\"{0}\">{1}</a>", s.id, esc(s.name))).collect();
+    let body: String = sections
         .iter()
-        .map(|o| {
+        .map(|s| {
+            let cards: String = s.offers.iter().map(card).collect();
+            format!("<section class=\"os\" id=\"{}\"><h2>{}<span class=\"mine\">Your computer</span></h2><div class=\"grid\">{cards}</div></section>", s.id, esc(s.name))
+        })
+        .collect();
+    // With an OS picked, only its section shows; the visitor's own one is marked.
+    let os_css: String = sections
+        .iter()
+        .map(|s| {
             format!(
-                "<a class=\"card\" href=\"{}\"><span class=\"label\">{}</span><span class=\"detail\">{}</span><span class=\"cta\">Download</span></a>",
-                esc(&o.href),
-                esc(o.label),
-                esc(&o.detail)
+                "html[data-os={0}] #{0}{{display:block}}html[data-os={0}] .switch a[data-os={0}]{{background:var(--ink);color:var(--canvas)}}html[data-mine={0}] #{0} .mine{{display:inline-block}}",
+                s.id
             )
         })
         .collect();
@@ -100,12 +172,23 @@ p{{font-size:17px;line-height:1.47;letter-spacing:-.022em;color:var(--muted);mar
 .card{{display:flex;flex-direction:column;gap:8px;padding:24px;border:1px solid var(--hairline);border-radius:18px;background:var(--tile);color:var(--ink);text-decoration:none}}
 .card:hover{{background:var(--parchment)}}
 .card:focus-visible{{outline:2px solid var(--focus);outline-offset:2px}}
+.card.off{{opacity:.6}}
+.card.off:hover{{background:var(--tile)}}
 .label{{font-size:21px;line-height:1.19;font-weight:600}}
 .detail{{font-size:14px;line-height:1.43;color:var(--muted)}}
 .cta{{align-self:flex-start;margin-top:16px;background:var(--accent);color:#fff;border-radius:9999px;padding:10px 22px;font-size:15px}}
+.switch{{display:inline-flex;gap:4px;margin-top:32px;padding:4px;border-radius:9999px;background:var(--parchment)}}
+.switch a{{padding:8px 18px;border-radius:9999px;color:var(--ink);text-decoration:none;font-size:15px}}
+.switch a:focus-visible{{outline:2px solid var(--focus);outline-offset:2px}}
+.os{{margin-top:48px}}
+html[data-os] .os{{display:none}}
+h2{{font-size:28px;line-height:1.14;letter-spacing:-.01em;font-weight:600;margin:0;display:flex;align-items:center;gap:12px}}
+.mine{{display:none;font-size:12px;font-weight:600;letter-spacing:0;color:var(--accent);border:1px solid currentColor;border-radius:9999px;padding:2px 10px}}
+.os .grid{{margin-top:24px}}
+{os_css}
 footer{{margin-top:80px;font-size:12px;color:var(--muted)}}
 </style></head>
-<body><main><h1>{title}</h1>{intro}<div class="grid">{cards}</div><footer>Downloads are signed and served over HTTPS.</footer></main></body></html>
+<body><main><h1>{title}</h1>{intro}<nav class="switch" aria-label="Operating system">{switch}</nav>{body}<footer>Downloads are signed and served over HTTPS.</footer></main><script>{SCRIPT}</script></body></html>
 "#,
         title = esc(title)
     )
@@ -118,7 +201,7 @@ mod tests {
     #[test]
     fn manifest_matches_api_doc() {
         let mut platforms = BTreeMap::new();
-        platforms.insert(PLATFORM.to_owned(), Platform { signature: "SIG".into(), url: "https://h/download/stable/technician/windows-x86_64/Tether_0.3.1_x64-setup.exe".into() });
+        platforms.insert(WINDOWS.to_owned(), Platform { signature: "SIG".into(), url: "https://h/download/stable/technician/windows-x86_64/Tether_0.3.1_x64-setup.exe".into() });
         let m = Manifest {
             version: "0.3.1".into(),
             notes: "n".into(),
@@ -139,16 +222,70 @@ mod tests {
     fn dates_targets_and_validation() {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
-        assert_eq!(target("technician", "0.3.1").unwrap().1, "Tether_0.3.1_x64-setup.exe");
-        assert_eq!(target("customer", "0.3.1").unwrap(), ("customer/windows-x86_64".into(), "TetherQS-0.3.1.exe".into()));
+        assert_eq!(target("technician", WINDOWS, "0.3.1").unwrap().1, "Tether_0.3.1_x64-setup.exe");
+        assert_eq!(target("customer", WINDOWS, "0.3.1").unwrap(), ("customer/windows-x86_64".into(), "TetherQS-0.3.1.exe".into()));
+        assert_eq!(target("technician", MAC, "0.3.1").unwrap(), ("technician/darwin-universal".into(), "Tether_0.3.1_universal.app.tar.gz".into()));
+        assert_eq!(target("customer", MAC, "0.3.1").unwrap().1, "TetherQS-0.3.1-universal.zip");
+        assert!(target("technician", "linux-x86_64", "0.3.1").is_err() && target("x", WINDOWS, "1").is_err());
+        assert_eq!(dmg_name("0.3.1"), "Tether_0.3.1_universal.dmg");
+        assert_eq!(platform_keys(MAC), ["darwin-universal", "darwin-aarch64", "darwin-x86_64"]);
+        assert_eq!(platform_keys(WINDOWS), ["windows-x86_64"]);
         assert!(valid_version("0.3.1") && valid_version("0.3.1-test") && !valid_version("0.3.x") && !valid_version("../1"));
         assert!(valid_channel("stable") && !valid_channel("Stable") && !valid_channel(""));
     }
 
+    fn p(url: &str) -> Platform {
+        Platform { signature: "S".into(), url: url.into() }
+    }
+
+    #[test]
+    fn merge_keeps_same_version_platforms_only() {
+        let existing = br#"{"version":"0.3.1","platforms":{"windows-x86_64":{"signature":"W","url":"w"},"darwin-universal":{"signature":"old","url":"old"}}}"#;
+        let new: BTreeMap<_, _> = platform_keys(MAC).iter().map(|k| (k.to_string(), p("mac"))).collect();
+        let m = merge_platforms(Some(existing), "0.3.1", new.clone());
+        assert_eq!(m.keys().collect::<Vec<_>>(), ["darwin-aarch64", "darwin-universal", "darwin-x86_64", "windows-x86_64"]);
+        assert_eq!(m["windows-x86_64"].url, "w");
+        assert_eq!(m["darwin-universal"].url, "mac");
+        // Another version, no manifest, or garbage: only the new entries.
+        assert_eq!(merge_platforms(Some(existing), "0.3.2", new.clone()), new);
+        assert_eq!(merge_platforms(None, "0.3.1", new.clone()), new);
+        assert_eq!(merge_platforms(Some(b"<html>"), "0.3.1", new.clone()), new);
+        // A merged manifest still has the api.md shape.
+        let back: Manifest = serde_json::from_slice(existing).unwrap();
+        assert_eq!((back.notes.as_str(), back.mandatory, back.minimum_version.as_str()), ("", false, ""));
+    }
+
+    fn sections(mac: Option<&str>) -> Vec<OsSection> {
+        let offer = |label, href: Option<&str>| Offer { label, detail: "d".into(), href: href.map(Into::into) };
+        vec![
+            OsSection { id: "windows", name: "Windows", offers: vec![offer("Tether", Some("/download/stable/technician/windows-x86_64/a\"b.exe")), offer("QS", Some("/w.exe"))] },
+            OsSection { id: "macos", name: "macOS", offers: vec![offer("Tether", mac), offer("QS", None)] },
+        ]
+    }
+
     #[test]
     fn page_escapes_input() {
-        let html = download_page("<b>", "a\n\nb", &[Offer { label: "Tether", detail: "x".into(), href: "/download/a\"b".into() }]);
-        assert!(html.contains("<title>&lt;b&gt;</title>") && html.contains("<p>a</p><p>b</p>") && html.contains("a&quot;b"));
-        assert!(!html.contains("http://") && !html.contains("<script"));
+        let html = download_page("<b>", "a\n\nb", &sections(None));
+        assert!(html.contains("<title>&lt;b&gt;</title>") && html.contains("<p>a</p><p>b</p>") && html.contains("a&quot;b.exe"));
+        // Self-contained: no external scripts, styles or fonts.
+        assert!(!html.contains("http://") && !html.contains("https://") && !html.contains(" src=") && !html.contains("<link"));
+    }
+
+    #[test]
+    fn page_has_a_section_and_switch_per_os() {
+        let html = download_page("T", "", &sections(Some("/download/stable/technician/darwin-universal/Tether_0.3.1_universal.dmg")));
+        for id in ["windows", "macos"] {
+            assert!(html.contains(&format!("<section class=\"os\" id=\"{id}\">")));
+            // Works without JS: a plain anchor link to every section.
+            assert!(html.contains(&format!("<a href=\"#{id}\" data-os=\"{id}\">")));
+            assert!(html.contains(&format!("html[data-os={id}] #{id}{{display:block}}")));
+        }
+        assert!(html.contains("href=\"/download/stable/technician/darwin-universal/Tether_0.3.1_universal.dmg\""));
+        // TetherQS for macOS is not released: no link, a notice instead.
+        assert_eq!(html.matches("Not available yet").count(), 1);
+        assert_eq!(html.matches("class=\"cta\"").count(), 3);
+        assert!(html.contains("navigator.userAgentData") && html.contains("<script>"));
+        // Sections are hidden only once the script picked an OS.
+        assert!(html.contains("html[data-os] .os{display:none}") && !html.contains("\n.os{display:none}"));
     }
 }

@@ -48,6 +48,7 @@
     "copyright": "AGPL-3.0",
     "macOS": {
       "minimumSystemVersion": "11.0",
+      "signingIdentity": null,
       "entitlements": "macos/entitlements.plist",
       "infoPlist": "macos/Info.plist"
     },

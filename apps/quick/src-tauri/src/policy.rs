@@ -153,7 +153,7 @@ fn heartbeat() -> Result<(), String> {
         "id": librustdesk::ui::api::get_id(),
         "profile": PROFILE_CUSTOMER,
         "version": env!("CARGO_PKG_VERSION"),
-        "os": format!("windows {}", hbb_common::whoami::distro()).chars().take(64).collect::<String>(),
+        "os": format!("{} {}", std::env::consts::OS, hbb_common::whoami::distro()).chars().take(64).collect::<String>(),
         "serial": current().serial,
     });
     http()?

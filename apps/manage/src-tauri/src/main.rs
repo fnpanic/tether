@@ -235,6 +235,8 @@ async fn policy_local(app: State<'_, App>, serial: u64) -> R<Bundle> {
 struct ReleaseArgs {
     file: String,
     kind: String,
+    /// `windows-x86_64` or `darwin-universal`
+    platform: String,
     channel: String,
     version: String,
     notes: String,
@@ -255,22 +257,37 @@ async fn release_publish(app: State<'_, App>, args: ReleaseArgs) -> R<String> {
     if !a.minimum_version.is_empty() && !release::valid_version(&a.minimum_version) {
         return Err("Minimum version must look like 0.3.0.".into());
     }
-    let (dir, name) = release::target(&a.kind, &a.version)?;
+    let (dir, name) = release::target(&a.kind, &a.platform, &a.version)?;
     let data = fs::read(&a.file).map_err(|e| format!("Could not read the file: {e}"))?;
-    let sig = {
-        let k = app.keys.lock().unwrap();
-        k.as_ref().ok_or("Unlock the keys first.")?.sign_update(&data, &name, &a.version)?
+    // The mac technician release also carries the .dmg for manual downloads (download page).
+    let dmg = if (a.kind.as_str(), a.platform.as_str()) == ("technician", release::MAC) {
+        let dmg_name = release::dmg_name(&a.version);
+        let path = std::path::Path::new(&a.file).with_file_name(&dmg_name);
+        let bytes = fs::read(&path).map_err(|_| format!("Put {dmg_name} next to the .app.tar.gz (scripts/build-macos.sh writes both to dist/macos)."))?;
+        Some((dmg_name, bytes))
+    } else {
+        None
     };
+    let sign = |bytes: &[u8], file: &str| -> R<String> {
+        let k = app.keys.lock().unwrap();
+        k.as_ref().ok_or("Unlock the keys first.")?.sign_update(bytes, file, &a.version)
+    };
+    let sig = sign(&data, &name)?;
+    let dmg_sig = dmg.as_ref().map(|(n, b)| sign(b, n)).transpose()?;
     let server = app.server();
     let base = format!("/api/admin/release/{}/{dir}", a.channel);
     let url = format!("{}/download/{}/{dir}/{name}", server.trim_end_matches('/'), a.channel);
-    let mut platforms = BTreeMap::new();
-    platforms.insert(release::PLATFORM.to_owned(), release::Platform { signature: sig.clone(), url: url.clone() });
+    let new = release::platform_keys(&a.platform)
+        .iter()
+        .map(|k| (k.to_string(), release::Platform { signature: sig.clone(), url: url.clone() }))
+        .collect();
+    // Read before writing: another OS's build of the same version in this manifest stays listed.
+    let existing = api::public(&server, &format!("/download/{}/{dir}/latest.json", a.channel)).await?;
     let manifest = release::Manifest {
         version: a.version.clone(),
         notes: a.notes,
         pub_date: release::rfc3339(api::now()),
-        platforms,
+        platforms: release::merge_platforms(existing.as_deref(), &a.version, new),
         mandatory: a.mandatory,
         minimum_version: a.minimum_version,
         forced: a.forced,
@@ -278,6 +295,10 @@ async fn release_publish(app: State<'_, App>, args: ReleaseArgs) -> R<String> {
     // Artifacts first, manifest last: clients never see a latest.json pointing at a missing file.
     app.call("PUT", &format!("{base}/{name}"), data, "application/octet-stream").await?;
     app.call("PUT", &format!("{base}/{name}.sig"), sig.into_bytes(), "text/plain").await?;
+    if let (Some((dmg_name, bytes)), Some(dmg_sig)) = (dmg, dmg_sig) {
+        app.call("PUT", &format!("{base}/{dmg_name}"), bytes, "application/octet-stream").await?;
+        app.call("PUT", &format!("{base}/{dmg_name}.sig"), dmg_sig.into_bytes(), "text/plain").await?;
+    }
     app.call("PUT", &format!("{base}/latest.json"), serde_json::to_vec_pretty(&manifest).unwrap(), "application/json").await?;
     Ok(url)
 }
@@ -287,25 +308,38 @@ async fn release_publish(app: State<'_, App>, args: ReleaseArgs) -> R<String> {
 #[tauri::command]
 async fn page_render(app: State<'_, App>, title: String, intro: String, technician: bool, customer: bool) -> R<String> {
     let server = app.server();
-    let mut offers = vec![];
-    for (on, kind, label) in [(technician, "technician", "Tether for technicians"), (customer, "customer", "Tether Quick Support")] {
-        if !on {
-            continue;
+    let mut sections = vec![];
+    for (id, name, platform) in [("windows", "Windows", release::WINDOWS), ("macos", "macOS", release::MAC)] {
+        let mut offers = vec![];
+        for (on, kind, label) in [(technician, "technician", "Tether for technicians"), (customer, "customer", "Tether Quick Support")] {
+            if !on {
+                continue;
+            }
+            let path = format!("/download/stable/{kind}/{platform}/latest.json");
+            let m: Option<Value> = match api::public(&server, &path).await? {
+                Some(b) => Some(serde_json::from_slice(&b).map_err(|_| format!("{path} is not valid JSON"))?),
+                None => None,
+            };
+            let version = m.as_ref().and_then(|m| m["version"].as_str()).unwrap_or("?").to_owned();
+            let file = m.as_ref().and_then(|m| match (kind, platform) {
+                // Uploaded before latest.json by release_publish, so it exists when the manifest does.
+                ("technician", release::MAC) => Some(release::dmg_name(m["version"].as_str()?)),
+                _ => Some(m["platforms"][platform]["url"].as_str()?.rsplit('/').next()?.to_owned()),
+            });
+            let detail = match (kind, platform) {
+                ("technician", release::WINDOWS) => format!("Windows installer · version {version}"),
+                ("technician", _) => format!("Disk image for Apple silicon and Intel · version {version}"),
+                (_, release::WINDOWS) => "Windows · no installation needed · run it when support asks you to".to_owned(),
+                _ => "Mac · no installation needed · unzip and open it when support asks you to".to_owned(),
+            };
+            offers.push(release::Offer { label, detail, href: file.map(|f| format!("/download/stable/{kind}/{platform}/{f}")) });
         }
-        let path = format!("/download/stable/{kind}/{}/latest.json", release::PLATFORM);
-        let m: Value = match api::public(&server, &path).await? {
-            Some(b) => serde_json::from_slice(&b).map_err(|_| format!("{path} is not valid JSON"))?,
-            None => return Err(format!("There is no stable {kind} release yet. Publish one first.")),
-        };
-        let url = m["platforms"][release::PLATFORM]["url"].as_str().unwrap_or_default();
-        let file = url.rsplit('/').next().unwrap_or_default();
-        let detail = match kind {
-            "technician" => format!("Windows installer · version {}", m["version"].as_str().unwrap_or("?")),
-            _ => "Windows · no installation needed · run it when support asks you to".to_owned(),
-        };
-        offers.push(release::Offer { label, detail, href: format!("/download/stable/{kind}/{}/{file}", release::PLATFORM) });
+        sections.push(release::OsSection { id, name, offers });
     }
-    Ok(release::download_page(&title, &intro, &offers))
+    if sections.iter().flat_map(|s| &s.offers).all(|o| o.href.is_none()) {
+        return Err("There is no stable release of the offered apps yet. Publish one first.".into());
+    }
+    Ok(release::download_page(&title, &intro, &sections))
 }
 
 #[tauri::command]

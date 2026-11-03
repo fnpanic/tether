@@ -11,8 +11,16 @@ into them (`TETHER_UPDATER_PUB_KEY`) and refuse anything else. Manifest format a
 https://<relay>/download/<channel>/technician/windows-x86_64/latest.json
 https://<relay>/download/<channel>/technician/windows-x86_64/Tether_<version>_x64-setup.exe(.sig)
 https://<relay>/download/<channel>/customer/windows-x86_64/latest.json
-https://<relay>/download/<channel>/customer/windows-x86_64/TetherQS.exe(.sig)
+https://<relay>/download/<channel>/customer/windows-x86_64/TetherQS-<version>.exe(.sig)
+https://<relay>/download/<channel>/technician/darwin-universal/latest.json
+https://<relay>/download/<channel>/technician/darwin-universal/Tether_<version>_universal.app.tar.gz(.sig)
+https://<relay>/download/<channel>/technician/darwin-universal/Tether_<version>_universal.dmg(.sig)
+https://<relay>/download/<channel>/customer/darwin-universal/latest.json
+https://<relay>/download/<channel>/customer/darwin-universal/TetherQS-<version>-universal.zip(.sig)
 ```
+
+Windows and macOS releases are independent: each platform folder has its own `latest.json`, so a
+macOS release can follow a Windows one later (or have another version).
 
 `<channel>` comes from policy `update.channel` (default `stable`; anything that is not 1–32
 lowercase letters, digits or dashes falls back to `stable` in the technician app). A missing
@@ -73,6 +81,12 @@ enforces it without network access:
 Verified 2026-11-03: 0.3.0 → 0.3.1 auto-update on a Hyper-V VM in corporate mode, through a
 TLS-inspecting proxy.
 
+On macOS the Tauri updater downloads `Tether_<version>_universal.app.tar.gz` (manifest key
+`darwin-universal`), verifies it the same way and replaces `Tether.app` in place, then restarts.
+The user must be allowed to write to the app's folder (`/Applications` for administrators).
+Unsigned builds lose their Screen Recording / Accessibility permissions with every update
+([macos.md](macos.md#permissions)).
+
 ## TetherQS (portable self-update)
 
 TetherQS has no installer. At start and every `update.check-hours` (only if `update.enabled`) it
@@ -97,6 +111,14 @@ Mandatory, minimum version and forced work as in the table above. No admin right
 Verified 2026-11-03: 0.3.0 → 0.3.1 self-update as a standard user in 47 s (VM in corporate mode,
 TLS-inspecting proxy).
 
+On macOS TetherQS reads `…/customer/darwin-universal/latest.json` and downloads
+`TetherQS-<version>-universal.zip` (verified like the exe). It unpacks it with the system `ditto`
+into `TetherQS.app.new` next to the running app, renames the running `TetherQS.app` to
+`TetherQS.app.old` (macOS allows renaming a running bundle), moves the new one in, and starts it.
+If the folder is not writable (or the app runs translocated from Downloads), the new app goes to
+`~/Library/Application Support/Tether-QS/TetherQS.app` and starts from there. Not yet verified on
+a Mac.
+
 ## Signing keys
 
 | Key | Private half | Public half |
@@ -117,20 +139,24 @@ base64 of the minisign signature file, with the trusted comment
 2. Build with the four release variables (`TETHER_SERVER`, `TETHER_PUB_KEY`,
    `TETHER_ADMIN_PUB_KEY`, `TETHER_UPDATER_PUB_KEY`), see [deployment.md](deployment.md):
    technician `npx tauri build --bundles nsis` → `Tether_<version>_x64-setup.exe`; TetherQS
-   `npx tauri build` → `TetherQS.exe`.
+   `npx tauri build` → `TetherQS.exe`. macOS: `bash scripts/build-macos.sh` on a Mac →
+   `dist/macos/` with `Tether_<version>_universal.app.tar.gz` + `.dmg` and
+   `TetherQS-<version>-universal.zip` ([macos.md](macos.md)).
 3. Test the build on one machine (install, connect, `tether --version`).
 4. Tether Manage → unlock → **Releases**:
-   1. **Choose…** the file. For a technician installer the version is filled in from the name;
-      for TetherQS type it.
+   1. **Choose…** the file. App, platform and version are filled in from the file name
+      (`TetherQS.exe` without a version: type it). For the macOS technician app choose the
+      `.app.tar.gz`; the `.dmg` next to it is uploaded too.
    2. Channel: `test` first (see below), later `stable`.
    3. Notes, and Mandatory / Minimum version / Forced only if needed.
    4. **Sign and publish**. Tether Manage uploads the file, then `.sig`, then `latest.json`.
-5. Check **Files on the server** for the three files.
+5. Check **Files on the server** for the three files (five for the macOS technician app).
+   Publish Windows and macOS separately; each has its own manifest.
 6. On a test device: `tether --check-update` should print `update <version> available`.
 7. Watch **Devices**: the Version column changes as devices update (each sends a heartbeat after
    its next policy check).
-8. For the technician installer, republish the **Download page** so its link points to the new
-   file.
+8. Republish the **Download page** so its links point to the new files (all file names contain
+   the version).
 
 Do not publish a version lower than the one already in a channel: clients only install newer
 versions, so nothing would happen.
