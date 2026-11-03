@@ -226,7 +226,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       await invoke("session_start", { key, peer, webcodecs: formats, video: ch });
       setImageQuality((await invoke<string>("get_option", { key: "image-quality" }).catch(() => "")) || "balanced");
     })();
-    const t = setInterval(() => pipeRef.current && setVstats({ ...pipeRef.current.stats }), 1000);
+    const t = setInterval(() => pipeRef.current && setVstats({ ...pipeRef.current.sample() }), 1000);
     return () => {
       alive = false;
       clearInterval(t);
@@ -510,6 +510,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           <Stat k="fps" v={vstats ? `${vstats.fps} shown / ${vstats.inFps} recv` : "–"} />
           <Stat k="latency" v={delay != null ? `${delay} ms` : "–"} />
           <Stat k="decode" v={vstats ? `${vstats.decodeMs} ms` : "–"} />
+          <Stat k="stall" v={vstats ? `${vstats.maxGapMs} ms max gap · ${vstats.keyRequests} key req · ${vstats.dropped} dropped` : "–"} />
           <Stat k="codec" v={vstats?.codec || quality.codec || "–"} />
           <Stat k="bitrate" v={quality.target_bitrate ? `${(quality.target_bitrate / 1000).toFixed(1)} Mbps` : "–"} />
           <Stat k="speed" v={quality.speed ?? "–"} />

@@ -55,3 +55,12 @@ def test_clock_latency_uses_remote_offset():
     # Remote (VM) clock runs 400 ms ahead: remote - local = +400 -> offset arg = -400.
     # The viewer shows remote time 10_400 when local capture time is 10_030: 30 ms latency.
     assert clock_latency(10_030, 10_400, -400) == 30
+
+
+def test_freeze_stats():
+    import glass2glass as g2g
+    ch = []
+    for t, v in [(0, 1), (16, 1), (33, 2), (50, 3), (450, 4), (466, 5)]:
+        g2g.note_change(ch, t, v)
+    f = g2g.freeze_stats(ch)
+    assert f["max"] == 400 and f["over_300ms"] == 1 and f["over_100ms"] == 1, f

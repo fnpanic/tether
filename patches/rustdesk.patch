@@ -1,20 +1,45 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 1002586..f46256d 100644
+index 1002586..cad4b96 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -26,6 +26,7 @@ use_samplerate = ["samplerate", "libsamplerate-sys"]
  use_rubato = ["rubato"]
  use_dasp = ["dasp"]
  flutter = ["flutter_rust_bridge"]
-+tauri = []
++tauri = ["scrap/tauri"]
  default = ["use_dasp"]
  hwcodec = ["scrap/hwcodec"]
  vram = ["scrap/vram"]
+diff --git a/libs/scrap/Cargo.toml b/libs/scrap/Cargo.toml
+index 185c38f..20a294f 100644
+--- a/libs/scrap/Cargo.toml
++++ b/libs/scrap/Cargo.toml
+@@ -22,6 +22,8 @@ wayland = ["gstreamer", "gstreamer-app", "gstreamer-video", "dbus", "tracing", "
+ # enable `scrap/wayland`, which is what hid this.
+ drm = ["wayland", "base/wayland_probe"]
+ mediacodec = ["ndk"]
++# Tether (Tauri UI) build: codec choices tuned for GPU-less hosts (docs/performance.md).
++tauri = []
+ linux-pkg-config = ["dep:pkg-config"]
+ hwcodec = ["dep:hwcodec"]
+ vram = ["hwcodec/vram"]
 diff --git a/libs/scrap/src/common/codec.rs b/libs/scrap/src/common/codec.rs
-index 606a4be..2510d2a 100644
+index 606a4be..d3db061 100644
 --- a/libs/scrap/src/common/codec.rs
 +++ b/libs/scrap/src/common/codec.rs
-@@ -485,6 +485,13 @@ impl Decoder {
+@@ -284,7 +284,10 @@ impl Encoder {
+         if auto_codec == CodecFormat::VP9 || auto_codec == CodecFormat::AV1 {
+             let mut system = System::new();
+             system.refresh_memory();
+-            if vp8_useable && system.total_memory() <= 4 * 1024 * 1024 * 1024 {
++            if vp8_useable
++                && system.total_memory() <= 4 * 1024 * 1024 * 1024
++                && !keep_av1_on_low_memory(auto_codec)
++            {
+                 // 4 Gb
+                 auto_codec = CodecFormat::VP8
+             }
+@@ -485,6 +488,13 @@ impl Decoder {
                      0
                  };
          }
@@ -28,7 +53,25 @@ index 606a4be..2510d2a 100644
          for unsupported in mark_unsupported {
              match unsupported {
                  CodecFormat::VP8 => decoding.ability_vp8 = 0,
-@@ -1155,3 +1162,9 @@ pub fn test_av1() {
+@@ -822,9 +832,15 @@ impl Decoder {
+             return (PreferCodec::Auto, Chroma::I420);
+         }
+         let options = PeerConfig::load(id).options;
+-        let codec = options
++        // A forced (admin policy) preference wins over the one saved for this peer.
++        let forced = hbb_common::config::OVERWRITE_DISPLAY_SETTINGS
++            .read()
++            .unwrap()
+             .get("codec-preference")
+-            .map_or("".to_owned(), |c| c.to_owned());
++            .cloned();
++        let codec = forced
++            .or_else(|| options.get("codec-preference").cloned())
++            .unwrap_or_default();
+         let codec = if codec == "vp8" {
+             PreferCodec::VP8
+         } else if codec == "vp9" {
+@@ -1155,3 +1171,28 @@ pub fn test_av1() {
          });
      });
  }
@@ -38,6 +81,25 @@ index 606a4be..2510d2a 100644
 +pub static EXTERNAL_DECODING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 +pub const EXTERNAL_DECODING_H264: u8 = 1;
 +pub const EXTERNAL_DECODING_H265: u8 = 2;
++
++/// Tether: keep software AV1 on hosts with <= 4 GB RAM instead of falling back to VP8. Measured on a
++/// GPU-less 1080p VM while dragging a window at the same ~1.4 Mbit/s target (docs/performance.md):
++/// AV1 ~19 fps at ~22 ms/frame, VP8 ~3 fps (rate control drops frames: VP8 needs far more bits for
++/// screen content). The AV1 speed test (`test_av1`) still guards hosts too slow for AV1.
++pub fn keep_av1_on_low_memory(auto_codec: CodecFormat) -> bool {
++    cfg!(feature = "tauri") && auto_codec == CodecFormat::AV1
++}
++
++#[cfg(all(test, feature = "tauri"))]
++mod tether_tests {
++    use super::*;
++
++    #[test]
++    fn low_memory_keeps_av1_but_not_vp9() {
++        assert!(keep_av1_on_low_memory(CodecFormat::AV1));
++        assert!(!keep_av1_on_low_memory(CodecFormat::VP9));
++    }
++}
 diff --git a/src/client.rs b/src/client.rs
 index 597dc86..faa3f22 100644
 --- a/src/client.rs
@@ -289,7 +351,7 @@ index 96ffa63..d40ba0d 100644
              // first network delay message
              adjust_ratio = user.delay.fps.is_none();
 diff --git a/src/server/video_service.rs b/src/server/video_service.rs
-index a13aebb..ced9ac5 100644
+index a13aebb..91ed2de 100644
 --- a/src/server/video_service.rs
 +++ b/src/server/video_service.rs
 @@ -815,6 +815,7 @@ fn run(vs: VideoService) -> ResultType<()> {
@@ -317,6 +379,72 @@ index a13aebb..ced9ac5 100644
  
          let elapsed = now.elapsed();
          // may need to enable frame(timeout)
+@@ -1300,8 +1304,12 @@ fn handle_one_frame(
+     let mut vpx_no_output = false;
+     let first = *first_frame;
+     *first_frame = false;
++    #[cfg(feature = "tauri")]
++    let t_enc = Instant::now();
+     match encoder.encode_to_message(frame, ms) {
+         Ok(mut vf) => {
++            #[cfg(feature = "tauri")]
++            fluxrt_stats::encoded(&vf, t_enc.elapsed());
+             *encode_fail_counter = 0;
+             *encoder_warmed_up = true;
+             vf.display = display as _;
+@@ -1590,3 +1598,52 @@ mod tests {
+         assert!(refresh_allowed(true, false, false));
+     }
+ }
++
++/// Tether: host-side encoder statistics, logged every few seconds while video is being sent, so
++/// slow software encoding or a stalled stream shows up in the host log (docs/performance.md).
++#[cfg(feature = "tauri")]
++mod fluxrt_stats {
++    use super::*;
++
++    #[derive(Default)]
++    struct Window {
++        since: Option<Instant>,
++        frames: u32,
++        keys: u32,
++        bytes: usize,
++        enc: Duration,
++        enc_max: Duration,
++    }
++
++    lazy_static::lazy_static! {
++        static ref WINDOW: Mutex<Window> = Default::default();
++    }
++
++    pub(super) fn encoded(vf: &VideoFrame, took: Duration) {
++        use video_frame::Union::*;
++        let frames = match &vf.union {
++            Some(Vp8s(f)) | Some(Vp9s(f)) | Some(Av1s(f)) | Some(H264s(f)) | Some(H265s(f)) => &f.frames,
++            _ => return,
++        };
++        let mut w = WINDOW.lock().unwrap();
++        let since = *w.since.get_or_insert_with(Instant::now);
++        w.frames += 1;
++        w.keys += frames.iter().filter(|f| f.key).count() as u32;
++        w.bytes += frames.iter().map(|f| f.data.len()).sum::<usize>();
++        w.enc += took;
++        w.enc_max = w.enc_max.max(took);
++        let secs = since.elapsed().as_secs_f64();
++        if secs >= 5.0 {
++            log::info!(
++                "fluxrt encode: {:?} {:.1} fps, encode avg {:.1} ms max {} ms, {:.0} kbit/s, {} key frames",
++                CodecFormat::from(vf),
++                w.frames as f64 / secs,
++                w.enc.as_secs_f64() * 1000.0 / w.frames as f64,
++                w.enc_max.as_millis(),
++                w.bytes as f64 * 8.0 / 1000.0 / secs,
++                w.keys
++            );
++            *w = Window::default();
++        }
++    }
++}
 diff --git a/src/tauri_ui/cm.rs b/src/tauri_ui/cm.rs
 new file mode 100644
 index 0000000..ba16801
