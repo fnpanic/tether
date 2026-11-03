@@ -19,12 +19,19 @@ use librustdesk::core_main::{core_main, CoreMainAction};
 /// Config, logs and IPC names live under this name: `%APPDATA%\Tether-QS`, separate from an
 /// installed technician app.
 pub const APP_NAME: &str = "Tether-QS";
+/// macOS config folder prefix (`~/Library/Preferences/app.tether.Tether-QS`), as in the technician app.
+#[cfg(target_os = "macos")]
+const ORG: &str = "app.tether";
 const HANDOFF: &str = "handoff.json";
 /// Read by the core at startup: start the elevated portable service (UAC prompt).
 const PRE_ELEVATE: &str = "pre-elevate-service";
 
 fn main() -> ExitCode {
     *hbb_common::config::APP_NAME.write().unwrap() = APP_NAME.to_owned();
+    #[cfg(target_os = "macos")]
+    {
+        *hbb_common::config::ORG.write().unwrap() = ORG.to_owned();
+    }
     security::apply_policy();
     netpolicy::apply();
     policy::load_cached();

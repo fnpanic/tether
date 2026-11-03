@@ -1,5 +1,6 @@
-//! Portable self-update (no installer): `download/<channel>/customer/windows-x86_64/latest.json`,
-//! minisign-verified exe, swapped in next to the running one, then relaunched.
+//! Portable self-update (no installer): `download/<channel>/customer/<platform>/latest.json`,
+//! minisign-verified exe (Windows) or zipped `.app` (macOS), swapped in next to the running one,
+//! then relaunched.
 
 use std::{
     collections::HashMap,
@@ -16,7 +17,10 @@ use tether_trust::version;
 use crate::policy;
 
 const PUBKEY: Option<&str> = option_env!("TETHER_UPDATER_PUB_KEY");
+#[cfg(not(target_os = "macos"))]
 const PLATFORM: &str = "windows-x86_64";
+#[cfg(target_os = "macos")]
+const PLATFORM: &str = "darwin-universal";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_EXE: usize = 200 * 1024 * 1024;
 
@@ -97,11 +101,40 @@ fn with_suffix(p: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Swap a downloaded `new` file in for the (running) `exe`; Windows allows renaming a running
-/// exe, not overwriting it. Rolls back if the second rename fails.
+/// Remove a file or a whole `.app` folder.
+fn remove_any(p: &Path) -> io::Result<()> {
+    if p.is_dir() {
+        std::fs::remove_dir_all(p)
+    } else {
+        std::fs::remove_file(p)
+    }
+}
+
+/// What an update replaces: the exe, or on macOS the `.app` bundle around
+/// `TetherQS.app/Contents/MacOS/TetherQS`.
+fn unit(exe: &Path) -> io::Result<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let app = exe.ancestors().nth(3).filter(|a| a.extension().is_some_and(|e| e == "app"));
+        return app.map(Path::to_path_buf).ok_or_else(|| io::Error::other("TetherQS is not running from its .app"));
+    }
+    Ok(exe.to_path_buf())
+}
+
+/// The executable inside a (new) unit, for the relaunch.
+fn exe_in(unit: &Path, exe: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        unit.join("Contents/MacOS").join(exe.file_name().unwrap_or("TetherQS".as_ref()))
+    } else {
+        unit.to_path_buf()
+    }
+}
+
+/// Swap a downloaded `new` file (or `.app`) in for the running one; Windows allows renaming a
+/// running exe, not overwriting it, and macOS allows renaming a running bundle. Rolls back if the
+/// second rename fails.
 pub fn swap(exe: &Path, new: &Path) -> io::Result<()> {
     let old = with_suffix(exe, ".old");
-    let _ = std::fs::remove_file(&old);
+    let _ = remove_any(&old);
     std::fs::rename(exe, &old)?;
     if let Err(e) = std::fs::rename(new, exe) {
         let _ = std::fs::rename(&old, exe);
@@ -110,18 +143,21 @@ pub fn swap(exe: &Path, new: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Write the verified exe next to the running one, or into `fallback_dir` if that folder is not
-/// writable. Returns the exe to start.
-pub fn stage(exe: &Path, bytes: &[u8], fallback_dir: &Path) -> io::Result<PathBuf> {
-    let new = with_suffix(exe, ".new");
-    if std::fs::write(&new, bytes).is_ok() {
-        swap(exe, &new)?;
-        return Ok(exe.to_path_buf());
+/// Write the verified update (`write`: plain file or unpacked `.app`) next to the running `unit`,
+/// or into `fallback_dir` if that folder is not writable. Returns the unit to start.
+pub fn stage(unit: &Path, bytes: &[u8], fallback_dir: &Path, write: impl Fn(&Path, &[u8]) -> io::Result<()>) -> io::Result<PathBuf> {
+    let new = with_suffix(unit, ".new");
+    let _ = remove_any(&new);
+    if write(&new, bytes).is_ok() {
+        swap(unit, &new)?;
+        return Ok(unit.to_path_buf());
     }
+    let _ = remove_any(&new);
     std::fs::create_dir_all(fallback_dir)?;
-    let target = fallback_dir.join(exe.file_name().unwrap_or("TetherQS.exe".as_ref()));
+    let target = fallback_dir.join(unit.file_name().unwrap_or("TetherQS.exe".as_ref()));
     let tmp = with_suffix(&target, ".new");
-    std::fs::write(&tmp, bytes)?;
+    let _ = remove_any(&tmp);
+    write(&tmp, bytes)?;
     if target.exists() {
         swap(&target, &tmp)?;
     } else {
@@ -132,14 +168,43 @@ pub fn stage(exe: &Path, bytes: &[u8], fallback_dir: &Path) -> io::Result<PathBu
 
 /// Leftovers of the previous update; the old exe is no longer running once we are.
 pub fn cleanup_old() {
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::fs::remove_file(with_suffix(&exe, ".old"));
-        let _ = std::fs::remove_file(with_suffix(&exe, ".new"));
+    if let Some(u) = std::env::current_exe().ok().and_then(|e| unit(&e).ok()) {
+        let _ = remove_any(&with_suffix(&u, ".old"));
+        let _ = remove_any(&with_suffix(&u, ".new"));
     }
 }
 
 fn fallback_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join(crate::APP_NAME)
+    let base = if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
+    } else {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    };
+    base.unwrap_or_else(std::env::temp_dir).join(crate::APP_NAME)
+}
+
+/// macOS update artifact: a zip (`ditto -c -k --keepParent TetherQS.app`) holding one `.app`.
+/// Unpacked with the system `ditto`, which keeps the bundle's symlinks, modes and signature.
+fn unpack_app(dest: &Path, zip: &[u8]) -> io::Result<()> {
+    let work = with_suffix(dest, ".unpack");
+    let _ = remove_any(&work);
+    std::fs::create_dir_all(&work)?;
+    let r = (|| {
+        let z = work.join("update.zip");
+        std::fs::write(&z, zip)?;
+        let out = work.join("x");
+        if !std::process::Command::new("/usr/bin/ditto").args(["-x", "-k"]).arg(&z).arg(&out).status()?.success() {
+            return Err(io::Error::other("ditto could not unpack the update"));
+        }
+        let mut apps = std::fs::read_dir(&out)?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "app"));
+        let app = match (apps.next(), apps.next()) {
+            (Some(a), None) if a.join("Contents/MacOS").is_dir() => a,
+            _ => return Err(io::Error::other("the update does not contain exactly one .app")),
+        };
+        std::fs::rename(app, dest)
+    })();
+    let _ = remove_any(&work);
+    r
 }
 
 fn now() -> u64 {
@@ -203,7 +268,14 @@ pub fn install() -> Result<(), String> {
         }
         verify(&bytes, &p.signature, PUBKEY.ok_or("no updater key in this build")?)?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let target = stage(&exe, &bytes, &fallback_dir()).map_err(|e| format!("could not replace the program: {e}"))?;
+        let replace = |e: io::Error| format!("could not replace the program: {e}");
+        let u = unit(&exe).map_err(replace)?;
+        let staged = if cfg!(target_os = "macos") {
+            stage(&u, &bytes, &fallback_dir(), unpack_app)
+        } else {
+            stage(&u, &bytes, &fallback_dir(), |p, b| std::fs::write(p, b))
+        };
+        let target = exe_in(&staged.map_err(replace)?, &exe);
         hbb_common::log::info!("updated to {}, restarting {}", m.version, target.display());
         crate::relaunch(&target, false)
     })();
@@ -278,7 +350,8 @@ mod tests {
         let exe = dir.join("TetherQS.exe");
         std::fs::write(&exe, b"v1").unwrap();
         let fb = dir.join("fallback");
-        assert_eq!(stage(&exe, b"v2", &fb).unwrap(), exe);
+        let write = |p: &Path, b: &[u8]| std::fs::write(p, b);
+        assert_eq!(stage(&exe, b"v2", &fb, write).unwrap(), exe);
         assert_eq!(std::fs::read(&exe).unwrap(), b"v2");
         assert_eq!(std::fs::read(with_suffix(&exe, ".old")).unwrap(), b"v1");
         assert!(!with_suffix(&exe, ".new").exists());
@@ -287,9 +360,28 @@ mod tests {
         assert_eq!(std::fs::read(&exe).unwrap(), b"v2");
         // Unwritable folder (here: a path below a file) falls back to the per-user folder.
         let blocked = dir.join("TetherQS.exe.old").join("TetherQS.exe");
-        let target = stage(&blocked, b"v3", &fb).unwrap();
+        let target = stage(&blocked, b"v3", &fb, write).unwrap();
         assert_eq!(target, fb.join("TetherQS.exe"));
         assert_eq!(std::fs::read(&target).unwrap(), b"v3");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The macOS path: the unit is a folder, a stale `.old` folder is replaced.
+    #[test]
+    fn swap_app_folders() {
+        let dir = std::env::temp_dir().join(format!("tetherqs-app-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("TetherQS.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::create_dir_all(dir.join("TetherQS.app.old/stale")).unwrap();
+        let write = |p: &Path, b: &[u8]| {
+            std::fs::create_dir_all(p.join("Contents/MacOS"))?;
+            std::fs::write(p.join("Contents/MacOS/TetherQS"), b)
+        };
+        assert_eq!(stage(&app, b"v2", &dir.join("fb"), write).unwrap(), app);
+        assert_eq!(std::fs::read(app.join("Contents/MacOS/TetherQS")).unwrap(), b"v2");
+        assert!(dir.join("TetherQS.app.old/Contents/MacOS").is_dir() && !dir.join("TetherQS.app.old/stale").exists());
+        assert!(!dir.join("TetherQS.app.new").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

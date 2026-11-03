@@ -7,6 +7,8 @@ on:
 env:
   TETHER_SERVER: ${{ secrets.TETHER_SERVER }}
   TETHER_PUB_KEY: ${{ secrets.TETHER_PUB_KEY }}
+  TETHER_ADMIN_PUB_KEY: ${{ secrets.TETHER_ADMIN_PUB_KEY }}
+  TETHER_UPDATER_PUB_KEY: ${{ secrets.TETHER_UPDATER_PUB_KEY }}
 
 jobs:
   build:
@@ -15,8 +17,6 @@ jobs:
       matrix:
         include:
           - { os: windows-2022, target: x86_64-pc-windows-msvc, triplet: x64-windows-static }
-          - { os: macos-14, target: aarch64-apple-darwin, triplet: arm64-osx }
-          - { os: macos-13, target: x86_64-apple-darwin, triplet: x64-osx }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +26,7 @@ jobs:
         with: { node-version: 22, cache: npm, cache-dependency-path: apps/desktop/package-lock.json }
       - name: Fetch pinned sources and apply patches
         shell: bash
-        run: scripts/bootstrap.sh
+        run: bash scripts/bootstrap.sh
       - name: vcpkg
         uses: lukka/run-vcpkg@v11
         with: { vcpkgGitCommitId: 9e593bb18ea69cc5095e012465dcd675a822ed0d }
@@ -48,18 +48,33 @@ jobs:
       - name: Bundle
         working-directory: apps/desktop
         shell: bash
-        env:
-          # Optional signing; add these secrets to produce signed/notarized builds.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx tauri build --target ${{ matrix.target }}
+        run: npx tauri build --target ${{ matrix.target }} --bundles nsis
       - uses: actions/upload-artifact@v4
         with:
           name: tether-${{ matrix.target }}
-          path: |
-            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
-            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          path: apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+
+  # Unsigned universal build (Apple silicon + Intel), the same script as on a developer Mac.
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/desktop/src-tauri
+            apps/quick/src-tauri
+      - name: Build
+        shell: bash
+        env:
+          # Optional: an Apple Developer ID identity instead of ad-hoc signing.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: bash scripts/build-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tether-macos-universal
+          path: dist/macos/*

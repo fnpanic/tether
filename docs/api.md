@@ -85,8 +85,17 @@ download/
   <channel>/technician/windows-x86_64/Tether_<v>_x64-setup.exe(.sig)
   <channel>/customer/windows-x86_64/latest.json
   <channel>/customer/windows-x86_64/TetherQS-<v>.exe(.sig)   versioned, so uploads never touch the live file
-  <channel>/technician/darwin-universal/…     (macOS, CI)
+  <channel>/technician/darwin-universal/latest.json
+  <channel>/technician/darwin-universal/Tether_<v>_universal.app.tar.gz(.sig)   updater archive
+  <channel>/technician/darwin-universal/Tether_<v>_universal.dmg(.sig)          manual download
+  <channel>/customer/darwin-universal/latest.json
+  <channel>/customer/darwin-universal/TetherQS-<v>-universal.zip(.sig)          zipped .app
 ```
+Each platform folder has its own `latest.json` (the technician app requests
+`…/technician/{{target}}/latest.json`, `{{target}}` = `windows-x86_64` or `darwin-universal`).
+A macOS manifest lists the universal build under `darwin-universal`, `darwin-aarch64` and
+`darwin-x86_64`. Tether Manage reads the existing `latest.json` before writing it: platform
+entries of the same version are kept, entries of another version are replaced.
 Channel default `stable` (policy feature `update.channel`). `latest.json` is the Tauri updater
 format plus three optional fields:
 ```json

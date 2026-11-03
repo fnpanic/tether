@@ -180,8 +180,9 @@ The server keeps at most 10 000 devices and drops entries older than 180 days.
 
 | Field | Meaning |
 | --- | --- |
-| File | `Tether_<version>_x64-setup.exe` (technician, NSIS) or `TetherQS.exe` (customer). Choosing a technician installer fills in the version from the file name. |
+| File | Windows: `Tether_<version>_x64-setup.exe` (technician, NSIS) or `TetherQS-<version>.exe` (customer). macOS: `Tether_<version>_universal.app.tar.gz` (technician; the `Tether_<version>_universal.dmg` from the same folder is uploaded with it) or `TetherQS-<version>-universal.zip` (customer). App, platform and version are filled in from the file name. |
 | App | Technician app or customer module |
+| Platform | Windows (`windows-x86_64`) or macOS (`darwin-universal`, Apple silicon and Intel) |
 | Version | Must equal the version built into the file (`0.3.1`, `0.3.1-test`). A wrong version makes clients offer the update again after installing it. |
 | Channel | 1–32 lowercase letters, digits or dashes. Devices use the channel from policy `update.channel` (default `stable`). |
 | Release notes | Shown in the update card |
@@ -191,9 +192,12 @@ The server keeps at most 10 000 devices and drops entries older than 180 days.
 
 Upload order, so that clients never see a manifest pointing to a missing file:
 
-1. the artifact, to `download/<channel>/<app>/windows-x86_64/<file>`
-2. `<file>.sig`
-3. `latest.json`, last
+1. the artifact, to `download/<channel>/<app>/<platform>/<file>`
+2. `<file>.sig` (macOS technician: then the `.dmg` and its `.sig`)
+3. `latest.json`, last. The current `latest.json` is read first; entries of other platforms for the
+   same version are kept.
+
+macOS builds: [macos.md](macos.md).
 
 **Files on the server** lists everything under `download/`, with delete. The server refuses uploads
 that would leave less than 2 GiB free.
@@ -204,10 +208,15 @@ How clients handle these flags: [updates.md](updates.md).
 
 Generates a self-contained page (no external resources, light and dark) and publishes it as
 `https://<relay>/`. Settings: title, introduction (empty line = new paragraph), and which apps to
-offer. The links always point to the current **stable** release; **Publish** fails if there is no
-stable release of an offered app yet. Republish the page after changing the texts; a new release
-does not need a republish for TetherQS (fixed file name) but does for the technician installer,
-whose file name contains the version.
+offer. The page has a Windows and a macOS section, each with the offered apps (technician
+installer / disk image, TetherQS). A small inline script detects the visitor's OS
+(`navigator.userAgentData.platform`, else the user agent), shows that section first and marks it
+"Your computer"; the **Windows / macOS** switch shows the other. Without JavaScript both sections
+are shown and the switch jumps to them. An app without a stable release for an OS shows "Not
+available yet". The links point to the current **stable** release; **Publish** fails only if no
+offered app has a stable release on any OS. Republish the page after every release (file names
+contain the version) and after changing the texts. The preview in Tether Manage shows the page
+without its script (both sections).
 
 ## Diagnostics tickets
 

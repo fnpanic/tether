@@ -44,7 +44,7 @@ export function DownloadPage() {
 
   return (
     <>
-      <PageHeader title="Download page" sub={`Served at ${s.server}/ — links always point to the current stable release.`}>
+      <PageHeader title="Download page" sub={`Served at ${s.server}/ — Windows and macOS downloads of the current stable release; visitors see their own OS first.`}>
         <Button onClick={render}>Preview</Button>
         <Button variant="primary" disabled={busy || !title.trim() || (!technician && !customer)} onClick={publish}>
           {busy ? "Publishing…" : "Publish"}
@@ -59,11 +59,11 @@ export function DownloadPage() {
             <TextArea rows={6} value={intro} onChange={(e) => setIntro(e.target.value)} />
           </Label>
           <div className="flex items-center justify-between">
-            <span className="text-caption">Technician installer</span>
+            <span className="text-caption">Technician app (installer / disk image)</span>
             <Toggle label="Offer technician installer" checked={technician} onChange={setTechnician} />
           </div>
           <div className="flex items-center justify-between">
-            <span className="text-caption">Customer module (TetherQS.exe)</span>
+            <span className="text-caption">Customer module (TetherQS)</span>
             <Toggle label="Offer customer module" checked={customer} onChange={setCustomer} />
           </div>
           <ErrorText error={error} />

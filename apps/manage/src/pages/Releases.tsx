@@ -12,11 +12,23 @@ interface Release {
   modified: number;
 }
 type Kind = "technician" | "customer";
+type Platform = "windows-x86_64" | "darwin-universal";
+
+/** Remote file name; must match release::target in src-tauri/src/release.rs. */
+const fileName = (kind: Kind, platform: Platform, v: string) =>
+  platform === "windows-x86_64"
+    ? kind === "technician"
+      ? `Tether_${v}_x64-setup.exe`
+      : `TetherQS-${v}.exe`
+    : kind === "technician"
+      ? `Tether_${v}_universal.app.tar.gz`
+      : `TetherQS-${v}-universal.zip`;
 
 export function Releases() {
   const { toast } = useApp();
   const [file, setFile] = useState("");
   const [kind, setKind] = useState<Kind>("technician");
+  const [platform, setPlatform] = useState<Platform>("windows-x86_64");
   const [channel, setChannel] = useState("stable");
   const [version, setVersion] = useState("");
   const [notes, setNotes] = useState("");
@@ -32,15 +44,24 @@ export function Releases() {
   useEffect(() => void load(), []);
 
   const pick = async () => {
-    const f = await open({ filters: [{ name: "Windows executable", extensions: ["exe"] }] });
+    const f = await open({ filters: [{ name: "Release file", extensions: ["exe", "gz", "zip"] }] });
     if (typeof f !== "string") return;
     setFile(f);
     const name = f.split(/[\\/]/).pop() ?? "";
-    const m = name.match(/^Tether_(.+)_x64-setup\.exe$/i);
-    if (m) {
-      setKind("technician");
-      setVersion(m[1]);
-    } else if (/^TetherQS/i.test(name)) setKind("customer");
+    const known: [RegExp, Kind, Platform][] = [
+      [/^Tether_(.+)_x64-setup\.exe$/i, "technician", "windows-x86_64"],
+      [/^Tether_(.+)_universal\.app\.tar\.gz$/i, "technician", "darwin-universal"],
+      [/^TetherQS-(.+)-universal\.zip$/i, "customer", "darwin-universal"],
+      [/^TetherQS(?:-(.+))?\.exe$/i, "customer", "windows-x86_64"],
+    ];
+    for (const [re, k, p] of known) {
+      const m = name.match(re);
+      if (!m) continue;
+      setKind(k);
+      setPlatform(p);
+      if (m[1]) setVersion(m[1]);
+      break;
+    }
   };
 
   const publish = async () => {
@@ -48,7 +69,7 @@ export function Releases() {
     setError(null);
     try {
       await invoke<string>("release_publish", {
-        args: { file, kind, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced },
+        args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced },
       });
       toast(`Released ${version} to ${channel}`);
       setFile("");
@@ -70,14 +91,21 @@ export function Releases() {
     }
   };
 
-  const target = kind === "technician" ? `Tether_${version || "<version>"}_x64-setup.exe` : `TetherQS-${version || "<version>"}.exe`;
+  const target = fileName(kind, platform, version || "<version>");
 
   return (
     <>
       <PageHeader title="Releases" sub="Sign an installer with the update key and publish it to an update channel." />
       <Card>
         <div className="grid grid-cols-2 gap-x-6 gap-y-4">
-          <Label text="File" hint={file ? `Uploaded as ${channel}/${kind}/windows-x86_64/${target}` : "Tether_<version>_x64-setup.exe (technician) or TetherQS-<version>.exe (customer)"}>
+          <Label
+            text="File"
+            hint={
+              file
+                ? `Uploaded as ${channel}/${kind}/${platform}/${target}${kind === "technician" && platform === "darwin-universal" ? " with the .dmg next to it" : ""}`
+                : "Windows: Tether_<version>_x64-setup.exe or TetherQS-<version>.exe. macOS: Tether_<version>_universal.app.tar.gz (its .dmg must be in the same folder) or TetherQS-<version>-universal.zip"
+            }
+          >
             <div className="flex gap-2">
               <TextField readOnly value={file} placeholder="No file chosen" />
               <Button onClick={pick}>Choose…</Button>
@@ -85,6 +113,9 @@ export function Releases() {
           </Label>
           <Label text="App">
             <Segmented<Kind> value={kind} onChange={setKind} options={[{ value: "technician", label: "Technician app" }, { value: "customer", label: "Customer module" }]} />
+          </Label>
+          <Label text="Platform">
+            <Segmented<Platform> value={platform} onChange={setPlatform} options={[{ value: "windows-x86_64", label: "Windows" }, { value: "darwin-universal", label: "macOS" }]} />
           </Label>
           <Label text="Version">
             <TextField value={version} onChange={(e) => setVersion(e.target.value)} placeholder="0.3.1" />

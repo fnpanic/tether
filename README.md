@@ -47,8 +47,9 @@ cd ../../apps/desktop && npm ci
 TETHER_SERVER=relay.example.com TETHER_PUB_KEY=<key from install.sh> npx tauri build
 ```
 
-On macOS use the triplets `arm64-osx` / `x64-osx`. Release builds refuse to compile without
-`TETHER_SERVER` and `TETHER_PUB_KEY`.
+On macOS run `bash scripts/build-macos.sh` instead: it installs the prerequisites and builds
+both apps as universal binaries ([docs/macos.md](docs/macos.md)). Release builds refuse to compile
+without `TETHER_SERVER`, `TETHER_PUB_KEY`, `TETHER_ADMIN_PUB_KEY` and `TETHER_UPDATER_PUB_KEY`.
 
 For development, `npm run dev` serves the UI against an in-browser mock backend. To run a real host
 and viewer side by side on one machine, start a second instance with `TETHER_PROFILE=b`.
