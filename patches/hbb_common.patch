@@ -70,7 +70,7 @@ index 126d08a..5e09dd2 100644
      pub fn set_send_timeout(&mut self, ms: u64) {
          match self {
 diff --git a/src/websocket.rs b/src/websocket.rs
-index 3a98a84..0ac72e0 100644
+index 3a98a84..7c98661 100644
 --- a/src/websocket.rs
 +++ b/src/websocket.rs
 @@ -86,6 +86,8 @@ pub struct WsFramedStream {
@@ -322,7 +322,7 @@ index 3a98a84..0ac72e0 100644
          }
      }
  
-@@ -902,3 +1087,43 @@ mod tests {
+@@ -902,3 +1087,45 @@ mod tests {
          }
      }
  }
@@ -364,5 +364,7 @@ index 3a98a84..0ac72e0 100644
 +        );
 +        let first = &connect_routes(id, true)[0];
 +        assert_eq!((first.url.as_str(), first.via_proxy), ("wss://relay.example.org:80/ws/id", false));
++        // Globals: other tests (check_ws) read the rendezvous server.
++        EXE_RENDEZVOUS_SERVER.write().unwrap().clear();
 +    }
 +}
