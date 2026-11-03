@@ -165,6 +165,10 @@ fn policy_publish_and_fetch() {
     let h = s.admin(&k, "GET", "/api/admin/policy-history", b"").json();
     assert_eq!(h, serde_json::json!([{"serial":6,"issued_at":200},{"serial":5,"issued_at":100}]));
     assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").json()["policy_serial"], 6);
+    // Any stored version can be fetched back exactly as signed (restore from another admin PC).
+    assert_eq!(s.admin(&k, "GET", "/api/admin/policy-history/5", b"").body, v5);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/policy-history/999", b"").status, 404);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/policy-history/..%2fpolicy", b"").status, 404);
     assert_eq!(s.req("GET", "/api/policy", &[("If-None-Match", "\"5\"")], b"").status, 200);
 }
 

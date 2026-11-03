@@ -63,6 +63,7 @@ Failure: `401` with a short reason. Bodies over the limits: `413`.
 | --- | --- | --- |
 | `PUT /api/admin/policy` | signed policy document (≤ 256 KiB) | `204`. The server also verifies the signature, validates the bundle and requires `serial` > current (`409` otherwise). Stored atomically, previous versions kept in `policy-history/<serial>.json` (last 50). |
 | `GET /api/admin/policy-history` | – | `[{"serial":…, "issued_at":…}]` newest first |
+| `GET /api/admin/policy-history/<serial>` | – | the signed document exactly as published (`404` if not kept) |
 | `GET /api/admin/devices` | – | `[{uuid,id,profile,version,os,serial,ip,last_seen}]` |
 | `POST /api/admin/diag-ticket` | `{"note":"…"}` (≤ 256 chars) | `{"ticket":"K7Q2M9XD","expires":unix}` (open 24 h) |
 | `GET /api/admin/diag` | – | `[{ticket,note,created,uploaded,size}]` |

@@ -470,7 +470,7 @@ impl App {
             ("PUT", "download-page") => LIMIT_PAGE,
             ("POST", "diag-ticket") => LIMIT_SMALL,
             ("GET", "policy-history" | "devices" | "diag" | "releases" | "status") => LIMIT_SMALL,
-            ("GET", r) if r.starts_with("diag/") => LIMIT_SMALL,
+            ("GET", r) if r.starts_with("diag/") || r.starts_with("policy-history/") => LIMIT_SMALL,
             _ => return Err(not_found()),
         };
         let body = read_body(rq, limit)?;
@@ -492,6 +492,12 @@ impl App {
             }
             ("GET", "diag") => Ok(json(&self.tickets)),
             ("GET", "releases") => self.list_releases(),
+            ("GET", r) if r.starts_with("policy-history/") => {
+                // The signed document exactly as published, so another admin PC can restore it.
+                let serial: u64 = r["policy-history/".len()..].parse().map_err(|_| not_found())?;
+                let doc = fs::read(self.data.join("policy-history").join(format!("{serial}.json"))).map_err(|_| not_found())?;
+                Ok(Response::from_data(doc).with_header(hdr("Content-Type", "application/json")).boxed())
+            }
             ("GET", "status") => Ok(json(&serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "disk_free": disk_free(&self.data),

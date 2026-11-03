@@ -197,7 +197,7 @@ async fn policy_publish(app: State<'_, App>, bundle: Bundle) -> R<u64> {
     Ok(b.serial)
 }
 
-/// Server history merged with the local copies (the server exposes serials only, not content).
+/// Server history merged with the local copies.
 #[tauri::command]
 async fn policy_history(app: State<'_, App>) -> R<Vec<Value>> {
     let server = app.call_json("GET", "/api/admin/policy-history", None).await?;
@@ -217,10 +217,16 @@ async fn policy_history(app: State<'_, App>) -> R<Vec<Value>> {
     Ok(rows.into_values().rev().collect())
 }
 
+/// Content of a published version: the local copy, else the signed document kept by the server
+/// (verified against this app's admin key, so a tampered server copy is never republished).
 #[tauri::command]
-fn policy_local(app: State<App>, serial: u64) -> R<Bundle> {
-    let p = app.published().remove(&serial).ok_or("No local copy of this version.")?;
-    serde_json::from_slice(&fs::read(p).map_err(err)?).map_err(err)
+async fn policy_local(app: State<'_, App>, serial: u64) -> R<Bundle> {
+    if let Some(p) = app.published().remove(&serial) {
+        return serde_json::from_slice(&fs::read(p).map_err(err)?).map_err(err);
+    }
+    let doc = app.call("GET", &format!("/api/admin/policy-history/{serial}"), Vec::new(), "application/json").await?;
+    let payload = envelope::open_json(&doc, &[app.admin_key()?.verifying_key()])?;
+    Bundle::from_json(&payload)
 }
 
 // ---- releases ----

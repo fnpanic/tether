@@ -248,7 +248,7 @@ export function Policy() {
             <span className="w-24 font-semibold">Version {h.serial}</span>
             <span className="flex-1 text-muted">{when(h.issued_at)}</span>
             <span className="text-footnote text-muted">{h.server ? "on server" : "local only"}</span>
-            <Button size="sm" disabled={!h.local || busy} title={h.local ? "" : "Published from another PC: no local copy"} onClick={() => restore(h.serial)}>
+            <Button size="sm" disabled={busy || !h.server && !h.local} onClick={() => restore(h.serial)}>
               <RotateCcw size={14} /> Restore
             </Button>
           </div>
