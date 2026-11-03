@@ -17,5 +17,81 @@
     },
     "latency_corrected_ms": null,
     "screen_to_capture_ms": null
+  },
+  {
+    "label": "tether \u00b7 VM host \u00b7 balanced",
+    "seconds": 20.0,
+    "capture_fps": 53.8,
+    "valid_samples": 1069,
+    "distinct_remote_frames_per_s": 28.1,
+    "latency_ms": {
+      "n": 1069,
+      "median": 38,
+      "mean": 39.2,
+      "p10": 25,
+      "p95": 61,
+      "min": 17,
+      "max": 88,
+      "stdev": 12.3
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
+  },
+  {
+    "label": "anydesk \u00b7 VM host \u00b7 default \u00b7 run 1",
+    "seconds": 20.0,
+    "capture_fps": 45.6,
+    "valid_samples": 913,
+    "distinct_remote_frames_per_s": 20.4,
+    "latency_ms": {
+      "n": 913,
+      "median": 44,
+      "mean": 45.8,
+      "p10": 26,
+      "p95": 76,
+      "min": 9,
+      "max": 99,
+      "stdev": 16.5
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
+  },
+  {
+    "label": "anydesk \u00b7 VM host \u00b7 default \u00b7 run 2",
+    "seconds": 20.0,
+    "capture_fps": 84.5,
+    "valid_samples": 1691,
+    "distinct_remote_frames_per_s": 20.4,
+    "latency_ms": {
+      "n": 1691,
+      "median": 51,
+      "mean": 53.3,
+      "p10": 29,
+      "p95": 88,
+      "min": 17,
+      "max": 122,
+      "stdev": 19.3
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
+  },
+  {
+    "label": "anydesk \u00b7 VM host \u00b7 default \u00b7 run 3",
+    "seconds": 20.0,
+    "capture_fps": 108.0,
+    "valid_samples": 2111,
+    "distinct_remote_frames_per_s": 17.4,
+    "latency_ms": {
+      "n": 2111,
+      "median": 55,
+      "mean": 55.5,
+      "p10": 33,
+      "p95": 85,
+      "min": 16,
+      "max": 102,
+      "stdev": 17.2
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
   }
 ]

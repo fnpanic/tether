@@ -57,20 +57,35 @@ Mean latency went from about 41 ms (RAM path, 30 fps) to about 24–30 ms.
 - **Latency:** capture time minus (barcode shown in the viewer + offset), which is absolute glass-to-glass latency.
 - **Network:** both products went P2P over the Hyper-V switch. Tether's relay ran on this PC.
 
-| Product | Mean | Median | p10 | p95 | Max | Remote fps | Samples |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| **Tether** (Balanced) | **33.8 ms** | **32** | 21 | **54** | 79 | **28.0** | 892 (20 s run) |
-| AnyDesk 9.8 (default) | 53.7 ms | 53 | — | 83 | 102 | 20.4 | 2306 (10 s run) |
+Each product was measured in several independent 20 s runs (one 10 s run for AnyDesk).
 
-Tether's average glass-to-glass latency was about **37 % lower** and its p95 about 35 % lower, while
-it delivered about 37 % more frames per second. Without a GPU in the VM, both products encode in
-software here, so these numbers are higher than Tether's 24–30 ms on real hardware (above).
+| Product | Run | Mean | Median | p10 | p95 | Max | Remote fps | Samples |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **Tether** (Balanced) | 1 | 33.8 ms | 32 | 21 | 54 | 79 | 28.0 | 892 |
+| | 2 | 40.7 ms | 39 | 26 | 62 | 86 | 28.1 | 918 |
+| | 3 | 39.2 ms | 38 | 25 | 61 | 88 | 28.1 | 1069 |
+| AnyDesk 9.8 (default) | 1 (10 s) | 53.7 ms | 53 | — | 83 | 102 | 20.4 | 2306 |
+| | 2 | 45.8 ms | 44 | 26 | 76 | 99 | 20.4 | 913 |
+| | 3 | 53.3 ms | 51 | 29 | 88 | 122 | 20.4 | 1691 |
+| | 4 | 55.5 ms | 55 | 33 | 85 | 102 | 17.4 | 2111 |
+
+**Summary (mean of runs):**
+
+| | Tether | AnyDesk | Difference |
+| --- | --- | --- | --- |
+| Glass-to-glass latency, mean | **37.9 ms** | 52.1 ms | Tether **27 % lower** |
+| p95 latency | **59 ms** | 83 ms | Tether **29 % lower** |
+| Delivered frames per second | **28.1** | 19.7 | Tether **43 % more** |
+
+The ranges don't overlap: Tether's worst run (40.7 ms) is faster than AnyDesk's best (45.8 ms). Without a
+GPU in the VM, both products encode in software here, so these numbers are higher than Tether's 24–30 ms on
+real hardware (above).
 
 Caveats:
-- One run per product. The AnyDesk figure comes from a 10 s run, because longer runs were disrupted
-  by interactive use of the measuring PC (other windows covering the viewer).
-- Re-run both with `node apps/desktop/e2e/bench-vm.mjs` while the PC is otherwise idle; the
-  `anydesk-login.ps1` helper answers AnyDesk's password prompt if needed.
+- Runs were taken on a PC that was partly in use; each run was checked for valid samples and kept only if
+  the viewer window stayed visible.
+- Re-run with `node apps/desktop/e2e/bench-vm.mjs` while the PC is idle. If AnyDesk asks for the VM
+  password, a person enters it (the harness never types into windows).
 
 ## Earlier single-machine attempt
 

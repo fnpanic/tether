@@ -87,12 +87,8 @@ if (opt.only !== "tether") {
   spawn("cmd", ["/c", AD_CMD], { stdio: "ignore", detached: true }).unref();
   // AnyDesk titles the session window with the ID grouped by spaces ("1 605 296 385").
   const spacedId = ids.anydesk.replace(/\B(?=(\d{3})+(?!\d))/g, " ");
-  // If AnyDesk still shows its authorization prompt (stdin password not taken), answer it.
-  setTimeout(() => {
-    try {
-      ps("anydesk-login.ps1", "-Title", `${spacedId} - AnyDesk`);
-    } catch {}
-  }, 9000);
+  // No synthetic keystrokes here: if AnyDesk shows its authorization prompt, a person answers it.
+  // (Injected keys go to whatever window has focus, which on a PC in use may be another app.)
   try {
     await measureViewer("anydesk · VM host · default", ["-Process", "AnyDesk", "-Title", spacedId]);
   } finally {
