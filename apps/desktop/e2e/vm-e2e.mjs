@@ -79,7 +79,7 @@ async function main() {
     const newFiles = () => (existsSync(REC_DIR) ? readdirSync(REC_DIR) : []).filter((f) => !before.has(f));
     // The technician's own toolbar button (DOM click: works while the window is minimised).
     const toolbar = (name) =>
-      v.getByRole("button", { name, exact: true }).dispatchEvent("click", undefined, { timeout: 15000 }).catch(async (e) => {
+      v.getByRole("button", { name, exact: true, includeHidden: true }).dispatchEvent("click", undefined, { timeout: 15000 }).catch(async (e) => {
         const labels = await v.evaluate(() => [...document.querySelectorAll("button")].map((b) => b.getAttribute("aria-label") || b.title || b.textContent.trim()));
         console.log("viewer buttons:", JSON.stringify(labels));
         throw e;
