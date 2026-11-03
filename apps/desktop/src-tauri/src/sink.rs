@@ -25,6 +25,8 @@ pub struct TauriSink {
     cm_clients: Mutex<Vec<Value>>,
     /// Passwords given on the command line, consumed once by `session_start`.
     pending_passwords: Mutex<HashMap<String, String>>,
+    /// New session key -> live session key whose login it reuses, consumed by `session_start`.
+    pending_logins: Mutex<HashMap<String, String>>,
 }
 
 static SINK: OnceLock<Arc<TauriSink>> = OnceLock::new();
@@ -37,6 +39,7 @@ pub fn install(app: AppHandle) -> Arc<TauriSink> {
                 video: Default::default(),
                 cm_clients: Default::default(),
                 pending_passwords: Default::default(),
+                pending_logins: Default::default(),
             })
         })
         .clone();
@@ -67,6 +70,14 @@ impl TauriSink {
 
     pub fn take_pending_password(&self, key: &str) -> Option<String> {
         self.pending_passwords.lock().unwrap().remove(key)
+    }
+
+    pub fn set_pending_login(&self, key: &str, from: String) {
+        self.pending_logins.lock().unwrap().insert(key.to_owned(), from);
+    }
+
+    pub fn take_pending_login(&self, key: &str) -> Option<String> {
+        self.pending_logins.lock().unwrap().remove(key)
     }
 
     pub fn cm_clients(&self) -> Vec<Value> {

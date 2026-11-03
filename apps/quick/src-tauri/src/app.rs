@@ -3,13 +3,25 @@
 //! second window) is spawned. If the core does start `--cm` (listener not up), that process shows
 //! the same window.
 
-use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::{commands, policy, sink, update};
 
 pub fn run(args: Vec<String>) {
     let cm_process = args.first().map(String::as_str) == Some("--cm");
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // Started again while running: show the first window (one ID, one password). A `--cm`
+    // process must keep running, the server talks to it.
+    if !cm_process {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }));
+    }
+    builder
         .invoke_handler(commands::handler())
         .setup(move |app| {
             sink::install(app.handle().clone());

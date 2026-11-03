@@ -21,7 +21,7 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { api, formatId, invoke, listen, videoChannel } from "../lib/ipc";
+import { api, formatId, invoke, subscribe, videoChannel } from "../lib/ipc";
 import { probeCodecs, VideoPipeline, type VideoStats } from "../lib/video";
 import { Button, IconButton, Logo, TitleBar, useToast } from "../components/ui";
 import { FileTransfer } from "./FileTransfer";
@@ -127,19 +127,92 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
     setRecState(r);
   };
   const toast = useToast();
+  /** Every toolbar action either works or says why not. */
+  const act = (p: Promise<unknown>) => p.catch((e) => toast.show(String(e)));
+  const [askRestart, setAskRestart] = useState(false);
 
   // ---------------------------------------------------------------- connection + events
   useEffect(() => {
     let alive = true;
-    const unsubs: (() => void)[] = [];
+    const pipe = new VideoPipeline(canvasRef.current!, {
+      onFail: (codec, d) => invoke("session_webcodecs_failed", { key, codec, display: d }),
+      onNeedKey: (d) => invoke("session_refresh", { key, display: d }).catch(() => {}),
+      onSize: (w, h) => setFrameSize({ w, h }),
+    });
+    pipeRef.current = pipe;
+    const sub = subscribe("session", (e) => {
+      const p = e.payload;
+      switch (e.name) {
+        case "msgbox":
+          onMsgbox(p.type, p.title, p.text, p.retry);
+          break;
+        case "peer_info":
+          setInfo(p);
+          setWindowTitle(`${p.hostname || formatId(peer)} — Tether`);
+          invoke("session_apply_fluxrt", { key });
+          if (p.displays?.length) {
+            const i = Math.min(p.current_display ?? 0, p.displays.length - 1);
+            setDisplayIdx(i);
+            setDisplay(p.displays[i]);
+          }
+          series.current = null;
+          everConnected.current = true;
+          setPhase({ kind: "connected" });
+          // Policy "always": ask right away; the host user still has to allow it.
+          if (recModeRef.current === "always" && recRef.current.state === "idle") startRecording();
+          break;
+        case "record_status":
+          if (p.start) {
+            setRec({ state: "on", since: Date.now() });
+            // A recording file has to start with a key frame.
+            invoke("session_refresh", { key, display: displayIdxRef.current });
+          } else recordingStopped();
+          break;
+        case "permission":
+          if (p.name !== "recording" || recRef.current.state !== "pending") break;
+          // The host user answered our request (see cm_record_consent).
+          if (p.value) invoke("session_record", { key, start: true });
+          else {
+            setRec({ state: "idle", since: 0 });
+            toast.show("Recording declined by the other party");
+          }
+          break;
+        case "displays":
+          setInfo((i) => (i ? { ...i, displays: p.displays } : i));
+          break;
+        case "switch_display":
+          setDisplayIdx(p.display);
+          setDisplay({ x: p.x, y: p.y, width: p.width, height: p.height });
+          pipeRef.current?.setDisplay(p.display);
+          break;
+        case "close_success":
+          setPhase({ kind: "connected" });
+          break;
+        case "connection_type":
+          setDirect(p.direct);
+          setSecured(p.secured);
+          break;
+        case "fingerprint":
+          setFingerprint(p.fingerprint ?? "");
+          break;
+        case "quality":
+          setQuality((q) => ({ ...q, ...Object.fromEntries(Object.entries(p).filter(([, v]) => v != null)) }));
+          break;
+        case "cursor_data": {
+          const css = `url(data:image/png;base64,${p.png}) ${p.hotx} ${p.hoty}, default`;
+          cursors.current.set(p.id, css);
+          setCursor(css);
+          break;
+        }
+        case "cursor_id":
+          setCursor(cursors.current.get(p.id) ?? "default");
+          break;
+        case "chat":
+          setChat((c) => ({ open: true, msgs: [...c.msgs, { me: false, text: p.text }] }));
+          break;
+      }
+    });
     (async () => {
-      const canvas = canvasRef.current!;
-      const pipe = new VideoPipeline(canvas, {
-        onFail: (codec, d) => invoke("session_webcodecs_failed", { key, codec, display: d }),
-        onNeedKey: (d) => invoke("session_refresh", { key, display: d }),
-        onSize: (w, h) => setFrameSize({ w, h }),
-      });
-      pipeRef.current = pipe;
       const formats = await probeCodecs();
       limitMin.current = reconnectMinutes(await invoke<string>("session_policy_get", { id: "connect.reconnect-minutes" }).catch(() => ""));
       const mode = (await invoke<string>("session_policy_get", { id: "recording.mode" }).catch(() => "")) || "off";
@@ -147,93 +220,21 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       setRecMode(mode);
       // Uploads left over from a closed window or an earlier run.
       if (mode !== "off") invoke("recording_finished").catch(() => {});
-      unsubs.push(
-        await listen("session", (e) => {
-          const p = e.payload;
-          switch (e.name) {
-            case "msgbox":
-              onMsgbox(p.type, p.title, p.text, p.retry);
-              break;
-            case "peer_info":
-              setInfo(p);
-              setWindowTitle(`${p.hostname || formatId(peer)} — Tether`);
-              invoke("session_apply_fluxrt", { key });
-              if (p.displays?.length) {
-                const i = Math.min(p.current_display ?? 0, p.displays.length - 1);
-                setDisplayIdx(i);
-                setDisplay(p.displays[i]);
-              }
-              series.current = null;
-              everConnected.current = true;
-              setPhase({ kind: "connected" });
-              // Policy "always": ask right away; the host user still has to allow it.
-              if (recModeRef.current === "always" && recRef.current.state === "idle") startRecording();
-              break;
-            case "record_status":
-              if (p.start) {
-                setRec({ state: "on", since: Date.now() });
-                // A recording file has to start with a key frame.
-                invoke("session_refresh", { key, display: displayIdxRef.current });
-              } else recordingStopped();
-              break;
-            case "permission":
-              if (p.name !== "recording" || recRef.current.state !== "pending") break;
-              // The host user answered our request (see cm_record_consent).
-              if (p.value) invoke("session_record", { key, start: true });
-              else {
-                setRec({ state: "idle", since: 0 });
-                toast.show("Recording declined by the other party");
-              }
-              break;
-            case "displays":
-              setInfo((i) => (i ? { ...i, displays: p.displays } : i));
-              break;
-            case "switch_display":
-              setDisplayIdx(p.display);
-              setDisplay({ x: p.x, y: p.y, width: p.width, height: p.height });
-              pipe.setDisplay(p.display);
-              break;
-            case "close_success":
-              setPhase({ kind: "connected" });
-              break;
-            case "connection_type":
-              setDirect(p.direct);
-              setSecured(p.secured);
-              break;
-            case "fingerprint":
-              setFingerprint(p.fingerprint ?? "");
-              break;
-            case "quality":
-              setQuality((q) => ({ ...q, ...Object.fromEntries(Object.entries(p).filter(([, v]) => v != null)) }));
-              break;
-            case "cursor_data": {
-              const css = `url(data:image/png;base64,${p.png}) ${p.hotx} ${p.hoty}, default`;
-              cursors.current.set(p.id, css);
-              setCursor(css);
-              break;
-            }
-            case "cursor_id":
-              setCursor(cursors.current.get(p.id) ?? "default");
-              break;
-            case "chat":
-              setChat((c) => ({ open: true, msgs: [...c.msgs, { me: false, text: p.text }] }));
-              break;
-          }
-        }),
-      );
+      await sub.ready;
+      // StrictMode's discarded first run must not start (and consume the pending login of) a session.
       if (!alive) return;
       const ch = videoChannel((buf) => pipe.push(buf));
       await invoke("session_start", { key, peer, webcodecs: formats, video: ch });
       setImageQuality((await invoke<string>("get_option", { key: "image-quality" }).catch(() => "")) || "balanced");
-    })();
+    })().catch((e) => alive && setPhase({ kind: "error", title: "Could not start the session", text: String(e), retry: false }));
     const t = setInterval(() => pipeRef.current && setVstats({ ...pipeRef.current.stats }), 1000);
     return () => {
       alive = false;
+      sub.off();
       clearInterval(t);
       clearTimeout(retryTimer.current);
       if (recRef.current.state === "on") invoke("recording_finished").catch(() => {});
-      unsubs.forEach((u) => u());
-      pipeRef.current?.close();
+      pipe.close();
       invoke("session_close", { key });
     };
   }, [key, peer]);
@@ -285,7 +286,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const toggleRecording = () => {
     if (rec.state === "idle") return startRecording();
     // Stopping (or withdrawing a pending request) is always allowed.
-    invoke("session_record", { key, start: false });
+    act(invoke("session_record", { key, start: false }));
     if (rec.state === "pending") setRec({ state: "idle", since: 0 });
   };
 
@@ -375,18 +376,18 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
     };
   }, [pinned, phase.kind]);
 
-  const toggleFullscreen = async () => {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window").catch(() => ({ getCurrentWindow: null as any }));
-    if (getCurrentWindow) {
-      const w = getCurrentWindow();
-      const f = !(await w.isFullscreen());
-      await w.setFullscreen(f);
-      setFullscreen(f);
-    }
-  };
+  const toggleFullscreen = () =>
+    act(
+      (async () => {
+        const w = (await import("@tauri-apps/api/window")).getCurrentWindow();
+        const f = !(await w.isFullscreen());
+        await w.setFullscreen(f);
+        setFullscreen(f);
+      })(),
+    );
 
   const switchDisplay = (i: number) => {
-    invoke("session_switch_display", { key, display: i });
+    act(invoke("session_switch_display", { key, display: i }));
     pipeRef.current?.setDisplay(i);
     setDisplayIdx(i);
     if (info?.displays[i]) setDisplay(info.displays[i]);
@@ -394,7 +395,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
 
   const setQ = (v: string) => {
     setImageQuality(v);
-    invoke("session_quality", { key, quality: v });
+    act(invoke("session_quality", { key, quality: v }));
   };
 
   const name = info?.hostname || formatId(peer);
@@ -463,16 +464,16 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
             <Activity size={17} />
           </TB>
           <Sep />
-          <TB label="Send Ctrl+Alt+Del" onClick={() => invoke("session_ctrl_alt_del", { key })}>
+          <TB label="Send Ctrl+Alt+Del" onClick={() => act(invoke("session_ctrl_alt_del", { key }))}>
             <Keyboard size={17} />
           </TB>
-          <TB label="Lock remote screen" onClick={() => invoke("session_lock_screen", { key })}>
+          <TB label="Lock remote screen" onClick={() => act(invoke("session_lock_screen", { key }))}>
             <Lock size={17} />
           </TB>
           <TB label="Chat" active={chat.open} onClick={() => setChat((c) => ({ ...c, open: !c.open }))}>
             <MessageSquare size={17} />
           </TB>
-          <TB label="Transfer files" onClick={() => api.openSession(peer, "file-transfer")}>
+          <TB label="Transfer files" onClick={() => act(api.openSession(peer, "file-transfer", key))}>
             <FolderSync size={17} />
           </TB>
           {recMode !== "off" && (
@@ -484,7 +485,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
               <Video size={17} className={rec.state === "on" ? "text-danger" : rec.state === "pending" ? "animate-pulse" : ""} />
             </TB>
           )}
-          <TB label="Restart remote device" onClick={() => confirm("Restart the remote device?") && invoke("session_restart_remote", { key })}>
+          <TB label="Restart remote device" active={askRestart} onClick={() => setAskRestart(!askRestart)}>
             <RotateCcw size={17} />
           </TB>
           <Sep />
@@ -497,13 +498,35 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           <button
             aria-label="Disconnect"
             title="Disconnect"
-            onClick={async () => (await import("@tauri-apps/api/window")).getCurrentWindow().close()}
+            onClick={() => act(import("@tauri-apps/api/window").then((m) => m.getCurrentWindow().close()))}
             className="no-drag ml-1 grid h-9 w-9 place-items-center rounded-full bg-danger text-white transition hover:brightness-110"
           >
             <Power size={16} />
           </button>
         </div>
       </div>
+
+      {askRestart && connected && (
+        <div role="dialog" aria-label="Restart remote device" className="animate-rise absolute left-1/2 top-16 z-30 w-[320px] -translate-x-1/2 rounded-2xl border border-white/10 glass p-4 text-center shadow-float">
+          <div className="text-callout font-semibold">Restart the remote device?</div>
+          <div className="mt-1 text-caption text-white/60">The session ends; reconnect once it is back.</div>
+          <div className="mt-4 flex justify-center gap-2">
+            <Button variant="ghost" size="sm" className="!text-white/70 hover:!bg-white/10" onClick={() => setAskRestart(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => {
+                setAskRestart(false);
+                act(invoke("session_restart_remote", { key }));
+              }}
+            >
+              Restart
+            </Button>
+          </div>
+        </div>
+      )}
 
       {showStats && connected && (
         <div className="animate-fade pointer-events-none absolute bottom-3 left-3 z-10 rounded-xl border border-white/10 bg-black/70 px-3.5 py-2.5 font-mono text-footnote leading-[1.7] text-white/85 backdrop-blur">
@@ -525,7 +548,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           msgs={chat.msgs}
           onClose={() => setChat((c) => ({ ...c, open: false }))}
           onSend={(text) => {
-            invoke("session_chat", { key, text });
+            act(invoke("session_chat", { key, text }));
             setChat((c) => ({ ...c, msgs: [...c.msgs, { me: true, text }] }));
           }}
         />
@@ -738,7 +761,10 @@ function RecPill({ since }: { since: number }) {
 function ChatPanel({ msgs, onSend, onClose }: { msgs: { me: boolean; text: string }[]; onSend: (t: string) => void; onClose: () => void }) {
   const [v, setV] = useState("");
   const end = useRef<HTMLDivElement>(null);
-  useEffect(() => end.current?.scrollIntoView({ behavior: "smooth" }), [msgs.length]);
+  // Braces: scrollIntoView returns a Promise in current WebView2, which React would call as cleanup.
+  useEffect(() => {
+    end.current?.scrollIntoView({ behavior: "smooth" });
+  }, [msgs.length]);
   return (
     <div className="animate-rise absolute bottom-3 right-3 z-20 flex h-[380px] w-[320px] flex-col overflow-hidden rounded-2xl border border-white/10 glass shadow-float">
       <div className="flex items-center justify-between border-b border-white/10 px-4 py-2.5">

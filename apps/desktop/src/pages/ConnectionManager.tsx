@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Clipboard, FolderSync, Keyboard, MessageSquare, Mic, RotateCcw, Send, ShieldAlert, Video } from "lucide-react";
-import { formatId, invoke, listen } from "../lib/ipc";
+import { formatId, invoke, subscribe } from "../lib/ipc";
 import { Button, Logo, Modal, Segmented, TitleBar, Toggle } from "../components/ui";
 
 interface Client {
@@ -51,35 +51,35 @@ export function ConnectionManager() {
   };
 
   useEffect(() => {
-    let un: (() => void) | undefined;
+    const sub = subscribe("cm", (e) => {
+      const p = e.payload;
+      if (e.name === "add_connection") {
+        if (!since.has(p.id)) since.set(p.id, Date.now());
+        setClients((cs) => [...cs.filter((c) => c.id !== p.id), p]);
+        setActive(p.id);
+        bringToFront();
+      } else if (e.name === "remove_connection") {
+        setClients((cs) => cs.filter((c) => c.id !== p.id));
+        setConsents((cs) => cs.filter((c) => c.conn_id !== p.id));
+      } else if (e.name === "record_consent_request") {
+        setConsents((cs) => [...cs.filter((c) => c.conn_id !== p.conn_id), p]);
+        bringToFront();
+      } else if (e.name === "chat") {
+        setChat((c) => ({ ...c, [p.id]: [...(c[p.id] ?? []), { me: false, text: p.text }] }));
+        bringToFront();
+      }
+    });
     (async () => {
       invoke("cm_record_consent_init").catch(() => {});
-      un = await listen("cm", (e) => {
-        const p = e.payload;
-        if (e.name === "add_connection") {
-          if (!since.has(p.id)) since.set(p.id, Date.now());
-          setClients((cs) => [...cs.filter((c) => c.id !== p.id), p]);
-          setActive(p.id);
-          bringToFront();
-        } else if (e.name === "remove_connection") {
-          setClients((cs) => cs.filter((c) => c.id !== p.id));
-          setConsents((cs) => cs.filter((c) => c.conn_id !== p.id));
-        } else if (e.name === "record_consent_request") {
-          setConsents((cs) => [...cs.filter((c) => c.conn_id !== p.conn_id), p]);
-          bringToFront();
-        } else if (e.name === "chat") {
-          setChat((c) => ({ ...c, [p.id]: [...(c[p.id] ?? []), { me: false, text: p.text }] }));
-          bringToFront();
-        }
-      });
+      await sub.ready;
       const initial = await invoke<Client[]>("cm_clients").catch(() => []);
       if (initial?.length) {
         initial.forEach((c) => since.set(c.id, Date.now()));
         setClients(initial);
         setActive(initial[initial.length - 1].id);
       }
-    })();
-    return () => un?.();
+    })().catch(() => {});
+    return sub.off;
   }, [since]);
 
   const c = clients.find((x) => x.id === active) ?? clients[clients.length - 1];
@@ -166,7 +166,9 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
   const [perm, setPerm] = useState(c);
   const [text, setText] = useState("");
   const [tab, setTab] = useState<"perm" | "chat">("perm");
-  useEffect(() => setPerm(c), [c]);
+  useEffect(() => {
+    setPerm(c);
+  }, [c]);
   const initials = (c.name || c.peer_id).replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase();
 
   return (

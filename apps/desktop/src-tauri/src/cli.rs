@@ -40,11 +40,12 @@ pub enum Password {
     Value(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Connect {
     pub peer: String,
     /// `default`, `file-transfer`, `view-camera` or `terminal`.
     pub conn: String,
+    #[serde(skip)]
     pub password: Option<Password>,
     pub view_only: bool,
     pub relay: bool,
@@ -165,6 +166,36 @@ static CONNECT: OnceLock<Mutex<Option<(Connect, Option<String>)>>> = OnceLock::n
 
 pub fn take_connect() -> Option<(Connect, Option<String>)> {
     CONNECT.get()?.lock().unwrap().take()
+}
+
+/// argv[1] of a session request a second process hands to the running instance (`app.rs`).
+pub const FORWARD_ARG: &str = "--forwarded-connect";
+
+/// Session request + password as one hex token: survives the single-instance channel's `|`
+/// separators and never appears on a command line (it travels in a local window message).
+pub fn encode_forward(c: &Connect, password: Option<&str>) -> String {
+    let json = serde_json::json!({ "c": c, "pw": password }).to_string();
+    json.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Inverse of [`encode_forward`], with the same checks as the command line.
+pub fn decode_forward(hex: &str) -> Result<(Connect, Option<String>), String> {
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| hex.get(i..i + 2).and_then(|b| u8::from_str_radix(b, 16).ok()))
+        .collect::<Option<Vec<u8>>>()
+        .ok_or("bad forwarded request")?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let c: Connect = serde_json::from_value(v["c"].clone()).map_err(|e| e.to_string())?;
+    security::check_peer_id(&c.peer)?;
+    if !matches!(c.conn.as_str(), "default" | "file-transfer" | "view-camera" | "terminal") {
+        return Err("unsupported connection type".into());
+    }
+    let pw = v["pw"].as_str().map(str::to_owned);
+    if pw.as_ref().is_some_and(|p| p.len() > 128) {
+        return Err("password too long".into());
+    }
+    Ok((c, pw))
 }
 
 /// Windows release builds have no console; print into the one we were started from.
@@ -306,6 +337,22 @@ mod tests {
             assert_eq!(p(core), None, "{core}");
         }
         assert_eq!(p(""), None);
+    }
+
+    #[test]
+    fn forward_round_trip() {
+        let c = connect("--connect 123456789 --file-transfer --view-only");
+        let hex = encode_forward(&c, Some("a|b c\"é"));
+        assert!(hex.chars().all(|ch| ch.is_ascii_hexdigit()));
+        let (d, pw) = decode_forward(&hex).unwrap();
+        assert_eq!((d.peer.as_str(), d.conn.as_str(), d.view_only, pw.as_deref()), ("123456789", "file-transfer", true, Some("a|b c\"é")));
+        assert_eq!(decode_forward(&encode_forward(&c, None)).unwrap().1, None);
+        let bad = Connect { peer: "1;2".into(), conn: "default".into(), ..Default::default() };
+        assert!(decode_forward(&encode_forward(&bad, None)).is_err());
+        let bad = Connect { conn: "port-forward".into(), ..c.clone() };
+        assert!(decode_forward(&encode_forward(&bad, None)).is_err());
+        assert!(decode_forward(&encode_forward(&c, Some(&"x".repeat(129)))).is_err());
+        assert!(decode_forward("zz").is_err());
     }
 
     #[test]

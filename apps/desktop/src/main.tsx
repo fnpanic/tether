@@ -20,7 +20,31 @@ function route() {
   return <Home />;
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(<React.StrictMode>{route()}</React.StrictMode>);
+/** A page that throws shows what failed instead of an empty window. */
+class Crash extends React.Component<{ children: React.ReactNode }, { error: string | null }> {
+  state = { error: null as string | null };
+  static getDerivedStateFromError(e: unknown) {
+    return { error: String((e as Error)?.stack ?? e) };
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 bg-canvas p-6 text-center text-ink">
+        <div className="text-callout font-semibold">Something went wrong in this window</div>
+        <pre className="max-h-48 max-w-full overflow-auto whitespace-pre-wrap text-left font-mono text-footnote text-muted">{this.state.error}</pre>
+        <button className="rounded-full bg-accent px-4 py-1.5 text-caption text-white" onClick={() => location.reload()}>
+          Reload
+        </button>
+      </div>
+    );
+  }
+}
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <Crash>{route()}</Crash>
+  </React.StrictMode>,
+);
 
 // Windows start hidden to avoid a white flash; reveal after the first paint.
 if (inTauri) {

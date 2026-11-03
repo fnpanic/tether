@@ -15,7 +15,7 @@ type R<T> = Result<T, String>;
 fn with_session<T>(key: &str, f: impl FnOnce(&core::TauriSession) -> T) -> R<T> {
     core::session(key)
         .map(|s| f(&s))
-        .ok_or_else(|| "session not found".to_owned())
+        .ok_or_else(|| "Not connected to the remote device.".to_owned())
 }
 
 // ----------------------------------------------------------------------------- main window
@@ -127,8 +127,9 @@ fn install_service() -> R<()> {
 }
 
 /// Async: creating a window from a synchronous command deadlocks on Windows (WebView2).
+/// `from`: a live session to the same peer whose login the new one reuses (no second password).
 #[tauri::command]
-async fn open_session(app: AppHandle, peer: String, conn: Option<String>) -> R<String> {
+async fn open_session(app: AppHandle, peer: String, conn: Option<String>, from: Option<String>) -> R<String> {
     let peer = peer.trim().replace(' ', "");
     security::check_peer_id(&peer)?;
     crate::policy::check_outgoing()?;
@@ -137,7 +138,16 @@ async fn open_session(app: AppHandle, peer: String, conn: Option<String>) -> R<S
         Some("file-transfer") => "file-transfer",
         Some(_) => return Err("unsupported connection type".to_owned()),
     };
-    app::open_session(&app, &peer, conn).map_err(|e| e.to_string())
+    if let Some(f) = &from {
+        if core::session(f).is_none() {
+            return Err("The session has ended; connect again.".to_owned());
+        }
+    }
+    let key = app::open_session(&app, &peer, conn).map_err(|e| e.to_string())?;
+    if let (Some(f), Some(s)) = (from, sink::get()) {
+        s.set_pending_login(&key, f);
+    }
+    Ok(key)
 }
 
 // ----------------------------------------------------------------------------- session
@@ -160,11 +170,13 @@ fn session_start(
         return Err("password too long".to_owned());
     }
     let mut password = password;
+    let mut login_from = None;
     if let Some(s) = sink::get() {
         s.attach_video(&key, video);
         if password.is_none() {
             password = s.take_pending_password(&key);
         }
+        login_from = s.take_pending_login(&key);
     }
     core::session_start(
         &key,
@@ -172,6 +184,7 @@ fn session_start(
         password.as_deref().unwrap_or(""),
         conn.as_deref().unwrap_or("default"),
         force_relay.unwrap_or(false),
+        login_from.as_deref(),
     );
     core::session_set_webcodecs(&key, &webcodecs);
     Ok(())
