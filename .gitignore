@@ -10,3 +10,7 @@ server/data/
 __pycache__/
 *.pyc
 .tools/
+
+# Tether Manage key backups (encrypted, but never commit them)
+backup-keys/
+*.tmkeys
