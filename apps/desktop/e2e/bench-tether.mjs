@@ -104,7 +104,9 @@ try {
       execFileSync("taskkill", ["/PID", String(p.pid), "/T", "/F"], { stdio: "ignore" });
     } catch {}
   }
+  // Only processes of the benchmarked binary, never the user's installed Tether.
   try {
-    execFileSync("taskkill", ["/IM", "tether.exe", "/F"], { stdio: "ignore" });
+    const exe = EXE.replace(/'/g, "''");
+    execFileSync("powershell", ["-NoProfile", "-Command", `Get-CimInstance Win32_Process -Filter "Name='tether.exe'" | Where-Object { $_.ExecutablePath -eq '${exe}' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`], { stdio: "ignore" });
   } catch {}
 }
