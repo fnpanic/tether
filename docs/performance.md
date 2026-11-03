@@ -86,6 +86,21 @@ AV1 here runs at ~19 fps); upstream's delay-based QoS.
 
 TBD
 
+## Result (0.4.0, 2026-11-04)
+
+Same VM and corporate proxy, technician 0.4.0 viewer and TetherQS 0.4.0 host (AV1, 4 encoder
+threads), 20 s window drag, `apps/desktop/e2e/bench-drag.mjs`:
+
+| Build | Remote frames/s (drag) | Longest gap between drawn pictures | Latency p95 (drag) |
+| --- | --- | --- | --- |
+| 0.3.0 as reported (refresh storm) | 3–4 | 1.6 s, or frozen until a lucky key frame | 1.2 s |
+| 0.3.0, meter v2 | 16–19 | ~500 ms (barcode) | ~90 ms |
+| **0.4.0** | **20 / 23** | **90 ms** (0 gaps > 100 ms) | **88 / 55 ms** |
+
+The barcode-based "freeze" figure in `drag.json` (446–486 ms) counts frames whose probe barcode
+is too blurred to decode during motion (81 of ~460 frames) as missing; the canvas draw gaps
+show the picture never stopped. Viewer stats: 0 key-frame requests, 0 dropped frames.
+
 ## AnyDesk
 
-TBD
+Not measured in the window-drag scenario. The idle LAN comparison is in `docs/benchmarks.md`.

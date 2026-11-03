@@ -4,6 +4,90 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.4.0] — 2026-11-04
+
+Faster, steadier sessions, a working toolbar and file transfer, and relays that keep sessions
+alive when one of them fails. Adds a macOS build and an OS-aware download page.
+
+### Fixed
+- **Picture froze while dragging a window on hosts without a GPU.**
+  - The viewer asked for a key frame whenever its queue briefly passed 3, and every request
+    restarted the host's video service. The result was refresh storms, and the picture stayed
+    frozen for good if one request got lost.
+  - Now a key frame is requested only when the decoder is really behind, and the request is
+    repeated until one arrives.
+  - Hosts with 4 GB of RAM or less keep AV1 instead of falling back to VP8, which managed ~3
+    fps on screen content.
+  - Software encoders use up to 4 cores instead of half of the idle ones.
+  - Measured during a window drag (corporate-proxy VM): 20–23 fps, a new picture at least
+    every 90 ms, latency p95 55–88 ms. Before: 3–4 fps and freezes of 1.6 s or longer. See
+    `docs/performance.md`.
+- **Session toolbar:**
+  - Every action now either works or shows why not.
+  - The chat panel crashed the window ("white screen").
+  - Failing calls were silent.
+  - An error screen now replaces an empty window.
+- **File transfer:**
+  - It no longer asks for the password again: it reuses the live session's login.
+  - Messages appeared twice because events reached every window instead of their own.
+  - A replaced session is now closed instead of leaked.
+- **Installer:**
+  - It no longer asks to close Tether. It closes every Tether process from the install folder
+    itself and reopens Tether afterwards.
+  - Upgrades install in place: the old version's uninstaller, whose hooks could not close
+    Tether, is no longer run.
+- **Only one Tether.**
+  - A second start brings the running window to the front.
+  - `--connect` and `tether://` links from a second start open the session in the running
+    app. The password goes over local IPC only.
+  - The RustDesk tray icon no longer appears.
+- **Recording consent:** a pending recording request now survives until the host answers.
+
+### Added
+- **Fast reconnect:**
+  - Retries start at once.
+  - A silent relay is detected within 3 s.
+  - Waiting for the host on the relay is cut from 18 s to 5 s.
+  - Host registration reconnects in parallel with backoff.
+  - The decoder and canvas are kept, so the picture continues from the next key frame.
+  - Relay restart: ~0.9 s (before: 2.3–17.8 s).
+- **Several relays** (`docs/relay-ha.md`):
+  - Clients take a list of servers (`TETHER_SERVER` comma-separated, policy `servers.list`).
+  - Hosts register with every relay.
+  - Viewers race their requests across relays.
+  - Each relay hands out the least-loaded healthy relay (`/readyz`).
+  - Measured with two production relays: the session's relay crashing costs 0.6–0.8 s; a
+    whole relay node going down costs 0.6–1.6 s; then the session continues through the
+    other relay.
+- **Second production relay** `tether-desk2.duckdns.org` (Oracle Always Free, same server key).
+- **Graceful relay drain:** on stop, hbbr refuses new sessions but keeps running ones for up to
+  `DRAIN_TIMEOUT` (300 s). hbbs and hbbr expose `/healthz` and `/readyz`.
+- **Kubernetes:** Helm chart `deploy/helm/tether-relay` (per-pod relay addressing, disruption
+  budgets, drain on stop). Tested on kind: rolling updates of hbbr and hbbs with 0 of 30
+  sessions dropped; a force-deleted relay pod caused a 39 ms gap. See `docs/kubernetes.md`.
+- **Tether Manage with several relays:**
+  - Policy, releases, the download page and diagnostics tickets are published to every relay.
+  - Each relay's update manifest points at that relay.
+  - The next policy serial is the highest on any relay plus 1.
+- **macOS:** `scripts/build-macos.sh` builds an unsigned universal `.dmg` and the updater
+  archive for the technician app, plus TetherQS as a portable `.app`. Tether Manage publishes
+  macOS releases. See `docs/macos.md`.
+- **Download page:**
+  - detects the visitor's OS and highlights the matching installers;
+  - has a Windows/macOS switch that also works without JavaScript;
+  - shows "Not available yet" for an OS without a release.
+- Policy feature `video.codec` now takes effect (it was written where the viewer didn't read it).
+
+### Known limits
+- The macOS build is written but not compiled or run here (no Mac available). Ad-hoc signed
+  builds may need Screen Recording and Accessibility to be granted again after each update.
+- When a whole Kubernetes node freezes silently while a proxy pod runs on it, sessions can
+  stall until Kubernetes marks the node NotReady (~40 s). Mitigation in `docs/kubernetes.md`.
+- The window-drag comparison with AnyDesk in the same VM was not measured; earlier
+  measurements are in `docs/benchmarks.md`.
+- Installer: when Tether was closed for an interactive upgrade, it comes back via "Run Tether"
+  on the finish page; automatic reopening is guaranteed only for the in-app updater (`/R`).
+
 ## [0.3.0] — 2026-11-03
 
 Central management, policies, updates, a customer module, recording with consent, CLI,
