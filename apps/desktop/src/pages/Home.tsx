@@ -3,6 +3,8 @@ import { ArrowRight, Copy, Eye, EyeOff, FolderSync, Lock, MoreHorizontal, Refres
 import { api, formatId, type Peer, type Status } from "../lib/ipc";
 import { Button, IconButton, Logo, PlatformIcon, StatusDot, TitleBar, useToast } from "../components/ui";
 import { Settings } from "./Settings";
+import { UpdateCard } from "../components/UpdateCard";
+import { errorText } from "../lib/policy";
 
 function useStatus() {
   const [s, setS] = useState<Status | null>(null);
@@ -184,7 +186,7 @@ export function Home() {
   }, [loadPeers]);
 
   const connect = (id: string, conn?: string) => {
-    api.openSession(id, conn).catch((e) => toast.show(String(e)));
+    api.openSession(id, conn).catch((e) => toast.show(errorText(e)));
   };
   const shown = peers.filter((p) => !q || p.id.includes(q.replace(/\s/g, "")) || `${p.hostname} ${p.username}`.toLowerCase().includes(q.toLowerCase()));
 
@@ -241,6 +243,7 @@ export function Home() {
         </div>
       </main>
       {settings && <Settings onClose={() => setSettings(false)} status={s} />}
+      <UpdateCard />
       {toast.node}
     </div>
   );

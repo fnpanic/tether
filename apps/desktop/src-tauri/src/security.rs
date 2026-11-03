@@ -4,7 +4,7 @@
 use hbb_common::config::{DEFAULT_SETTINGS, OVERWRITE_SETTINGS};
 
 /// Forced: users and remote peers cannot change these.
-const ENFORCED: &[(&str, &str)] = &[
+pub(crate) const ENFORCED: &[(&str, &str)] = &[
     // No calls home to third-party update servers.
     ("enable-check-update", "N"),
     ("allow-auto-update", "N"),
@@ -30,15 +30,26 @@ const DEFAULTS: &[(&str, &str)] = &[
 ];
 
 pub fn apply_policy() {
-    let mut o = OVERWRITE_SETTINGS.write().unwrap();
-    for (k, v) in ENFORCED {
-        o.insert((*k).to_owned(), (*v).to_owned());
-    }
-    drop(o);
     let mut d = DEFAULT_SETTINGS.write().unwrap();
     for (k, v) in DEFAULTS {
         d.insert((*k).to_owned(), (*v).to_owned());
     }
+    drop(d);
+    enforce();
+}
+
+/// Re-applies the forced settings; the admin policy (`policy.rs`) calls this last, so a policy can
+/// never weaken them.
+pub fn enforce() {
+    let mut o = OVERWRITE_SETTINGS.write().unwrap();
+    for (k, v) in ENFORCED {
+        o.insert((*k).to_owned(), (*v).to_owned());
+    }
+}
+
+/// `set_option` guard: the admin policy may lock an option or forbid changing the server.
+pub fn check_option_write(key: &str) -> Result<(), String> {
+    crate::policy::check_option_write(&crate::policy::effective(), key)
 }
 
 /// Options the UI may read or write. Anything else is rejected at the IPC boundary so a

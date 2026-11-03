@@ -20,10 +20,9 @@ index 9ee5cac..dbd2afa 100644
  pub const RENDEZVOUS_PORT: i32 = 21116;
  pub const RELAY_PORT: i32 = 21117;
 diff --git a/src/websocket.rs b/src/websocket.rs
-index 3a98a84..bb49b4f 100644
 --- a/src/websocket.rs
 +++ b/src/websocket.rs
-@@ -141,6 +141,38 @@ impl WsFramedStream {
+@@ -141,6 +141,40 @@
          .await
      }
  
@@ -46,7 +45,9 @@ index 3a98a84..bb49b4f 100644
 +            let proxy = if route.via_proxy { proxy_conf.clone() } else { None };
 +            Box::pin(async move {
 +                tokio::time::sleep(Duration::from_millis(i as u64 * ROUTE_STAGGER_MS)).await;
++                let started = std::time::Instant::now();
 +                let r = Self::connect(&route.url, local_addr, proxy.as_ref(), ms_timeout).await;
++                record_attempt(&route, started, r.as_ref().err());
 +                if let Err(e) = &r {
 +                    log::debug!("route {} (proxy: {}) failed: {}", route.url, route.via_proxy, e);
 +                }
@@ -62,7 +63,7 @@ index 3a98a84..bb49b4f 100644
      #[async_recursion]
      async fn try_connect(
          url: &str,
-@@ -304,8 +336,7 @@ impl WsFramedStream {
+@@ -304,8 +338,7 @@
          ms_timeout: u64,
      ) -> ResultType<Self> {
          let proxy_conf = Config::get_socks();
@@ -72,7 +73,7 @@ index 3a98a84..bb49b4f 100644
  
          let ws = Self {
              stream,
-@@ -533,6 +564,78 @@ pub fn check_ws(endpoint: &str) -> String {
+@@ -533,6 +566,136 @@
      format!("{}://{}", protocol, address)
  }
  
@@ -103,6 +104,64 @@ index 3a98a84..bb49b4f 100644
 +fn remember_route(url: &str, route: &Route) {
 +    // Store the route for the other path on the same host too: /ws/id and /ws/relay share routes.
 +    GOOD_ROUTE.lock().unwrap().insert(route_key(url), route.clone());
++}
++
++/// One connection attempt made by the route racer (Tether diagnostics).
++#[derive(Clone, Debug, serde_derive::Serialize)]
++pub struct RouteAttempt {
++    pub url: String,
++    pub via_proxy: bool,
++    pub ok: bool,
++    pub error: String,
++    pub ms: u64,
++    /// Unix seconds.
++    pub at: u64,
++}
++
++const ROUTE_LOG_LEN: usize = 50;
++
++lazy_static::lazy_static! {
++    static ref ROUTE_LOG: std::sync::Mutex<std::collections::VecDeque<RouteAttempt>> = Default::default();
++}
++
++fn record_attempt(route: &Route, started: std::time::Instant, err: Option<&anyhow::Error>) -> RouteAttempt {
++    let a = RouteAttempt {
++        url: route.url.clone(),
++        via_proxy: route.via_proxy,
++        ok: err.is_none(),
++        error: err.map(|e| e.to_string()).unwrap_or_default(),
++        ms: started.elapsed().as_millis() as u64,
++        at: std::time::SystemTime::now()
++            .duration_since(std::time::UNIX_EPOCH)
++            .map(|d| d.as_secs())
++            .unwrap_or_default(),
++    };
++    let mut log = ROUTE_LOG.lock().unwrap();
++    if log.len() >= ROUTE_LOG_LEN {
++        log.pop_front();
++    }
++    log.push_back(a.clone());
++    a
++}
++
++/// The last route attempts of this process, oldest first.
++pub fn route_attempts() -> Vec<RouteAttempt> {
++    ROUTE_LOG.lock().unwrap().iter().cloned().collect()
++}
++
++/// Connect every route to `url` now, in parallel, and report each result (also recorded).
++pub async fn probe_routes(url: &str, ms_timeout: u64) -> Vec<RouteAttempt> {
++    let proxy_conf = Config::get_socks();
++    let routes = connect_routes(url, proxy_conf.is_some());
++    let attempts = routes.iter().map(|route| {
++        let proxy = if route.via_proxy { proxy_conf.clone() } else { None };
++        async move {
++            let started = std::time::Instant::now();
++            let r = WsFramedStream::connect(&route.url, None, proxy.as_ref(), ms_timeout).await;
++            record_attempt(route, started, r.as_ref().err())
++        }
++    });
++    futures::future::join_all(attempts).await
 +}
 +
 +/// Routes to try for `url`, best first. Only `wss://` URLs to this client's own (compiled-in)
@@ -151,7 +210,7 @@ index 3a98a84..bb49b4f 100644
  /// Port of the reverse proxy serving `/ws/id` and `/ws/relay` on this client's own servers, for
  /// when it cannot listen on the scheme's default port. Any other host, such as a peer's server or
  /// a relay on another machine, keeps the default port. IP endpoints never get here.
-@@ -902,3 +1005,35 @@ mod tests {
+@@ -902,3 +1065,35 @@
          }
      }
  }

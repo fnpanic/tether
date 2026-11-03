@@ -51,6 +51,7 @@ fn refresh_password() {
 
 #[tauri::command]
 fn set_permanent_password(password: String) -> R<()> {
+    crate::policy::require("security.permanent-password", "Your organisation does not allow a permanent password.")?;
     security::check_password_strength(&password)?;
     if api::set_permanent_password(password) {
         Ok(())
@@ -68,6 +69,7 @@ fn get_option(key: String) -> R<String> {
 #[tauri::command]
 fn set_option(key: String, value: String) -> R<()> {
     security::check_option(&key)?;
+    security::check_option_write(&key)?;
     if value.len() > 512 {
         return Err("value too long".to_owned());
     }
@@ -118,8 +120,10 @@ fn remove_peer(id: String) -> R<()> {
 }
 
 #[tauri::command]
-fn install_service() {
+fn install_service() -> R<()> {
+    crate::policy::require("security.unattended", "Your organisation does not allow unattended access.")?;
     std::thread::spawn(api::install_service);
+    Ok(())
 }
 
 /// Async: creating a window from a synchronous command deadlocks on Windows (WebView2).
@@ -127,6 +131,7 @@ fn install_service() {
 async fn open_session(app: AppHandle, peer: String, conn: Option<String>) -> R<String> {
     let peer = peer.trim().replace(' ', "");
     security::check_peer_id(&peer)?;
+    crate::policy::check_outgoing()?;
     let conn = match conn.as_deref() {
         None | Some("default") => "default",
         Some("file-transfer") => "file-transfer",
@@ -397,6 +402,71 @@ fn cm_chat(id: i32, text: String) {
     cm::send_chat(id, text);
 }
 
+// --- policy/update/diagnostics/cli ---
+
+#[tauri::command]
+fn policy_state() -> Value {
+    crate::policy::state_json()
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> R<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn policy_refresh() -> R<Value> {
+    blocking(crate::policy::refresh).await??;
+    Ok(crate::policy::state_json())
+}
+
+#[tauri::command]
+fn update_status() -> Value {
+    crate::update::status()
+}
+
+#[tauri::command]
+async fn update_check() -> R<Value> {
+    blocking(crate::update::check).await?
+}
+
+#[tauri::command]
+async fn update_install(app: AppHandle) -> R<()> {
+    crate::update::install(app).await
+}
+
+#[tauri::command]
+async fn diag_info() -> R<Value> {
+    blocking(crate::diag::info).await
+}
+
+#[tauri::command]
+async fn diag_test() -> Value {
+    crate::diag::test_connection().await
+}
+
+#[tauri::command]
+fn diag_verbose(on: bool) -> R<u64> {
+    crate::diag::set_verbose(on)
+}
+
+#[tauri::command]
+fn diag_open_logs() -> R<()> {
+    crate::diag::open_log_folder()
+}
+
+/// Writes the diagnostics zip to the Downloads folder and returns its path.
+#[tauri::command]
+async fn diag_export() -> R<String> {
+    blocking(crate::diag::export_to_downloads).await?
+}
+
+#[tauri::command]
+async fn diag_upload(ticket: String) -> R<()> {
+    blocking(move || crate::diag::upload(&ticket)).await?
+}
+
+// --- end policy/update/diagnostics/cli ---
+
 pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         status,
@@ -445,5 +515,17 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         cm_close,
         cm_permission,
         cm_chat,
+        // --- policy/update/diagnostics/cli ---
+        policy_state,
+        policy_refresh,
+        update_status,
+        update_check,
+        update_install,
+        diag_info,
+        diag_test,
+        diag_verbose,
+        diag_open_logs,
+        diag_export,
+        diag_upload,
     ]
 }

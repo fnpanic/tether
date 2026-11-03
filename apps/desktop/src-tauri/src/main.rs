@@ -1,11 +1,15 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod app;
+mod cli;
 mod commands;
+mod diag;
 mod fluxrt;
 mod netpolicy;
+mod policy;
 mod security;
 mod sink;
+mod update;
 
 use std::process::ExitCode;
 
@@ -32,6 +36,18 @@ fn main() -> ExitCode {
     security::apply_policy();
     netpolicy::apply();
     fluxrt::apply_defaults();
+    // Cached admin policy (no network) in every role; it never weakens the settings above.
+    policy::init();
+    diag::apply_verbose_env();
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = cli::run(&args) {
+        return code;
+    }
+    if args.first().map(String::as_str) == Some("--server") {
+        // The server role enforces the core options: keep its policy current too.
+        policy::start(false);
+    }
 
     #[cfg(windows)]
     if let Some(code) = librustdesk::platform::handle_service_control() {
