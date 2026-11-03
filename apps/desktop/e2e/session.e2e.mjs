@@ -117,6 +117,8 @@ async function main() {
   pin();
   await sleep(500);
 
+  // --no-input: skip everything that injects mouse/keyboard on this desktop (safe while the PC is in use).
+  if (!process.argv.includes("--no-input")) {
   // 3. Mouse: click inside the probe window through the remote session.
   step("geometry");
   const geo = await withTimeout(probe.evaluate(() => ({ x: screenX, y: screenY, dpr: devicePixelRatio, top: outerHeight - innerHeight })), 10000, "probe geometry");
@@ -169,6 +171,8 @@ async function main() {
   record("input latency (viewer → host event)", moves.length >= 35, { pointer_move_ms: stats(moves) });
 
   step("file transfer");
+  }
+
   // 6. File transfer: 64 MB upload through an encrypted file-transfer session, verified by hash.
   const src = join(WORK, "upload.bin");
   const dstDir = join(WORK, "remote-dst");
