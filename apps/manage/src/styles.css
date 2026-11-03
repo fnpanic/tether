@@ -1,0 +1,182 @@
+/* Design tokens and base styles. Spec: /DESIGN.md — change both together. */
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: -apple-system, "SF Pro Text", "SF Pro Display", "Inter Variable", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
+
+  --color-canvas: var(--canvas);
+  --color-parchment: var(--parchment);
+  --color-tile: var(--tile);
+  --color-tile-2: var(--tile-2);
+  --color-ink: var(--ink);
+  --color-ink-80: var(--ink-80);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-hairline: var(--hairline);
+  --color-accent: var(--accent);
+  --color-focus: var(--focus);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+
+  /* Radius scale: 5 · 8 · 11 · 18 · full (DESIGN.md). Tailwind names remapped onto it. */
+  --radius-xs: 5px;
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --radius-lg: 8px;
+  --radius-xl: 11px;
+  --radius-2xl: 18px;
+  --radius-3xl: 18px;
+
+  /* Type roles */
+  --text-display: 40px;
+  --text-display--line-height: 1.1;
+  --text-display--letter-spacing: -0.02em;
+  --text-title: 28px;
+  --text-title--line-height: 1.14;
+  --text-title--letter-spacing: -0.01em;
+  --text-headline: 21px;
+  --text-headline--line-height: 1.19;
+  --text-body: 17px;
+  --text-body--line-height: 1.47;
+  --text-body--letter-spacing: -0.022em;
+  --text-callout: 15px;
+  --text-callout--line-height: 1.4;
+  --text-callout--letter-spacing: -0.01em;
+  --text-caption: 14px;
+  --text-caption--line-height: 1.43;
+  --text-caption--letter-spacing: -0.016em;
+  --text-footnote: 12px;
+  --text-footnote--line-height: 1.33;
+  --text-footnote--letter-spacing: -0.01em;
+
+  /* The only shadow in the product: floating layers. */
+  --shadow-float: 0 12px 40px rgba(0, 0, 0, 0.18);
+
+  --animate-fade: fade 160ms ease-out;
+  --animate-rise: rise 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+:root {
+  --canvas: #ffffff;
+  --parchment: #f5f5f7;
+  --tile: #ffffff;
+  --tile-2: #fafafc;
+  --ink: #1d1d1f;
+  --ink-80: #333333;
+  --muted: #6e6e73;
+  --faint: #7a7a7a;
+  --hairline: rgba(0, 0, 0, 0.08);
+  --accent: #0066cc;
+  --focus: #0071e3;
+  --ok: #1f9d55;
+  --warn: #b25000;
+  --danger: #d70015;
+  color-scheme: light;
+}
+
+:root.dark {
+  --canvas: #000000;
+  --parchment: #1c1c1e;
+  --tile: #272729;
+  --tile-2: #2a2a2c;
+  --ink: #f5f5f7;
+  --ink-80: #cccccc;
+  --muted: #98989d;
+  --faint: #6e6e73;
+  --hairline: rgba(255, 255, 255, 0.1);
+  --accent: #2997ff;
+  --focus: #2997ff;
+  --ok: #30d158;
+  --warn: #ffb340;
+  --danger: #ff453a;
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  letter-spacing: -0.016em;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+input,
+textarea {
+  user-select: text;
+  font: inherit;
+}
+
+.drag {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Press feedback and keyboard focus for every interactive element (DESIGN.md › Motion). */
+button,
+[role="switch"] {
+  transition: transform 120ms ease-out, background-color 120ms ease-out, color 120ms ease-out, opacity 120ms ease-out;
+}
+button:active:not(:disabled) {
+  transform: scale(0.95);
+}
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Session glass (always dark). */
+.glass {
+  background: rgba(39, 39, 41, 0.72);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+  button:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--hairline);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
