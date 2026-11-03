@@ -10,7 +10,8 @@ source "$HOME/.cargo/env"
 export CC_x86_64_unknown_linux_musl=musl-gcc
 T=x86_64-unknown-linux-musl
 mkdir -p "$OUT/bin"
-rsync -a --delete --exclude target --exclude .git --exclude '*.sqlite3*' --exclude src/version.rs "$SRC/vendor/rustdesk-server/" "$OUT/rustdesk-server/"
+# db_v2.sqlite3 is the schema sqlx checks queries against at compile time: copy it, skip only -wal/-shm.
+rsync -a --delete --exclude target --exclude .git --exclude '*.sqlite3-*'--exclude src/version.rs "$SRC/vendor/rustdesk-server/" "$OUT/rustdesk-server/"
 mkdir -p "$OUT/server" "$OUT/crates"
 rsync -a --delete --exclude target "$SRC/server/api/" "$OUT/server/api/"
 rsync -a --delete --exclude target "$SRC/crates/tether-trust/" "$OUT/crates/tether-trust/"
