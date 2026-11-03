@@ -18,7 +18,7 @@ use hbb_common::{
 use serde_json::{json, Value};
 use tether_trust::{
     envelope,
-    policy::{resolve, Bundle, Effective, Layer, FEATURES, FLOOR, PROFILE_TECHNICIAN},
+    policy::{parse_servers, resolve, server_host, Bundle, Effective, Layer, FEATURES, FLOOR, PROFILE_TECHNICIAN, SERVERS_LIST},
     VerifyingKey,
 };
 
@@ -28,6 +28,48 @@ const ADMIN_KEYS: Option<&str> = option_env!("TETHER_ADMIN_PUB_KEY");
 pub const SERVER: Option<&str> = option_env!("TETHER_SERVER");
 /// Options that change which server this app talks to (`settings.server`).
 const SERVER_OPTIONS: &[&str] = &["custom-rendezvous-server", "relay-server", "key"];
+
+/// First compiled-in server host, without port (`TETHER_SERVER` may list several).
+pub fn primary_host() -> &'static str {
+    server_host(SERVER.unwrap_or_default().split(',').next().unwrap_or_default().trim())
+}
+
+/// API hosts, best first: the last one that answered, then compiled-in and policy servers.
+pub fn api_hosts() -> Vec<String> {
+    if SERVER.is_none() {
+        return Vec::new(); // never the upstream public servers
+    }
+    let mut v: Vec<String> = hbb_common::config::own_rendezvous_servers()
+        .iter()
+        .map(|h| server_host(h).to_owned())
+        .filter(|h| !h.is_empty())
+        .collect();
+    v.dedup();
+    let last = LAST_API_HOST.read().unwrap().clone();
+    if let Some(i) = v.iter().position(|h| *h == last) {
+        let h = v.remove(i);
+        v.insert(0, h);
+    }
+    v
+}
+
+static LAST_API_HOST: RwLock<String> = RwLock::new(String::new());
+
+/// `servers.list` → extra rendezvous servers in the core (hosts register with every one, viewers
+/// ask them all). Only host names pass, see `parse_servers`. True when the list changed.
+fn apply_servers(eff: &Effective) -> bool {
+    let list = parse_servers(eff.get(SERVERS_LIST)).unwrap_or_else(|e| {
+        log::error!("policy {SERVERS_LIST} ignored: {e}");
+        Vec::new()
+    });
+    let mut cur = hbb_common::config::POLICY_RENDEZVOUS_SERVERS.write().unwrap();
+    if *cur == list {
+        return false;
+    }
+    log::info!("policy servers: {list:?}");
+    *cur = list;
+    true
+}
 
 #[derive(Default)]
 struct State {
@@ -160,9 +202,13 @@ fn apply(bundle: Option<Bundle>) -> bool {
     let mut st = STATE.write().unwrap();
     let changed = st.eff != eff;
     apply_core(&eff, &mut st.applied);
+    let servers_changed = apply_servers(&eff);
     st.eff = eff;
     st.bundle = bundle;
     drop(st);
+    if servers_changed {
+        librustdesk::ui::api::restart_rendezvous();
+    }
     if changed {
         crate::app::emit("policy", state_json());
     }
@@ -257,28 +303,36 @@ pub fn proxy_url() -> Option<String> {
 pub(crate) fn api(
     build: impl Fn(&reqwest::blocking::Client, &str) -> reqwest::blocking::RequestBuilder,
 ) -> Result<reqwest::blocking::Response, String> {
-    let host = SERVER.filter(|h| !h.is_empty()).ok_or("offline: no server compiled into this build")?;
-    let host = host.split(':').next().unwrap_or(host);
+    let hosts = api_hosts();
+    if hosts.is_empty() {
+        return Err("offline: no server compiled into this build".into());
+    }
     let proxy = proxy_url();
     let mut last = String::new();
-    for via_proxy in [true, false] {
-        if via_proxy && proxy.is_none() {
-            continue;
-        }
-        let mut b = reqwest::blocking::Client::builder()
-            .use_rustls_tls()
-            .no_proxy()
-            .connect_timeout(Duration::from_secs(6))
-            .timeout(Duration::from_secs(30))
-            .user_agent(concat!("Tether/", env!("CARGO_PKG_VERSION")));
-        if via_proxy {
-            b = b.proxy(reqwest::Proxy::all(proxy.as_deref().unwrap_or_default()).map_err(|e| e.to_string())?);
-        }
-        let client = b.build().map_err(|e| e.to_string())?;
-        for base in [format!("https://{host}"), format!("https://{host}:80")] {
-            match build(&client, &base).send() {
-                Ok(r) => return Ok(r),
-                Err(e) => last = e.to_string(),
+    // First reachable server: each one over all routes before the next.
+    for host in &hosts {
+        for via_proxy in [true, false] {
+            if via_proxy && proxy.is_none() {
+                continue;
+            }
+            let mut b = reqwest::blocking::Client::builder()
+                .use_rustls_tls()
+                .no_proxy()
+                .connect_timeout(Duration::from_secs(6))
+                .timeout(Duration::from_secs(30))
+                .user_agent(concat!("Tether/", env!("CARGO_PKG_VERSION")));
+            if via_proxy {
+                b = b.proxy(reqwest::Proxy::all(proxy.as_deref().unwrap_or_default()).map_err(|e| e.to_string())?);
+            }
+            let client = b.build().map_err(|e| e.to_string())?;
+            for base in [format!("https://{host}"), format!("https://{host}:80")] {
+                match build(&client, &base).send() {
+                    Ok(r) => {
+                        *LAST_API_HOST.write().unwrap() = host.clone();
+                        return Ok(r);
+                    }
+                    Err(e) => last = e.to_string(),
+                }
             }
         }
     }

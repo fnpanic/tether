@@ -1,17 +1,36 @@
 diff --git a/src/config.rs b/src/config.rs
-index 9ee5cac..dbd2afa 100644
+index 9ee5cac..6264678 100644
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -113,8 +113,14 @@ const CHARS: &[char] = &[
+@@ -113,8 +113,33 @@ const CHARS: &[char] = &[
      'm', 'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
  ];
  
 -pub const RENDEZVOUS_SERVERS: &[&str] = &["rs-ny.rustdesk.com"];
 -pub const RS_PUB_KEY: &str = "OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=";
-+pub const RENDEZVOUS_SERVERS: &[&str] = &[match option_env!("TETHER_SERVER") {
++/// Compiled-in rendezvous servers: `TETHER_SERVER` may list several, comma-separated.
++const COMPILED_SERVERS: &str = match option_env!("TETHER_SERVER") {
 +    Some(s) => s,
 +    None => "rs-ny.rustdesk.com",
-+}];
++};
++
++lazy_static::lazy_static! {
++    pub static ref RENDEZVOUS_SERVERS: Vec<&'static str> =
++        COMPILED_SERVERS.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
++    /// Extra rendezvous servers from the admin policy (`servers.list`), validated by the app.
++    pub static ref POLICY_RENDEZVOUS_SERVERS: RwLock<Vec<String>> = Default::default();
++}
++
++/// This client's own servers: the compiled-in ones, then the policy's, without duplicates.
++pub fn own_rendezvous_servers() -> Vec<String> {
++    let mut v: Vec<String> = RENDEZVOUS_SERVERS.iter().map(|s| s.to_string()).collect();
++    for s in POLICY_RENDEZVOUS_SERVERS.read().unwrap().iter() {
++        if !v.iter().any(|x| x.eq_ignore_ascii_case(s)) {
++            v.push(s.clone());
++        }
++    }
++    v
++}
 +pub const RS_PUB_KEY: &str = match option_env!("TETHER_PUB_KEY") {
 +    Some(s) => s,
 +    None => "OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=",
@@ -19,11 +38,51 @@ index 9ee5cac..dbd2afa 100644
  
  pub const RENDEZVOUS_PORT: i32 = 21116;
  pub const RELAY_PORT: i32 = 21117;
+@@ -1093,7 +1118,7 @@ impl Config {
+                 return ss;
+             }
+         }
+-        return RENDEZVOUS_SERVERS.iter().map(|x| x.to_string()).collect();
++        own_rendezvous_servers()
+     }
+ 
+     pub fn reset_online() {
+diff --git a/src/stream.rs b/src/stream.rs
+index 126d08a..5e09dd2 100644
+--- a/src/stream.rs
++++ b/src/stream.rs
+@@ -14,6 +14,17 @@ pub enum Stream {
+ }
+ 
+ impl Stream {
++    /// WebSocket only: send a ping and return the silence before it (`None` for other streams).
++    pub async fn ws_ping(&mut self) -> Option<ResultType<std::time::Duration>> {
++        match self {
++            Stream::WebSocket(s) => {
++                let silent = s.since_rx();
++                Some(s.ping().await.map(|_| silent))
++            }
++            _ => None,
++        }
++    }
++
+     #[inline]
+     pub fn set_send_timeout(&mut self, ms: u64) {
+         match self {
 diff --git a/src/websocket.rs b/src/websocket.rs
-index 3a98a84..cc6a988 100644
+index 3a98a84..7c98661 100644
 --- a/src/websocket.rs
 +++ b/src/websocket.rs
-@@ -141,6 +141,40 @@ impl WsFramedStream {
+@@ -86,6 +86,8 @@ pub struct WsFramedStream {
+     addr: SocketAddr,
+     encrypt: Option<Encrypt>,
+     send_timeout: u64,
++    /// Last frame of any kind (data, ping, pong) from the peer.
++    last_rx: std::time::Instant,
+ }
+ 
+ impl WsFramedStream {
+@@ -141,6 +143,40 @@ impl WsFramedStream {
          .await
      }
  
@@ -64,7 +123,7 @@ index 3a98a84..cc6a988 100644
      #[async_recursion]
      async fn try_connect(
          url: &str,
-@@ -304,8 +338,7 @@ impl WsFramedStream {
+@@ -304,14 +340,14 @@ impl WsFramedStream {
          ms_timeout: u64,
      ) -> ResultType<Self> {
          let proxy_conf = Config::get_socks();
@@ -74,7 +133,48 @@ index 3a98a84..cc6a988 100644
  
          let ws = Self {
              stream,
-@@ -533,6 +566,136 @@ pub fn check_ws(endpoint: &str) -> String {
+             addr,
+             encrypt: None,
+             send_timeout: ms_timeout,
++            last_rx: std::time::Instant::now(),
+         };
+ 
+         Ok(ws)
+@@ -397,9 +433,22 @@ impl WsFramedStream {
+         Ok(())
+     }
+ 
++    /// A WebSocket ping. The peer's WebSocket layer answers it (no protocol support needed), so
++    /// `since_rx` stays small on a live path even when the peer has nothing to say.
++    pub async fn ping(&mut self) -> ResultType<()> {
++        timeout(Duration::from_secs(1), self.stream.send(WsMessage::Ping(Default::default()))).await??;
++        Ok(())
++    }
++
++    /// Time since the last frame from the peer.
++    pub fn since_rx(&self) -> Duration {
++        self.last_rx.elapsed()
++    }
++
+     #[inline]
+     pub async fn next(&mut self) -> Option<Result<BytesMut, Error>> {
+         while let Some(msg) = self.stream.next().await {
++            self.last_rx = std::time::Instant::now();
+             let msg = match msg {
+                 Ok(msg) => msg,
+                 Err(e) => {
+@@ -494,7 +543,9 @@ pub fn check_ws(endpoint: &str) -> String {
+         .map(|(_, p)| p)
+         .unwrap_or(RELAY_PORT);
+ 
+-    let (relay, dst_port) = if endpoint_port == rendezvous_port {
++    // Tether: with several servers the remembered fastest one (Config2) need not be on the default
++    // port, so the default rendezvous port always means rendezvous too.
++    let (relay, dst_port) = if endpoint_port == rendezvous_port || endpoint_port == RENDEZVOUS_PORT {
+         // rendezvous
+         (false, endpoint_port + 2)
+     } else if endpoint_port == rendezvous_port - 1 {
+@@ -533,6 +584,139 @@ pub fn check_ws(endpoint: &str) -> String {
      format!("{}://{}", protocol, address)
  }
  
@@ -172,16 +272,19 @@ index 3a98a84..cc6a988 100644
 +    let Ok(parsed) = url::Url::parse(url) else { return single };
 +    let Some(host) = parsed.host_str() else { return single };
 +    let exe = EXE_RENDEZVOUS_SERVER.read().unwrap().clone();
-+    let is_own = crate::config::RENDEZVOUS_SERVERS
++    let is_own = crate::config::own_rendezvous_servers()
 +        .iter()
-+        .copied()
++        .map(String::as_str)
 +        .chain(std::iter::once(exe.as_str()))
 +        .filter(|s| !s.is_empty())
 +        .any(|s| {
-+            split_host_port(s)
-+                .map(|(h, _)| h)
-+                .unwrap_or_else(|| s.to_owned())
-+                .eq_ignore_ascii_case(host)
++            // An entry may be a full URL (`wss://host/ws/id/1`, one pod behind an ingress).
++            let h = if is_ws_endpoint(s) {
++                url::Url::parse(s).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default()
++            } else {
++                split_host_port(s).map(|(h, _)| h).unwrap_or_else(|| s.to_owned())
++            };
++            h.eq_ignore_ascii_case(host)
 +        });
 +    if parsed.scheme() != "wss" || parsed.port().is_some() || !is_own {
 +        return single;
@@ -211,7 +314,15 @@ index 3a98a84..cc6a988 100644
  /// Port of the reverse proxy serving `/ws/id` and `/ws/relay` on this client's own servers, for
  /// when it cannot listen on the scheme's default port. Any other host, such as a peer's server or
  /// a relay on another machine, keeps the default port. IP endpoints never get here.
-@@ -902,3 +1065,35 @@ mod tests {
+@@ -592,6 +776,7 @@ mod tests {
+             addr,
+             encrypt: None,
+             send_timeout: 0,
++            last_rx: std::time::Instant::now(),
+         }
+     }
+ 
+@@ -902,3 +1087,45 @@ mod tests {
          }
      }
  }
@@ -237,6 +348,14 @@ index 3a98a84..cc6a988 100644
 +        );
 +        // Other servers, explicit ports and plain ws keep one route.
 +        assert_eq!(connect_routes("wss://peer.example.com/ws/relay", true).len(), 1);
++        // A second server from the policy list is one of our own and gets the fallbacks too.
++        crate::config::POLICY_RENDEZVOUS_SERVERS.write().unwrap().push("relay2.example.org".into());
++        assert_eq!(connect_routes("wss://relay2.example.org/ws/relay", false).len(), 2);
++        // A full-URL entry (one pod of a cluster) makes its host ours; per-pod paths are kept.
++        crate::config::POLICY_RENDEZVOUS_SERVERS.write().unwrap().push("wss://k8s.example.org/ws/id/1".into());
++        let got: Vec<_> = connect_routes("wss://k8s.example.org/ws/relay/2", false).into_iter().map(|r| r.url).collect();
++        assert_eq!(got, ["wss://k8s.example.org/ws/relay/2", "wss://k8s.example.org:80/ws/relay/2"]);
++        crate::config::POLICY_RENDEZVOUS_SERVERS.write().unwrap().clear();
 +        assert_eq!(connect_routes("wss://relay.example.org:8443/ws/id", false).len(), 1);
 +        // A winner on /ws/relay (direct, port 80) is tried first for /ws/id as well.
 +        remember_route(
@@ -245,5 +364,7 @@ index 3a98a84..cc6a988 100644
 +        );
 +        let first = &connect_routes(id, true)[0];
 +        assert_eq!((first.url.as_str(), first.via_proxy), ("wss://relay.example.org:80/ws/id", false));
++        // Globals: other tests (check_ws) read the rendezvous server.
++        EXE_RENDEZVOUS_SERVER.write().unwrap().clear();
 +    }
 +}

@@ -133,6 +133,7 @@ pub const FEATURES: &[Feature] = &[
     b!("connect.chat", "connections", "Chat in sessions", "Chat in Sitzungen", "Y", None, BOTH),
     t!("connect.reconnect-minutes", "connections", "Keep reconnecting after a connection loss (minutes)", "Nach Verbindungsverlust erneut verbinden (Minuten)", Kind::Number, "10", BOTH),
     b!("settings.server", "connections", "Allow changing the relay server", "Relay-Server ändern erlauben", "N", None, TECH),
+    t!("servers.list", "connections", "Additional relay servers (host names or wss:// URLs, comma-separated)", "Weitere Relay-Server (Hostnamen oder wss://-URLs, kommagetrennt)", Kind::Text, "", BOTH),
     // Video.
     c!("video.quality", "video", "Default image quality", "Standard-Bildqualität", "balanced", &["best", "balanced", "low"], "balanced", Some("image-quality"), TECH),
     c!("video.codec", "video", "Preferred codec", "Bevorzugter Codec", "auto", &["auto", "h264", "h265", "av1", "vp9", "vp8"], "auto", Some("codec-preference"), TECH),
@@ -202,11 +203,72 @@ fn check_value(f: &Feature, v: &str) -> Result<(), String> {
         Kind::Number => v.parse::<u32>().is_ok(),
         Kind::Text => v.len() <= 1024 && !v.chars().any(|c| c.is_control() && c != '\n'),
     };
+    if f.id == SERVERS_LIST {
+        return parse_servers(v).map(|_| ()).map_err(|e| format!("feature {}: {e}", f.id));
+    }
     if ok {
         Ok(())
     } else {
         Err(format!("invalid value {v:?} for feature {}", f.id))
     }
+}
+
+/// Feature holding extra rendezvous servers.
+pub const SERVERS_LIST: &str = "servers.list";
+/// Most servers a policy may add.
+pub const MAX_SERVERS: usize = 8;
+
+/// Host name of a server entry: `host`, `host:port` or `wss://host/path`.
+pub fn server_host(entry: &str) -> &str {
+    let e = entry.strip_prefix("wss://").or_else(|| entry.strip_prefix("ws://")).unwrap_or(entry);
+    let e = e.split('/').next().unwrap_or(e);
+    e.split(':').next().unwrap_or(e)
+}
+
+/// Parse a comma-separated list of servers (`servers.list`): DNS names, or `wss://<name>/<path>`
+/// for one rendezvous endpoint of a cluster. No port, IP literal, plain `ws://`, query or
+/// credentials, so every entry is reached over TLS on 443 and verified with the same compiled-in
+/// server key; a policy cannot point clients at anything else.
+pub fn parse_servers(s: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in s.split(',').map(str::trim).filter(|x| !x.is_empty()) {
+        let (host, path) = match raw.get(..6).filter(|p| p.eq_ignore_ascii_case("wss://")) {
+            Some(_) => match raw[6..].split_once('/') {
+                Some((h, p)) => (h, Some(p)),
+                None => (&raw[6..], None),
+            },
+            None => (raw, None),
+        };
+        let path_ok = path.map_or(true, |p| {
+            !p.is_empty() && p.len() <= 128 && p.chars().all(|c| c.is_ascii_alphanumeric() || "/_-.".contains(c)) && !p.contains("..")
+        });
+        if !path_ok {
+            return Err(format!("{raw:?} has an invalid path"));
+        }
+        let h = host.to_ascii_lowercase();
+        let labels: Vec<&str> = h.split('.').collect();
+        let label_ok = |l: &&str| {
+            (1..=63).contains(&l.len())
+                && l.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+        };
+        let tld_ok = labels.last().is_some_and(|t| t.chars().any(|c| c.is_ascii_lowercase()));
+        if h.len() > 253 || labels.len() < 2 || !labels.iter().all(label_ok) || !tld_ok {
+            return Err(format!("{raw:?} is not a host name"));
+        }
+        let entry = match path {
+            Some(p) => format!("wss://{h}/{p}"),
+            None => h,
+        };
+        if !out.contains(&entry) {
+            out.push(entry);
+        }
+    }
+    if out.len() > MAX_SERVERS {
+        return Err(format!("at most {MAX_SERVERS} servers"));
+    }
+    Ok(out)
 }
 
 fn check_layer(layer: &Layer, ctx: &str) -> Result<(), String> {
@@ -368,6 +430,54 @@ mod tests {
 
     fn rule(state: State, value: Option<&str>) -> Rule {
         Rule { state, value: value.map(Into::into) }
+    }
+
+    #[test]
+    fn server_list_accepts_host_names_only() {
+        assert_eq!(parse_servers("").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            parse_servers(" Tether-Desk2.duckdns.org, relay.example.com ,tether-desk2.duckdns.org,").unwrap(),
+            ["tether-desk2.duckdns.org", "relay.example.com"]
+        );
+        for bad in [
+            "ws://relay.example.com",
+            "https://relay.example.com",
+            "relay.example.com:21116",
+            "relay.example.com/ws/id",
+            "158.101.205.185",
+            "[::1]",
+            "localhost",
+            "-bad.example.com",
+            "bad_.example.com",
+            "a..example.com",
+            "relay.example.com;evil.com",
+            "relay example.com",
+            "ws://relay.example.com/ws/id",
+            "wss://relay.example.com:8443/ws/id",
+            "wss://user@relay.example.com/ws/id",
+            "wss://relay.example.com/ws/id?x=1",
+            "wss://1.2.3.4/ws/id",
+            "wss://relay.example.com/",
+            "wss://relay.example.com/../x",
+        ] {
+            assert!(parse_servers(bad).is_err(), "{bad} accepted");
+        }
+        assert_eq!(
+            parse_servers("WSS://K8s.Example.com/ws/id/1, wss://k8s.example.com/ws/id/2").unwrap(),
+            ["wss://k8s.example.com/ws/id/1", "wss://k8s.example.com/ws/id/2"]
+        );
+        assert_eq!(server_host("wss://k8s.example.com/ws/id/1"), "k8s.example.com");
+        assert_eq!(server_host("relay.example.com:21116"), "relay.example.com");
+        let many = (0..9).map(|i| format!("r{i}.example.com")).collect::<Vec<_>>().join(",");
+        assert!(parse_servers(&many).is_err());
+        // A bundle with a bad list is rejected as a whole.
+        let mut b = Bundle::default();
+        let layer: Layer = [(SERVERS_LIST.to_owned(), rule(State::Locked, Some("1.2.3.4")))].into();
+        b.profiles.insert(PROFILE_TECHNICIAN.into(), layer);
+        assert!(b.validate().is_err());
+        let layer: Layer = [(SERVERS_LIST.to_owned(), rule(State::Locked, Some("relay2.example.com")))].into();
+        b.profiles.insert(PROFILE_TECHNICIAN.into(), layer);
+        assert!(b.validate().is_ok());
     }
 
     #[test]

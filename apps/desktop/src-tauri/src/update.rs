@@ -150,14 +150,16 @@ pub async fn install(app: AppHandle) -> Result<(), String> {
         return Err("locked:update.enabled: Your organisation installs updates for you.".into());
     }
     let key = UPDATER_KEY.filter(|k| !k.is_empty()).ok_or("Updates are not configured in this build.")?;
-    let host = policy::SERVER.unwrap_or_default();
-    let host = host.split(':').next().unwrap_or(host);
-    let endpoint = format!("https://{host}{}", manifest_path("{{target}}"));
+    // Every server serves the same signed releases; the updater tries them in order.
+    let mut endpoints = Vec::new();
+    for host in policy::api_hosts() {
+        endpoints.push(format!("https://{host}{}", manifest_path("{{target}}")).parse().map_err(|e| format!("{e}"))?);
+    }
     let mut b = app
         .updater_builder()
         .pubkey(key)
         .target(target())
-        .endpoints(vec![endpoint.parse().map_err(|e| format!("{e}"))?])
+        .endpoints(endpoints)
         .map_err(|e| e.to_string())?;
     if let Some(p) = policy::proxy_url().and_then(|p| p.parse().ok()) {
         b = b.proxy(p);

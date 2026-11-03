@@ -155,6 +155,8 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
             setDisplayIdx(i);
             setDisplay(p.displays[i]);
           }
+          // Reconnected: same decoder and canvas; the new stream starts with a key frame.
+          if (series.current) pipe.resync();
           series.current = null;
           everConnected.current = true;
           setPhase({ kind: "connected" });

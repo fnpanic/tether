@@ -39,10 +39,152 @@ index 606a4be..2510d2a 100644
 +pub const EXTERNAL_DECODING_H264: u8 = 1;
 +pub const EXTERNAL_DECODING_H265: u8 = 2;
 diff --git a/src/client.rs b/src/client.rs
-index 597dc86..cde3beb 100644
+index 597dc86..c0f7479 100644
 --- a/src/client.rs
 +++ b/src/client.rs
-@@ -3002,6 +3002,12 @@ impl LoginConfigHandler {
+@@ -212,6 +212,78 @@ impl Drop for OffererGuard {
+     }
+ }
+ 
++/// Tether: the rendezvous server the last connection went through, asked first next time.
++#[cfg(feature = "tauri")]
++static LAST_GOOD_SERVER: Mutex<String> = Mutex::new(String::new());
++
++/// Head start of each rendezvous server over the next one. A server that fails (down, or the
++/// peer is not registered there) hands over at once; the delay only matters when one hangs, and
++/// keeps a peer registered everywhere from getting a relay request from every server.
++#[cfg(feature = "tauri")]
++const SERVER_STAGGER: Duration = Duration::from_millis(1000);
++
++/// How long to wait on a relay for the host's first message (see `secure_connection`).
++#[cfg(feature = "tauri")]
++const RELAY_PAIR_TIMEOUT: u64 = 5_000;
++
++/// `servers` with the last one that worked first.
++#[cfg(feature = "tauri")]
++fn order_servers(mut servers: Vec<String>, last_good: &str) -> Vec<String> {
++    if let Some(i) = servers.iter().position(|s| s == last_good) {
++        let s = servers.remove(i);
++        servers.insert(0, s);
++    }
++    servers
++}
++
++/// First success of `attempts`, started one after another: the next one starts when the
++/// previous fails or after `stagger`. All failed: the first "peer is offline" answer (the peer
++/// was looked up and is not there), else the first attempt's error.
++#[cfg(feature = "tauri")]
++async fn first_ok_staggered<'a, T: 'a>(
++    attempts: Vec<BoxFuture<'a, ResultType<T>>>,
++    stagger: Duration,
++) -> ResultType<T> {
++    use hbb_common::futures::stream::{FuturesUnordered, StreamExt};
++    let mut pending = attempts.into_iter().enumerate();
++    let mut running = FuturesUnordered::new();
++    let mut errors: Vec<(usize, hbb_common::anyhow::Error)> = Vec::new();
++    let mut start_next = true;
++    loop {
++        if std::mem::take(&mut start_next) {
++            if let Some((i, f)) = pending.next() {
++                running.push(f.map(move |r| (i, r)));
++            }
++        }
++        if running.is_empty() {
++            break;
++        }
++        let more = pending.len() > 0;
++        tokio::select! {
++            Some((i, r)) = running.next() => match r {
++                Ok(v) => return Ok(v),
++                Err(e) => {
++                    errors.push((i, e));
++                    start_next = true;
++                }
++            },
++            _ = tokio::time::sleep(stagger), if more => start_next = true,
++        }
++    }
++    errors.sort_by_key(|(i, _)| *i);
++    let pick = errors
++        .iter()
++        .position(|(_, e)| {
++            let e = e.to_string();
++            e.contains("offline") || e.contains("not exist")
++        })
++        .unwrap_or(0);
++    match errors.into_iter().nth(pick) {
++        Some((_, e)) => Err(e),
++        None => bail!("no rendezvous server"),
++    }
++}
++
+ /// Race WebRTC against the other transports, preferring P2P: `select_ok` would always pick the
+ /// relay, whose TCP connect beats ICE + DTLS + SCTP by an order of magnitude. An `is_p2p` result
+ /// wins outright; a relayed one — from either side, since `webrtc_fut` is a whole punch attempt
+@@ -487,6 +559,46 @@ impl Client {
+             }
+         };
+ 
++        // Tether: with several rendezvous servers, ask each (the last good one first) and take the
++        // first that reaches the peer. Relay-only, so there is no punch state to share; the relay
++        // comes from that server's answer.
++        #[cfg(feature = "tauri")]
++        if other_server.is_empty() && !servers.is_empty() && interface.is_force_relay() {
++            let mut all = servers;
++            all.insert(0, rendezvous_server);
++            let all = order_servers(all, &LAST_GOOD_SERVER.lock().unwrap());
++            log::info!("rendezvous servers: {:?}", all);
++            let attempts = all
++                .into_iter()
++                .map(|server| {
++                    let fut = Self::_start_inner(
++                        peer.to_owned(),
++                        key.to_owned(),
++                        token.to_owned(),
++                        conn_type,
++                        interface.clone(),
++                        (None, None),
++                        None,
++                        None,
++                        None,
++                        server.clone(),
++                        Vec::new(),
++                        true,
++                    );
++                    async move {
++                        let r = fut.await;
++                        match &r {
++                            Ok(_) => *LAST_GOOD_SERVER.lock().unwrap() = server,
++                            Err(e) => log::info!("via {server}: {e}"),
++                        }
++                        r
++                    }
++                    .boxed()
++                })
++                .collect();
++            return first_ok_staggered(attempts, SERVER_STAGGER).await;
++        }
++
+         // Same relay gate as the v6 socket below: under any forced relay the v6 punch cannot
+         // be used, so probing v6 reachability is wasted work on every such connection.
+         if crate::get_ipv6_punch_enabled() && !interface.is_force_relay() {
+@@ -1697,7 +1809,14 @@ impl Client {
+                 return Ok(option_pk);
+             }
+         };
+-        match timeout(READ_TIMEOUT, conn.next()).await? {
++        // Tether: over a relay the host is already connected or arrives within a second (it dials
++        // while its answer travels back); a host whose relay leg failed never comes, so give up
++        // early and re-ask the servers instead of waiting 18 s.
++        #[cfg(feature = "tauri")]
++        let read_timeout = if use_ws() { RELAY_PAIR_TIMEOUT } else { READ_TIMEOUT };
++        #[cfg(not(feature = "tauri"))]
++        let read_timeout = READ_TIMEOUT;
++        match timeout(read_timeout, conn.next()).await? {
+             Some(res) => {
+                 let bytes = res?;
+                 if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
+@@ -3002,6 +3121,12 @@ impl LoginConfigHandler {
          self.shared_password = shared_password;
          self.record_state = false;
          self.record_permission = true;
@@ -55,7 +197,7 @@ index 597dc86..cde3beb 100644
  
          // `std::env::remove_var("IS_TERMINAL_ADMIN");` is called in `session_add_sync()` - `flutter_ffi.rs`.
          let is_terminal_admin = conn_type == ConnType::TERMINAL
-@@ -3951,6 +3957,13 @@ impl LoginConfigHandler {
+@@ -3951,6 +4076,13 @@ impl LoginConfigHandler {
          &self.id
      }
  
@@ -69,7 +211,7 @@ index 597dc86..cde3beb 100644
      pub fn get_key_terminal_service_id(&self) -> &'static str {
          if self.is_terminal_admin {
              "terminal-admin-service-id"
-@@ -5043,6 +5056,19 @@ pub async fn confirm_insecure_connection(
+@@ -5043,6 +5175,19 @@ pub async fn confirm_insecure_connection(
      interface: &impl Interface,
      receiver: &mut UnboundedReceiver<Data>,
  ) -> bool {
@@ -89,11 +231,111 @@ index 597dc86..cde3beb 100644
      interface.msgbox(
          "insecure-connection-nocancel-hasclose",
          "Insecure Connection",
+@@ -5562,6 +5707,69 @@ async fn udp_nat_connect(
+     Ok((res.1, Some(res.0), typ))
+ }
+ 
++#[cfg(all(test, feature = "tauri"))]
++mod server_race_tests {
++    use super::{first_ok_staggered, order_servers};
++    use hbb_common::{
++        anyhow::anyhow,
++        futures::future::{BoxFuture, FutureExt},
++        tokio,
++        tokio::time::{sleep, Duration, Instant},
++        ResultType,
++    };
++
++    fn after(ms: u64, r: Result<&'static str, &'static str>) -> BoxFuture<'static, ResultType<&'static str>> {
++        async move {
++            sleep(Duration::from_millis(ms)).await;
++            r.map_err(|e| anyhow!(e))
++        }
++        .boxed()
++    }
++
++    const STAGGER: Duration = Duration::from_millis(500);
++
++    #[tokio::test]
++    async fn failed_server_hands_over_at_once() {
++        let t = Instant::now();
++        let got = first_ok_staggered(vec![after(20, Err("connect failed")), after(20, Ok("b"))], STAGGER).await;
++        assert_eq!(got.unwrap(), "b");
++        assert!(t.elapsed() < Duration::from_millis(300));
++    }
++
++    #[tokio::test]
++    async fn hanging_server_is_overtaken_after_the_stagger() {
++        let t = Instant::now();
++        let got = first_ok_staggered(vec![after(60_000, Ok("a")), after(20, Ok("b"))], STAGGER).await;
++        assert_eq!(got.unwrap(), "b");
++        assert!(t.elapsed() < Duration::from_millis(900));
++    }
++
++    #[tokio::test]
++    async fn healthy_primary_never_starts_the_others() {
++        let got = first_ok_staggered(vec![after(50, Ok("a")), after(0, Ok("b"))], STAGGER).await;
++        assert_eq!(got.unwrap(), "a");
++    }
++
++    #[tokio::test]
++    async fn all_failed_reports_offline_over_transport_errors() {
++        let got = first_ok_staggered(
++            vec![after(10, Err("connection refused")), after(10, Err("Remote desktop is offline"))],
++            STAGGER,
++        )
++        .await;
++        assert_eq!(got.unwrap_err().to_string(), "Remote desktop is offline");
++        let got = first_ok_staggered(vec![after(10, Err("a down")), after(5, Err("b down"))], STAGGER).await;
++        assert_eq!(got.unwrap_err().to_string(), "a down");
++    }
++
++    #[test]
++    fn last_good_server_goes_first() {
++        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
++        assert_eq!(order_servers(s(&["a:1", "b:1"]), "b:1"), s(&["b:1", "a:1"]));
++        assert_eq!(order_servers(s(&["a:1", "b:1"]), ""), s(&["a:1", "b:1"]));
++    }
++}
++
+ #[cfg(test)]
+ mod webrtc_race_tests {
+     use super::race_transports_prefer_webrtc;
 diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
-index 1b197a8..dfe0a78 100644
+index 1b197a8..def9c12 100644
 --- a/src/client/io_loop.rs
 +++ b/src/client/io_loop.rs
-@@ -1315,6 +1315,20 @@ impl<T: InvokeUiSession> Remote<T> {
+@@ -14,6 +14,9 @@ use crate::{
+ // Empirical no-data window before exposing the restart reconnect state to the UI.
+ // Restart msgbox text is kept as a legacy UI fallback; Flutter handles the type as a control event.
+ const RESTART_REMOTE_DEVICE_NO_DATA_TIMEOUT: Duration = Duration::from_secs(5);
++/// Tether: relay silence that ends a logged-in WebSocket session (see the status timer).
++#[cfg(feature = "tauri")]
++const RELAY_SILENCE_LIMIT: Duration = Duration::from_secs(3);
+ const KCP_CLOSE_REASON_FLUSH_DELAY: Duration = Duration::from_millis(30);
+ // Deadline for the parting close-reason send once the peer is presumed gone; KCP waits for send
+ // capacity with no deadline of its own.
+@@ -355,6 +358,19 @@ impl<T: InvokeUiSession> Remote<T> {
+                                 self.handler.msgbox("restarting-show", "Restarting remote device", "Connection in progress. Please wait.", "");
+                                 break;
+                             }
++                            // Tether: a logged-in host answers a delay test every second, so a
++                            // relay path that went silent is dead (node gone without a FIN); do
++                            // not wait 30 s for it, reconnect.
++                            #[cfg(feature = "tauri")]
++                            if hbb_common::config::use_ws()
++                                && !self.handler.is_restarting_remote_device()
++                                && self.handler.lc.read().unwrap().peer_info.is_some()
++                                && last_recv_time.elapsed() >= RELAY_SILENCE_LIMIT
++                            {
++                                log::info!("relay silent for {:?}, reconnecting", last_recv_time.elapsed());
++                                self.handler.msgbox("error", "Connection Error", "Timeout", "");
++                                break;
++                            }
+                             let rx_progress = peer.rx_progress();
+                             // `None` for transports that report none, and it never changes for a
+                             // given one, so they are inert here.
+@@ -1315,6 +1331,20 @@ impl<T: InvokeUiSession> Remote<T> {
                  }
              }
              Data::RecordScreen(start) => {
@@ -114,7 +356,7 @@ index 1b197a8..dfe0a78 100644
                  self.handler.lc.write().unwrap().record_state = start;
                  self.update_record_state();
              }
-@@ -1706,6 +1720,10 @@ impl<T: InvokeUiSession> Remote<T> {
+@@ -1706,6 +1736,10 @@ impl<T: InvokeUiSession> Remote<T> {
                      }
                      self.video_format = CodecFormat::from(&vf);
  
@@ -208,8 +450,218 @@ index f6e48a1..600a09e 100644
  pub(crate) mod update_metadata;
  pub(crate) mod update_hash;
  #[cfg(target_os = "macos")]
+diff --git a/src/rendezvous_mediator.rs b/src/rendezvous_mediator.rs
+index b1e523d..1223bfa 100644
+--- a/src/rendezvous_mediator.rs
++++ b/src/rendezvous_mediator.rs
+@@ -264,6 +264,18 @@ async fn wait_for_retry(delay: f32, restarted: tokio::sync::futures::Notified<'_
+     }
+ }
+ 
++/// Silence after which a WebSocket to the rendezvous server counts as dead (pinged every second).
++#[cfg(feature = "tauri")]
++pub(crate) const WS_SILENCE_LIMIT: Duration = Duration::from_millis(3000);
++
++/// Seconds before re-registering after `failures` short-lived attempts in a row (0: the
++/// registration held, so it was lost rather than refused).
++#[cfg(feature = "tauri")]
++fn reregister_delay(failures: usize) -> f32 {
++    const STEPS: [f32; 11] = [0., 0.2, 0.2, 0.3, 0.3, 0.5, 0.5, 1., 2., 4., 8.];
++    STEPS.get(failures).copied().unwrap_or(16.)
++}
++
+ #[derive(Clone)]
+ pub struct RendezvousMediator {
+     addr: TargetAddr<'static>,
+@@ -326,6 +338,15 @@ impl RendezvousMediator {
+                 for host in servers.clone() {
+                     let server = server.clone();
+                     let timeout = timeout.clone();
++                    // Tether: one independent loop per server, so losing one server never
++                    // unregisters this host from the others; they end only on restart().
++                    #[cfg(feature = "tauri")]
++                    {
++                        let _ = timeout;
++                        futs.push(tokio::spawn(Self::keep_registered(server, host)));
++                        continue;
++                    }
++                    #[allow(unreachable_code)]
+                     futs.push(tokio::spawn(async move {
+                         if let Err(err) = Self::start(server, host).await {
+                             let err = format!("rendezvous mediator error: {err}");
+@@ -362,7 +383,38 @@ impl RendezvousMediator {
+         }
+     }
+ 
++    /// Keep this host registered with one rendezvous server until `restart()`. A registration
++    /// that held for a while was lost (server restart, network change), not refused: retry at
++    /// once, then back off, so a restarted hbbs sees the host again within about a second.
++    #[cfg(feature = "tauri")]
++    async fn keep_registered(server: ServerPtr, host: String) {
++        let mut failures = 0usize;
++        loop {
++            let started = Instant::now();
++            if let Err(err) = Self::start(server.clone(), host.clone()).await {
++                log::error!("rendezvous mediator error ({host}): {err}");
++            }
++            let restarted = MANUAL_RESTART_NOTIFY.notified();
++            if SHOULD_EXIT.load(Ordering::SeqCst) {
++                return;
++            }
++            failures = if started.elapsed() >= Duration::from_secs(30) { 0 } else { failures + 1 };
++            let delay = reregister_delay(failures);
++            if delay > 0. {
++                wait_for_retry(delay, restarted).await;
++            }
++            if SHOULD_EXIT.load(Ordering::SeqCst) {
++                return;
++            }
++        }
++    }
++
+     fn get_host_prefix(host: &str) -> String {
++        // Tether: URL entries (`wss://host/ws/id/1`) of one cluster share the first label, but each
++        // is its own hbbs and needs its own key confirmation.
++        if hbb_common::websocket::is_ws_endpoint(host) {
++            return host.to_owned();
++        }
+         host.split(".")
+             .next()
+             .map(|x| {
+@@ -643,6 +695,14 @@ impl RendezvousMediator {
+                     if last_recv_msg.elapsed().as_millis() as u64 > rz.keep_alive as u64 * 3 / 2 {
+                         bail!("Rendezvous connection is timeout");
+                     }
++                    // Tether: ping every second; a path that dies silently (node gone, NAT
++                    // dropped) is noticed in seconds instead of after the 90 s keep-alive.
++                    #[cfg(feature = "tauri")]
++                    if let Some(silent) = conn.ws_ping().await {
++                        if silent? > WS_SILENCE_LIMIT {
++                            bail!("Rendezvous connection is silent");
++                        }
++                    }
+                     if (!Config::get_key_confirmed() ||
+                         !Config::get_host_key_confirmed(&rz.host_prefix)) &&
+                         last_register_sent.map(|x| x.elapsed().as_millis() as i64).unwrap_or(REG_INTERVAL) >= REG_INTERVAL {
+@@ -717,48 +777,63 @@ impl RendezvousMediator {
+             secure,
+         );
+ 
+-        let mut socket = connect_tcp(&*self.host, CONNECT_TIMEOUT).await?;
+-        // A relay response carrying an answer carries this machine's ICE candidates with it, so
+-        // that half goes out only on an encrypted channel. A server that does not complete the
+-        // exchange loses the answer, not the relay: the response goes without it, on a fresh
+-        // socket since the failed exchange may have consumed a message on this one, and the
+-        // controller falls back to its other transports.
+-        let mut webrtc_sdp_answer = webrtc_sdp_answer;
+-        if !webrtc_sdp_answer.is_empty() {
+-            let key = crate::get_key(true).await;
+-            if let Err(err) = crate::secure_tcp_required(&mut socket, &key).await {
+-                log::warn!("relaying without the WebRTC answer, it cannot be encrypted: {err}");
+-                webrtc_sdp_answer = String::new();
+-                socket = connect_tcp(&*self.host, CONNECT_TIMEOUT).await?;
++        let ipv4 = is_ipv4(&self.addr);
++        let respond = async {
++            let mut socket = connect_tcp(&*self.host, CONNECT_TIMEOUT).await?;
++            // A relay response carrying an answer carries this machine's ICE candidates with it, so
++            // that half goes out only on an encrypted channel. A server that does not complete the
++            // exchange loses the answer, not the relay: the response goes without it, on a fresh
++            // socket since the failed exchange may have consumed a message on this one, and the
++            // controller falls back to its other transports.
++            let mut webrtc_sdp_answer = webrtc_sdp_answer;
++            if !webrtc_sdp_answer.is_empty() {
++                let key = crate::get_key(true).await;
++                if let Err(err) = crate::secure_tcp_required(&mut socket, &key).await {
++                    log::warn!("relaying without the WebRTC answer, it cannot be encrypted: {err}");
++                    webrtc_sdp_answer = String::new();
++                    socket = connect_tcp(&*self.host, CONNECT_TIMEOUT).await?;
++                }
+             }
+-        }
+ 
+-        let mut msg_out = Message::new();
+-        let mut rr = RelayResponse {
+-            socket_addr: socket_addr.into(),
+-            version: crate::VERSION.to_owned(),
+-            socket_addr_v6,
+-            webrtc_sdp_answer,
+-            ..Default::default()
++            let mut msg_out = Message::new();
++            let mut rr = RelayResponse {
++                socket_addr: socket_addr.into(),
++                version: crate::VERSION.to_owned(),
++                socket_addr_v6,
++                webrtc_sdp_answer,
++                ..Default::default()
++            };
++            if initiate {
++                rr.uuid = uuid.clone();
++                rr.relay_server = relay_server.clone();
++                rr.set_id(Config::get_id());
++            }
++            msg_out.set_relay_response(rr);
++            socket.send(&msg_out).await?;
++            ResultType::Ok(())
+         };
+-        if initiate {
+-            rr.uuid = uuid.clone();
+-            rr.relay_server = relay_server.clone();
+-            rr.set_id(Config::get_id());
+-        }
+-        msg_out.set_relay_response(rr);
+-        socket.send(&msg_out).await?;
+-        crate::create_relay_connection(
++        let relay = crate::create_relay_connection(
+             server,
+-            relay_server,
+-            uuid,
++            relay_server.clone(),
++            uuid.clone(),
+             peer_addr,
+             secure,
+-            is_ipv4(&self.addr),
++            ipv4,
+             meta,
+-        )
+-        .await;
+-        Ok(())
++        );
++        // Tether: dial the relay while the answer travels back through hbbs, so this side is
++        // already waiting when the controller arrives (saves one TLS handshake on reconnect).
++        #[cfg(feature = "tauri")]
++        {
++            let (r, ()) = tokio::join!(respond, relay);
++            return r;
++        }
++        #[allow(unreachable_code)]
++        {
++            respond.await?;
++            relay.await;
++            Ok(())
++        }
+     }
+ 
+     async fn handle_intranet(&self, fla: FetchLocalAddr, server: ServerPtr) -> ResultType<()> {
+@@ -1737,6 +1812,17 @@ mod tests {
+     };
+     use hbb_common::protobuf::Message as _;
+ 
++    #[cfg(feature = "tauri")]
++    #[test]
++    fn lost_registration_is_retried_at_once_then_backs_off() {
++        use super::reregister_delay;
++        assert_eq!(reregister_delay(0), 0.);
++        // Within about a second a restarted hbbs has had four attempts.
++        assert!((1..=3).map(reregister_delay).sum::<f32>() <= 1.0);
++        assert!((1..20).all(|n| reregister_delay(n) <= reregister_delay(n + 1)));
++        assert_eq!(reregister_delay(100), 16.);
++    }
++
+     #[tokio::test]
+     async fn manual_restart_interrupts_retry_wait() {
+         const WAKE_TIMEOUT: Duration = Duration::from_secs(1);
 diff --git a/src/server.rs b/src/server.rs
-index 8e4c56c..995d6df 100644
+index 8e4c56c..d747022 100644
 --- a/src/server.rs
 +++ b/src/server.rs
 @@ -262,7 +262,15 @@ pub async fn create_tcp_connection(
@@ -244,6 +696,38 @@ index 8e4c56c..995d6df 100644
                      }
                  } else {
                      bail!("Handshake failed: invalid message format");
+@@ -407,11 +419,26 @@ async fn create_relay_connection_(
+     // The proxy's address family does not constrain the relay target.
+     let relay_server = crate::check_port(relay_server, RELAY_PORT);
+     let use_ws_proxy = Config::is_proxy() && is_ws_endpoint(&check_ws(&relay_server));
+-    let mut stream = socket_client::connect_tcp(
+-        socket_client::ipv4_to_ipv6(relay_server, ipv4 || use_ws_proxy),
+-        CONNECT_TIMEOUT,
+-    )
+-    .await?;
++    let target = socket_client::ipv4_to_ipv6(relay_server, ipv4 || use_ws_proxy);
++    // Tether: the relay may be restarting (the controller reconnects at once); retry briefly,
++    // the controller waits on its leg for a few seconds.
++    #[cfg(feature = "tauri")]
++    let mut stream = {
++        let mut tries = 0;
++        loop {
++            match socket_client::connect_tcp(target.clone(), CONNECT_TIMEOUT).await {
++                Ok(s) => break s,
++                Err(e) if tries < 4 => {
++                    tries += 1;
++                    log::info!("relay {target} not reachable ({e}), retry {tries}");
++                    hbb_common::sleep(0.3).await;
++                }
++                Err(e) => return Err(e),
++            }
++        }
++    };
++    #[cfg(not(feature = "tauri"))]
++    let mut stream = socket_client::connect_tcp(target, CONNECT_TIMEOUT).await?;
+     let mut msg_out = RendezvousMessage::new();
+     let licence_key = crate::get_key(true).await;
+     msg_out.set_request_relay(RequestRelay {
 diff --git a/src/server/connection.rs b/src/server/connection.rs
 index e9ea313..0a95160 100644
 --- a/src/server/connection.rs
@@ -522,10 +1006,10 @@ index 0000000..eaa6333
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..bd5e9a3
+index 0000000..4159cb4
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,356 @@
 +//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
 +//!
 +//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
@@ -773,6 +1257,11 @@ index 0000000..bd5e9a3
 +
 +    pub fn get_id() -> String {
 +        crate::ipc::get_id()
++    }
++
++    /// Re-register this host with the current rendezvous servers (the list changed).
++    pub fn restart_rendezvous() {
++        crate::rendezvous_mediator::RendezvousMediator::restart();
 +    }
 +
 +    pub fn set_permanent_password(pw: String) -> bool {
