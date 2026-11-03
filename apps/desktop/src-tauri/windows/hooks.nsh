@@ -11,8 +11,11 @@ Var TetherRelaunch
   nsExec::Exec 'sc.exe stop Tether'
   nsExec::ExecToStack `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$exe = '$INSTDIR\tether.exe'; $$s = Get-Service Tether -ErrorAction SilentlyContinue; if ($$s -and $$s.Status -ne 'Stopped') { try { $$s.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) } catch {} }; $$ui = 0; for ($$i = 0; $$i -lt 50; $$i++) { $$p = @(Get-CimInstance Win32_Process -Filter 'Name=''tether.exe''' | Where-Object { $$_.ExecutablePath -eq $$exe }); if ($$p.Count -eq 0) { break }; foreach ($$x in $$p) { if ($$x.CommandLine -match '\.exe.?\s*$$') { $$ui = 1 }; Stop-Process -Id $$x.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 200 }; Write-Output $$ui"`
   Pop $0
-  Pop $TetherRelaunch
-  StrCpy $TetherRelaunch $TetherRelaunch 1
+  Pop $1
+  ; Runs before the old uninstaller and again in PREINSTALL: only ever raise the relaunch flag.
+  StrCpy $1 $1 1
+  StrCmp $1 "1" 0 +2
+    StrCpy $TetherRelaunch "1"
 !macroend
 
 !macro NSIS_HOOK_PREINSTALL
