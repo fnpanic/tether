@@ -1,0 +1,1020 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 1002586..f46256d 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -26,6 +26,7 @@ use_samplerate = ["samplerate", "libsamplerate-sys"]
+ use_rubato = ["rubato"]
+ use_dasp = ["dasp"]
+ flutter = ["flutter_rust_bridge"]
++tauri = []
+ default = ["use_dasp"]
+ hwcodec = ["scrap/hwcodec"]
+ vram = ["scrap/vram"]
+diff --git a/libs/scrap/src/common/codec.rs b/libs/scrap/src/common/codec.rs
+index 606a4be..2510d2a 100644
+--- a/libs/scrap/src/common/codec.rs
++++ b/libs/scrap/src/common/codec.rs
+@@ -485,6 +485,13 @@ impl Decoder {
+                     0
+                 };
+         }
++        let external = EXTERNAL_DECODING.load(std::sync::atomic::Ordering::Relaxed);
++        if external & EXTERNAL_DECODING_H264 != 0 {
++            decoding.ability_h264 = 1;
++        }
++        if external & EXTERNAL_DECODING_H265 != 0 {
++            decoding.ability_h265 = 1;
++        }
+         for unsupported in mark_unsupported {
+             match unsupported {
+                 CodecFormat::VP8 => decoding.ability_vp8 = 0,
+@@ -1155,3 +1162,9 @@ pub fn test_av1() {
+         });
+     });
+ }
++
++/// Codecs decoded outside this process (e.g. by a webview's WebCodecs), advertised to the peer
++/// even when no native decoder exists.
++pub static EXTERNAL_DECODING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
++pub const EXTERNAL_DECODING_H264: u8 = 1;
++pub const EXTERNAL_DECODING_H265: u8 = 2;
+diff --git a/src/client.rs b/src/client.rs
+index 597dc86..6127224 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -5043,6 +5043,19 @@ pub async fn confirm_insecure_connection(
+     interface: &impl Interface,
+     receiver: &mut UnboundedReceiver<Data>,
+ ) -> bool {
++    // Tether never falls back to a connection without end-to-end encryption.
++    #[cfg(feature = "tauri")]
++    {
++        let _ = receiver;
++        interface.msgbox(
++            "error",
++            "Connection blocked",
++            "This connection could not be end-to-end encrypted, so it was refused. Check that both devices use the same server key.",
++            "",
++        );
++        return false;
++    }
++    #[allow(unreachable_code)]
+     interface.msgbox(
+         "insecure-connection-nocancel-hasclose",
+         "Insecure Connection",
+diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
+index 1b197a8..e36221b 100644
+--- a/src/client/io_loop.rs
++++ b/src/client/io_loop.rs
+@@ -1706,6 +1706,10 @@ impl<T: InvokeUiSession> Remote<T> {
+                     }
+                     self.video_format = CodecFormat::from(&vf);
+ 
++                    #[cfg(feature = "tauri")]
++                    if crate::ui::video_passthrough(&self.handler.ui_handler, &vf) {
++                        return true;
++                    }
+                     let display = vf.display as usize;
+                     if !self.video_threads.contains_key(&display) {
+                         self.new_video_thread(display);
+diff --git a/src/lib.rs b/src/lib.rs
+index f6e48a1..600a09e 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -26,9 +26,13 @@ pub mod ipc;
+ #[cfg(not(any(
+     target_os = "android",
+     target_os = "ios",
+-    feature = "flutter"
++    feature = "flutter",
++    feature = "tauri"
+ )))]
+ pub mod ui;
++#[cfg(all(feature = "tauri", not(any(target_os = "android", target_os = "ios"))))]
++#[path = "tauri_ui/mod.rs"]
++pub mod ui;
+ pub(crate) mod update_metadata;
+ pub(crate) mod update_hash;
+ #[cfg(target_os = "macos")]
+diff --git a/src/server.rs b/src/server.rs
+index 8e4c56c..995d6df 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -262,7 +262,15 @@ pub async fn create_tcp_connection(
+ /// Our signed identity goes out and, when `secure`, the controller's reply keys `stream`.
+ /// Separate so it can be raced against the connection's eviction.
+ async fn identity_handshake(stream: &mut Stream, secure: bool) -> ResultType<()> {
++    #[cfg(feature = "tauri")]
++    if !secure {
++        bail!("Handshake refused: unencrypted transport");
++    }
+     let (sk, pk) = Config::get_key_pair();
++    #[cfg(feature = "tauri")]
++    if pk.len() != sign::PUBLICKEYBYTES || sk.len() != sign::SECRETKEYBYTES {
++        bail!("Handshake refused: device key pair missing");
++    }
+     if secure && pk.len() == sign::PUBLICKEYBYTES && sk.len() == sign::SECRETKEYBYTES {
+         let mut sk_ = [0u8; sign::SECRETKEYBYTES];
+         sk_[..].copy_from_slice(&sk);
+@@ -334,11 +342,15 @@ async fn identity_handshake(stream: &mut Stream, secure: bool) -> ResultType<()>
+                         } else if pk.asymmetric_value.is_empty() {
+                             Config::set_key_confirmed(false);
+                             log::info!("Force to update pk");
++                            #[cfg(feature = "tauri")]
++                            bail!("Handshake refused: peer did not offer end-to-end encryption");
+                         } else {
+                             bail!("Handshake failed: invalid public sign key length from peer");
+                         }
+                     } else {
+                         log::error!("Handshake failed: invalid message type");
++                        #[cfg(feature = "tauri")]
++                        bail!("Handshake refused: no key exchange");
+                     }
+                 } else {
+                     bail!("Handshake failed: invalid message format");
+diff --git a/src/server/video_qos.rs b/src/server/video_qos.rs
+index 96ffa63..d40ba0d 100644
+--- a/src/server/video_qos.rs
++++ b/src/server/video_qos.rs
+@@ -48,7 +48,11 @@ delay:
+ */
+ 
+ // Constants
++#[cfg(not(feature = "tauri"))]
+ pub const FPS: u32 = 30;
++// FluxRT: 60 fps is the default ceiling; the delay-based controller lowers it on slow links.
++#[cfg(feature = "tauri")]
++pub const FPS: u32 = 60;
+ pub const MIN_FPS: u32 = 1;
+ pub const MAX_FPS: u32 = 120;
+ pub const INIT_FPS: u32 = 15;
+@@ -566,6 +570,15 @@ impl VideoQoS {
+             reduce_bitrate = bitrate_first
+                 && user.delay.needs_bitrate_reduction()
+                 && user.delay.replies_after_bitrate_reduction.is_none();
++            // FluxRT fast path: on a clean low-latency link go straight to the viewer's cap instead
++            // of ramping from INIT_FPS; any queue growth falls back to the controller above.
++            #[cfg(feature = "tauri")]
++            if !braked
++                && avg_delay < 50
++                && delay.saturating_sub(user.delay.rtt_calculator.get_rtt().unwrap_or(delay)) < 15
++            {
++                fps = user_cap;
++            }
+             fps = fps.clamp(MIN_FPS, user_cap);
+             // first network delay message
+             adjust_ratio = user.delay.fps.is_none();
+diff --git a/src/server/video_service.rs b/src/server/video_service.rs
+index a13aebb..ced9ac5 100644
+--- a/src/server/video_service.rs
++++ b/src/server/video_service.rs
+@@ -815,6 +815,7 @@ fn run(vs: VideoService) -> ResultType<()> {
+ 
+         let time = now - start;
+         let ms = (time.as_secs() * 1000 + time.subsec_millis() as u64) as i64;
++        let t_cap0 = time::Instant::now();
+         let res = match c.frame(spf) {
+             Ok(frame) => {
+                 repeat_encode_counter = 0;
+@@ -1007,6 +1008,8 @@ fn run(vs: VideoService) -> ResultType<()> {
+         }
+ 
+         let mut fetched_conn_ids = HashSet::new();
++        log::trace!("fluxrt_phase capture+encode={:?}", t_cap0.elapsed());
++        let t_wait0 = Instant::now();
+         let timeout_millis = 3_000u64;
+         let wait_begin = Instant::now();
+         while wait_begin.elapsed().as_millis() < timeout_millis as _ {
+@@ -1020,6 +1023,7 @@ fn run(vs: VideoService) -> ResultType<()> {
+             }
+         }
+         DISPLAY_CONN_IDS.lock().unwrap().remove(&display_idx);
++        log::trace!("fluxrt_phase fetch_wait={:?}", t_wait0.elapsed());
+ 
+         let elapsed = now.elapsed();
+         // may need to enable frame(timeout)
+diff --git a/src/tauri_ui/cm.rs b/src/tauri_ui/cm.rs
+new file mode 100644
+index 0000000..9c89448
+--- /dev/null
++++ b/src/tauri_ui/cm.rs
+@@ -0,0 +1,60 @@
++//! Host-side connection manager: incoming connection requests, permissions, chat.
++
++use serde_json::{json, Value};
++
++use crate::ui_cm_interface::{start_ipc, Client, ConnectionManager, InvokeUiCM};
++
++#[derive(Clone, Default)]
++pub struct TauriCmHandler;
++
++fn emit(name: &str, payload: Value) {
++    if let Some(s) = super::sink() {
++        s.cm_event(name, payload);
++    }
++}
++
++impl InvokeUiCM for TauriCmHandler {
++    fn add_connection(&self, client: &Client) {
++        emit("add_connection", serde_json::to_value(client).unwrap_or(Value::Null));
++    }
++
++    fn remove_connection(&self, id: i32, close: bool) {
++        emit("remove_connection", json!({ "id": id, "close": close }));
++    }
++
++    fn new_message(&self, id: i32, text: String) {
++        emit("chat", json!({ "id": id, "text": text }));
++    }
++
++    fn change_theme(&self, dark: String) {
++        emit("theme", json!({ "dark": dark }));
++    }
++
++    fn change_language(&self) {}
++
++    fn show_elevation(&self, show: bool) {
++        emit("elevation", json!({ "show": show }));
++    }
++
++    fn update_voice_call_state(&self, client: &Client) {
++        emit("voice_call", serde_json::to_value(client).unwrap_or(Value::Null));
++    }
++
++    fn file_transfer_log(&self, action: &str, log: &str) {
++        emit("file_log", json!({ "action": action, "log": log }));
++    }
++}
++
++/// Start listening for connections from the local `--server` process. Call once in `--cm` mode.
++pub fn start() {
++    #[cfg(target_os = "linux")]
++    std::thread::spawn(crate::ipc::start_pa);
++    let cm = ConnectionManager {
++        ui_handler: TauriCmHandler,
++    };
++    std::thread::spawn(move || start_ipc(cm));
++}
++
++pub use crate::ui_cm_interface::{
++    authorize, close, send_chat, switch_permission,
++};
+diff --git a/src/tauri_ui/files.rs b/src/tauri_ui/files.rs
+new file mode 100644
+index 0000000..eaa6333
+--- /dev/null
++++ b/src/tauri_ui/files.rs
+@@ -0,0 +1,68 @@
++//! File transfer wrappers (the `FileManager` trait lives in the crate-private client module).
++
++use serde_json::{json, Value};
++
++use super::TauriSession;
++use crate::client::file_trait::FileManager;
++
++pub fn home_dir() -> String {
++    base::fs::get_home_as_string()
++}
++
++pub fn read_local_dir(path: &str, hidden: bool) -> Result<Value, String> {
++    let fd = base::fs::read_dir(&base::fs::get_path(path), hidden).map_err(|e| e.to_string())?;
++    let entries: Vec<Value> = fd
++        .entries
++        .iter()
++        .map(|e| {
++            json!({
++                "name": e.name, "type": e.entry_type.value(), "is_hidden": e.is_hidden,
++                "size": e.size, "modified": e.modified_time,
++            })
++        })
++        .collect();
++    Ok(json!({ "path": fd.path, "entries": entries }))
++}
++
++pub fn read_remote_dir(s: &TauriSession, path: String, hidden: bool) {
++    s.read_remote_dir(path, hidden);
++}
++
++pub fn send_files(
++    s: &TauriSession,
++    id: i32,
++    path: String,
++    to: String,
++    file_num: i32,
++    hidden: bool,
++    is_remote: bool,
++) {
++    s.send_files(id, 0, path, to, file_num, hidden, is_remote);
++}
++
++pub fn cancel_job(s: &TauriSession, id: i32) {
++    s.cancel_job(id);
++}
++
++pub fn create_dir(s: &TauriSession, id: i32, path: String, is_remote: bool) {
++    s.create_dir(id, path, is_remote);
++}
++
++pub fn remove(s: &TauriSession, id: i32, path: String, is_remote: bool, is_dir: bool) {
++    if is_dir {
++        s.remove_dir_all(id, path, is_remote, true);
++    } else {
++        s.remove_file(id, path, 0, is_remote);
++    }
++}
++
++pub fn confirm_override(
++    s: &TauriSession,
++    id: i32,
++    file_num: i32,
++    need_override: bool,
++    remember: bool,
++    is_upload: bool,
++) {
++    s.set_confirm_override_file(id, file_num, need_override, remember, is_upload);
++}
+diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
+new file mode 100644
+index 0000000..80a3b39
+--- /dev/null
++++ b/src/tauri_ui/mod.rs
+@@ -0,0 +1,307 @@
++//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
++//!
++//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
++//! connection manager and the video path is forwarded to it as JSON events or binary frames.
++
++pub mod cm;
++pub mod files;
++pub mod remote;
++
++use std::{
++    collections::HashMap,
++    sync::{atomic::Ordering, Arc, Mutex, RwLock},
++};
++
++use base::message_proto::*;
++use hbb_common::{log, rendezvous_proto::ConnType};
++use serde_json::{json, Value};
++
++use crate::{
++    client::{Interface, QualityStatus},
++    ui_session_interface::{InvokeUiSession, Session},
++};
++
++pub use remote::TauriHandler;
++pub type TauriSession = Session<TauriHandler>;
++
++lazy_static::lazy_static! {
++    /// Session receiving raw keyboard grabs (read by `keyboard.rs`).
++    pub static ref CUR_SESSION: Arc<Mutex<Option<Session<TauriHandler>>>> = Default::default();
++    static ref SINK: RwLock<Option<Arc<dyn UiSink>>> = RwLock::new(None);
++    static ref SESSIONS: RwLock<HashMap<String, Session<TauriHandler>>> = Default::default();
++}
++
++/// Implemented by the embedding app (Tauri) to receive everything the core wants to show.
++pub trait UiSink: Send + Sync + 'static {
++    /// A JSON event for a remote session window, keyed by the app's session key.
++    fn session_event(&self, session: &str, name: &str, payload: Value);
++    /// One binary video packet, see [`encode_video_header`] for the layout.
++    fn video(&self, session: &str, packet: Vec<u8>);
++    /// Incoming-connection manager event (host side).
++    fn cm_event(&self, name: &str, payload: Value);
++}
++
++pub fn set_sink(sink: Arc<dyn UiSink>) {
++    *SINK.write().unwrap() = Some(sink);
++}
++
++pub(crate) fn sink() -> Option<Arc<dyn UiSink>> {
++    SINK.read().unwrap().clone()
++}
++
++// ---------------------------------------------------------------------------------------------
++// Video packets
++// ---------------------------------------------------------------------------------------------
++
++/// Packet kinds.
++pub const PKT_ENCODED: u8 = 0;
++pub const PKT_RGBA: u8 = 1;
++/// Codec ids inside an encoded packet.
++pub const CODEC_VP8: u8 = 1;
++pub const CODEC_VP9: u8 = 2;
++pub const CODEC_AV1: u8 = 3;
++pub const CODEC_H264: u8 = 4;
++pub const CODEC_H265: u8 = 5;
++pub const HEADER_LEN: usize = 16;
++
++/// 16-byte little-endian header followed by the payload:
++/// `kind u8 | codec u8 | flags u8 (bit0 key, bit1 bgra) | display u8 | w u32 | h u32 | pts u32`.
++pub fn encode_video_header(
++    kind: u8,
++    codec: u8,
++    flags: u8,
++    display: usize,
++    w: u32,
++    h: u32,
++    pts: i64,
++    payload_len: usize,
++) -> Vec<u8> {
++    let mut v = Vec::with_capacity(HEADER_LEN + payload_len);
++    v.push(kind);
++    v.push(codec);
++    v.push(flags);
++    v.push(display.min(255) as u8);
++    v.extend_from_slice(&w.to_le_bytes());
++    v.extend_from_slice(&h.to_le_bytes());
++    v.extend_from_slice(&(pts as u32).to_le_bytes());
++    v
++}
++
++fn codec_bit(codec: u8) -> u8 {
++    1 << codec
++}
++
++/// Called from the client io loop for every received video frame. Returns `true` when the
++/// frame was forwarded to the webview decoder and must not be decoded natively.
++pub fn video_passthrough<T: InvokeUiSession>(handler: &T, vf: &VideoFrame) -> bool {
++    let Some(h) = (handler as &dyn std::any::Any).downcast_ref::<TauriHandler>() else {
++        return false;
++    };
++    let (codec, frames) = match &vf.union {
++        Some(video_frame::Union::Vp8s(f)) => (CODEC_VP8, f),
++        Some(video_frame::Union::Vp9s(f)) => (CODEC_VP9, f),
++        Some(video_frame::Union::Av1s(f)) => (CODEC_AV1, f),
++        Some(video_frame::Union::H264s(f)) => (CODEC_H264, f),
++        Some(video_frame::Union::H265s(f)) => (CODEC_H265, f),
++        _ => return false,
++    };
++    if h.passthrough.load(Ordering::Relaxed) & codec_bit(codec) == 0 {
++        return false;
++    }
++    let Some(sink) = sink() else { return false };
++    let key = h.key();
++    for f in frames.frames.iter() {
++        let mut pkt = encode_video_header(
++            PKT_ENCODED,
++            codec,
++            f.key as u8,
++            vf.display as usize,
++            0,
++            0,
++            f.pts,
++            f.data.len(),
++        );
++        pkt.extend_from_slice(&f.data);
++        sink.video(&key, pkt);
++    }
++    true
++}
++
++// ---------------------------------------------------------------------------------------------
++// Sessions (viewer side)
++// ---------------------------------------------------------------------------------------------
++
++pub fn session_start(key: &str, peer_id: &str, password: &str, conn_type: &str, force_relay: bool) {
++    let session = remote::new_session(key, peer_id, password, conn_type, force_relay);
++    SESSIONS
++        .write()
++        .unwrap()
++        .insert(key.to_owned(), session.clone());
++    session.reconnect(force_relay);
++}
++
++pub fn session(key: &str) -> Option<Session<TauriHandler>> {
++    SESSIONS.read().unwrap().get(key).cloned()
++}
++
++pub fn session_close(key: &str) {
++    if let Some(s) = SESSIONS.write().unwrap().remove(key) {
++        s.close();
++        let mut cur = CUR_SESSION.lock().unwrap();
++        if cur.as_ref().map(|c| c.ui_handler.key() == key).unwrap_or(false) {
++            *cur = None;
++        }
++    }
++}
++
++/// Mark the session as the one receiving keyboard focus.
++pub fn session_focus(key: &str) {
++    *CUR_SESSION.lock().unwrap() = session(key);
++}
++
++/// Formats (`vp8`,`vp9`,`av1`,`h264`,`h265`) the webview can decode with WebCodecs.
++pub fn session_set_webcodecs(key: &str, formats: &[String]) {
++    let mut mask = 0u8;
++    let mut external = 0u8;
++    for f in formats {
++        match f.as_str() {
++            "vp8" => mask |= codec_bit(CODEC_VP8),
++            "vp9" => mask |= codec_bit(CODEC_VP9),
++            "av1" => mask |= codec_bit(CODEC_AV1),
++            "h264" => {
++                mask |= codec_bit(CODEC_H264);
++                external |= scrap::codec::EXTERNAL_DECODING_H264;
++            }
++            "h265" => {
++                mask |= codec_bit(CODEC_H265);
++                external |= scrap::codec::EXTERNAL_DECODING_H265;
++            }
++            _ => {}
++        }
++    }
++    scrap::codec::EXTERNAL_DECODING.store(external, Ordering::Relaxed);
++    if let Some(s) = session(key) {
++        s.ui_handler.passthrough.store(mask, Ordering::Relaxed);
++        s.send(crate::client::Data::Message(
++            s.lc.read().unwrap().update_supported_decodings(),
++        ));
++    }
++}
++
++/// The webview failed to decode `format`: decode it natively from now on and ask for a key frame.
++pub fn session_webcodecs_failed(key: &str, codec: u8, display: i32) {
++    if let Some(s) = session(key) {
++        s.ui_handler
++            .passthrough
++            .fetch_and(!codec_bit(codec), Ordering::Relaxed);
++        log::warn!("webcodecs failed for codec {codec}, falling back to native decoding");
++        s.refresh_video(display);
++    }
++}
++
++// ---------------------------------------------------------------------------------------------
++// Main window helpers (thin re-exports of the crate-private ui_interface)
++// ---------------------------------------------------------------------------------------------
++
++pub mod api {
++    pub use crate::ui_interface::{
++        generate2fa, get_async_job_status, get_connect_status, get_option, get_options,
++        has_valid_2fa, verify2fa,
++        get_local_option, set_local_option, is_installed, set_option, temporary_password,
++        update_temporary_password, UiStatus,
++    };
++
++    /// Starts the background thread that mirrors server status/options into this UI process.
++    pub fn start_status_sync() {
++        crate::ui_interface::start_option_status_sync();
++    }
++
++    pub fn disable_2fa() {
++        crate::ui_interface::set_option("2fa".to_owned(), String::new());
++    }
++
++    pub fn get_id() -> String {
++        crate::ipc::get_id()
++    }
++
++    pub fn set_permanent_password(pw: String) -> bool {
++        crate::ui_interface::set_permanent_password_with_result(pw)
++    }
++
++    pub fn get_peer_name(id: &str) -> String {
++        let c = crate::ui_interface::get_peer(id.to_owned());
++        if !c.info.hostname.is_empty() {
++            c.info.hostname
++        } else {
++            c.info.username
++        }
++    }
++
++    /// Recent peers, newest first: `(id, hostname, username, platform)`.
++    pub fn recent_peers(limit: usize) -> Vec<serde_json::Value> {
++        hbb_common::config::PeerConfig::peers(None)
++            .into_iter()
++            .take(limit)
++            .map(|(id, _, p)| {
++                serde_json::json!({
++                    "id": id,
++                    "hostname": p.info.hostname,
++                    "username": p.info.username,
++                    "platform": p.info.platform,
++                })
++            })
++            .collect()
++    }
++
++    pub fn remove_peer(id: &str) {
++        hbb_common::config::PeerConfig::remove(id);
++    }
++
++    pub fn install_service() {
++        crate::ui_interface::install_me(
++            "desktopicon startmenu".to_owned(),
++            crate::ui_interface::install_path(),
++            false,
++            false,
++        );
++    }
++
++    pub fn app_name() -> String {
++        crate::get_app_name()
++    }
++
++    pub fn version() -> String {
++        crate::VERSION.to_owned()
++    }
++}
++
++// ---------------------------------------------------------------------------------------------
++// Sciter-module shims required by shared non-flutter code
++// ---------------------------------------------------------------------------------------------
++
++pub(crate) fn emit(key: &str, name: &str, payload: Value) {
++    if let Some(s) = sink() {
++        s.session_event(key, name, payload);
++    }
++}
++
++pub(crate) fn quality_json(qs: &QualityStatus) -> Value {
++    json!({
++        "speed": qs.speed,
++        "fps": qs.fps,
++        "delay": qs.delay,
++        "target_bitrate": qs.target_bitrate,
++        "codec": qs.codec_format.map(|c| c.to_string()),
++        "chroma": qs.chroma,
++    })
++}
++
++pub(crate) fn conn_type_from_str(s: &str) -> ConnType {
++    match s {
++        "file-transfer" => ConnType::FILE_TRANSFER,
++        "view-camera" => ConnType::VIEW_CAMERA,
++        "port-forward" => ConnType::PORT_FORWARD,
++        "terminal" => ConnType::TERMINAL,
++        _ => ConnType::DEFAULT_CONN,
++    }
++}
+diff --git a/src/tauri_ui/remote.rs b/src/tauri_ui/remote.rs
+new file mode 100644
+index 0000000..01b0f4d
+--- /dev/null
++++ b/src/tauri_ui/remote.rs
+@@ -0,0 +1,366 @@
++use std::sync::{
++    atomic::{AtomicU8, AtomicUsize},
++    Arc, RwLock,
++};
++
++use base::message_proto::*;
++use hbb_common::{protobuf::Enum, rendezvous_proto::ConnType};
++use serde_json::{json, Value};
++
++use super::{emit, encode_video_header, quality_json, sink, PKT_RGBA};
++use crate::{
++    client::QualityStatus,
++    ui_session_interface::{InvokeUiSession, Session},
++};
++
++#[derive(Clone, Default)]
++pub struct TauriHandler {
++    key: Arc<RwLock<String>>,
++    /// Bitmask of codec ids decoded by the webview (see `super::CODEC_*`).
++    pub passthrough: Arc<AtomicU8>,
++}
++
++impl TauriHandler {
++    pub fn key(&self) -> String {
++        self.key.read().unwrap().clone()
++    }
++
++    fn emit(&self, name: &str, payload: Value) {
++        emit(&self.key(), name, payload);
++    }
++}
++
++pub(super) fn new_session(
++    key: &str,
++    peer_id: &str,
++    password: &str,
++    conn_type: &str,
++    force_relay: bool,
++) -> Session<TauriHandler> {
++    let handler = TauriHandler::default();
++    *handler.key.write().unwrap() = key.to_owned();
++    let session: Session<TauriHandler> = Session {
++        password: password.to_owned(),
++        server_keyboard_enabled: Arc::new(RwLock::new(true)),
++        server_file_transfer_enabled: Arc::new(RwLock::new(true)),
++        server_clipboard_enabled: Arc::new(RwLock::new(true)),
++        reconnect_count: Arc::new(AtomicUsize::new(0)),
++        ui_handler: handler,
++        ..Default::default()
++    };
++    session.lc.write().unwrap().initialize(
++        peer_id.to_owned(),
++        super::conn_type_from_str(conn_type),
++        None,
++        force_relay,
++        None,
++        None,
++        None,
++    );
++    session
++}
++
++fn displays_json(displays: &[DisplayInfo]) -> Value {
++    Value::Array(
++        displays
++            .iter()
++            .map(|d| {
++                json!({
++                    "x": d.x, "y": d.y, "width": d.width, "height": d.height,
++                    "name": d.name, "online": d.online,
++                    "cursor_embedded": d.cursor_embedded, "scale": d.scale,
++                })
++            })
++            .collect(),
++    )
++}
++
++fn entries_json(entries: &[FileEntry]) -> Value {
++    Value::Array(
++        entries
++            .iter()
++            .map(|e| {
++                json!({
++                    "name": e.name,
++                    "type": e.entry_type.value(),
++                    "is_hidden": e.is_hidden,
++                    "size": e.size,
++                    "modified": e.modified_time,
++                })
++            })
++            .collect(),
++    )
++}
++
++impl InvokeUiSession for TauriHandler {
++    fn set_cursor_data(&self, cd: CursorData) {
++        let colors: Vec<u8> = cd.colors.into();
++        let mut png = Vec::new();
++        if repng::encode(&mut png, cd.width as _, cd.height as _, &colors).is_ok() {
++            use hbb_common::base64::{engine::general_purpose::STANDARD, Engine};
++            self.emit(
++                "cursor_data",
++                json!({
++                    "id": cd.id.to_string(), "hotx": cd.hotx, "hoty": cd.hoty,
++                    "width": cd.width, "height": cd.height,
++                    "png": STANDARD.encode(&png),
++                }),
++            );
++        }
++    }
++
++    fn set_cursor_id(&self, id: String) {
++        self.emit("cursor_id", json!({ "id": id }));
++    }
++
++    fn set_cursor_position(&self, cp: CursorPosition) {
++        self.emit("cursor_position", json!({ "x": cp.x, "y": cp.y }));
++    }
++
++    fn set_display(&self, x: i32, y: i32, w: i32, h: i32, cursor_embedded: bool, scale: f64) {
++        self.emit(
++            "display",
++            json!({ "x": x, "y": y, "width": w, "height": h,
++                    "cursor_embedded": cursor_embedded, "scale": scale }),
++        );
++    }
++
++    fn switch_display(&self, d: &SwitchDisplay) {
++        self.emit(
++            "switch_display",
++            json!({ "display": d.display, "x": d.x, "y": d.y, "width": d.width,
++                    "height": d.height, "cursor_embedded": d.cursor_embedded }),
++        );
++    }
++
++    fn set_peer_info(&self, pi: &PeerInfo) {
++        self.emit(
++            "peer_info",
++            json!({
++                "username": pi.username, "hostname": pi.hostname, "platform": pi.platform,
++                "version": pi.version, "sas_enabled": pi.sas_enabled,
++                "current_display": pi.current_display,
++                "displays": displays_json(&pi.displays),
++            }),
++        );
++    }
++
++    fn set_displays(&self, displays: &Vec<DisplayInfo>) {
++        self.emit("displays", json!({ "displays": displays_json(displays) }));
++    }
++
++    fn set_platform_additions(&self, data: &str) {
++        self.emit("platform_additions", json!({ "data": data }));
++    }
++
++    fn on_connected(&self, conn_type: ConnType) {
++        self.emit("connected", json!({ "conn_type": conn_type.value() }));
++    }
++
++    fn update_privacy_mode(&self) {
++        self.emit("privacy_mode", json!({}));
++    }
++
++    fn set_permission(&self, name: &str, value: bool) {
++        self.emit("permission", json!({ "name": name, "value": value }));
++    }
++
++    fn close_success(&self) {
++        self.emit("close_success", json!({}));
++    }
++
++    fn update_quality_status(&self, qs: QualityStatus) {
++        self.emit("quality", quality_json(&qs));
++    }
++
++    fn set_connection_type(&self, is_secured: bool, direct: bool, stream_type: &str) {
++        self.emit(
++            "connection_type",
++            json!({ "secured": is_secured, "direct": direct, "stream_type": stream_type }),
++        );
++    }
++
++    fn set_fingerprint(&self, fingerprint: String) {
++        self.emit("fingerprint", json!({ "fingerprint": fingerprint }));
++    }
++
++    fn job_error(&self, id: i32, err: String, file_num: i32) {
++        self.emit("job_error", json!({ "id": id, "err": err, "file_num": file_num }));
++    }
++
++    fn job_done(&self, id: i32, file_num: i32) {
++        self.emit("job_done", json!({ "id": id, "file_num": file_num }));
++    }
++
++    fn clear_all_jobs(&self) {
++        self.emit("clear_jobs", json!({}));
++    }
++
++    fn new_message(&self, msg: String) {
++        self.emit("chat", json!({ "text": msg }));
++    }
++
++    fn update_transfer_list(&self) {
++        self.emit("transfer_list", json!({}));
++    }
++
++    fn load_last_job(&self, _cnt: i32, _job_json: &str, _auto_start: bool) {}
++
++    fn update_folder_files(
++        &self,
++        id: i32,
++        entries: &Vec<FileEntry>,
++        path: String,
++        is_local: bool,
++        only_count: bool,
++    ) {
++        let total: u64 = entries.iter().map(|e| e.size).sum();
++        self.emit(
++            "folder_files",
++            json!({
++                "id": id, "path": path, "is_local": is_local, "only_count": only_count,
++                "num_entries": entries.len(), "total_size": total,
++                "entries": if only_count { Value::Null } else { entries_json(entries) },
++            }),
++        );
++    }
++
++    fn confirm_delete_files(&self, id: i32, i: i32, name: String) {
++        self.emit("confirm_delete", json!({ "id": id, "file_num": i, "name": name }));
++    }
++
++    fn override_file_confirm(
++        &self,
++        id: i32,
++        file_num: i32,
++        to: String,
++        is_upload: bool,
++        is_identical: bool,
++    ) {
++        self.emit(
++            "override_file",
++            json!({ "id": id, "file_num": file_num, "to": to,
++                    "is_upload": is_upload, "is_identical": is_identical }),
++        );
++    }
++
++    fn update_block_input_state(&self, on: bool) {
++        self.emit("block_input", json!({ "on": on }));
++    }
++
++    fn job_progress(&self, id: i32, file_num: i32, speed: f64, finished_size: f64) {
++        self.emit(
++            "job_progress",
++            json!({ "id": id, "file_num": file_num, "speed": speed, "finished_size": finished_size }),
++        );
++    }
++
++    fn adapt_size(&self) {}
++
++    fn on_rgba(&self, display: usize, rgba: &mut scrap::ImageRgb) {
++        // Native-decode fallback path: ship the decoded picture to the webview.
++        let Some(sink) = sink() else { return };
++        let bgra = matches!(rgba.fmt, scrap::ImageFormat::ARGB);
++        let mut pkt = encode_video_header(
++            PKT_RGBA,
++            0,
++            if bgra { 2 } else { 0 },
++            display,
++            rgba.w as u32,
++            rgba.h as u32,
++            0,
++            rgba.raw.len(),
++        );
++        pkt.extend_from_slice(&rgba.raw);
++        sink.video(&self.key(), pkt);
++    }
++
++    fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str, retry: bool) {
++        self.emit(
++            "msgbox",
++            json!({ "type": msgtype, "title": title, "text": text, "link": link, "retry": retry }),
++        );
++    }
++
++    fn cancel_msgbox(&self, tag: &str) {
++        self.emit("cancel_msgbox", json!({ "tag": tag }));
++    }
++
++    fn switch_back(&self, id: &str) {
++        self.emit("switch_back", json!({ "id": id }));
++    }
++
++    fn portable_service_running(&self, running: bool) {
++        self.emit("portable_service", json!({ "running": running }));
++    }
++
++    fn on_voice_call_started(&self) {
++        self.emit("voice_call", json!({ "state": "started" }));
++    }
++
++    fn on_voice_call_closed(&self, reason: &str) {
++        self.emit("voice_call", json!({ "state": "closed", "reason": reason }));
++    }
++
++    fn on_voice_call_waiting(&self) {
++        self.emit("voice_call", json!({ "state": "waiting" }));
++    }
++
++    fn on_voice_call_incoming(&self) {
++        self.emit("voice_call", json!({ "state": "incoming" }));
++    }
++
++    fn get_rgba(&self, _display: usize) -> *const u8 {
++        std::ptr::null()
++    }
++
++    fn next_rgba(&self, _display: usize) {}
++
++    fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>) {
++        let list: Vec<Value> = sessions
++            .iter()
++            .map(|s| json!({ "sid": s.sid, "name": s.name }))
++            .collect();
++        self.emit("windows_sessions", json!({ "sessions": list }));
++    }
++
++    fn set_current_display(&self, disp_idx: i32) {
++        self.emit("current_display", json!({ "display": disp_idx }));
++    }
++
++    fn update_record_status(&self, start: bool) {
++        self.emit("record_status", json!({ "start": start }));
++    }
++
++    fn printer_request(&self, _id: i32, _path: String) {}
++
++    fn handle_screenshot_resp(&self, _sid: String, _msg: String) {}
++
++    fn handle_terminal_response(&self, _response: TerminalResponse) {}
++}
++
++/// Used by `client/file_trait.rs` on non-flutter builds.
++pub fn make_fd(id: i32, entries: &Vec<FileEntry>, only_count: bool) -> sciter::Value {
++    let mut m = sciter::Value::map();
++    m.set_item("id", id);
++    let mut n: u64 = 0;
++    let mut a = sciter::Value::array(0);
++    for entry in entries {
++        n += entry.size;
++        if only_count {
++            continue;
++        }
++        let mut e = sciter::Value::map();
++        e.set_item("name", entry.name.to_owned());
++        e.set_item("type", entry.entry_type.value());
++        e.set_item("time", entry.modified_time as f64);
++        e.set_item("size", entry.size as f64);
++        a.push(e);
++    }
++    if !only_count {
++        m.set_item("entries", a);
++    }
++    m.set_item("num_entries", entries.len() as i32);
++    m.set_item("total_size", n as f64);
++    m
++}

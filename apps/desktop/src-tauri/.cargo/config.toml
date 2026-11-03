@@ -1,0 +1,12 @@
+# Static CRT on Windows: vcpkg's x64-windows-static libs (ffmpeg, libvpx, aom) are built /MT.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-Ctarget-feature=+crt-static"]
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-Ctarget-feature=+crt-static"]
+
+# Lets the macOS agent run at the login window (pre-login launch agent section).
+[target.'cfg(target_os="macos")']
+rustflags = ["-C", "link-args=-sectcreate __CGPreLoginApp __cgpreloginapp /dev/null"]
+
+[net]
+git-fetch-with-cli = true

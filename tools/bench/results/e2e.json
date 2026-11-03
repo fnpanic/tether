@@ -1,0 +1,53 @@
+{
+  "started": "2026-11-03T00:11:57.376Z",
+  "tests": [
+    {
+      "name": "host registers with relay (pinned key)",
+      "ok": true,
+      "id": "385951235"
+    },
+    {
+      "name": "password login + first frame",
+      "ok": true,
+      "ms_to_first_frame": 3
+    },
+    {
+      "name": "mouse click reaches host",
+      "ok": true,
+      "latency_ms": 24
+    },
+    {
+      "name": "keyboard reaches host",
+      "ok": true,
+      "typed": "tether",
+      "latency_ms": {
+        "n": 6,
+        "median": 3,
+        "p95": 13,
+        "min": 3,
+        "max": 13
+      }
+    },
+    {
+      "name": "input latency (viewer → host event)",
+      "ok": true,
+      "pointer_move_ms": {
+        "n": 40,
+        "median": 12,
+        "p95": 19,
+        "min": 3,
+        "max": 24
+      }
+    },
+    {
+      "name": "file transfer 64 MB, SHA-256 verified",
+      "ok": true,
+      "seconds": 3.96,
+      "MBps": 16.2
+    },
+    {
+      "name": "session reports end-to-end encryption",
+      "ok": true
+    }
+  ]
+}

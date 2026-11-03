@@ -1,0 +1,76 @@
+<!doctype html>
+<!--
+  Tether bench probe. Runs on the HOST screen.
+  - Draws Date.now() every frame as a barcode: [red] 32 data bits + 8 checksum bits [green].
+    glass2glass.py finds the live copy and the copy inside a remote viewer in the same screenshot.
+  - Records key/pointer events with their arrival time (window.__events) for input-latency tests.
+  - ?mode=scroll adds continuously scrolling text (busy desktop workload).
+-->
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Tether probe</title>
+<style>
+  html, body { margin: 0; background: #fff; overflow: hidden; font: 15px/1.5 -apple-system, "Segoe UI", sans-serif; color: #1d1d1f; }
+  canvas { display: block; }
+  #log { position: absolute; left: 12px; top: 92px; font: 12px ui-monospace, Consolas, monospace; color: #555; }
+  #scroll { position: absolute; left: 0; right: 0; top: 130px; bottom: 0; overflow: hidden; padding: 0 24px; display: none; }
+  #scroll p { margin: 0 0 10px; }
+</style>
+</head>
+<body>
+<canvas id="c" width="860" height="80"></canvas>
+<div id="log">waiting for input…</div>
+<div id="scroll"></div>
+<script>
+  const CELL = 20, H = 64, PAD = 8, BITS = 40;
+  const c = document.getElementById("c"), g = c.getContext("2d", { alpha: false });
+  const log = document.getElementById("log");
+  window.__events = [];
+
+  function encode(ms) {
+    const v = ms >>> 0; // low 32 bits of epoch ms
+    const bytes = [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+    const sum = (bytes[0] + bytes[1] + bytes[2] + bytes[3] + 0x5a) & 255;
+    const bits = [];
+    for (let i = 31; i >= 0; i--) bits.push((v >>> i) & 1);
+    for (let i = 7; i >= 0; i--) bits.push((sum >>> i) & 1);
+    return bits;
+  }
+
+  function draw() {
+    const bits = encode(Date.now());
+    g.fillStyle = "#808080"; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = "#ff0000"; g.fillRect(PAD, PAD, CELL, H);
+    bits.forEach((b, i) => { g.fillStyle = b ? "#000" : "#fff"; g.fillRect(PAD + CELL * (i + 1), PAD, CELL, H); });
+    g.fillStyle = "#00ff00"; g.fillRect(PAD + CELL * (BITS + 1), PAD, CELL, H);
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+
+  const rec = (type) => (e) => {
+    const ev = { type, t: Date.now(), key: e.key, code: e.code, x: e.screenX, y: e.screenY, button: e.button };
+    window.__events.push(ev);
+    log.textContent = `${ev.type} ${ev.code || ""}${ev.key ? " '" + ev.key + "'" : ""} @ ${ev.t}`;
+  };
+  addEventListener("keydown", rec("keydown"), true);
+  addEventListener("keyup", rec("keyup"), true);
+  addEventListener("pointerdown", rec("pointerdown"), true);
+  addEventListener("pointermove", rec("pointermove"), true);
+
+  if (new URLSearchParams(location.search).get("mode") === "scroll") {
+    const s = document.getElementById("scroll");
+    s.style.display = "block";
+    const words = "remote desktop latency frame encoder decoder relay network packet pixel cursor keyboard window screen motion text sharp scroll".split(" ");
+    let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 0; i < 400; i++) {
+      const p = document.createElement("p");
+      p.textContent = Array.from({ length: 24 }, () => words[Math.floor(rnd() * words.length)]).join(" ");
+      s.appendChild(p);
+    }
+    let y = 0;
+    (function tick() { y = (y + 3) % (s.scrollHeight - s.clientHeight); s.scrollTop = y; requestAnimationFrame(tick); })();
+  }
+</script>
+</body>
+</html>

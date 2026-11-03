@@ -1,0 +1,21 @@
+# Tether relay. Host networking keeps UDP hole punching and real client IPs intact.
+#   RELAY_HOST=relay.example.com docker compose up -d
+#   docker compose exec hbbs cat /data/id_ed25519.pub   # -> build clients with TETHER_PUB_KEY
+services:
+  hbbs:
+    build: { context: .., dockerfile: server/Dockerfile }
+    image: tether-server
+    container_name: tether-hbbs
+    command: hbbs -r ${RELAY_HOST:?set RELAY_HOST to this server's public DNS name or IP} -k _
+    network_mode: host
+    volumes: [ "./data:/data" ]
+    restart: unless-stopped
+    depends_on: [ hbbr ]
+
+  hbbr:
+    image: tether-server
+    container_name: tether-hbbr
+    command: hbbr -k _
+    network_mode: host
+    volumes: [ "./data:/data" ]
+    restart: unless-stopped

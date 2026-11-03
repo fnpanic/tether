@@ -1,0 +1,22 @@
+[Unit]
+Description=Tether relay server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tether
+Group=tether
+WorkingDirectory=/var/lib/tether
+ExecStart=/usr/local/bin/hbbr -k _
+Restart=always
+RestartSec=3
+LimitNOFILE=1000000
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tether
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

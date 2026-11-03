@@ -1,0 +1,25 @@
+name: server
+on:
+  push: { branches: [main], paths: [server/**, scripts/**, .github/workflows/server.yml] }
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: scripts/bootstrap.sh
+      - name: Build hbbs/hbbr
+        working-directory: vendor/rustdesk-server
+        run: cargo build --release --bin hbbs --bin hbbr
+      - name: Package
+        run: |
+          mkdir -p dist/tether-server/bin
+          cp vendor/rustdesk-server/target/release/{hbbs,hbbr} dist/tether-server/bin/
+          cp -r server/systemd server/install.sh dist/tether-server/
+          tar -C dist -czf tether-server-linux-x86_64.tar.gz tether-server
+      - uses: actions/upload-artifact@v4
+        with: { name: tether-server-linux-x86_64, path: tether-server-linux-x86_64.tar.gz }
+      - name: Docker image
+        run: docker build -f server/Dockerfile -t tether-server .

@@ -1,0 +1,11 @@
+vendor/
+.playwright-mcp/
+node_modules/
+target/
+dist/
+server/data/
+*.log
+.DS_Store
+.venv/
+__pycache__/
+*.pyc

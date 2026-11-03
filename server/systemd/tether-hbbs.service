@@ -1,0 +1,23 @@
+[Unit]
+Description=Tether rendezvous (ID) server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tether
+Group=tether
+WorkingDirectory=/var/lib/tether
+EnvironmentFile=-/etc/tether/server.env
+ExecStart=/usr/local/bin/hbbs -r ${RELAY_HOST} -k _
+Restart=always
+RestartSec=3
+LimitNOFILE=1000000
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tether
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

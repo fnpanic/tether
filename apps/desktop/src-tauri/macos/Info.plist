@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key><string>Tether can transmit audio during remote sessions.</string>
+  <key>NSScreenCaptureUsageDescription</key><string>Tether shares your screen with people you allow to connect.</string>
+  <key>NSAppleEventsUsageDescription</key><string>Tether controls this Mac on behalf of an allowed remote user.</string>
+  <key>LSUIElement</key><false/>
+</dict>
+</plist>

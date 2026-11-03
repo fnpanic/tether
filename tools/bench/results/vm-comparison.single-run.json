@@ -1,0 +1,21 @@
+[
+  {
+    "label": "tether \u00b7 VM host \u00b7 balanced",
+    "seconds": 20.0,
+    "capture_fps": 44.8,
+    "valid_samples": 892,
+    "distinct_remote_frames_per_s": 28.0,
+    "latency_ms": {
+      "n": 892,
+      "median": 32.0,
+      "mean": 33.8,
+      "p10": 21,
+      "p95": 54,
+      "min": 18,
+      "max": 79,
+      "stdev": 11.9
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
+  }
+]
