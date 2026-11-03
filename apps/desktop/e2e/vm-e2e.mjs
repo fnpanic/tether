@@ -113,15 +113,60 @@ async function main() {
   }
 
   if (!process.argv.includes("--skip-reconnect")) {
-    // 4. Relay outage mid-session: restart hbbr; the session must resume on its own.
-    const r0 = Date.now();
-    execFileSync("ssh", ["-i", SSH_KEY, "-o", "ConnectTimeout=20", "opc@158.101.205.185", "sudo systemctl restart tether-hbbr"], { stdio: "ignore" });
-    const saw = await until("reconnecting overlay", async () => (await text(v)).includes("Reconnecting"), 30000, 200).then(() => true, () => false);
-    const resumed = await until("session resumed", async () => {
-      const t = await text(v);
-      return !t.includes("Reconnecting") && (await v.evaluate(() => { const c = document.querySelector("canvas"); return !!c && !(c.width === 300 && c.height === 150); }));
-    }, 120000, 500).then(() => true, () => false);
-    record("relay restart mid-session: automatic reconnect", saw && resumed, { saw_overlay: saw, resumed_after_ms: Date.now() - r0 });
+    // 4. Relay failures mid-session. Interruption = failure -> first picture drawn afterwards
+    // (viewer clock; a hook timestamps every canvas draw). A session that was not on the failed
+    // relay is simply not interrupted, which is what high availability should give.
+    const RELAYS = ["opc@158.101.205.185", "opc@92.5.231.71"];
+    const ssh = (host, cmd) => execFileSync("ssh", ["-i", SSH_KEY, "-o", "ConnectTimeout=20", host, cmd], { stdio: "ignore" });
+    await v.evaluate(() => {
+      if (window.__dh) return;
+      window.__dh = 1;
+      window.__draws = [];
+      const o = CanvasRenderingContext2D.prototype.drawImage;
+      CanvasRenderingContext2D.prototype.drawImage = function (...a) {
+        window.__draws.push(performance.now());
+        return o.apply(this, a);
+      };
+    });
+    const outage = async (label, fail, restore) => {
+      const t0 = await v.evaluate(() => performance.now());
+      fail();
+      const tFail = await v.evaluate(() => performance.now());
+      const saw = await until("reconnecting overlay", async () => (await text(v)).includes("Reconnecting"), 8000, 100).then(() => true, () => false);
+      const tSeen = await v.evaluate(() => performance.now());
+      let first = null;
+      if (saw) {
+        await until("session resumed", async () => !(await text(v)).includes("Reconnecting"), 60000, 100).catch(() => {});
+        first = await until("first picture after the failure", () => v.evaluate((tf) => window.__draws.find((t) => t > tf) ?? null, tFail), 20000, 100).catch(() => null);
+      }
+      if (restore) restore();
+      // upper bound: from before the SSH command that causes the failure (includes its round trip);
+      // recovery: from the moment the viewer saw the drop (100 ms polling) to the next picture.
+      const upper = first != null ? Math.round(first - t0) : null;
+      const recovery = first != null ? Math.round(first - tSeen) : null;
+      record(label, !saw || (recovery != null && recovery <= 2000), saw ? { recovery_ms: recovery, upper_bound_ms: upper, ssh_cmd_ms: Math.round(tFail - t0) } : { interrupted: false });
+      await sleep(6000);
+    };
+    // Which relay carries the session: each hbbr reports its open sessions at /readyz/relay.
+    const NAMES = ["tether-desk.duckdns.org", "tether-desk2.duckdns.org"];
+    const carrier = async () => {
+      for (let i = 0; i < NAMES.length; i++) {
+        const body = await fetch(`https://${NAMES[i]}/readyz/relay`).then((r) => r.text()).catch(() => "");
+        if (/sessions=([1-9]\d*)/.test(body)) return i;
+      }
+      return -1;
+    };
+    let c = await carrier();
+    if (c < 0) throw new Error("no relay reports an open session");
+    await outage(`relay crash (hbbr SIGKILL on ${NAMES[c]}, the session's relay): recovers within 2 s via the other relay`, () => ssh(RELAYS[c], "sudo systemctl kill -s SIGKILL tether-hbbr"));
+    await sleep(5000);
+    c = await carrier();
+    if (c < 0) throw new Error("no relay reports an open session after the first recovery");
+    await outage(
+      `relay node down (${NAMES[c]}: hbbs + hbbr killed and kept down): session continues via the other relay`,
+      () => ssh(RELAYS[c], "sudo systemctl kill -s SIGKILL tether-hbbs tether-hbbr; sudo systemctl stop tether-hbbs tether-hbbr"),
+      () => ssh(RELAYS[c], "sudo systemctl start tether-hbbs tether-hbbr"),
+    );
   }
 
   const ok = results.every((r) => r.ok);
