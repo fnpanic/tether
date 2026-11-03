@@ -20,9 +20,10 @@ index 9ee5cac..dbd2afa 100644
  pub const RENDEZVOUS_PORT: i32 = 21116;
  pub const RELAY_PORT: i32 = 21117;
 diff --git a/src/websocket.rs b/src/websocket.rs
+index 3a98a84..cc6a988 100644
 --- a/src/websocket.rs
 +++ b/src/websocket.rs
-@@ -141,6 +141,40 @@
+@@ -141,6 +141,40 @@ impl WsFramedStream {
          .await
      }
  
@@ -63,7 +64,7 @@ diff --git a/src/websocket.rs b/src/websocket.rs
      #[async_recursion]
      async fn try_connect(
          url: &str,
-@@ -304,8 +338,7 @@
+@@ -304,8 +338,7 @@ impl WsFramedStream {
          ms_timeout: u64,
      ) -> ResultType<Self> {
          let proxy_conf = Config::get_socks();
@@ -73,7 +74,7 @@ diff --git a/src/websocket.rs b/src/websocket.rs
  
          let ws = Self {
              stream,
-@@ -533,6 +566,136 @@
+@@ -533,6 +566,136 @@ pub fn check_ws(endpoint: &str) -> String {
      format!("{}://{}", protocol, address)
  }
  
@@ -210,7 +211,7 @@ diff --git a/src/websocket.rs b/src/websocket.rs
  /// Port of the reverse proxy serving `/ws/id` and `/ws/relay` on this client's own servers, for
  /// when it cannot listen on the scheme's default port. Any other host, such as a peer's server or
  /// a relay on another machine, keeps the default port. IP endpoints never get here.
-@@ -902,3 +1065,35 @@
+@@ -902,3 +1065,35 @@ mod tests {
          }
      }
  }
