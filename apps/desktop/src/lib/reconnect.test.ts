@@ -50,9 +50,11 @@ describe("reconnect", () => {
 
   it("offline ends a working session but not a running reconnect series", () => {
     const offline = classify(err("Remote desktop is offline", false));
-    expect(offline).toBe("offline");
+    expect(offline).toBe("transient");
     expect(onFailure(null, offline, 0, 10).kind).toBe("give-up");
     expect(onFailure({ attempt: 3, startedAt: 0 }, offline, 1000, 10).kind).toBe("retry");
+    const blocked = classify({ type: "error", title: "Connection blocked", text: "This connection could not be end-to-end encrypted, so it was refused.", retry: false });
+    expect(onFailure({ attempt: 3, startedAt: 0 }, blocked, 1000, 10).kind).toBe("retry");
   });
 
   it("parses the policy value", () => {

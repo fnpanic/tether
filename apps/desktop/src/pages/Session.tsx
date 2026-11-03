@@ -110,6 +110,8 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const cursors = useRef(new Map<string, string>());
   const displayRef = useRef(display);
   displayRef.current = display;
+  const displayIdxRef = useRef(displayIdx);
+  displayIdxRef.current = displayIdx;
   // Reconnect: the running series, its timer and the policy limit (event handlers read refs).
   const series = useRef<Series | null>(null);
   const retryTimer = useRef(0);
@@ -168,8 +170,11 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
               if (recModeRef.current === "always" && recRef.current.state === "idle") startRecording();
               break;
             case "record_status":
-              if (p.start) setRec({ state: "on", since: Date.now() });
-              else recordingStopped();
+              if (p.start) {
+                setRec({ state: "on", since: Date.now() });
+                // A recording file has to start with a key frame.
+                invoke("session_refresh", { key, display: displayIdxRef.current });
+              } else recordingStopped();
               break;
             case "permission":
               if (p.name !== "recording" || recRef.current.state !== "pending") break;
@@ -235,7 +240,10 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
 
   const onMsgbox = (type: string, title: string, text: string, retry: boolean) => {
     if (type === "connecting" && series.current) return; // keep the reconnect overlay
-    if (type === "input-password" || type === "re-input-password") series.current = null;
+    if (type === "input-password" || type === "re-input-password") {
+      series.current = null;
+      clearTimeout(retryTimer.current);
+    }
     if (type === "input-password") return setPhase({ kind: "password", wrong: false });
     if (type === "re-input-password") return setPhase({ kind: "password", wrong: true });
     if (type === "connecting") return setPhase({ kind: "connecting", text: friendly(text) || "Connecting…" });

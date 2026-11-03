@@ -3,8 +3,10 @@
  *
  * - The core's `msgbox.retry` flag (`check_if_retry`) says whether a failure is a transport
  *   problem; texts that mean a decision by the other side or by policy are never retried.
- * - "Offline" ends a working session (never starts reconnecting) but is expected while the
- *   peer comes back, so it does not end a reconnect series that is already running.
+ * - "Transient" outcomes (peer offline, encryption refused because the restarted peer has not
+ *   re-registered its key yet) never start reconnecting, but are expected while the peer comes
+ *   back, so they do not end a series that is already running. Every attempt still refuses an
+ *   unencrypted connection.
  */
 
 /** Delay before reconnect attempt n (1-based): 0.5, 1, 2, 4, 8 s, then every 10 s. */
@@ -16,13 +18,14 @@ export function delayMs(attempt: number): number {
 /** After two failed attempts go through the relay (harmless: production is relay-only). */
 export const forceRelay = (attempt: number) => attempt > 2;
 
-export type FailureKind = "retryable" | "offline" | "fatal";
+export type FailureKind = "retryable" | "transient" | "fatal";
 
 const FATAL = /password|reject|denied|declin|manually|not allowed|restricted|policy|locked|update|upgrade|version|incoming only|mismatch|2fa/i;
 
 export function classify(m: { type: string; title: string; text: string; retry?: boolean }): FailureKind {
   const t = m.text.toLowerCase();
-  if (t.includes("offline") || t.includes("not exist")) return "offline";
+  // While the peer restarts it is offline, then briefly has no signed key (E2E refused).
+  if (t.includes("offline") || t.includes("not exist") || t.includes("end-to-end encrypted")) return "transient";
   if (m.type.includes("password") || FATAL.test(m.text) || FATAL.test(m.title)) return "fatal";
   if (m.type === "error" && m.retry !== false) return "retryable";
   return "fatal";

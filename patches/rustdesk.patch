@@ -451,10 +451,10 @@ index 0000000..eaa6333
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..e997338
+index 0000000..c2da8dc
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,331 @@
 +//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
 +//!
 +//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
@@ -580,6 +580,9 @@ index 0000000..e997338
 +        );
 +        pkt.extend_from_slice(&f.data);
 +        sink.video(&key, pkt);
++    }
++    if let Some(u) = &vf.union {
++        h.record_passthrough(vf.display as usize, u);
 +    }
 +    true
 +}
@@ -785,17 +788,21 @@ index 0000000..e997338
 +}
 diff --git a/src/tauri_ui/remote.rs b/src/tauri_ui/remote.rs
 new file mode 100644
-index 0000000..01b0f4d
+index 0000000..0a92403
 --- /dev/null
 +++ b/src/tauri_ui/remote.rs
-@@ -0,0 +1,366 @@
-+use std::sync::{
-+    atomic::{AtomicU8, AtomicUsize},
-+    Arc, RwLock,
+@@ -0,0 +1,425 @@
++use std::{
++    collections::HashMap,
++    sync::{
++        atomic::{AtomicU8, AtomicUsize},
++        Arc, Mutex, RwLock,
++    },
 +};
 +
 +use base::message_proto::*;
-+use hbb_common::{protobuf::Enum, rendezvous_proto::ConnType};
++use hbb_common::{log, protobuf::Enum, rendezvous_proto::ConnType};
++use scrap::record::{Recorder, RecorderContext};
 +use serde_json::{json, Value};
 +
 +use super::{emit, encode_video_header, quality_json, sink, PKT_RGBA};
@@ -809,11 +816,54 @@ index 0000000..01b0f4d
 +    key: Arc<RwLock<String>>,
 +    /// Bitmask of codec ids decoded by the webview (see `super::CODEC_*`).
 +    pub passthrough: Arc<AtomicU8>,
++    /// Passthrough frames never reach the core's video threads, so they are recorded here.
++    rec: Arc<Mutex<PassthroughRecording>>,
++}
++
++#[derive(Default)]
++struct PassthroughRecording {
++    on: bool,
++    peer_id: String,
++    /// Display sizes from peer info; the recorder needs them for the container header.
++    sizes: Vec<(usize, usize)>,
++    recorders: HashMap<usize, Recorder>,
 +}
 +
 +impl TauriHandler {
 +    pub fn key(&self) -> String {
 +        self.key.read().unwrap().clone()
++    }
++
++    pub(super) fn record_passthrough(&self, display: usize, frame: &video_frame::Union) {
++        let mut r = self.rec.lock().unwrap();
++        if !r.on {
++            return;
++        }
++        let (w, h) = r.sizes.get(display).copied().unwrap_or((0, 0));
++        if !r.recorders.contains_key(&display) {
++            let ctx = RecorderContext {
++                server: false,
++                id: r.peer_id.clone(),
++                dir: crate::ui_interface::video_save_directory(false),
++                display_idx: display,
++                camera: false,
++                tx: None,
++            };
++            match Recorder::new(ctx) {
++                Ok(rec) => {
++                    r.recorders.insert(display, rec);
++                }
++                Err(e) => {
++                    log::error!("recorder for display {display}: {e}");
++                    r.on = false;
++                    return;
++                }
++            }
++        }
++        if let Some(rec) = r.recorders.get_mut(&display) {
++            // Frames before the first key frame are rejected; that only skips them.
++            rec.write_frame(frame, w, h).ok();
++        }
 +    }
 +
 +    fn emit(&self, name: &str, payload: Value) {
@@ -830,6 +880,7 @@ index 0000000..01b0f4d
 +) -> Session<TauriHandler> {
 +    let handler = TauriHandler::default();
 +    *handler.key.write().unwrap() = key.to_owned();
++    handler.rec.lock().unwrap().peer_id = peer_id.to_owned();
 +    let session: Session<TauriHandler> = Session {
 +        password: password.to_owned(),
 +        server_keyboard_enabled: Arc::new(RwLock::new(true)),
@@ -849,6 +900,10 @@ index 0000000..01b0f4d
 +        None,
 +    );
 +    session
++}
++
++fn display_sizes(displays: &[DisplayInfo]) -> Vec<(usize, usize)> {
++    displays.iter().map(|d| (d.width as usize, d.height as usize)).collect()
 +}
 +
 +fn displays_json(displays: &[DisplayInfo]) -> Value {
@@ -925,6 +980,7 @@ index 0000000..01b0f4d
 +    }
 +
 +    fn set_peer_info(&self, pi: &PeerInfo) {
++        self.rec.lock().unwrap().sizes = display_sizes(&pi.displays);
 +        self.emit(
 +            "peer_info",
 +            json!({
@@ -937,6 +993,7 @@ index 0000000..01b0f4d
 +    }
 +
 +    fn set_displays(&self, displays: &Vec<DisplayInfo>) {
++        self.rec.lock().unwrap().sizes = display_sizes(displays);
 +        self.emit("displays", json!({ "displays": displays_json(displays) }));
 +    }
 +
@@ -1120,6 +1177,11 @@ index 0000000..01b0f4d
 +    }
 +
 +    fn update_record_status(&self, start: bool) {
++        let mut r = self.rec.lock().unwrap();
++        r.on = start;
++        // Dropping a recorder finalises its file.
++        r.recorders.clear();
++        drop(r);
 +        self.emit("record_status", json!({ "start": start }));
 +    }
 +

@@ -2,6 +2,9 @@
 
 The technician (viewer) records the remote screen locally with the core's recorder (WebM/MP4, the
 same encoded stream it receives, no re-encoding). The remote user always has to consent first.
+Frames the webview decodes itself (WebCodecs passthrough) never reach the core's video threads, so
+`tauri_ui` feeds them to a recorder of its own (`TauriHandler::record_passthrough`); the viewer asks
+for a key frame when recording starts so each file begins with one.
 
 ## Policy keys
 
@@ -65,6 +68,7 @@ e.g. "Reset by the peer", "Timeout", relay drop) reconnects on its own: the last
 dimmed, with "Reconnecting… (attempt n)". Attempts wait 0.5, 1, 2, 4, 8 s, then every 10 s; from the
 third attempt the connection is forced through the relay. After `connect.reconnect-minutes` the error
 screen with a manual Retry is shown. Wrong password, rejected/closed by the other side, policy and
-version errors are never retried; "offline" never starts a reconnect but does not stop one already
-running (the peer is coming back). The core keeps the hashed password, so no password is asked
+version errors are never retried; "offline" and "could not be end-to-end encrypted" (a restarted
+peer that has not re-registered its key yet) never start a reconnect but do not stop one already
+running. Every attempt still refuses an unencrypted connection. The core keeps the hashed password, so no password is asked
 again unless the host changed it. The logic is in `apps/desktop/src/lib/reconnect.ts`.
