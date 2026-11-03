@@ -11,6 +11,10 @@ Fast, private, self-hosted remote desktop for Windows and macOS, with a Linux re
 - **Security:** end-to-end encryption is mandatory, with no plaintext fallback. The server key is
   pinned. 2FA, strong passwords and brute-force limits are built in. See [SECURITY.md](SECURITY.md).
 - **Design:** [DESIGN.md](DESIGN.md).
+- **Networks:** only TCP 443 (port 80 as fallback), works behind proxies and TLS inspection. See
+  [docs/corporate-networks.md](docs/corporate-networks.md) and
+  [docs/connection-resilience.md](docs/connection-resilience.md).
+- **Changes:** [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
