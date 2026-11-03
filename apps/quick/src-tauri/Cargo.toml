@@ -1,0 +1,54 @@
+[package]
+name = "tether-quick"
+version = "0.3.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "TetherQS: portable customer module for Tether remote support"
+
+[[bin]]
+name = "TetherQS"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+librustdesk = { package = "rustdesk", path = "../../../vendor/rustdesk", default-features = false, features = ["tauri", "hwcodec", "vram", "use_dasp"] }
+hbb_common = { path = "../../../vendor/rustdesk/libs/hbb_common" }
+tether-trust = { path = "../../../crates/tether-trust" }
+# Same version/features as the core already pulls in, so no second HTTP stack is compiled.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls", "rustls-tls", "rustls-tls-native-roots", "gzip", "zstd", "socks"] }
+minisign-verify = "0.3"
+
+[dev-dependencies]
+minisign = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Threading"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+# Keep in sync with vendor/rustdesk/Cargo.toml: patches only apply at the workspace root.
+[patch.crates-io]
+libxdo-sys = { path = "../../../vendor/rustdesk/libs/libxdo-sys-stub" }
+tungstenite = { git = "https://github.com/rustdesk-org/tungstenite-rs", rev = "efce47e5364f00a63302cf07ab1fb13ded478914" }
+webrtc = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
+webrtc-util = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
+webrtc-sctp = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+debug = 1
+
+[workspace]
