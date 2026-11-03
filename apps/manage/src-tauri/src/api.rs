@@ -1,0 +1,128 @@
+//! Relay API client. Every admin request is signed with `tether_trust::reqauth` over the exact
+//! path (with query) and body bytes that go on the wire.
+
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tether_trust::{reqauth, SigningKey};
+
+fn client() -> &'static reqwest::Client {
+    static C: OnceLock<reqwest::Client> = OnceLock::new();
+    C.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            // Release uploads may be up to 200 MiB on a slow uplink.
+            .timeout(Duration::from_secs(30 * 60))
+            .user_agent(concat!("tether-manage/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("http client")
+    })
+}
+
+pub fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+}
+
+fn explain(status: u16, body: &str) -> String {
+    let reason = body.trim();
+    let reason = if reason.is_empty() { "no details".to_owned() } else { reason.chars().take(300).collect() };
+    let hint = match status {
+        401 => "The server did not accept this app's admin signature. Check that the server's ADMIN_PUB_KEY contains this app's admin public key and that the PC clock is correct.",
+        404 => "Not found on the server.",
+        409 => "The server already has a newer version. Reload and try again.",
+        413 => "The upload is larger than the server allows.",
+        429 => "Too many requests. Wait a minute and try again.",
+        507 => "The server is low on disk space (less than 2 GiB would remain).",
+        500..=599 => "The server failed to handle the request.",
+        _ => "The server refused the request.",
+    };
+    format!("{hint} (HTTP {status}: {reason})")
+}
+
+fn url(server: &str, path: &str) -> String {
+    format!("{}{path}", server.trim_end_matches('/'))
+}
+
+/// Signed admin request; returns the response body on 2xx.
+pub async fn admin(server: &str, key: &SigningKey, method: &str, path: &str, body: Vec<u8>, content_type: &str) -> Result<Vec<u8>, String> {
+    let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
+    let sig = reqauth::sign_request(key, method, path, &body, now());
+    let mut req = client().request(m, url(server, path)).header(reqauth::HEADER, sig);
+    if !body.is_empty() {
+        req = req.header("Content-Type", content_type).body(body);
+    }
+    finish(req.send().await).await
+}
+
+/// Unauthenticated GET (public `latest.json`, `/api/policy`). `Ok(None)` on 404.
+pub async fn public(server: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    match finish(client().get(url(server, path)).send().await).await {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.contains("HTTP 404") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+async fn finish(res: reqwest::Result<reqwest::Response>) -> Result<Vec<u8>, String> {
+    let res = res.map_err(|e| format!("Could not reach the server: {e}"))?;
+    let status = res.status().as_u16();
+    let bytes = res.bytes().await.map_err(|e| format!("The connection broke while reading the answer: {e}"))?;
+    if (200..300).contains(&status) {
+        Ok(bytes.to_vec())
+    } else {
+        Err(explain(status, &String::from_utf8_lossy(&bytes)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    /// A one-shot HTTP server that checks the `Tether-Sig` header the way tether-api does.
+    #[test]
+    fn signed_request_is_accepted_by_verify_request() {
+        let key = tether_trust::generate_key();
+        let pk = key.verifying_key();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            let mut parts = line.split_whitespace();
+            let (method, path) = (parts.next().unwrap().to_owned(), parts.next().unwrap().to_owned());
+            let (mut sig, mut len) = (String::new(), 0usize);
+            loop {
+                let mut h = String::new();
+                r.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+                let (k, v) = h.split_once(':').unwrap();
+                match k.to_ascii_lowercase().as_str() {
+                    "tether-sig" => sig = v.trim().to_owned(),
+                    "content-length" => len = v.trim().parse().unwrap(),
+                    _ => {}
+                }
+            }
+            let mut body = vec![0; len];
+            r.read_exact(&mut body).unwrap();
+            let ok = reqauth::verify_request(&sig, &pk, &method, &path, &body, now(), |_| true);
+            let (code, text) = if ok.is_ok() { (200, "{\"ok\":true}".to_owned()) } else { (401, ok.unwrap_err()) };
+            write!(&s, "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).unwrap();
+            (method, path, body)
+        });
+        let out = tauri::async_runtime::block_on(admin(&server, &key, "POST", "/api/admin/diag-ticket?x=1", br#"{"note":"hi"}"#.to_vec(), "application/json"));
+        assert_eq!(out.unwrap(), b"{\"ok\":true}");
+        let (m, p, b) = handle.join().unwrap();
+        assert_eq!((m.as_str(), p.as_str(), b.as_slice()), ("POST", "/api/admin/diag-ticket?x=1", &br#"{"note":"hi"}"#[..]));
+    }
+
+    #[test]
+    fn errors_are_explained() {
+        let e = explain(401, "signature does not match");
+        assert!(e.contains("ADMIN_PUB_KEY") && e.contains("HTTP 401: signature does not match"));
+    }
+}
