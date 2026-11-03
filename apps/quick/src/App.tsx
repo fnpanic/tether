@@ -69,7 +69,7 @@ export function App() {
             ) : (
               <Idle s={s} onCopied={say} />
             )}
-            <Footer s={s} session={s.clients.length > 0} onError={say} />
+            <Footer s={s} onError={say} />
           </>
         )}
       </div>
@@ -332,7 +332,7 @@ function UpdateBanner({ s }: { s: State }) {
   );
 }
 
-function Footer({ s, session, onError }: { s: State; session: boolean; onError: (m: string) => void }) {
+function Footer({ s, onError }: { s: State; onError: (m: string) => void }) {
   const pill =
     s.clients.some((c) => c.authorized) ? (["ok", "Session active"] as const) : s.status === 1 ? (["ok", "Ready"] as const) : s.status === 0 ? (["warn", "Connecting"] as const) : (["danger", "Offline"] as const);
   return (
