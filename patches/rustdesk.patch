@@ -39,7 +39,7 @@ index 606a4be..2510d2a 100644
 +pub const EXTERNAL_DECODING_H264: u8 = 1;
 +pub const EXTERNAL_DECODING_H265: u8 = 2;
 diff --git a/src/client.rs b/src/client.rs
-index 597dc86..faa3f22 100644
+index 597dc86..cde3beb 100644
 --- a/src/client.rs
 +++ b/src/client.rs
 @@ -3002,6 +3002,12 @@ impl LoginConfigHandler {
@@ -55,7 +55,21 @@ index 597dc86..faa3f22 100644
  
          // `std::env::remove_var("IS_TERMINAL_ADMIN");` is called in `session_add_sync()` - `flutter_ffi.rs`.
          let is_terminal_admin = conn_type == ConnType::TERMINAL
-@@ -5043,6 +5049,19 @@ pub async fn confirm_insecure_connection(
+@@ -3951,6 +3957,13 @@ impl LoginConfigHandler {
+         &self.id
+     }
+ 
++    /// Tether: a second connection to the same peer (file transfer opened from a session) logs in
++    /// with this session's salted password hash instead of asking again.
++    #[cfg(feature = "tauri")]
++    pub fn copy_login_from(&mut self, other: &LoginConfigHandler) {
++        self.password = other.password.clone();
++    }
++
+     pub fn get_key_terminal_service_id(&self) -> &'static str {
+         if self.is_terminal_admin {
+             "terminal-admin-service-id"
+@@ -5043,6 +5056,19 @@ pub async fn confirm_insecure_connection(
      interface: &impl Interface,
      receiver: &mut UnboundedReceiver<Data>,
  ) -> bool {
@@ -138,6 +152,28 @@ index 53831cc..2204e07 100644
      {
          // One look and one claim of the minute, under one lock: two connections arriving
          // together would otherwise both find it over and both probe.
+diff --git a/src/core_main.rs b/src/core_main.rs
+index 19a2670..01fcdec 100644
+--- a/src/core_main.rs
++++ b/src/core_main.rs
+@@ -93,7 +93,8 @@ pub fn core_main() -> Option<CoreMainAction> {
+         }
+         i += 1;
+     }
+-    #[cfg(any(target_os = "linux", target_os = "windows"))]
++    // Tether's main window process shows its own tray icon: never a second (RustDesk) one.
++    #[cfg(all(any(target_os = "linux", target_os = "windows"), not(feature = "tauri")))]
+     if args.is_empty() {
+         #[cfg(target_os = "linux")]
+         let should_check_start_tray = crate::check_process("--server", false);
+@@ -365,6 +366,7 @@ pub fn core_main() -> Option<CoreMainAction> {
+                 return None;
+             }
+         } else if args[0] == "--tray" {
++            #[cfg(not(feature = "tauri"))]
+             if !crate::check_process("--tray", true) {
+                 crate::tray::start_tray();
+             }
 diff --git a/src/hbbs_http/sync.rs b/src/hbbs_http/sync.rs
 index aac220b..2b67671 100644
 --- a/src/hbbs_http/sync.rs
@@ -486,10 +522,10 @@ index 0000000..eaa6333
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..c2da8dc
+index 0000000..bd5e9a3
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,351 @@
 +//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
 +//!
 +//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
@@ -626,12 +662,32 @@ index 0000000..c2da8dc
 +// Sessions (viewer side)
 +// ---------------------------------------------------------------------------------------------
 +
-+pub fn session_start(key: &str, peer_id: &str, password: &str, conn_type: &str, force_relay: bool) {
++/// `login_from`: key of a live session to the same peer whose login (the salted password hash the
++/// core keeps in `lc.password`) the new connection reuses, so e.g. file transfer opened from a
++/// remote session does not ask for the password again.
++pub fn session_start(
++    key: &str,
++    peer_id: &str,
++    password: &str,
++    conn_type: &str,
++    force_relay: bool,
++    login_from: Option<&str>,
++) {
 +    let session = remote::new_session(key, peer_id, password, conn_type, force_relay);
-+    SESSIONS
++    if let Some(from) = login_from.and_then(self::session) {
++        let from = from.lc.read().unwrap();
++        if from.get_id() == peer_id {
++            session.lc.write().unwrap().copy_login_from(&from);
++        }
++    }
++    let old = SESSIONS
 +        .write()
 +        .unwrap()
 +        .insert(key.to_owned(), session.clone());
++    // A second start for the same key (page reload) must not leave the first connection running.
++    if let Some(old) = old {
++        old.close();
++    }
 +    session.reconnect(force_relay);
 +}
 +

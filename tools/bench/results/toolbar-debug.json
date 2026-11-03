@@ -1,0 +1,101 @@
+{
+  "started": "2026-11-03T21:06:49.099Z",
+  "flavor": "debug",
+  "viewer": "C:\\cargo-target\\ux\\debug\\tether.exe",
+  "tests": [
+    {
+      "name": "single instance: second start exits, still one main window",
+      "ok": true,
+      "exit": 0
+    },
+    {
+      "name": "single instance: second --connect opens the session in the first process (password via env, no prompt)",
+      "ok": true,
+      "exit": 0,
+      "windows": 1,
+      "ms_to_first_frame": 1621
+    },
+    {
+      "name": "safety gate: host revoked keyboard/mouse and restart for the session",
+      "ok": true
+    },
+    {
+      "name": "pin toolbar keeps it visible",
+      "ok": true
+    },
+    {
+      "name": "display switch (single display: no buttons, nothing to switch)",
+      "ok": true,
+      "displays": 0
+    },
+    {
+      "name": "original size / fit to window",
+      "ok": true
+    },
+    {
+      "name": "image quality menu",
+      "ok": true,
+      "saved": "balanced"
+    },
+    {
+      "name": "statistics overlay",
+      "ok": true
+    },
+    {
+      "name": "Send Ctrl+Alt+Del: command accepted (host drops it: keyboard revoked)",
+      "ok": true
+    },
+    {
+      "name": "Lock remote screen: command accepted (host drops it: keyboard revoked)",
+      "ok": true
+    },
+    {
+      "name": "restart: in-app confirmation, cancel closes it",
+      "ok": true
+    },
+    {
+      "name": "full screen: window API reachable, permission granted",
+      "ok": true
+    },
+    {
+      "name": "chat: panel, send, host message shown exactly once",
+      "ok": true
+    },
+    {
+      "name": "transfer files: opens without a password prompt and lists the remote home",
+      "ok": true,
+      "remote_path": {
+        "path": "C:\\Users\\Thomas",
+        "entries": 227
+      }
+    },
+    {
+      "name": "10 MB upload completes, SHA-256 matches, one job_done event, one row",
+      "ok": true,
+      "seconds": 13.396
+    },
+    {
+      "name": "no duplicate connections; each window gets only its own events",
+      "ok": true,
+      "host_connections": 2,
+      "any_target_would_have_leaked": {
+        "folder_files": 3,
+        "job_done": 1,
+        "job_progress": 4
+      }
+    },
+    {
+      "name": "after the session is gone, lock and a confirmed restart show an error toast (no request sent)",
+      "ok": true
+    },
+    {
+      "name": "disconnect closes the session window",
+      "ok": true
+    },
+    {
+      "name": "TetherQS: second start exits, first window stays the only one",
+      "ok": true,
+      "exit": 0
+    }
+  ]
+}

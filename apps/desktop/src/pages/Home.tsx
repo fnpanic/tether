@@ -85,7 +85,9 @@ function ConnectBox({ peers, onConnect }: { peers: Peer[]; onConnect: (id: strin
     () => (clean ? peers.filter((p) => p.id.startsWith(clean) || p.hostname.toLowerCase().includes(clean.toLowerCase())).slice(0, 5) : []),
     [clean, peers],
   );
-  useEffect(() => ref.current?.focus(), []);
+  useEffect(() => {
+    ref.current?.focus();
+  }, []);
   const go = (id = clean, conn?: string) => id && onConnect(id, conn);
 
   return (

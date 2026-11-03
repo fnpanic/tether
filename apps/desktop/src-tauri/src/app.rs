@@ -40,7 +40,26 @@ fn mode(args: &[String]) -> Mode {
 
 pub fn run(args: Vec<String>) {
     let mode = mode(&args);
-    tauri::Builder::default()
+    let mut ctx = tauri::generate_context!();
+    // The single-instance lock is keyed by the identifier: dev profiles must not share it.
+    if let Ok(p) = std::env::var("TETHER_PROFILE") {
+        if !p.is_empty() {
+            ctx.config_mut().identifier = format!("{}.{p}", ctx.config().identifier);
+        }
+    }
+    // A session request while Tether runs opens in that process instead of a second one.
+    #[cfg(windows)]
+    if let Mode::Connect { c, password } = &mode {
+        if forward_to_running(&ctx.config().identifier, &cli::encode_forward(c, password.as_deref())) {
+            return;
+        }
+    }
+    let mut builder = tauri::Builder::default();
+    if matches!(mode, Mode::Main) {
+        // First plugin: a second start exits before doing anything else.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| second_instance(app, &argv)));
+    }
+    builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(commands::handler())
@@ -93,7 +112,7 @@ pub fn run(args: Vec<String>) {
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(ctx)
         .expect("failed to build tauri app")
         .run(|app, ev| {
             if let tauri::RunEvent::ExitRequested { api, code, .. } = ev {
@@ -104,6 +123,52 @@ pub fn run(args: Vec<String>) {
                 }
             }
         });
+}
+
+/// Runs in the first instance when Tether is started again: a forwarded session request opens a
+/// session window, anything else brings the main window to the front.
+fn second_instance(app: &AppHandle, argv: &[String]) {
+    if argv.get(1).map(String::as_str) != Some(cli::FORWARD_ARG) {
+        let _ = main_window(app);
+        return;
+    }
+    let req = argv.get(2).ok_or_else(|| "empty request".to_owned()).and_then(|h| cli::decode_forward(h));
+    let (c, pw) = match req.and_then(|r| policy::check_outgoing().map(|_| r)) {
+        Ok(r) => r,
+        Err(e) => return hbb_common::log::warn!("forwarded session refused: {e}"),
+    };
+    // Called from a window message on the main thread; building a webview there can deadlock.
+    let app = app.clone();
+    std::thread::spawn(move || match open_session_with(&app, &c) {
+        Ok(key) => {
+            if let (Some(pw), Some(s)) = (pw, sink::get()) {
+                s.set_pending_password(&key, pw);
+            }
+        }
+        Err(e) => hbb_common::log::warn!("forwarded session: {e}"),
+    });
+}
+
+/// Hands a session request to a running Tether (its single-instance window), like the plugin does
+/// for a plain second start, but with our payload instead of this process's argv.
+/// shortcut: Windows only; elsewhere `--connect` still runs in its own process, as before.
+#[cfg(windows)]
+fn forward_to_running(identifier: &str, payload: &str) -> bool {
+    use windows_sys::Win32::{
+        System::DataExchange::COPYDATASTRUCT,
+        UI::WindowsAndMessaging::{FindWindowW, SendMessageW, WM_COPYDATA},
+    };
+    let w = |s: String| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (class, name) = (w(format!("{identifier}-sic")), w(format!("{identifier}-siw")));
+    let hwnd = unsafe { FindWindowW(class.as_ptr(), name.as_ptr()) };
+    if hwnd.is_null() {
+        return false;
+    }
+    // The plugin's wire format (tauri-plugin-single-instance windows.rs): "cwd|argv0|argv1…\0",
+    // tagged 1542; its window procedure answers 1.
+    let data = format!("|tether|{}|{payload}\0", cli::FORWARD_ARG);
+    let cds = COPYDATASTRUCT { dwData: 1542, cbData: data.len() as u32, lpData: data.as_ptr() as _ };
+    unsafe { SendMessageW(hwnd, WM_COPYDATA, 0, &cds as *const _ as isize) == 1 }
 }
 
 fn has_tray(app: &AppHandle) -> bool {
@@ -132,6 +197,7 @@ fn base<'a>(app: &'a AppHandle, label: &str, route: &str) -> tauri::Result<Webvi
 
 pub fn main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     if let Some(w) = app.get_webview_window("main") {
+        w.unminimize()?;
         w.show()?;
         w.set_focus()?;
         return Ok(w);

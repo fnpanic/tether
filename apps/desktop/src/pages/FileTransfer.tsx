@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowLeft, ArrowUpFromLine, CheckCircle2, File, Folder, FolderPlus, HardDrive, RefreshCw, Trash2, XCircle } from "lucide-react";
-import { formatId, invoke, listen, videoChannel } from "../lib/ipc";
+import { formatId, invoke, subscribe, videoChannel } from "../lib/ipc";
 import { Button, IconButton, Logo, TitleBar } from "../components/ui";
 
 interface Entry {
@@ -74,56 +74,58 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
   const loadRemote = useCallback(
     (path: string) => {
       remotePathRef.current = path;
-      invoke("fs_remote_dir", { key, path, hidden: false });
+      invoke("fs_remote_dir", { key, path, hidden: false }).catch((e) => setError(String(e)));
     },
     [key],
   );
 
   useEffect(() => {
-    let un: (() => void) | undefined;
-    (async () => {
-      un = await listen("session", (e) => {
-        const p = e.payload;
-        switch (e.name) {
-          case "peer_info": {
-            setConnected(true);
-            setHostname(p.hostname);
-            const win = (p.platform ?? "").toLowerCase().includes("win");
-            setRemoteSep(win ? "\\" : "/");
-            const home = p.platform_additions_home ?? "";
-            loadRemote(home);
-            break;
-          }
-          case "folder_files":
-            if (!p.is_local && !p.only_count) setRemote({ path: p.path, entries: sortEntries(p.entries ?? []) });
-            break;
-          case "job_progress":
-            setJobs((js) => js.map((j) => (j.id === p.id ? { ...j, done: p.finished_size, speed: p.speed } : j)));
-            break;
-          case "job_done":
-            setJobs((js) => js.map((j) => (j.id === p.id ? { ...j, state: "done", done: j.total || j.done } : j)));
-            loadRemote(remotePathRef.current);
-            setLocal((l) => (loadLocal(l.path), l));
-            break;
-          case "job_error":
-            setJobs((js) => js.map((j) => (j.id === p.id ? { ...j, state: "error", err: p.err } : j)));
-            break;
-          case "override_file":
-            invoke("fs_override", { key, id: p.id, fileNum: p.file_num, needOverride: true, remember: true, isUpload: p.is_upload });
-            break;
-          case "msgbox":
-            if (p.type === "input-password") setPassword({ wrong: false });
-            else if (p.type === "re-input-password") setPassword({ wrong: true });
-            else if (p.type === "error") setError(p.text);
-            break;
+    let alive = true;
+    const sub = subscribe("session", (e) => {
+      const p = e.payload;
+      switch (e.name) {
+        case "peer_info": {
+          // The host lists its home folder by itself right after login (`folder_files`).
+          setConnected(true);
+          setHostname(p.hostname);
+          const win = (p.platform ?? "").toLowerCase().includes("win");
+          setRemoteSep(win ? "\\" : "/");
+          break;
         }
-      });
-      const home = await invoke<string>("fs_home_dir");
-      loadLocal(home);
+        case "folder_files":
+          if (!p.is_local && !p.only_count) setRemote({ path: p.path, entries: sortEntries(p.entries ?? []) });
+          break;
+        case "job_progress":
+          setJobs((js) => js.map((j) => (j.id === p.id ? { ...j, done: p.finished_size, speed: p.speed } : j)));
+          break;
+        case "job_done":
+          setJobs((js) => js.map((j) => (j.id === p.id ? { ...j, state: "done", done: j.total || j.done } : j)));
+          loadRemote(remotePathRef.current);
+          setLocal((l) => (loadLocal(l.path), l));
+          break;
+        case "job_error":
+          setJobs((js) => js.map((j) => (j.id === p.id ? { ...j, state: "error", err: p.err } : j)));
+          break;
+        case "override_file":
+          invoke("fs_override", { key, id: p.id, fileNum: p.file_num, needOverride: true, remember: true, isUpload: p.is_upload }).catch((e) => setError(String(e)));
+          break;
+        case "msgbox":
+          if (p.type === "input-password") setPassword({ wrong: false });
+          else if (p.type === "re-input-password") setPassword({ wrong: true });
+          else if (p.type === "error") setError(p.text);
+          break;
+      }
+    });
+    (async () => {
+      loadLocal(await invoke<string>("fs_home_dir"));
+      await sub.ready;
+      // StrictMode's discarded first run must not start (and consume the pending login of) a session.
+      if (!alive) return;
       await invoke("session_start", { key, peer, conn: "file-transfer", webcodecs: [], video: videoChannel(() => {}) });
-    })();
+    })().catch((e) => alive && setError(String(e)));
     return () => {
-      un?.();
+      alive = false;
+      sub.off();
       invoke("session_close", { key });
     };
   }, [key, peer, loadLocal, loadRemote]);
@@ -134,7 +136,9 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
     const from = join(upload ? local.path : remote.path, e.name, upload ? localSep : remoteSep);
     const to = join(upload ? remote.path : local.path, e.name, upload ? remoteSep : localSep);
     setJobs((js) => [{ id, name: e.name, upload, total: e.size, done: 0, speed: 0, state: "running" }, ...js]);
-    invoke("fs_transfer", { key, id, path: from, to, fileNum: 0, hidden: false, isRemote: !upload });
+    invoke("fs_transfer", { key, id, path: from, to, fileNum: 0, hidden: false, isRemote: !upload }).catch((err) =>
+      setJobs((js) => js.map((j) => (j.id === id ? { ...j, state: "error", err: String(err) } : j))),
+    );
   };
 
   if (password) {
@@ -144,7 +148,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           className="m-auto w-[340px]"
           onSubmit={(e) => {
             e.preventDefault();
-            invoke("session_login", { key, password: pw, remember: true });
+            invoke("session_login", { key, password: pw, remember: true }).catch((e) => setError(String(e)));
             setPassword(null);
             setPw("");
           }}
@@ -220,7 +224,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           }}
         />
       </div>
-      <Jobs jobs={jobs} onCancel={(id) => invoke("fs_cancel", { key, id })} onClear={() => setJobs((js) => js.filter((j) => j.state === "running"))} />
+      <Jobs jobs={jobs} onCancel={(id) => invoke("fs_cancel", { key, id }).catch((e) => setError(String(e)))} onClear={() => setJobs((js) => js.filter((j) => j.state === "running"))} />
     </Shell>
   );
 }
