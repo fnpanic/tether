@@ -24,10 +24,31 @@
 		}
 	}
 
-	# Clients send optional API calls (heartbeat etc.) to https://<relay>/api/*.
-	# This deployment has no API server; answer locally so nothing leaves this host.
+	# Relay API (tether-api). Caddy ignores client-sent X-Forwarded-For and sets the real peer.
 	handle /api/* {
-		respond 404
+		reverse_proxy 127.0.0.1:21120
+	}
+
+	# Release downloads and update manifests written by tether-api. Caddy (user tether-https)
+	# reads them through membership in group tether-api; see install.sh.
+	handle /download/* {
+		root * /var/lib/tether-api
+		@manifest path */latest.json
+		header @manifest Cache-Control "no-cache"
+		file_server
+	}
+
+	# Download page, if one was published; otherwise the plain marker text.
+	handle / {
+		root * /var/lib/tether-api/download
+		@page file /index.html
+		handle @page {
+			rewrite * /index.html
+			file_server
+		}
+		handle {
+			respond "Tether relay" 200
+		}
 	}
 
 	handle {

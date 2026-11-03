@@ -1,0 +1,18 @@
+[package]
+name = "tether-api"
+version = "0.3.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Tether relay API: signed policy, heartbeat, diagnostics and release hosting (see docs/api.md)"
+
+[dependencies]
+tether-trust = { path = "../../crates/tether-trust" }
+tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

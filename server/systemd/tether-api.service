@@ -1,0 +1,27 @@
+[Unit]
+Description=Tether relay API (policy, heartbeat, diagnostics, releases)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tether-api
+Group=tether-api
+# ADMIN_PUB_KEY=<base64 Ed25519 key>[,<key>…]; empty disables the admin endpoints.
+EnvironmentFile=/etc/tether/api.env
+ExecStart=/usr/local/bin/tether-api --data /var/lib/tether-api --listen 127.0.0.1:21120
+Restart=always
+RestartSec=3
+MemoryMax=64M
+# Files group-readable for Caddy (group tether-api), nothing for others.
+UMask=0027
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tether-api
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
