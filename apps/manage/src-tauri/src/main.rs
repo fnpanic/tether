@@ -355,7 +355,11 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let dir = app.path().data_dir()?.join("Tether-Manage");
+            // TETHER_MANAGE_DIR: a separate vault (tests, or several deployments on one PC).
+            let dir = match std::env::var_os("TETHER_MANAGE_DIR") {
+                Some(d) => std::path::PathBuf::from(d),
+                None => app.path().data_dir()?.join("Tether-Manage"),
+            };
             fs::create_dir_all(&dir)?;
             app.manage(App { dir, keys: Mutex::new(None), diag: Mutex::new(None) });
             Ok(())
