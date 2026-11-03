@@ -12,7 +12,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-const { values: opt } = parseArgs({ options: { seconds: { type: "string", default: "20" }, only: { type: "string" } } });
+const { values: opt } = parseArgs({ options: { seconds: { type: "string", default: "20" }, only: { type: "string" }, id: { type: "string" } } });
 const ROOT = resolve(import.meta.dirname, "../../..");
 const PY = join(ROOT, "tools/bench/.venv/Scripts/python.exe");
 const OUT = join(ROOT, "tools/bench/results/vm-comparison.json");
@@ -70,7 +70,7 @@ const OFFSET = await until("VM clock server", () => parseFloat(execFileSync(PY, 
 console.log(`VM clock offset: ${OFFSET.toFixed(2)} ms`);
 
 if (opt.only !== "anydesk") {
-  const tid = await until("VM Tether ID in relay", () => tetherIdOfVm(), 120000, 3000);
+  const tid = opt.id ?? await until("VM Tether ID in relay", () => tetherIdOfVm(), 120000, 3000);
   console.log(`VM ${ids.ip}: Tether ${tid}`);
   const t = spawn(TETHER, ["--connect", tid, password], { env: { ...process.env, TETHER_PROFILE: "vm-viewer" }, stdio: "ignore" });
   try {

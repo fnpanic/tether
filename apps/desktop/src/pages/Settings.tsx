@@ -76,7 +76,6 @@ function Security() {
       <BoolOption k="enable-clipboard" title="Allow clipboard" />
       <BoolOption k="enable-file-transfer" title="Allow file transfer" />
       <BoolOption k="enable-audio" title="Share audio" />
-      <BoolOption k="enable-lan-discovery" title="Discoverable on local network" />
     </>
   );
 }

@@ -24,8 +24,6 @@ const ENFORCED: &[(&str, &str)] = &[
 const DEFAULTS: &[(&str, &str)] = &[
     // 10-character one-time password (~52 bits) instead of 6.
     ("temporary-password-length", "10"),
-    // Not discoverable on the local network unless enabled.
-    ("enable-lan-discovery", "N"),
 ];
 
 pub fn apply_policy() {
@@ -49,7 +47,6 @@ pub const UI_OPTIONS: &[&str] = &[
     "enable-clipboard",
     "enable-file-transfer",
     "enable-audio",
-    "enable-lan-discovery",
     "temporary-password-length",
     "custom-rendezvous-server",
     "relay-server",

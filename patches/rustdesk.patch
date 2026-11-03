@@ -77,6 +77,33 @@ index 1b197a8..e36221b 100644
                      let display = vf.display as usize;
                      if !self.video_threads.contains_key(&display) {
                          self.new_video_thread(display);
+diff --git a/src/common.rs b/src/common.rs
+index 53831cc..2204e07 100644
+--- a/src/common.rs
++++ b/src/common.rs
+@@ -693,6 +693,11 @@ impl Drop for CheckTestNatType {
+ }
+ 
+ pub fn test_nat_type() {
++    // WebSocket / no-UDP mode routes everything through the TCP-443 path; NAT and STUN probes
++    // would send traffic to other ports and are useless there (connections are always relayed).
++    if config::use_ws() || is_udp_disabled() {
++        return;
++    }
+     test_ipv6_sync();
+     use std::sync::atomic::{AtomicBool, Ordering};
+     std::thread::spawn(move || {
+@@ -2786,6 +2791,10 @@ async fn test_bind_ipv6() -> ResultType<SocketAddr> {
+ }
+ 
+ pub async fn test_ipv6() -> Option<tokio::task::JoinHandle<()>> {
++    // STUN probes are UDP to public STUN servers: never in WebSocket / no-UDP mode.
++    if config::use_ws() || is_udp_disabled() {
++        return None;
++    }
+     {
+         // One look and one claim of the minute, under one lock: two connections arriving
+         // together would otherwise both find it over and both probe.
 diff --git a/src/lib.rs b/src/lib.rs
 index f6e48a1..600a09e 100644
 --- a/src/lib.rs

@@ -52,7 +52,7 @@ RELAY_HOST=relay.example.com docker compose -f server/docker-compose.yml up -d
 sudo server/install.sh relay.example.com ./bin
 ```
 
-Open TCP 21115–21117 and UDP 21116.
+Tether clients use only TCP 443: put `server/caddy/Caddyfile` (`tether-https.service`) in front. Stock RustDesk clients additionally need TCP 21115–21117 and UDP 21116. See [docs/corporate-networks.md](docs/corporate-networks.md).
 
 ## License
 

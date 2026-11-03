@@ -1,0 +1,41 @@
+# Tether relay front end: everything clients need over TCP 443 (TLS + WebSocket).
+# {$RELAY_HOST} comes from /etc/tether/server.env.
+{
+	admin off
+}
+
+{$RELAY_HOST} {
+	tls {
+		issuer acme {
+			# Certificate via TLS-ALPN-01 on 443 only: no port 80 needed.
+			disable_http_challenge
+		}
+	}
+
+	# Rendezvous (hbbs) and relay (hbbr) WebSocket endpoints. Only Caddy can reach these ports.
+	handle /ws/id {
+		reverse_proxy 127.0.0.1:21118 {
+			flush_interval -1
+		}
+	}
+	handle /ws/relay {
+		reverse_proxy 127.0.0.1:21119 {
+			flush_interval -1
+		}
+	}
+
+	# Clients send optional API calls (heartbeat etc.) to https://<relay>/api/*.
+	# This deployment has no API server; answer locally so nothing leaves this host.
+	handle /api/* {
+		respond 404
+	}
+
+	handle {
+		respond "Tether relay" 200
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+	}
+}

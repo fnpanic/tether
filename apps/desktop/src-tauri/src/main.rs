@@ -3,6 +3,7 @@
 mod app;
 mod commands;
 mod fluxrt;
+mod netpolicy;
 mod security;
 mod sink;
 
@@ -29,6 +30,7 @@ fn main() -> ExitCode {
     }
 
     security::apply_policy();
+    netpolicy::apply();
     fluxrt::apply_defaults();
 
     #[cfg(windows)]

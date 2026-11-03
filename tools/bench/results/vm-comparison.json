@@ -93,5 +93,24 @@
     },
     "latency_corrected_ms": null,
     "screen_to_capture_ms": null
+  },
+  {
+    "label": "tether \u00b7 VM host \u00b7 balanced",
+    "seconds": 20.0,
+    "capture_fps": 97.4,
+    "valid_samples": 1948,
+    "distinct_remote_frames_per_s": 27.9,
+    "latency_ms": {
+      "n": 1948,
+      "median": 62.0,
+      "mean": 62.8,
+      "p10": 44,
+      "p95": 87,
+      "min": 37,
+      "max": 109,
+      "stdev": 14.0
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
   }
 ]
