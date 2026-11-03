@@ -22,6 +22,7 @@ pub fn run(args: Vec<String>) {
                 });
                 update::spawn();
             }
+            librustdesk::ui::cm::set_record_consent_text(policy::current().get("recording.consent-text").to_owned());
             librustdesk::ui::cm::start();
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title(policy::current().get("customer.title"))

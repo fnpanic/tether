@@ -63,10 +63,26 @@ index 597dc86..6127224 100644
          "insecure-connection-nocancel-hasclose",
          "Insecure Connection",
 diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
-index 1b197a8..e36221b 100644
+index 1b197a8..7114045 100644
 --- a/src/client/io_loop.rs
 +++ b/src/client/io_loop.rs
-@@ -1706,6 +1706,10 @@ impl<T: InvokeUiSession> Remote<T> {
+@@ -1315,6 +1315,15 @@ impl<T: InvokeUiSession> Remote<T> {
+                 }
+             }
+             Data::RecordScreen(start) => {
++                // Tether: no permission yet, so ask the host user; recording starts once granted.
++                #[cfg(feature = "tauri")]
++                if start && !self.handler.lc.read().unwrap().record_permission {
++                    let mut misc = Misc::new();
++                    misc.set_client_record_status(true);
++                    let mut msg = Message::new();
++                    msg.set_misc(misc);
++                    allow_err!(peer.send(&msg).await);
++                }
+                 self.handler.lc.write().unwrap().record_state = start;
+                 self.update_record_state();
+             }
+@@ -1706,6 +1715,10 @@ impl<T: InvokeUiSession> Remote<T> {
                      }
                      self.video_format = CodecFormat::from(&vf);
  
@@ -174,6 +190,37 @@ index 8e4c56c..995d6df 100644
                      }
                  } else {
                      bail!("Handshake failed: invalid message format");
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+index e9ea313..7510ca0 100644
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -663,6 +663,11 @@ impl Connection {
+             conn_audit_primary_auth: ConnAuditPrimaryAuth::None,
+             conn_audit_two_factor: ConnAuditTwoFactor::None,
+         };
++        // Tether: recording always needs the host user's consent for this connection.
++        #[cfg(feature = "tauri")]
++        {
++            conn.recording = false;
++        }
+         let addr = hbb_common::try_into_v4(addr);
+         if !conn.on_open(addr).await {
+             conn.closed = true;
+@@ -4032,6 +4037,14 @@ impl Connection {
+                         .lock()
+                         .unwrap()
+                         .user_auto_adjust_fps(self.inner.id(), fps),
++                    // Tether: a viewer without the recording permission asks the host user.
++                    #[cfg(feature = "tauri")]
++                    Some(misc::Union::ClientRecordStatus(true)) if !self.recording => {
++                        self.send_to_cm(ipc::Data::SwitchPermission {
++                            name: "recording-request".to_owned(),
++                            enabled: true,
++                        });
++                    }
+                     Some(misc::Union::ClientRecordStatus(status)) => video_service::VIDEO_QOS
+                         .lock()
+                         .unwrap()
 diff --git a/src/server/video_qos.rs b/src/server/video_qos.rs
 index 96ffa63..d40ba0d 100644
 --- a/src/server/video_qos.rs
@@ -237,10 +284,10 @@ index a13aebb..ced9ac5 100644
          // may need to enable frame(timeout)
 diff --git a/src/tauri_ui/cm.rs b/src/tauri_ui/cm.rs
 new file mode 100644
-index 0000000..9c89448
+index 0000000..ba16801
 --- /dev/null
 +++ b/src/tauri_ui/cm.rs
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,87 @@
 +//! Host-side connection manager: incoming connection requests, permissions, chat.
 +
 +use serde_json::{json, Value};
@@ -299,8 +346,35 @@ index 0000000..9c89448
 +}
 +
 +pub use crate::ui_cm_interface::{
-+    authorize, close, send_chat, switch_permission,
++    authorize, can_elevate, close, elevate_portable, send_chat, switch_permission,
 +};
++
++lazy_static::lazy_static! {
++    static ref RECORD_CONSENT_TEXT: std::sync::RwLock<String> =
++        std::sync::RwLock::new("The technician wants to record this session. Allow?".to_owned());
++}
++
++/// Question shown to the local user when a viewer wants to record (policy `recording.consent-text`).
++pub fn set_record_consent_text(text: String) {
++    if !text.trim().is_empty() {
++        *RECORD_CONSENT_TEXT.write().unwrap() = text;
++    }
++}
++
++/// A viewer asked to record connection `conn_id`; it may only once the user allows it.
++pub(crate) fn record_consent_request(conn_id: i32, peer_name: String) {
++    let text = RECORD_CONSENT_TEXT.read().unwrap().clone();
++    emit(
++        "record_consent_request",
++        json!({ "conn_id": conn_id, "peer_name": peer_name, "text": text }),
++    );
++}
++
++/// The user's answer. Allow grants the connection's `recording` permission (the viewer then starts
++/// its recorder); deny re-sends it as off, which the viewer reports as declined.
++pub fn record_consent(conn_id: i32, allow: bool) {
++    switch_permission(conn_id, "recording".to_owned(), allow);
++}
 diff --git a/src/tauri_ui/files.rs b/src/tauri_ui/files.rs
 new file mode 100644
 index 0000000..eaa6333
@@ -377,10 +451,10 @@ index 0000000..eaa6333
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..80a3b39
+index 0000000..c2da8dc
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
-@@ -0,0 +1,307 @@
+@@ -0,0 +1,331 @@
 +//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
 +//!
 +//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
@@ -506,6 +580,9 @@ index 0000000..80a3b39
 +        );
 +        pkt.extend_from_slice(&f.data);
 +        sink.video(&key, pkt);
++    }
++    if let Some(u) = &vf.union {
++        h.record_passthrough(vf.display as usize, u);
 +    }
 +    true
 +}
@@ -649,6 +726,27 @@ index 0000000..80a3b39
 +        );
 +    }
 +
++    /// Blocking HTTPS PUT of a file through the core's proxy/TLS-aware client.
++    pub fn http_put_file(url: &str, bearer: &str, path: &std::path::Path) -> Result<(), String> {
++        let client = crate::hbbs_http::create_http_client_with_url_strict(url)
++            .map_err(|e| e.to_string())?;
++        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
++        // The blocking client's 30 s default would cut off large recordings.
++        let mut req = client
++            .put(url)
++            .timeout(std::time::Duration::from_secs(3600))
++            .body(file);
++        if !bearer.is_empty() {
++            req = req.bearer_auth(bearer);
++        }
++        let res = req.send().map_err(|e| e.to_string())?;
++        if res.status().is_success() {
++            Ok(())
++        } else {
++            Err(format!("HTTP {}", res.status()))
++        }
++    }
++
 +    pub fn app_name() -> String {
 +        crate::get_app_name()
 +    }
@@ -690,17 +788,21 @@ index 0000000..80a3b39
 +}
 diff --git a/src/tauri_ui/remote.rs b/src/tauri_ui/remote.rs
 new file mode 100644
-index 0000000..01b0f4d
+index 0000000..0a92403
 --- /dev/null
 +++ b/src/tauri_ui/remote.rs
-@@ -0,0 +1,366 @@
-+use std::sync::{
-+    atomic::{AtomicU8, AtomicUsize},
-+    Arc, RwLock,
+@@ -0,0 +1,425 @@
++use std::{
++    collections::HashMap,
++    sync::{
++        atomic::{AtomicU8, AtomicUsize},
++        Arc, Mutex, RwLock,
++    },
 +};
 +
 +use base::message_proto::*;
-+use hbb_common::{protobuf::Enum, rendezvous_proto::ConnType};
++use hbb_common::{log, protobuf::Enum, rendezvous_proto::ConnType};
++use scrap::record::{Recorder, RecorderContext};
 +use serde_json::{json, Value};
 +
 +use super::{emit, encode_video_header, quality_json, sink, PKT_RGBA};
@@ -714,11 +816,54 @@ index 0000000..01b0f4d
 +    key: Arc<RwLock<String>>,
 +    /// Bitmask of codec ids decoded by the webview (see `super::CODEC_*`).
 +    pub passthrough: Arc<AtomicU8>,
++    /// Passthrough frames never reach the core's video threads, so they are recorded here.
++    rec: Arc<Mutex<PassthroughRecording>>,
++}
++
++#[derive(Default)]
++struct PassthroughRecording {
++    on: bool,
++    peer_id: String,
++    /// Display sizes from peer info; the recorder needs them for the container header.
++    sizes: Vec<(usize, usize)>,
++    recorders: HashMap<usize, Recorder>,
 +}
 +
 +impl TauriHandler {
 +    pub fn key(&self) -> String {
 +        self.key.read().unwrap().clone()
++    }
++
++    pub(super) fn record_passthrough(&self, display: usize, frame: &video_frame::Union) {
++        let mut r = self.rec.lock().unwrap();
++        if !r.on {
++            return;
++        }
++        let (w, h) = r.sizes.get(display).copied().unwrap_or((0, 0));
++        if !r.recorders.contains_key(&display) {
++            let ctx = RecorderContext {
++                server: false,
++                id: r.peer_id.clone(),
++                dir: crate::ui_interface::video_save_directory(false),
++                display_idx: display,
++                camera: false,
++                tx: None,
++            };
++            match Recorder::new(ctx) {
++                Ok(rec) => {
++                    r.recorders.insert(display, rec);
++                }
++                Err(e) => {
++                    log::error!("recorder for display {display}: {e}");
++                    r.on = false;
++                    return;
++                }
++            }
++        }
++        if let Some(rec) = r.recorders.get_mut(&display) {
++            // Frames before the first key frame are rejected; that only skips them.
++            rec.write_frame(frame, w, h).ok();
++        }
 +    }
 +
 +    fn emit(&self, name: &str, payload: Value) {
@@ -735,6 +880,7 @@ index 0000000..01b0f4d
 +) -> Session<TauriHandler> {
 +    let handler = TauriHandler::default();
 +    *handler.key.write().unwrap() = key.to_owned();
++    handler.rec.lock().unwrap().peer_id = peer_id.to_owned();
 +    let session: Session<TauriHandler> = Session {
 +        password: password.to_owned(),
 +        server_keyboard_enabled: Arc::new(RwLock::new(true)),
@@ -754,6 +900,10 @@ index 0000000..01b0f4d
 +        None,
 +    );
 +    session
++}
++
++fn display_sizes(displays: &[DisplayInfo]) -> Vec<(usize, usize)> {
++    displays.iter().map(|d| (d.width as usize, d.height as usize)).collect()
 +}
 +
 +fn displays_json(displays: &[DisplayInfo]) -> Value {
@@ -830,6 +980,7 @@ index 0000000..01b0f4d
 +    }
 +
 +    fn set_peer_info(&self, pi: &PeerInfo) {
++        self.rec.lock().unwrap().sizes = display_sizes(&pi.displays);
 +        self.emit(
 +            "peer_info",
 +            json!({
@@ -842,6 +993,7 @@ index 0000000..01b0f4d
 +    }
 +
 +    fn set_displays(&self, displays: &Vec<DisplayInfo>) {
++        self.rec.lock().unwrap().sizes = display_sizes(displays);
 +        self.emit("displays", json!({ "displays": displays_json(displays) }));
 +    }
 +
@@ -1025,6 +1177,11 @@ index 0000000..01b0f4d
 +    }
 +
 +    fn update_record_status(&self, start: bool) {
++        let mut r = self.rec.lock().unwrap();
++        r.on = start;
++        // Dropping a recorder finalises its file.
++        r.recorders.clear();
++        drop(r);
 +        self.emit("record_status", json!({ "start": start }));
 +    }
 +
@@ -1060,3 +1217,19 @@ index 0000000..01b0f4d
 +    m.set_item("total_size", n as f64);
 +    m
 +}
+diff --git a/src/ui_cm_interface.rs b/src/ui_cm_interface.rs
+index 64e1370..c655e13 100644
+--- a/src/ui_cm_interface.rs
++++ b/src/ui_cm_interface.rs
+@@ -584,6 +584,11 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
+                                 Data::ChatMessage { text } => {
+                                     self.cm.new_message(self.conn_id, text);
+                                 }
++                                #[cfg(feature = "tauri")]
++                                Data::SwitchPermission { name, .. } if name == "recording-request" => {
++                                    let peer_name = CLIENTS.read().unwrap().get(&self.conn_id).map(|c| c.name.clone()).unwrap_or_default();
++                                    crate::ui::cm::record_consent_request(self.conn_id, peer_name);
++                                }
+                                 Data::SwitchPermission { name, enabled } => {
+                                     // Keep this branch scoped to privacy mode rollback.
+                                     // Other CM permission toggles are updated optimistically by the UI itself.

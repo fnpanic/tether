@@ -527,5 +527,58 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         diag_open_logs,
         diag_export,
         diag_upload,
+        // --- reconnect/recording ---
+        session_policy_get,
+        session_record,
+        recording_finished,
+        cm_record_consent_init,
+        cm_record_consent,
+        // --- end reconnect/recording ---
     ]
 }
+
+// --- reconnect/recording ---
+use crate::{recording, session_policy};
+
+/// Policy value for the webview (`connect.reconnect-minutes`, `recording.*`).
+#[tauri::command]
+fn session_policy_get(id: String) -> String {
+    session_policy::get(&id)
+}
+
+/// Start/stop recording. Starting without the host's permission asks the host user first.
+#[tauri::command]
+fn session_record(key: String, start: bool) -> R<()> {
+    if start {
+        if session_policy::get("recording.mode") == "off" {
+            return Err("Recording is disabled by policy.".to_owned());
+        }
+        recording::apply_folder();
+        recording::started();
+    }
+    with_session(&key, |s| s.record_screen(start))
+}
+
+/// A recording stopped or a session window opened: queue closed recordings, retry uploads,
+/// prune old files.
+#[tauri::command]
+fn recording_finished() {
+    std::thread::spawn(|| {
+        // The recorder finalises its file when its video thread drops it.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        recording::after_session();
+    });
+}
+
+/// Host side: load the consent question from policy (call once when the CM window opens).
+#[tauri::command]
+fn cm_record_consent_init() {
+    cm::set_record_consent_text(session_policy::get("recording.consent-text"));
+}
+
+/// Host side: answer to a `record_consent_request` event.
+#[tauri::command]
+fn cm_record_consent(conn_id: i32, allow: bool) {
+    cm::record_consent(conn_id, allow);
+}
+// --- end reconnect/recording ---

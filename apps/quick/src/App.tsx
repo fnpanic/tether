@@ -350,11 +350,8 @@ function Footer({ s, session, onError }: { s: State; session: boolean; onError: 
         ) : (
           <button
             className="inline-flex items-center gap-1.5 text-caption text-accent"
-            title={session ? "Restarts TetherQS with admin rights. Your technician reconnects with the same ID and password." : "Lets your technician handle admin prompts (UAC)."}
-            onClick={() => {
-              if (session && !confirm("The session will end while TetherQS restarts with admin rights. Your technician can reconnect with the same ID and password. Continue?")) return;
-              api.elevate().catch((e) => onError(String(e)));
-            }}
+            title="Lets your technician handle admin prompts (UAC). Windows asks you once."
+            onClick={() => api.elevate().catch((e) => onError(String(e)))}
           >
             <ShieldCheck size={14} /> Allow admin access
           </button>

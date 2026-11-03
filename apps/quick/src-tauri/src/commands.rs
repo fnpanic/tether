@@ -169,14 +169,12 @@ fn cm_permission(id: i32, name: String, enabled: bool) -> R<()> {
 #[allow(non_snake_case)]
 fn cm_record_consent(connId: i32, allow: bool) -> R<()> {
     hbb_common::log::info!("record consent for {connId}: {allow}");
-    if allow {
-        return Err("Recording consent is not supported by this build yet.".into());
-    }
+    librustdesk::ui::cm::record_consent(connId, allow);
     Ok(())
 }
 
-/// Restart with admin rights via the core's portable service (UAC prompt), keeping ID and
-/// one-time password. Ends a running session; the technician reconnects with the same password.
+/// Admin rights for UAC prompts. During a session: the core's portable service elevates in place
+/// (one UAC prompt, the session continues). Otherwise: restart elevated, keeping ID and password.
 #[tauri::command]
 fn elevate() -> R<()> {
     if !policy::current().on("customer.elevate") {
@@ -184,6 +182,13 @@ fn elevate() -> R<()> {
     }
     if elevated() {
         return Ok(());
+    }
+    let active = crate::sink::clients().into_iter().find(|c| c["authorized"] == true).and_then(|c| c["id"].as_i64());
+    if let Some(id) = active {
+        if librustdesk::ui::cm::can_elevate() {
+            librustdesk::ui::cm::elevate_portable(id as i32);
+            return Ok(());
+        }
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     crate::relaunch(&exe, true)

@@ -54,6 +54,8 @@ pub fn run(args: Vec<String>) {
                     tray(app.handle())?;
                     policy::start(true);
                     update::start();
+                    // Retry recording uploads left from earlier sessions.
+                    std::thread::spawn(crate::recording::after_session);
                     // macOS delivers tether:// links to the running app; Windows starts a new
                     // process with the link as argument (cli.rs).
                     let handle = app.handle().clone();
