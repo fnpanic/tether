@@ -47,11 +47,12 @@ async function until(what, fn, timeout, every = 1000) {
   throw new Error(`timeout: ${what}`);
 }
 
-/** Start the drag workload in the VM's interactive session (elevated PowerShell Direct). */
+/** Start the drag workload in the VM's interactive session (PowerShell Direct, elevated through the
+ * broker in C:\vms\broker so no UAC prompt appears on this PC). */
 function startDrag(seconds) {
   writeFileSync("C:/vms/perf/cmd.txt", `-File C:\\bench\\perf\\drag.ps1 -Seconds ${seconds}`);
   writeFileSync("C:/vms/perf/wait.txt", "0");
-  execFileSync("powershell", ["-NoProfile", "-Command", "Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:\\vms\\perf-exec.ps1','-Script','interactive.ps1'"]);
+  execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\vms\\broker\\run-elevated.ps1", "vm-perf-exec.ps1", "-Script", "interactive.ps1"]);
   return readFileSync("C:/vms/perf-exec.log", "utf8").trim();
 }
 
