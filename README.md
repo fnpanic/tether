@@ -14,6 +14,12 @@ Fast, private, self-hosted remote desktop for Windows and macOS, with a Linux re
 - **Networks:** only TCP 443 (port 80 as fallback), works behind proxies and TLS inspection. See
   [docs/corporate-networks.md](docs/corporate-networks.md) and
   [docs/connection-resilience.md](docs/connection-resilience.md).
+- **Management:** Tether Manage (`apps/manage`) signs policies and releases; the relay API
+  serves them. Customer module TetherQS (`apps/quick`): portable, no admin rights. See
+  [docs/management.md](docs/management.md), [docs/policy.md](docs/policy.md),
+  [docs/updates.md](docs/updates.md), [docs/quick-support.md](docs/quick-support.md),
+  [docs/recording.md](docs/recording.md), [docs/cli.md](docs/cli.md),
+  [docs/troubleshooting.md](docs/troubleshooting.md), [docs/api.md](docs/api.md).
 - **Changes:** [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout

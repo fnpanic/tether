@@ -39,6 +39,18 @@ The relay operator is **not trusted with content**. The relay only forwards ciph
 | Brute-force protection | Failed logins are counted per IP and per IPv6 /64, /56 and /48 prefix. Attempts are throttled and then blocked. The one-time password rotates after too many failures. | core `server/connection.rs` (`LOGIN_FAILURES`) |
 | Identity verification | Viewers see whether the session is end-to-end encrypted and whether it runs P2P or through the relay. Device fingerprints are exposed for out-of-band checks. | `Session.tsx` |
 
+## Central management (0.3)
+
+| Control | Mechanism | Where |
+| --- | --- | --- |
+| Policy integrity | Policies are signed by the **admin key** (Ed25519), which never leaves the admin's PC. Clients verify against compile-time public keys, so a compromised relay cannot push or alter a policy. Lower serials are rejected (no rollback). | `crates/tether-trust`, `apps/*/src-tauri/src/policy.rs` |
+| Security floor | TLS verification, end-to-end encryption, 443-only networking and "no silent recording" are not policy features. The apps apply them on top of any policy. | `tether_trust::policy::FLOOR`, `security.rs`, `netpolicy.rs` |
+| Admin API | Every admin request is signed over method, path, timestamp, nonce and body hash. The server allows ±300 s clock skew and rejects replayed nonces (persisted across restarts). | `tether_trust::reqauth`, `server/api` |
+| Keys at rest | Admin and updater private keys are encrypted with argon2id + XChaCha20-Poly1305 under the admin's passphrase. | `apps/manage/src-tauri/src/keys.rs` |
+| Update integrity | Installers and TetherQS are signed with the updater key (minisign) and verified before installation. Clients below the minimum version cannot start or accept sessions. | `update.rs` (both apps) |
+| Recording consent | Recording requires an explicit Allow from the other party for every connection, regardless of policy. The viewer never assumes the permission. | core `client.rs`, `server/connection.rs`, `docs/recording.md` |
+| Diagnostics | Exports redact passwords, salts, key pairs and tokens. Uploads are accepted only for tickets an admin opened (8 characters, 24 h, one upload, kept 7 days). | `diag.rs`, `server/api` |
+
 ## Least privilege and attack surface
 
 Settings below are **forced** for every Tether process (UI, server, service and connection manager).

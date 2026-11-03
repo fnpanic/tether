@@ -13,20 +13,22 @@ pub const HELP: &str = "\
 Usage: tether [command]
 
   (no command)                      start Tether
-  --connect <id> [password]         open a session to <id>
+  --connect <id> [password]         open a session to <id> (a positional or --password <pw>
+                                    value is visible in the process list: prefer the next two)
       --password-stdin              read the password from the first line of stdin
       --password-env <VAR>          read the password from environment variable VAR
       --file-transfer               open file transfer instead of the remote screen
       --view-only                   do not send mouse or keyboard input
       --relay                       always use the relay (Tether always does)
       --fullscreen                  open the session window in full screen
+  --view-camera <id> / --terminal <id>   open the camera view / a terminal instead (same options)
   tether://connect/<id>             same as --connect <id> (links never carry passwords)
   --get-id                          print this device's ID
   --version                         print the version
   --check-update                    check for an update and print the result
   --policy-refresh                  fetch the organisation policy now
   --diagnostics <out.zip>           write a diagnostics archive (logs, settings without secrets)
-  --help                            show this help
+  --help, -h, /?                    show this help
 
 Exit codes: 0 ok, 1 error, 2 bad arguments, 3 offline, 4 policy signature rejected,
 5 not allowed by policy, 6 update required.";

@@ -12,11 +12,9 @@
   Pop $1
   StrCmp $0 "0" 0 +2
     nsExec::Exec 'sc.exe start Tether'
-  ; Allow incoming P2P sessions for Tether only (program-scoped, private + domain networks).
-  ; Public networks stay blocked; sessions there fall back to the relay.
+  ; 443-only (0.2+): Tether never listens for incoming connections, so no inbound firewall rule.
+  ; Remove the rules older versions created.
   nsExec::Exec 'netsh advfirewall firewall delete rule name="Tether"'
-  nsExec::Exec 'netsh advfirewall firewall add rule name="Tether" dir=in action=allow program="$INSTDIR\tether.exe" enable=yes profile=private,domain protocol=TCP'
-  nsExec::Exec 'netsh advfirewall firewall add rule name="Tether" dir=in action=allow program="$INSTDIR\tether.exe" enable=yes profile=private,domain protocol=UDP'
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

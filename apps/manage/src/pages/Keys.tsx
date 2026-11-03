@@ -33,7 +33,7 @@ export function Keys() {
           <CopyField label="admin public key" value={state.admin_pub ?? ""} />
           <h2 className="mt-6 text-headline font-semibold">Update signing public key</h2>
           <p className="mb-3 mt-1 text-caption text-muted">
-            For <code className="font-mono">plugins.updater.pubkey</code> in tauri.conf.json (technician app) and <code className="font-mono">TETHER_UPDATER_PUB_KEY</code> (customer module).
+            For the build variable <code className="font-mono">TETHER_UPDATER_PUB_KEY</code> (technician app and customer module).
           </p>
           <CopyField label="update public key" value={state.updater_pub ?? ""} />
         </Card>

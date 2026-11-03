@@ -41,7 +41,7 @@ The recipe behind "always connects":
 | TLS on port 80 | On the relay, firewalld forwards TCP 80 to Caddy's 443 listener, so it is the same certificate and the same endpoints. The OCI security list allows TCP 80. |
 | Dead or wrong proxy | The direct routes run alongside the proxy routes, so a broken proxy setting cannot keep Tether offline. |
 | TLS inspection | Works (OS trust store fallback), unlike AnyDesk. The session stays end-to-end encrypted inside it. |
-| Quiet operation | No `/api/heartbeat` polling (the relay has no API). Before this change it was a blocked or 404 request every ~18 s in proxy logs. |
+| Quiet operation | No upstream `/api/heartbeat` polling. Since 0.3 the policy client sends one small heartbeat per policy check to `tether-api` (see `docs/api.md`). |
 | Recovery | The rendezvous loop retries every ≤18 s, racing every route each time. |
 
 Only Tether's own compiled-in relay gets alternative routes. Other servers keep upstream's single

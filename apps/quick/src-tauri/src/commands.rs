@@ -163,8 +163,8 @@ fn cm_permission(id: i32, name: String, enabled: bool) -> R<()> {
     Ok(())
 }
 
-/// Answer to `record_consent_request`. Integration point: the core's consent hook is being
-/// added in parallel (tauri_ui::cm); until it exists the request can only be declined.
+/// Answer to `record_consent_request`: Allow grants this connection's recording permission,
+/// Deny keeps it off (the viewer reports "declined").
 #[tauri::command]
 #[allow(non_snake_case)]
 fn cm_record_consent(connId: i32, allow: bool) -> R<()> {

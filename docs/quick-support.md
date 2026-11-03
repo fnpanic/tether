@@ -44,11 +44,11 @@ minute. Policy, heartbeat and update requests use the same proxy and the Windows
 ## Admin access (UAC)
 
 A normal-user process cannot see or click UAC prompts or the secure desktop. **Allow admin
-access** (policy `customer.elevate`) restarts TetherQS so the core starts its elevated *portable
-service* (`pre-elevate-service` → `start_portable_service`, one UAC prompt for the customer). The
-main process stays a normal-user process; the ID and the current one-time password are kept
-(handed over to the new process), so a technician who was connected reconnects with the same
-credentials. A running session is interrupted by this restart.
+access** (policy `customer.elevate`) starts the core's elevated *portable service* (one UAC
+prompt for the customer). During a session this happens in place (`elevate_portable`), so the
+session continues. Without a session TetherQS restarts with `pre-elevate-service`; the ID and the
+current one-time password are kept (handed over to the new process). The main process stays a
+normal-user process either way.
 
 The technician can also request elevation from inside a session (core `ElevationRequest`), which
 starts the same portable service without a restart.
@@ -118,9 +118,11 @@ cargo build --release --features custom-protocol
 
 ## Known limits
 
-- Recording consent: the UI listens for the `record_consent_request` event and answers with
-  `cm_record_consent`; the core side of that contract is not in this core yet, so the app command
-  currently only accepts "Don't allow".
+- Recording consent works like in the technician app: the request arrives as
+  `record_consent_request`, the customer's answer goes to the core via `cm_record_consent`
+  (verified end to end: Deny → nothing recorded, Allow → playable file).
+- A manifest `minimumVersion` is only seen while `update.enabled` is on; the policy key
+  `update.minimum-version` is enforced either way.
 - Starting TetherQS twice: the second instance finds the first one's IPC and exits.
 - Over-the-shoulder UAC with a different admin account works for the portable service (it runs as
   SYSTEM), but the customer must know those credentials.

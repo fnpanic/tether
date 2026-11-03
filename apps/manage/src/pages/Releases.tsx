@@ -70,14 +70,14 @@ export function Releases() {
     }
   };
 
-  const target = kind === "technician" ? `Tether_${version || "<version>"}_x64-setup.exe` : "TetherQS.exe";
+  const target = kind === "technician" ? `Tether_${version || "<version>"}_x64-setup.exe` : `TetherQS-${version || "<version>"}.exe`;
 
   return (
     <>
       <PageHeader title="Releases" sub="Sign an installer with the update key and publish it to an update channel." />
       <Card>
         <div className="grid grid-cols-2 gap-x-6 gap-y-4">
-          <Label text="File" hint={file ? `Uploaded as ${channel}/${kind}/windows-x86_64/${target}` : "Tether_<version>_x64-setup.exe (technician) or TetherQS.exe (customer)"}>
+          <Label text="File" hint={file ? `Uploaded as ${channel}/${kind}/windows-x86_64/${target}` : "Tether_<version>_x64-setup.exe (technician) or TetherQS-<version>.exe (customer)"}>
             <div className="flex gap-2">
               <TextField readOnly value={file} placeholder="No file chosen" />
               <Button onClick={pick}>Choose…</Button>

@@ -11,7 +11,9 @@ installed clients.
 | Host | OCI `VM.Standard.E2.1.Micro` (Always Free), Oracle Linux 9, region eu-amsterdam-1 |
 | Public IP | ephemeral (free); the DNS name follows it |
 | Ports | **TCP 443** (Caddy → `/ws/id`, `/ws/relay`; what Tether clients use) and **TCP 80** (firewalld forwards it to 443, the fallback route; see [connection-resilience.md](connection-resilience.md)). Legacy TCP 21115–21117 and UDP 21116 are still open for stock RustDesk clients and can be closed. |
-| Services | `tether-hbbs`, `tether-hbbr` (patched for WebSocket hosts), `tether-https` (Caddy, Let's Encrypt), `tether-ddns.timer` (systemd, enabled at boot) |
+| Services | `tether-hbbs`, `tether-hbbr` (patched for WebSocket hosts), `tether-https` (Caddy, Let's Encrypt), `tether-api` (policy, heartbeats, releases, download page, diagnostics; `MemoryMax=64M`), `tether-ddns.timer` (systemd, enabled at boot) |
+| Admin key | `ADMIN_PUB_KEY` in `/etc/tether/api.env`: the public half of the Tether Manage admin key (comma-separated to trust several during a rotation). Without it the admin endpoints answer 503. |
+| Download page | `https://tether-desk.duckdns.org/` (published from Tether Manage; files under `/var/lib/tether-api/download/<channel>/…`) |
 | Data | `/var/lib/tether` (key pair `id_ed25519` + peer DB). Back up `id_ed25519`; losing it means rebuilding every client. |
 
 ## Cost
@@ -33,7 +35,13 @@ No other paid resources were created.
    - `server/systemd/tether-https.service` enabled; TCP 443 opened in the OCI security list and firewalld;
    - port 80 fallback: `firewall-cmd --permanent --add-forward-port=port=80:proto=tcp:toport=443 --add-port=80/tcp` plus an OCI ingress rule for TCP 80;
    - the certificate comes from Let's Encrypt via TLS-ALPN-01 on 443 (no port 80 needed) and renews automatically.
-5. VM tuning for the 1 GB micro shape:
+5. Relay API (`tether-api`, 0.3.0+): binary at `/usr/local/bin/tether-api` (`install`, not `mv`,
+   so SELinux labels are right), user `tether-api`, data in `/var/lib/tether-api` (0750; Caddy's
+   user is in group `tether-api` to read `download/`), `server/systemd/tether-api.service`,
+   `/etc/tether/api.env` with `ADMIN_PUB_KEY=<base64>`. Restart `tether-https` after changing the
+   Caddyfile (its admin API is off). A fresh server gets all of this from
+   `sudo ADMIN_PUB_KEY=<key> ./install.sh tether-desk.duckdns.org`.
+6. VM tuning for the 1 GB micro shape:
    - kdump disabled and the `crashkernel` reservation removed (it reserved 448 MB, which starved
      the VM until it froze);
    - a 2 GB swap file added as a safety net.
@@ -43,16 +51,20 @@ No other paid resources were created.
 ```bash
 TETHER_SERVER=tether-desk.duckdns.org \
 TETHER_PUB_KEY=fe8A7xTX72RJlJypn8aBxG3NZHHxygCLPQqCWxbeev8= \
-npx tauri build --bundles nsis
+TETHER_ADMIN_PUB_KEY=<admin public key from Tether Manage> \
+TETHER_UPDATER_PUB_KEY=<updater public key from Tether Manage> \
+npx tauri build --bundles nsis           # apps/desktop (technician installer)
+# apps/quick: same env, `npx tauri build` -> TetherQS.exe (portable, no installer)
 ```
 
-The same two values are stored as GitHub Actions secrets in `fnpanic/tether` for the macOS and
-Windows CI builds.
+Release builds refuse to compile without the four values. They are stored as GitHub Actions
+secrets in `fnpanic/tether` for the macOS and Windows CI builds. Publish the artifacts with
+Tether Manage (Releases); see [updates.md](updates.md).
 
 ## Operations
 
 ```bash
 ssh -i ~/.ssh/tether_oracle opc@tether-desk.duckdns.org
-sudo systemctl status tether-hbbs tether-hbbr tether-ddns.timer
+sudo systemctl status tether-hbbs tether-hbbr tether-https tether-api tether-ddns.timer
 sudo journalctl -u tether-hbbs -f
 ```

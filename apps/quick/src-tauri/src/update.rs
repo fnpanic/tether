@@ -150,7 +150,8 @@ fn check() -> Result<(), String> {
     let eff = policy::current();
     let base = policy::base_url().ok_or("no server")?;
     let channel = eff.get("update.channel");
-    let channel = if channel.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && !channel.is_empty() { channel } else { "stable" };
+    // Same rule as the technician app and the relay: [a-z0-9-]{1,32}.
+    let channel = if (1..=32).contains(&channel.len()) && channel.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') { channel } else { "stable" };
     let resp = policy::http()?
         .get(format!("{base}/download/{channel}/customer/{PLATFORM}/latest.json"))
         .send()

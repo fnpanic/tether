@@ -19,7 +19,7 @@ system proxy. Everything is TLS; plain HTTP is never used.
 | Key | Holder | Public half lives in |
 | --- | --- | --- |
 | Admin key (Ed25519) | management app, encrypted at rest | clients: compile-time `TETHER_ADMIN_PUB_KEY` (base64); server: `ADMIN_PUB_KEY` in `/etc/tether/api.env` |
-| Updater key (Tauri minisign) | management app, encrypted at rest | `tauri.conf.json` `plugins.updater.pubkey` (technician), compile-time `TETHER_UPDATER_PUB_KEY` (customer module) |
+| Updater key (Tauri minisign) | management app, encrypted at rest | compile-time `TETHER_UPDATER_PUB_KEY` (technician app and customer module) |
 
 Several admin public keys may be trusted (comma-separated) to allow key rotation.
 
@@ -84,7 +84,7 @@ download/
   <channel>/technician/windows-x86_64/latest.json
   <channel>/technician/windows-x86_64/Tether_<v>_x64-setup.exe(.sig)
   <channel>/customer/windows-x86_64/latest.json
-  <channel>/customer/windows-x86_64/TetherQS.exe(.sig)
+  <channel>/customer/windows-x86_64/TetherQS-<v>.exe(.sig)   versioned, so uploads never touch the live file
   <channel>/technician/darwin-universal/…     (macOS, CI)
 ```
 Channel default `stable` (policy feature `update.channel`). `latest.json` is the Tauri updater

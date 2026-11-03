@@ -27,7 +27,8 @@ pub struct Manifest {
 pub fn target(kind: &str, version: &str) -> Result<(String, String), String> {
     match kind {
         "technician" => Ok((format!("technician/{PLATFORM}"), format!("Tether_{version}_x64-setup.exe"))),
-        "customer" => Ok((format!("customer/{PLATFORM}"), "TetherQS.exe".into())),
+        // Versioned: an upload never replaces the file the current latest.json points to.
+        "customer" => Ok((format!("customer/{PLATFORM}"), format!("TetherQS-{version}.exe"))),
         _ => Err(format!("unknown release kind {kind:?}")),
     }
 }
@@ -139,7 +140,7 @@ mod tests {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(target("technician", "0.3.1").unwrap().1, "Tether_0.3.1_x64-setup.exe");
-        assert_eq!(target("customer", "0.3.1").unwrap(), ("customer/windows-x86_64".into(), "TetherQS.exe".into()));
+        assert_eq!(target("customer", "0.3.1").unwrap(), ("customer/windows-x86_64".into(), "TetherQS-0.3.1.exe".into()));
         assert!(valid_version("0.3.1") && valid_version("0.3.1-test") && !valid_version("0.3.x") && !valid_version("../1"));
         assert!(valid_channel("stable") && !valid_channel("Stable") && !valid_channel(""));
     }

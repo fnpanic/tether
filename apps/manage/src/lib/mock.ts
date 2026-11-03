@@ -39,7 +39,7 @@ const admin: Record<string, unknown> = {
     { channel: "stable", path: "technician/windows-x86_64/Tether_0.3.0_x64-setup.exe", size: 14_200_000, modified: now - 86400 * 3 },
     { channel: "stable", path: "technician/windows-x86_64/Tether_0.3.0_x64-setup.exe.sig", size: 420, modified: now - 86400 * 3 },
     { channel: "stable", path: "technician/windows-x86_64/latest.json", size: 610, modified: now - 86400 * 3 },
-    { channel: "stable", path: "customer/windows-x86_64/TetherQS.exe", size: 9_800_000, modified: now - 86400 * 3 },
+    { channel: "stable", path: "customer/windows-x86_64/TetherQS-0.3.0.exe", size: 9_800_000, modified: now - 86400 * 3 },
   ],
   "/api/admin/diag": [
     { ticket: "K7Q2M9XD", note: "Black screen after login, Dr. Weber", created: now - 3600, uploaded: now - 3000, size: 182_000 },
