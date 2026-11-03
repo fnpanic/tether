@@ -82,6 +82,8 @@ export class VideoPipeline {
   private decoder: VideoDecoder | null = null;
   private codec = 0;
   private waitingKey = true;
+  /** Only after resync() does a stray delta ask for a key frame (once). */
+  private askedKey = true;
   private pending = new Map<number, number>();
   private frames = 0;
   private decodeSum = 0;
@@ -138,8 +140,14 @@ export class VideoPipeline {
     }
     const dec = this.decoder!;
     if (this.waitingKey) {
-      if (!p.key) return;
+      if (!p.key) {
+        // A refresh restarts the host's video service, so ask only once per resync.
+        if (!this.askedKey) this.cb.onNeedKey(this.display);
+        this.askedKey = true;
+        return;
+      }
       this.waitingKey = false;
+      this.askedKey = true;
     }
     // Never let the queue grow: a backed-up decoder means stale pictures, so drop and resync.
     if (dec.decodeQueueSize > 3) {
@@ -207,6 +215,13 @@ export class VideoPipeline {
       this.decodeSum = 0;
       this.lastStats = now;
     }
+  }
+
+  /** After a reconnect: keep the decoder and the last picture, resume at the next key frame. */
+  resync() {
+    this.waitingKey = true;
+    this.askedKey = false;
+    this.pending.clear();
   }
 
   /** Switch the shown display; the next key frame repaints. */

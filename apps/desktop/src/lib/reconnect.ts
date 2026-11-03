@@ -9,9 +9,12 @@
  *   unencrypted connection.
  */
 
-/** Delay before reconnect attempt n (1-based): 0.5, 1, 2, 4, 8 s, then every 10 s. */
+/**
+ * Delay before reconnect attempt n (1-based): at once, then 0.25, 0.5, 1, 2, 4, 8 s, then every
+ * 10 s. A relay restart is over in about a second, so the first attempts are packed into it.
+ */
 export function delayMs(attempt: number): number {
-  const steps = [500, 1000, 2000, 4000, 8000];
+  const steps = [0, 250, 500, 1000, 2000, 4000, 8000];
   return steps[attempt - 1] ?? 10000;
 }
 
@@ -19,6 +22,9 @@ export function delayMs(attempt: number): number {
 export const forceRelay = (attempt: number) => attempt > 2;
 
 export type FailureKind = "retryable" | "transient" | "fatal";
+
+/** Transport failures the core does not flag as retryable ("Failed to connect via relay…"). */
+const TRANSPORT = /failed|timeout|timed out|reset|refused|handshake|connect|relay|network|unreachable|closed|io error|os error/i;
 
 const FATAL = /password|reject|denied|declin|manually|not allowed|restricted|policy|locked|update|upgrade|version|incoming only|mismatch|2fa/i;
 
@@ -28,6 +34,8 @@ export function classify(m: { type: string; title: string; text: string; retry?:
   if (t.includes("offline") || t.includes("not exist") || t.includes("end-to-end encrypted")) return "transient";
   if (m.type.includes("password") || FATAL.test(m.text) || FATAL.test(m.title)) return "fatal";
   if (m.type === "error" && m.retry !== false) return "retryable";
+  // Such a failure while reconnecting (the relay is still restarting) must not end the series.
+  if (m.type === "error" && TRANSPORT.test(m.text)) return "transient";
   return "fatal";
 }
 

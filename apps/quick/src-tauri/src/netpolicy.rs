@@ -41,7 +41,9 @@ fn enforced(relay: Option<&str>) -> Vec<(String, String)> {
         ("disable-udp", "Y".to_owned()),
         ("enable-lan-discovery", "N".to_owned()),
     ];
-    if let Some(host) = relay.map(|h| h.split(':').next().unwrap_or(h)).filter(|h| !h.is_empty()) {
+    // `TETHER_SERVER` may list several servers; they all share the scheme, the first decides it.
+    let first = relay.and_then(|h| h.split(',').next()).map(str::trim);
+    if let Some(host) = first.map(tether_trust::policy::server_host).filter(|h| !h.is_empty()) {
         // hbb_common picks wss:// (TLS on 443) only when api-server is https.
         v.push(("api-server", format!("https://{host}")));
     }
@@ -49,7 +51,7 @@ fn enforced(relay: Option<&str>) -> Vec<(String, String)> {
 }
 
 fn refresh_system_proxy() {
-    let target = format!("https://{}/", RELAY.unwrap_or("example.com"));
+    let target = crate::policy::base_url().unwrap_or_else(|| "https://example.com".into()) + "/";
     let detected = detect_proxy(&target);
     let mut d = DEFAULT_SETTINGS.write().unwrap();
     match detected {
@@ -228,6 +230,8 @@ mod tests {
         assert_eq!(e["enable-lan-discovery"], "N");
         assert_eq!(e["api-server"], "https://relay.example.com");
         let e: HashMap<_, _> = enforced(Some("relay.example.com:21116")).into_iter().collect();
+        assert_eq!(e["api-server"], "https://relay.example.com");
+        let e: HashMap<_, _> = enforced(Some("relay.example.com, relay2.example.com")).into_iter().collect();
         assert_eq!(e["api-server"], "https://relay.example.com");
     }
 

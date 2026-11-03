@@ -24,8 +24,7 @@ fn now() -> u64 {
 }
 
 fn relay_host() -> &'static str {
-    let h = policy::SERVER.unwrap_or_default();
-    h.split(':').next().unwrap_or(h)
+    policy::primary_host()
 }
 
 /// Proxy without credentials.

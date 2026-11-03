@@ -4,19 +4,21 @@ import { classify, delayMs, onFailure, reconnectMinutes, type Series } from "./r
 const err = (text: string, retry = true) => ({ type: "error", title: "Connection Error", text, retry });
 
 describe("reconnect", () => {
-  it("backs off 0.5, 1, 2, 4, 8 s then every 10 s, relay after two failures", () => {
+  it("retries at once, then 0.25, 0.5, 1, 2, 4, 8 s, then every 10 s, relay after two failures", () => {
     let s: Series | null = null;
     const delays: number[] = [];
     const relay: boolean[] = [];
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 10; i++) {
       const step = onFailure(s, "retryable", 1000 + i, 10);
       if (step.kind !== "retry") throw new Error("gave up");
       s = step.series;
       delays.push(step.delayMs);
       relay.push(step.forceRelay);
     }
-    expect(delays).toEqual([500, 1000, 2000, 4000, 8000, 10000, 10000, 10000]);
-    expect(relay).toEqual([false, false, true, true, true, true, true, true]);
+    expect(delays).toEqual([0, 250, 500, 1000, 2000, 4000, 8000, 10000, 10000, 10000]);
+    expect(relay).toEqual([false, false, true, true, true, true, true, true, true, true]);
+    // Everything a ~1 s relay restart needs fits into the first four attempts.
+    expect(delays.slice(0, 4).reduce((a, b) => a + b)).toBeLessThanOrEqual(2000);
     expect(delayMs(100)).toBe(10000);
   });
 
@@ -46,6 +48,15 @@ describe("reconnect", () => {
   it("retries transport failures", () => {
     expect(classify(err("Reset by the peer"))).toBe("retryable");
     expect(classify(err("Timeout"))).toBe("retryable");
+  });
+
+  it("a relay that is still restarting does not end a running series", () => {
+    // The core flags "Failed …" texts as not retryable; they are transport failures all the same.
+    const k = classify(err("Failed to connect via relay server: HTTP error: 502 Bad Gateway: Please try later", false));
+    expect(k).toBe("transient");
+    expect(onFailure({ attempt: 1, startedAt: 0 }, k, 300, 10).kind).toBe("retry");
+    // A working session that fails like this still shows the error (no series yet).
+    expect(onFailure(null, k, 0, 10).kind).toBe("give-up");
   });
 
   it("offline ends a working session but not a running reconnect series", () => {

@@ -27,6 +27,7 @@ works wins. See [connection-resilience.md](connection-resilience.md).
 ## Requirements for IT
 
 - Allow `https://tether-desk.duckdns.org` (TCP 443, WebSocket upgrade on `/ws/id` and `/ws/relay`).
+  With several servers (`TETHER_SERVER` list, policy `servers.list`) allow each of them.
 - If WebSockets are inspected, allow long-lived connections. Hosts keep one open permanently and
   send a heartbeat every 20 s.
 - Nothing else is needed: no UDP, no inbound rules, no other ports.

@@ -4,7 +4,9 @@ The contract between the technician app (`apps/desktop`), the customer module (`
 management app (`apps/manage`) and the relay service (`server/api`). Shared types and crypto live
 in `crates/tether-trust`; do not reimplement them.
 
-Base URL: `https://<relay>` (production `https://tether-desk.duckdns.org`). Caddy routes:
+Base URL: `https://<relay>` (production `https://tether-desk.duckdns.org`). With several servers
+(compiled-in `TETHER_SERVER` list plus policy `servers.list`) clients use the first one that answers,
+the last one that answered first; every server must serve the same API and releases. Caddy routes:
 - `/api/*` → `tether-api` on `127.0.0.1:21120`
 - `/download/*` → static files in `/var/lib/tether-api/download/` (served by Caddy `file_server`;
   `latest.json` with `Cache-Control: no-cache`)

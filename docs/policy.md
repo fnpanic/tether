@@ -23,6 +23,7 @@ States per layer: `on` (user may change, `value` is the default), `off` (locked 
 | `connect.chat` | connections | Chat in sessions | `Y` | technician, customer | – |
 | `connect.reconnect-minutes` | connections | Keep reconnecting after a connection loss (minutes) | `10` | technician, customer | – |
 | `settings.server` | connections | Allow changing the relay server | `N` | technician | – |
+| `servers.list` | connections | Additional relay servers (host names or wss:// URLs, comma-separated) | – | technician, customer | – |
 | `video.quality` | video | Default image quality (best, balanced, low) | `balanced` | technician | `image-quality` |
 | `video.codec` | video | Preferred codec (auto, h264, h265, av1, vp9, vp8) | `auto` | technician | `codec-preference` |
 | `recording.mode` | recording | Session recording (off, on-request, always) | `on-request` | technician | – |

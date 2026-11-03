@@ -10,7 +10,7 @@ use std::{
 use hbb_common::config::{Config, LocalConfig, DEFAULT_SETTINGS, OVERWRITE_SETTINGS};
 use tether_trust::{
     envelope,
-    policy::{resolve, Bundle, Effective, FLOOR, PROFILE_CUSTOMER},
+    policy::{parse_servers, resolve, server_host, Bundle, Effective, FLOOR, PROFILE_CUSTOMER, SERVERS_LIST},
     VerifyingKey,
 };
 
@@ -30,10 +30,45 @@ pub fn current() -> Effective {
         .unwrap_or_else(|| resolve(None, PROFILE_CUSTOMER, "", None))
 }
 
-/// `https://<relay host>`, or None in builds without a pinned server.
+/// The API server that answered last (else the first compiled-in one), or None in builds without
+/// a pinned server.
 pub fn base_url() -> Option<String> {
-    let host = SERVER?.split(':').next()?.trim();
-    (!host.is_empty()).then(|| format!("https://{host}"))
+    base_urls().into_iter().next()
+}
+
+/// `https://<host>` of every server (compiled-in, then policy `servers.list`), last good first.
+fn base_urls() -> Vec<String> {
+    if SERVER.is_none() {
+        return Vec::new(); // never the upstream public servers
+    }
+    let mut v: Vec<String> = hbb_common::config::own_rendezvous_servers()
+        .iter()
+        .map(|h| server_host(h.trim()))
+        .filter(|h| !h.is_empty())
+        .map(|h| format!("https://{h}"))
+        .collect();
+    v.dedup();
+    let last = LAST_BASE.lock().unwrap().clone();
+    if let Some(i) = v.iter().position(|b| *b == last) {
+        let b = v.remove(i);
+        v.insert(0, b);
+    }
+    v
+}
+
+static LAST_BASE: Mutex<String> = Mutex::new(String::new());
+
+/// `servers.list` → extra rendezvous servers (host names only, see `parse_servers`); the host
+/// registers with all of them. True when the list changed.
+fn apply_servers(eff: &Effective) -> bool {
+    let list = parse_servers(eff.get(SERVERS_LIST)).unwrap_or_default();
+    let mut cur = hbb_common::config::POLICY_RENDEZVOUS_SERVERS.write().unwrap();
+    if *cur == list {
+        return false;
+    }
+    hbb_common::log::info!("policy servers: {list:?}");
+    *cur = list;
+    true
 }
 
 /// HTTPS client through the detected system proxy (same detection as the relay connection).
@@ -89,7 +124,11 @@ pub fn device_uuid() -> String {
 fn set(bundle: Option<&Bundle>) {
     let eff = resolve(bundle, PROFILE_CUSTOMER, &device_uuid(), None);
     apply_core(&eff);
+    let servers_changed = apply_servers(&eff);
     *EFFECTIVE.write().unwrap() = Some(eff);
+    if servers_changed {
+        librustdesk::ui::api::restart_rendezvous();
+    }
 }
 
 /// Locked features become overrides, the rest defaults. Floor keys are never touched.
@@ -119,13 +158,18 @@ pub fn load_cached() {
 }
 
 fn fetch(keys: &[VerifyingKey]) -> Result<bool, String> {
-    let base = base_url().ok_or("no server")?;
     let serial = current().serial;
-    let resp = http()?
-        .get(format!("{base}/api/policy"))
-        .header("If-None-Match", format!("\"{serial}\""))
-        .send()
-        .map_err(|e| e.to_string())?;
+    let client = http()?;
+    // First server that answers.
+    let mut resp = Err("no server".to_owned());
+    for base in base_urls() {
+        resp = client.get(format!("{base}/api/policy")).header("If-None-Match", format!("\"{serial}\"")).send().map_err(|e| e.to_string());
+        if resp.is_ok() {
+            *LAST_BASE.lock().unwrap() = base;
+            break;
+        }
+    }
+    let resp = resp?;
     match resp.status().as_u16() {
         304 | 404 => return Ok(false),
         200 => {}
