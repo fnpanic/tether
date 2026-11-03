@@ -50,13 +50,60 @@ impl App {
         s
     }
     fn server(&self) -> String {
-        self.settings()["server"].as_str().unwrap_or(DEFAULT_SERVER).to_owned()
+        self.servers().remove(0)
+    }
+    /// Every relay node, in order (setting "server" may be a comma-separated list; see
+    /// docs/relay-ha.md). The first one is used for reads.
+    fn servers(&self) -> Vec<String> {
+        let list = self.settings()["server"].as_str().unwrap_or(DEFAULT_SERVER).to_owned();
+        let v: Vec<String> = list.split(',').map(|s| s.trim().trim_end_matches('/').to_owned()).filter(|s| !s.is_empty()).collect();
+        if v.is_empty() { vec![DEFAULT_SERVER.to_owned()] } else { v }
     }
     fn admin_key(&self) -> R<SigningKey> {
         self.keys.lock().unwrap().as_ref().map(|k| k.admin.clone()).ok_or_else(|| "Unlock the keys first.".to_owned())
     }
+    async fn call_on(&self, server: &str, method: &str, path: &str, body: Vec<u8>, ct: &str) -> R<Vec<u8>> {
+        api::admin(server, &self.admin_key()?, method, path, body, ct).await
+    }
+    /// Reads go to the first node that answers; writes go to every node (each keeps a full copy of
+    /// policy, releases, download page and tickets), so any node can serve clients alone.
     async fn call(&self, method: &str, path: &str, body: Vec<u8>, ct: &str) -> R<Vec<u8>> {
-        api::admin(&self.server(), &self.admin_key()?, method, path, body, ct).await
+        let servers = self.servers();
+        if method.eq_ignore_ascii_case("GET") {
+            let mut last = String::new();
+            for sv in &servers {
+                match self.call_on(sv, method, path, body.clone(), ct).await {
+                    Ok(out) => return Ok(out),
+                    Err(e) => last = if servers.len() > 1 { format!("{sv}: {e}") } else { e },
+                }
+            }
+            return Err(last);
+        }
+        let mut first: Option<Vec<u8>> = None;
+        let mut body = body;
+        let mut failed = Vec::new();
+        for sv in &servers {
+            match self.call_on(sv, method, path, body.clone(), ct).await {
+                Ok(out) => {
+                    // The same diagnostics ticket code on every node: the first issues it.
+                    if path == "/api/admin/diag-ticket" && first.is_none() {
+                        if let (Ok(t), Ok(mut req)) = (serde_json::from_slice::<Value>(&out), serde_json::from_slice::<Value>(&body)) {
+                            if let Some(id) = t.get("ticket") {
+                                req["ticket"] = id.clone();
+                                body = serde_json::to_vec(&req).unwrap();
+                            }
+                        }
+                    }
+                    first.get_or_insert(out);
+                }
+                Err(e) => failed.push(format!("{sv}: {e}")),
+            }
+        }
+        match (first, failed.is_empty()) {
+            (Some(out), true) => Ok(out),
+            (Some(_), false) => Err(format!("Saved on some relays, but not on: {}", failed.join("; "))),
+            (None, _) => Err(failed.join("; ")),
+        }
     }
     async fn call_json(&self, method: &str, path: &str, body: Option<Value>) -> R<Value> {
         let body = body.map(|b| serde_json::to_vec(&b).unwrap()).unwrap_or_default();
@@ -132,8 +179,10 @@ fn keys_import(app: State<App>, path: String, passphrase: String) -> R<()> {
 #[tauri::command]
 fn settings_set(app: State<App>, settings: Value) -> R<()> {
     let server = settings.get("server").and_then(Value::as_str).unwrap_or("");
-    if !server.is_empty() && !server.starts_with("https://") {
-        return Err("The server address must start with https://".into());
+    for sv in server.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if !sv.starts_with("https://") {
+            return Err(format!("Every server address must start with https:// ({sv})"));
+        }
     }
     app.write("settings.json", &serde_json::to_vec_pretty(&settings).unwrap())
 }
@@ -184,8 +233,12 @@ fn policy_preview(bundle: Bundle, profile: String, device: String) -> Effective 
 async fn policy_publish(app: State<'_, App>, bundle: Bundle) -> R<u64> {
     let mut b = bundle;
     b.validate()?;
-    let status = app.call_json("GET", "/api/admin/status", None).await?;
-    let server = status["policy_serial"].as_u64().unwrap_or(0);
+    let mut server = 0;
+    for sv in app.servers() {
+        let out = app.call_on(&sv, "GET", "/api/admin/status", Vec::new(), "application/json").await?;
+        let status: Value = serde_json::from_slice(&out).unwrap_or(Value::Null);
+        server = server.max(status["policy_serial"].as_u64().unwrap_or(0));
+    }
     let local = app.published().keys().next_back().copied().unwrap_or(0);
     b.serial = server.max(local) + 1;
     b.issued_at = api::now();
@@ -274,33 +327,39 @@ async fn release_publish(app: State<'_, App>, args: ReleaseArgs) -> R<String> {
     };
     let sig = sign(&data, &name)?;
     let dmg_sig = dmg.as_ref().map(|(n, b)| sign(b, n)).transpose()?;
-    let server = app.server();
     let base = format!("/api/admin/release/{}/{dir}", a.channel);
-    let url = format!("{}/download/{}/{dir}/{name}", server.trim_end_matches('/'), a.channel);
-    let new = release::platform_keys(&a.platform)
-        .iter()
-        .map(|k| (k.to_string(), release::Platform { signature: sig.clone(), url: url.clone() }))
-        .collect();
-    // Read before writing: another OS's build of the same version in this manifest stays listed.
-    let existing = api::public(&server, &format!("/download/{}/{dir}/latest.json", a.channel)).await?;
-    let manifest = release::Manifest {
-        version: a.version.clone(),
-        notes: a.notes,
-        pub_date: release::rfc3339(api::now()),
-        platforms: release::merge_platforms(existing.as_deref(), &a.version, new),
-        mandatory: a.mandatory,
-        minimum_version: a.minimum_version,
-        forced: a.forced,
-    };
-    // Artifacts first, manifest last: clients never see a latest.json pointing at a missing file.
-    app.call("PUT", &format!("{base}/{name}"), data, "application/octet-stream").await?;
-    app.call("PUT", &format!("{base}/{name}.sig"), sig.into_bytes(), "text/plain").await?;
-    if let (Some((dmg_name, bytes)), Some(dmg_sig)) = (dmg, dmg_sig) {
-        app.call("PUT", &format!("{base}/{dmg_name}"), bytes, "application/octet-stream").await?;
-        app.call("PUT", &format!("{base}/{dmg_name}.sig"), dmg_sig.into_bytes(), "text/plain").await?;
+    let pub_date = release::rfc3339(api::now());
+    let mut urls = Vec::new();
+    // Every node gets the files and its own manifest: its download URL points at itself, so a
+    // node can serve updates even when the others are down.
+    for server in app.servers() {
+        let url = format!("{}/download/{}/{dir}/{name}", server.trim_end_matches('/'), a.channel);
+        let new = release::platform_keys(&a.platform)
+            .iter()
+            .map(|k| (k.to_string(), release::Platform { signature: sig.clone(), url: url.clone() }))
+            .collect();
+        // Read before writing: another OS's build of the same version in this manifest stays listed.
+        let existing = api::public(&server, &format!("/download/{}/{dir}/latest.json", a.channel)).await?;
+        let manifest = release::Manifest {
+            version: a.version.clone(),
+            notes: a.notes.clone(),
+            pub_date: pub_date.clone(),
+            platforms: release::merge_platforms(existing.as_deref(), &a.version, new),
+            mandatory: a.mandatory,
+            minimum_version: a.minimum_version.clone(),
+            forced: a.forced,
+        };
+        // Artifacts first, manifest last: clients never see a latest.json pointing at a missing file.
+        app.call_on(&server, "PUT", &format!("{base}/{name}"), data.clone(), "application/octet-stream").await?;
+        app.call_on(&server, "PUT", &format!("{base}/{name}.sig"), sig.clone().into_bytes(), "text/plain").await?;
+        if let (Some((dmg_name, bytes)), Some(dmg_sig)) = (&dmg, &dmg_sig) {
+            app.call_on(&server, "PUT", &format!("{base}/{dmg_name}"), bytes.clone(), "application/octet-stream").await?;
+            app.call_on(&server, "PUT", &format!("{base}/{dmg_name}.sig"), dmg_sig.clone().into_bytes(), "text/plain").await?;
+        }
+        app.call_on(&server, "PUT", &format!("{base}/latest.json"), serde_json::to_vec_pretty(&manifest).unwrap(), "application/json").await?;
+        urls.push(url);
     }
-    app.call("PUT", &format!("{base}/latest.json"), serde_json::to_vec_pretty(&manifest).unwrap(), "application/json").await?;
-    Ok(url)
+    Ok(urls.join(", "))
 }
 
 // ---- download page ----
@@ -423,4 +482,30 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tether Manage");
+}
+
+#[cfg(test)]
+mod server_list_tests {
+    use super::*;
+
+    fn app_with(server: Option<&str>) -> App {
+        let dir = std::env::temp_dir().join(format!("tether-manage-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let app = App { dir, keys: Mutex::new(None), diag: Mutex::new(None) };
+        let s = match server {
+            Some(v) => json!({ "server": v }),
+            None => json!({}),
+        };
+        app.write("settings.json", &serde_json::to_vec(&s).unwrap()).unwrap();
+        app
+    }
+
+    #[test]
+    fn several_relays_in_order_default_when_empty() {
+        let a = app_with(Some(" https://a.example/ , https://b.example,,"));
+        assert_eq!(a.servers(), vec!["https://a.example", "https://b.example"]);
+        assert_eq!(a.server(), "https://a.example");
+        let b = app_with(None);
+        assert_eq!(b.servers(), vec![DEFAULT_SERVER]);
+    }
 }

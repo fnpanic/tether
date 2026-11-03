@@ -41,8 +41,8 @@ export function Keys() {
         <Card>
           <h2 className="text-headline font-semibold">Server</h2>
           <div className="mt-4 flex items-end gap-2">
-            <Label text="Relay address">
-              <TextField value={server} onChange={(e) => setServer(e.target.value)} placeholder="https://tether-desk.duckdns.org" />
+            <Label text="Relay addresses" hint="Several relays, comma-separated: every publish goes to all of them; reads use the first that answers.">
+              <TextField value={server} onChange={(e) => setServer(e.target.value)} placeholder="https://tether-desk.duckdns.org, https://tether-desk2.duckdns.org" />
             </Label>
             <Button variant="primary" disabled={server === state.settings.server} onClick={() => run(() => api.saveSettings({ ...state.settings, server: server.trim() }), "Server saved")}>
               Save
