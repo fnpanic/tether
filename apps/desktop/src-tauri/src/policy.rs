@@ -12,7 +12,7 @@ use std::{
 };
 
 use hbb_common::{
-    config::{Config, DEFAULT_SETTINGS, OVERWRITE_SETTINGS},
+    config::{Config, DEFAULT_DISPLAY_SETTINGS, DEFAULT_SETTINGS, OVERWRITE_DISPLAY_SETTINGS, OVERWRITE_SETTINGS},
     log,
 };
 use serde_json::{json, Value};
@@ -28,6 +28,9 @@ const ADMIN_KEYS: Option<&str> = option_env!("TETHER_ADMIN_PUB_KEY");
 pub const SERVER: Option<&str> = option_env!("TETHER_SERVER");
 /// Options that change which server this app talks to (`settings.server`).
 const SERVER_OPTIONS: &[&str] = &["custom-rendezvous-server", "relay-server", "key"];
+/// Per-peer session options (the viewer reads them from the peer config, not the global options),
+/// so policy must go to the display-settings layers for them to take effect.
+const DISPLAY_OPTIONS: &[&str] = &["codec-preference"];
 
 /// First compiled-in server host, without port (`TETHER_SERVER` may list several).
 pub fn primary_host() -> &'static str {
@@ -219,19 +222,24 @@ fn apply(bundle: Option<Bundle>) -> bool {
 /// and the security settings are re-applied last.
 fn apply_core(eff: &Effective, applied: &mut Vec<String>) {
     let mut o = OVERWRITE_SETTINGS.write().unwrap();
+    let mut od = OVERWRITE_DISPLAY_SETTINGS.write().unwrap();
     for k in applied.drain(..) {
         o.remove(&k);
+        od.remove(&k);
     }
     for (k, v) in eff.core_overrides().into_iter().filter(|(k, _)| !FLOOR.contains(k)) {
-        o.insert(k.to_owned(), v);
+        let map = if DISPLAY_OPTIONS.contains(&k) { &mut od } else { &mut o };
+        map.insert(k.to_owned(), v);
         applied.push(k.to_owned());
     }
-    drop(o);
+    drop((o, od));
     let mut d = DEFAULT_SETTINGS.write().unwrap();
+    let mut dd = DEFAULT_DISPLAY_SETTINGS.write().unwrap();
     for (k, v) in eff.core_defaults().into_iter().filter(|(k, _)| !FLOOR.contains(k)) {
-        d.insert(k.to_owned(), v);
+        let map = if DISPLAY_OPTIONS.contains(&k) { &mut dd } else { &mut d };
+        map.insert(k.to_owned(), v);
     }
-    drop(d);
+    drop((d, dd));
     crate::security::enforce();
 }
 
@@ -449,10 +457,15 @@ mod tests {
         }
         assert_eq!(o.get("enable-clipboard").map(String::as_str), Some("N"));
         drop(o);
+        // video.codec is a per-peer option: it must be forced where the viewer reads it.
+        assert!(applied.contains(&"codec-preference".to_owned()));
+        assert!(OVERWRITE_DISPLAY_SETTINGS.read().unwrap().contains_key("codec-preference"));
+        assert!(!OVERWRITE_SETTINGS.read().unwrap().contains_key("codec-preference"));
         // Unlocking removes what policy forced.
         let mut applied2 = applied.clone();
         apply_core(&resolve(None, PROFILE, "dev", None), &mut applied2);
         assert!(applied2.is_empty());
+        assert!(!OVERWRITE_DISPLAY_SETTINGS.read().unwrap().contains_key("codec-preference"));
         assert!(OVERWRITE_SETTINGS.read().unwrap().get("enable-clipboard").is_none());
         crate::security::enforce();
     }

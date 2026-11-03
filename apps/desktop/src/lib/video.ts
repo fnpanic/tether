@@ -58,6 +58,58 @@ export async function probeCodecs(): Promise<CodecName[]> {
   return out;
 }
 
+/** Ask again this often while no key frame has arrived (a request or its answer can be lost). */
+export const KEY_RETRY_MS = 1000;
+/** Drop deltas and resync only when the decoder is this many frames behind. Bursts of a few
+ * frames are normal (relays and proxies coalesce packets) and decode in a few milliseconds. */
+export const MAX_DECODE_QUEUE = 24;
+
+/**
+ * Key-frame recovery: once the pipeline needs a key frame it requests one right away and again every
+ * KEY_RETRY_MS until a key frame arrives, so a lost request never freezes the picture.
+ */
+export class KeyRecovery {
+  waiting = false;
+  requests = 0;
+  private since = 0;
+  private last = -Infinity;
+
+  /** Start (or keep) waiting; returns true when a request should be sent now. */
+  need(now: number): boolean {
+    if (!this.waiting) {
+      this.waiting = true;
+      this.since = now;
+      this.last = -Infinity;
+    }
+    return this.poll(now);
+  }
+
+  /** While waiting: true when the previous request is overdue and must be repeated. */
+  poll(now: number): boolean {
+    if (!this.waiting || now - this.last < KEY_RETRY_MS) return false;
+    this.last = now;
+    this.requests++;
+    return true;
+  }
+
+  /** Wait for a key frame that is already on its way (a new stream starts with one): no request now,
+   * poll() asks only if it has not arrived after KEY_RETRY_MS. */
+  expect(now: number) {
+    if (!this.waiting) {
+      this.waiting = true;
+      this.since = now;
+    }
+    this.last = now;
+  }
+
+  /** A key frame arrived: returns how long the picture waited for it (ms), or 0 if it did not. */
+  gotKey(now: number): number {
+    if (!this.waiting) return 0;
+    this.waiting = false;
+    return now - this.since;
+  }
+}
+
 export interface VideoStats {
   fps: number;
   /** Encoded packets received per second (before decoding). */
@@ -67,6 +119,12 @@ export interface VideoStats {
   width: number;
   height: number;
   codec: string;
+  /** Longest time without a new picture during the last second (ms). */
+  maxGapMs: number;
+  /** Key frames requested since the session started. */
+  keyRequests: number;
+  /** Delta frames dropped since the session started (waiting for a key frame). */
+  dropped: number;
 }
 
 interface Callbacks {
@@ -81,17 +139,20 @@ export class VideoPipeline {
   private ctx: CanvasRenderingContext2D;
   private decoder: VideoDecoder | null = null;
   private codec = 0;
-  private waitingKey = true;
-  /** Only after resync() does a stray delta ask for a key frame (once). */
-  private askedKey = true;
+  private key = new KeyRecovery();
+  private retryTimer: ReturnType<typeof setInterval> | undefined;
+  private lastDraw = 0;
+  private maxGap = 0;
+  private dropped = 0;
   private pending = new Map<number, number>();
   private frames = 0;
   private decodeSum = 0;
   private lastStats = performance.now();
   private w = 0;
   private h = 0;
-  stats: VideoStats = { fps: 0, inFps: 0, coded: "", decodeMs: 0, width: 0, height: 0, codec: "" };
+  stats: VideoStats = { fps: 0, inFps: 0, coded: "", decodeMs: 0, width: 0, height: 0, codec: "", maxGapMs: 0, keyRequests: 0, dropped: 0 };
   private packets = 0;
+  private decodedSinceConfigure = 0;
   display = 0;
 
   constructor(private canvas: HTMLCanvasElement, private cb: Callbacks) {
@@ -99,6 +160,29 @@ export class VideoPipeline {
     const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
     if (!ctx) throw new Error("2d context unavailable");
     this.ctx = ctx;
+  }
+
+  /** Need a key frame: ask now and keep asking until one arrives (see KeyRecovery). */
+  private needKey(why: string) {
+    if (!this.key.waiting) console.warn(`[video] waiting for a key frame: ${why}`);
+    if (this.key.need(performance.now())) this.cb.onNeedKey(this.display);
+    this.startKeyRetry();
+  }
+
+  private startKeyRetry() {
+    this.retryTimer ??= setInterval(() => {
+      if (this.key.poll(performance.now())) {
+        console.warn(`[video] still no key frame, asking again (${this.key.requests})`);
+        this.cb.onNeedKey(this.display);
+      }
+    }, KEY_RETRY_MS / 2);
+  }
+
+  private keyArrived() {
+    const waited = this.key.gotKey(performance.now());
+    if (waited > 300) console.warn(`[video] key frame after ${Math.round(waited)} ms`);
+    clearInterval(this.retryTimer);
+    this.retryTimer = undefined;
   }
 
   push(buf: ArrayBuffer) {
@@ -119,7 +203,6 @@ export class VideoPipeline {
   private configure(codec: number) {
     this.decoder?.state !== "closed" && this.decoder?.close();
     this.codec = codec;
-    this.waitingKey = true;
     this.pending.clear();
     const dec = new VideoDecoder({
       output: (frame) => this.output(frame),
@@ -131,6 +214,7 @@ export class VideoPipeline {
     });
     dec.configure({ codec: CODEC_STRING[codec], optimizeForLatency: true, hardwareAcceleration: "no-preference" });
     this.decoder = dec;
+    this.decodedSinceConfigure = 0;
     this.stats.codec = Object.entries(CODEC).find(([, v]) => v === codec)?.[0]?.toUpperCase() ?? "";
   }
 
@@ -139,30 +223,28 @@ export class VideoPipeline {
       this.configure(p.codec);
     }
     const dec = this.decoder!;
-    if (this.waitingKey) {
+    // A fresh decoder (new codec, display switch, error) can only start from a key frame.
+    if (this.decodedSinceConfigure === 0 && !p.key) this.needKey("decoder (re)started");
+    if (this.key.waiting) {
       if (!p.key) {
-        // A refresh restarts the host's video service, so ask only once per resync.
-        if (!this.askedKey) this.cb.onNeedKey(this.display);
-        this.askedKey = true;
+        this.dropped++;
         return;
       }
-      this.waitingKey = false;
-      this.askedKey = true;
-    }
-    // Never let the queue grow: a backed-up decoder means stale pictures, so drop and resync.
-    if (dec.decodeQueueSize > 3) {
-      this.waitingKey = true;
-      this.cb.onNeedKey(this.display);
+      this.keyArrived();
+    } else if (dec.decodeQueueSize > MAX_DECODE_QUEUE) {
+      // Hopelessly behind: showing every queued picture would only add latency, so resync.
+      this.dropped++;
+      this.needKey(`decoder ${dec.decodeQueueSize} frames behind`);
       return;
     }
+    this.decodedSinceConfigure++;
     const ts = p.pts * 1000;
     this.pending.set(ts, performance.now());
     try {
       dec.decode(new EncodedVideoChunk({ type: p.key ? "key" : "delta", timestamp: ts, data: p.data }));
     } catch (e) {
       console.warn("[video] decode threw", e);
-      this.waitingKey = true;
-      this.cb.onNeedKey(this.display);
+      this.needKey("decode threw");
     }
   }
 
@@ -200,6 +282,13 @@ export class VideoPipeline {
   private tick() {
     this.frames++;
     const now = performance.now();
+    if (this.lastDraw) this.maxGap = Math.max(this.maxGap, now - this.lastDraw);
+    this.lastDraw = now;
+    this.sample(now);
+  }
+
+  /** Refresh the per-second stats; also called on a timer so a frozen picture shows up as one. */
+  sample(now = performance.now()): VideoStats {
     const dt = now - this.lastStats;
     if (dt >= 1000) {
       this.stats = {
@@ -209,28 +298,36 @@ export class VideoPipeline {
         decodeMs: this.frames ? +(this.decodeSum / this.frames).toFixed(1) : 0,
         width: this.w,
         height: this.h,
+        maxGapMs: Math.round(Math.max(this.maxGap, this.lastDraw ? now - this.lastDraw : 0)),
+        keyRequests: this.key.requests,
+        dropped: this.dropped,
       };
+      this.maxGap = 0;
       this.frames = 0;
       this.packets = 0;
       this.decodeSum = 0;
       this.lastStats = now;
     }
+    return this.stats;
   }
 
   /** After a reconnect: keep the decoder and the last picture, resume at the next key frame. */
   resync() {
-    this.waitingKey = true;
-    this.askedKey = false;
+    // The new stream starts with a key frame; asking now would restart the host's video service
+    // (~1 s). Only a late key frame triggers requests (KeyRecovery.expect + retry timer).
+    this.key.expect(performance.now());
+    this.startKeyRetry();
     this.pending.clear();
   }
 
   /** Switch the shown display; the next key frame repaints. */
   setDisplay(d: number) {
     this.display = d;
-    this.waitingKey = true;
+    this.needKey("display switched");
   }
 
   close() {
+    clearInterval(this.retryTimer);
     if (this.decoder && this.decoder.state !== "closed") this.decoder.close();
     this.decoder = null;
   }

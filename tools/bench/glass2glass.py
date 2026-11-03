@@ -162,14 +162,30 @@ def bands_from(shot):
     return out
 
 
-def run(seconds, monitor_idx, pair="mirror", offset=0.0):
+def note_change(changes, t_cap, v):
+    """Remember the capture time at which the mirrored picture changed (for freeze gaps)."""
+    if not changes or changes[-1][1] != v:
+        changes.append((t_cap, v))
+
+
+def freeze_stats(changes):
+    """Gaps between successive picture changes in the viewer: the longest is the worst freeze."""
+    gaps = [signed_diff(b[0], a[0]) for a, b in zip(changes, changes[1:])]
+    if not gaps:
+        return None
+    gaps.sort()
+    return {"max": gaps[-1], "p99": gaps[min(len(gaps) - 1, int(len(gaps) * 0.99))], "over_300ms": sum(g > 300 for g in gaps), "over_100ms": sum(g > 100 for g in gaps)}
+
+
+def run(seconds, monitor_idx, pair="mirror", offset=0.0, changes=None):
+    changes = [] if changes is None else changes
     lat, live_lag, mirror_values, frames, valid = [], [], set(), 0, 0
     try:
         src = DxgiSource()
     except Exception:
         src = None
     if src is None:
-        return run_gdi(seconds, monitor_idx, pair, offset)
+        return run_gdi(seconds, monitor_idx, pair, offset, changes)
     src.focus(bands_from(src.full()))
     end = time.time() + seconds
     misses = 0
@@ -194,6 +210,7 @@ def run(seconds, monitor_idx, pair="mirror", offset=0.0):
                 d = clock_latency(t_cap, v, offset)
                 if 0 <= d < 5000:
                     lat.append(d)
+                    note_change(changes, t_cap, v)
                     mirror_values.add(v)
                     valid += 1
                 continue
@@ -205,6 +222,7 @@ def run(seconds, monitor_idx, pair="mirror", offset=0.0):
                 d = signed_diff(live, (other + int(round(offset))) & 0xFFFFFFFF)
                 if -1000 < d < 5000:
                     lat.append(d)
+                    note_change(changes, t_cap, other)
                     mirror_values.add(other)
                     valid += 1
                 continue
@@ -216,12 +234,14 @@ def run(seconds, monitor_idx, pair="mirror", offset=0.0):
             d = signed_diff(live, vals[1])
             if 0 <= d < 5000:
                 lat.append(d)
+                note_change(changes, t_cap, vals[1])
                 mirror_values.add(vals[1])
                 valid += 1
     return lat, live_lag, mirror_values, frames, valid
 
 
-def run_gdi(seconds, monitor_idx, pair="mirror", offset=0.0):
+def run_gdi(seconds, monitor_idx, pair="mirror", offset=0.0, changes=None):
+    changes = [] if changes is None else changes
     lat, live_lag, mirror_values, frames, valid = [], [], set(), 0, 0
     with (mss.MSS() if hasattr(mss, "MSS") else mss.mss()) as sct:
         mon = sct.monitors[monitor_idx]
@@ -244,6 +264,7 @@ def run_gdi(seconds, monitor_idx, pair="mirror", offset=0.0):
                 d = signed_diff(live, (other + int(round(offset))) & 0xFFFFFFFF)
                 if -1000 < d < 5000:
                     lat.append(d)
+                    note_change(changes, t_cap, other)
                     mirror_values.add(other)
                     valid += 1
                 continue
@@ -258,6 +279,7 @@ def run_gdi(seconds, monitor_idx, pair="mirror", offset=0.0):
             d = signed_diff(live, mirrors[0])
             if 0 <= d < 5000:
                 lat.append(d)
+                note_change(changes, t_cap, mirrors[0])
                 mirror_values.add(mirrors[0])
                 valid += 1
     return lat, live_lag, mirror_values, frames, valid
@@ -290,7 +312,8 @@ def main():
     ap.add_argument("--offset", type=float, default=0.0, help="ms added to the second probe's clock (remote - local offset, negated)")
     a = ap.parse_args()
 
-    lat, lag, mv, frames, valid = run(a.seconds, a.monitor, a.pair, a.offset)
+    changes = []
+    lat, lag, mv, frames, valid = run(a.seconds, a.monitor, a.pair, a.offset, changes)
     res = {
         "label": a.label,
         "seconds": a.seconds,
@@ -298,6 +321,7 @@ def main():
         "valid_samples": valid,
         "distinct_remote_frames_per_s": round(len(mv) / a.seconds, 1),
         "latency_ms": summary(lat),
+        "freeze_ms": freeze_stats(changes),
         "latency_corrected_ms": summary([x - a.subtract for x in lat]) if a.subtract else None,
         "screen_to_capture_ms": summary(lag),
     }
