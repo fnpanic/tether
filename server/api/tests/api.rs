@@ -260,6 +260,14 @@ fn diag_ticket_flow() {
     let long = format!(r#"{{"note":"{}"}}"#, "n".repeat(257));
     assert_eq!(s.admin(&k, "POST", "/api/admin/diag-ticket", long.as_bytes()).status, 413);
     assert_eq!(s.admin(&k, "POST", "/api/admin/diag-ticket", br#"{"note":"a","x":1}"#).status, 400);
+
+    // Same ticket on another relay (multi-relay setups): given ID accepted once, validated.
+    let r = s.admin(&k, "POST", "/api/admin/diag-ticket", br#"{"note":"b","ticket":"K7Q2M9XD"}"#);
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(r.json()["ticket"], "K7Q2M9XD");
+    assert_eq!(s.admin(&k, "POST", "/api/admin/diag-ticket", br#"{"note":"b","ticket":"K7Q2M9XD"}"#).status, 409);
+    assert_eq!(s.admin(&k, "POST", "/api/admin/diag-ticket", br#"{"note":"b","ticket":"../x/abc"}"#).status, 400);
+    assert_eq!(s.req("POST", "/api/diag/K7Q2M9XD", &[("Content-Type", "application/zip")], &zip).status, 204);
 }
 
 #[test]

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tether-relay
+description: Tether relay (hbbs rendezvous, hbbr relay, Caddy WebSocket front end, optional tether-api) with drain-safe rollouts
+type: application
+version: 0.1.0
+appVersion: "0.3.0"

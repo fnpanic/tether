@@ -1,0 +1,27 @@
+# kind test values (deploy/kind/kind-config.yaml). Throwaway test key, never use it for real clients:
+# public key 3d94eDolyjozz+/Kjzy8Jz6oKAdITJ0QIchN0h2wgkw=
+image:
+  repository: tether-relay
+  tag: ha1
+  pullPolicy: Never
+# In-cluster URL of the proxy, so the harness pod (and hbbs's relay list) use it directly.
+publicUrl: ws://tether-relay-proxy
+key:
+  privateKey: Tj7jytlr5caIPFWl9N9MPLokEmPBkYFNuZiUFEuS7Evd33h4OiXKOjPP78qPPLwnPqgoB0hMnRAhyE3SHbCCTA==
+hbbs:
+  replicas: 2
+hbbr:
+  replicas: 3
+  # Short enough to watch a drain end in the test; production default is 3600.
+  drainSeconds: 90
+proxy:
+  image: caddy:2.10.2
+  replicas: 2
+  service:
+    type: NodePort
+    nodePort: 30080
+api:
+  enabled: true
+  adminPubKey: y1UGt7w1seY3j4S0rkLX6Xj8XfLDOpFuPa78U30Tcww=
+  persistence:
+    size: 3Gi

@@ -76,6 +76,10 @@ struct Ticket {
 #[serde(deny_unknown_fields)]
 struct TicketRequest {
     note: String,
+    /// Open this ticket ID instead of a random one: Tether Manage opens the ticket it got from
+    /// the first relay on the others too, so the upload works on whichever relay the client uses.
+    #[serde(default)]
+    ticket: Option<String>,
 }
 
 /// Just the header fields of a stored bundle (history listing, startup).
@@ -551,13 +555,24 @@ impl App {
         if req.note.chars().count() > 256 {
             return Err(text(413, "note longer than 256 characters"));
         }
-        let ticket = loop {
-            let mut b = [0u8; 8];
-            random_bytes(&mut b).map_err(internal)?;
-            let t: String = b.iter().map(|x| TICKET_ALPHABET[(x & 31) as usize] as char).collect();
-            if !self.tickets.iter().any(|k| k.ticket == t) {
-                break t;
+        let ticket = match req.ticket {
+            Some(t) => {
+                if t.len() != 8 || !t.bytes().all(|c| TICKET_ALPHABET.contains(&c)) {
+                    return Err(text(400, "ticket must be 8 characters of the ticket alphabet"));
+                }
+                if self.tickets.iter().any(|k| k.ticket == t) {
+                    return Err(text(409, "ticket exists"));
+                }
+                t
             }
+            None => loop {
+                let mut b = [0u8; 8];
+                random_bytes(&mut b).map_err(internal)?;
+                let t: String = b.iter().map(|x| TICKET_ALPHABET[(x & 31) as usize] as char).collect();
+                if !self.tickets.iter().any(|k| k.ticket == t) {
+                    break t;
+                }
+            },
         };
         let created = now();
         self.tickets.push(Ticket { ticket: ticket.clone(), note: req.note, created, uploaded: None, size: None });

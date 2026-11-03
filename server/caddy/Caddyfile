@@ -24,6 +24,13 @@
 		}
 	}
 
+	# Relay readiness for the other relays' hbbs (HA, docs/relay-ha.md): 200 "ready sessions=N",
+	# 503 while hbbr drains.
+	handle /readyz/relay {
+		rewrite * /readyz
+		reverse_proxy 127.0.0.1:21121
+	}
+
 	# Relay API (tether-api). Caddy ignores client-sent X-Forwarded-For and sets the real peer.
 	handle /api/* {
 		reverse_proxy 127.0.0.1:21120

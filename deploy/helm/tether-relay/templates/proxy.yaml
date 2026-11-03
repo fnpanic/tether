@@ -1,0 +1,116 @@
+{{- if .Values.proxy.enabled }}
+{{- $fn := include "tr.fullname" . -}}
+{{- $ctx := dict "root" . "component" "proxy" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fn }}-proxy
+  labels: {{- include "tr.labels" . | nindent 4 }}
+data:
+  Caddyfile: |
+    {{- include "tr.caddyfile" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fn }}-proxy
+  labels: {{- include "tr.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.proxy.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: {{- include "tr.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "tr.selector" $ctx | nindent 8 }}
+      annotations:
+        # Restarting the proxy cuts the WebSockets through it (clients reconnect); the config
+        # does not depend on replica counts, so scaling hbbs/hbbr never restarts it.
+        checksum/config: {{ include "tr.caddyfile" . | sha256sum | trunc 16 }}
+    spec:
+      terminationGracePeriodSeconds: 30
+      enableServiceLinks: false
+      securityContext: { seccompProfile: { type: RuntimeDefault } }
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: caddy
+          image: {{ .Values.proxy.image }}
+          command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+          env:
+            - { name: XDG_DATA_HOME, value: /tmp/data }
+            - { name: XDG_CONFIG_HOME, value: /tmp/config }
+          ports:
+            - { name: http, containerPort: 8080 }
+            {{- if .Values.proxy.tls.secretName }}
+            - { name: https, containerPort: 8443 }
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /proxy-healthz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /proxy-healthz, port: http }
+            periodSeconds: 10
+          lifecycle:
+            # Leave the Service endpoints before Caddy stops accepting.
+            preStop: { sleep: { seconds: 5 } }
+          resources: {{- toYaml .Values.proxy.resources | nindent 12 }}
+          {{- include "tr.caddySecurity" . | nindent 10 }}
+          volumeMounts:
+            - { name: config, mountPath: /etc/caddy }
+            - { name: tmp, mountPath: /tmp }
+            {{- if .Values.proxy.tls.secretName }}
+            - { name: tls, mountPath: /tls, readOnly: true }
+            {{- end }}
+      volumes:
+        - { name: config, configMap: { name: {{ $fn }}-proxy } }
+        - { name: tmp, emptyDir: {} }
+        {{- if .Values.proxy.tls.secretName }}
+        - { name: tls, secret: { secretName: {{ .Values.proxy.tls.secretName }} } }
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fn }}-proxy
+  labels: {{- include "tr.labels" . | nindent 4 }}
+  {{- with .Values.proxy.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.proxy.service.type }}
+  selector: {{- include "tr.selector" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.proxy.service.port }}
+      targetPort: http
+      {{- if .Values.proxy.service.nodePort }}
+      nodePort: {{ .Values.proxy.service.nodePort }}
+      {{- end }}
+    {{- if .Values.proxy.tls.secretName }}
+    - name: https
+      port: {{ .Values.proxy.service.tlsPort }}
+      targetPort: https
+      {{- if .Values.proxy.service.tlsNodePort }}
+      nodePort: {{ .Values.proxy.service.tlsNodePort }}
+      {{- end }}
+    {{- end }}
+{{- if gt (int .Values.proxy.replicas) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $fn }}-proxy
+  labels: {{- include "tr.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {{- include "tr.selector" $ctx | nindent 6 }}
+{{- end }}
+{{- end }}

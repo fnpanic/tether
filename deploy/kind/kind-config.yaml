@@ -1,0 +1,11 @@
+# Local test cluster for deploy/helm/tether-relay: kind.exe create cluster --config deploy/kind/kind-config.yaml
+# The proxy's NodePort 30080 is reachable from Windows at http://localhost:18080.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: tether-ha
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - { containerPort: 30080, hostPort: 18080, listenAddress: "127.0.0.1" }
+  - role: worker
+  - role: worker

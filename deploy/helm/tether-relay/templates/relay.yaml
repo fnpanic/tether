@@ -1,0 +1,152 @@
+{{- $fn := include "tr.fullname" . -}}
+{{- if not .Values.key.existingSecret }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $fn }}-key
+  labels: {{- include "tr.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  id_ed25519: {{ required "key.privateKey or key.existingSecret is required (same key on every relay)" .Values.key.privateKey | quote }}
+{{- end }}
+{{- range $c := list "hbbs" "hbbr" }}
+{{- $v := index $.Values $c }}
+{{- $ctx := dict "root" $ "component" $c }}
+---
+# Headless service: stable pod DNS for the StatefulSet.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fn }}-{{ $c }}
+  labels: {{- include "tr.labels" $ | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: {{- include "tr.selector" $ctx | nindent 4 }}
+  ports:
+    - { name: ws, port: {{ if eq $c "hbbs" }}21118{{ else }}21119{{ end }} }
+{{- range $i := until (int $v.replicas) }}
+---
+# One Service per pod: /ws/{{ if eq $c "hbbs" }}id{{ else }}relay{{ end }}/{{ $i }} must reach exactly this pod. Not-ready (draining)
+# pods stay reachable so their open sessions and half-made pairs finish.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fn }}-{{ $c }}-{{ $i }}
+  labels: {{- include "tr.labels" $ | nindent 4 }}
+spec:
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "tr.selector" $ctx | nindent 4 }}
+    statefulset.kubernetes.io/pod-name: {{ $fn }}-{{ $c }}-{{ $i }}
+  ports:
+    - { name: ws, port: {{ if eq $c "hbbs" }}21118{{ else }}21119{{ end }} }
+    - { name: health, port: {{ if eq $c "hbbs" }}21122{{ else }}21121{{ end }} }
+{{- end }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $fn }}-{{ $c }}
+  labels: {{- include "tr.labels" $ | nindent 4 }}
+spec:
+  serviceName: {{ $fn }}-{{ $c }}
+  replicas: {{ $v.replicas }}
+  podManagementPolicy: Parallel
+  updateStrategy: { type: RollingUpdate }
+  selector:
+    matchLabels: {{- include "tr.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "tr.selector" $ctx | nindent 8 }}
+      annotations:
+        checksum/key: {{ $.Values.key.privateKey | sha256sum | trunc 16 }}
+    spec:
+      # Drain window plus margin; SIGKILL only after hbbr has given up on its sessions.
+      terminationGracePeriodSeconds: {{ add $v.drainSeconds 30 }}
+      enableServiceLinks: false
+      securityContext: { fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {{- include "tr.selector" $ctx | nindent 20 }}
+      {{- with $.Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $c }}
+          image: {{ include "tr.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          # The key is read from the working directory (id_ed25519).
+          workingDir: /key
+          {{- if eq $c "hbbs" }}
+          command: ["hbbs", "-r", {{ include "tr.relayList" $ | quote }}, "-k", "_"{{ range $v.extraArgs }}, {{ . | quote }}{{ end }}]
+          {{- else }}
+          command: ["hbbr", "-k", "_"]
+          {{- end }}
+          env:
+            - { name: DRAIN_TIMEOUT, value: {{ $v.drainSeconds | quote }} }
+            # hbb_common writes a config dir under HOME; the root filesystem is read-only.
+            - { name: HOME, value: /tmp }
+            {{- if eq $c "hbbs" }}
+            - { name: DB_URL, value: /data/db_v2.sqlite3 }
+            {{- end }}
+            {{- range $k, $val := $v.env }}
+            - { name: {{ $k }}, value: {{ $val | quote }} }
+            {{- end }}
+          ports:
+            - { name: ws, containerPort: {{ if eq $c "hbbs" }}21118{{ else }}21119{{ end }} }
+            - { name: health, containerPort: {{ if eq $c "hbbs" }}21122{{ else }}21121{{ end }} }
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            periodSeconds: 2
+            failureThreshold: 1
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources: {{- toYaml $v.resources | nindent 12 }}
+          {{- include "tr.containerSecurity" $ | nindent 10 }}
+          volumeMounts:
+            - { name: key, mountPath: /key, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+            {{- if eq $c "hbbs" }}
+            - { name: data, mountPath: /data }
+            {{- end }}
+      volumes:
+        - name: key
+          secret:
+            secretName: {{ include "tr.keySecret" $ }}
+            items: [{ key: id_ed25519, path: id_ed25519 }]
+        - { name: tmp, emptyDir: {} }
+        {{- if and (eq $c "hbbs") (not $v.persistence.enabled) }}
+        - { name: data, emptyDir: {} }
+        {{- end }}
+  {{- if and (eq $c "hbbs") $v.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $v.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources: { requests: { storage: {{ $v.persistence.size }} } }
+  {{- end }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $fn }}-{{ $c }}
+  labels: {{- include "tr.labels" $ | nindent 4 }}
+spec:
+  maxUnavailable: {{ $.Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels: {{- include "tr.selector" $ctx | nindent 6 }}
+{{- end }}

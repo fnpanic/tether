@@ -46,6 +46,33 @@ No other paid resources were created.
      the VM until it froze);
    - a 2 GB swap file added as a safety net.
 
+## Relay 2 (high availability)
+
+A second, independent node with the same stack and the **same key pair**
+([relay-ha.md](relay-ha.md)).
+
+| Item | Value |
+| --- | --- |
+| Name | `tether-desk2.duckdns.org` (DuckDNS, `tether-ddns.timer`) |
+| Host | OCI instance `tether-relay-2`, `ocid1.instance.oc1.eu-amsterdam-1.anqw2ljr2k2q4vycutwdi4p62yb5ee6ody3rzy6k3kgvyfcpoqiau4sndjtq`, `VM.Standard.E2.1.Micro` (Always Free), Oracle Linux 9.8, AD-1, same subnet and security list as relay 1 |
+| Public IP | `92.5.231.71` (ephemeral, free) |
+| Key | `/var/lib/tether/id_ed25519{,.pub}` copied from relay 1 (`fe8A7xTX…`) |
+| Relay list | `/etc/tether/server.env`: `RELAY_SERVERS=tether-desk2.duckdns.org\|http://127.0.0.1:21121/readyz,tether-desk.duckdns.org\|https://tether-desk.duckdns.org/readyz/relay` |
+| Admin key | `ADMIN_PUB_KEY=y1UGt7w1seY3j4S0rkLX6Xj8XfLDOpFuPa78U30Tcww=` |
+| Tuning | crashkernel removed, kdump disabled, 2 GB `/swapfile` (as relay 1) |
+
+Cost check at creation (2026-11-03): `vm-standard-e2-1-micro-count` limit 2, 1 used before; the
+Always Free block storage allowance is 200 GB, 47 GB used before, plus the new 47 GB default boot
+volume. No other resources were created.
+
+Set up with the bundle from this repository (binaries with drain support):
+
+```bash
+sudo DUCKDNS_DOMAIN=tether-desk2 DUCKDNS_TOKEN=<token> ADMIN_PUB_KEY=<key> \
+  RELAY_SERVERS='tether-desk2.duckdns.org|http://127.0.0.1:21121/readyz,tether-desk.duckdns.org|https://tether-desk.duckdns.org/readyz/relay' \
+  ./install.sh tether-desk2.duckdns.org      # after copying the key pair into /var/lib/tether
+```
+
 ## Building clients for this relay
 
 ```bash
