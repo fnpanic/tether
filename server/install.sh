@@ -26,7 +26,11 @@ systemctl restart tether-hbbr tether-hbbs
 
 # Host firewall. ufw if active; otherwise raw iptables, as on Oracle Cloud's Ubuntu images,
 # which ship an INPUT chain that rejects everything except SSH.
-if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+  # Oracle Linux / RHEL family.
+  firewall-cmd --permanent --add-port=21115-21117/tcp --add-port=21116/udp
+  firewall-cmd --reload
+elif command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow 21115:21117/tcp
   ufw allow 21116/udp
 elif command -v iptables >/dev/null && iptables -S INPUT | grep -q -- "-j REJECT"; then
