@@ -18,13 +18,15 @@ import {
   Scan,
   Send,
   ShieldCheck,
+  Video,
   X,
 } from "lucide-react";
 import { api, formatId, invoke, listen, videoChannel } from "../lib/ipc";
 import { probeCodecs, VideoPipeline, type VideoStats } from "../lib/video";
-import { Button, IconButton, Logo, TitleBar } from "../components/ui";
+import { Button, IconButton, Logo, TitleBar, useToast } from "../components/ui";
 import { FileTransfer } from "./FileTransfer";
 import { mouseMask, MOUSE, wheelSteps, lockModes } from "../lib/input";
+import { classify, onFailure, reconnectMinutes, type Series } from "../lib/reconnect";
 
 interface Display {
   x: number;
@@ -53,7 +55,11 @@ type Phase =
   | { kind: "connecting"; text: string }
   | { kind: "password"; wrong: boolean }
   | { kind: "connected" }
+  | { kind: "reconnecting"; attempt: number; text: string }
   | { kind: "error"; title: string; text: string; retry: boolean };
+
+/** idle → pending (asked the host user) → on (core recorder running). */
+type Rec = { state: "idle" | "pending" | "on"; since: number };
 
 type Fit = "fit" | "original";
 
@@ -104,6 +110,21 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const cursors = useRef(new Map<string, string>());
   const displayRef = useRef(display);
   displayRef.current = display;
+  // Reconnect: the running series, its timer and the policy limit (event handlers read refs).
+  const series = useRef<Series | null>(null);
+  const retryTimer = useRef(0);
+  const limitMin = useRef(10);
+  const everConnected = useRef(false);
+  // Recording: policy mode and state (mirrored in a ref for the event listener).
+  const [recMode, setRecMode] = useState("off");
+  const recModeRef = useRef("off");
+  const [rec, setRecState] = useState<Rec>({ state: "idle", since: 0 });
+  const recRef = useRef(rec);
+  const setRec = (r: Rec) => {
+    recRef.current = r;
+    setRecState(r);
+  };
+  const toast = useToast();
 
   // ---------------------------------------------------------------- connection + events
   useEffect(() => {
@@ -118,6 +139,12 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       });
       pipeRef.current = pipe;
       const formats = await probeCodecs();
+      limitMin.current = reconnectMinutes(await invoke<string>("session_policy_get", { id: "connect.reconnect-minutes" }).catch(() => ""));
+      const mode = (await invoke<string>("session_policy_get", { id: "recording.mode" }).catch(() => "")) || "off";
+      recModeRef.current = mode;
+      setRecMode(mode);
+      // Uploads left over from a closed window or an earlier run.
+      if (mode !== "off") invoke("recording_finished").catch(() => {});
       unsubs.push(
         await listen("session", (e) => {
           const p = e.payload;
@@ -134,7 +161,24 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
                 setDisplayIdx(i);
                 setDisplay(p.displays[i]);
               }
+              series.current = null;
+              everConnected.current = true;
               setPhase({ kind: "connected" });
+              // Policy "always": ask right away; the host user still has to allow it.
+              if (recModeRef.current === "always" && recRef.current.state === "idle") startRecording();
+              break;
+            case "record_status":
+              if (p.start) setRec({ state: "on", since: Date.now() });
+              else recordingStopped();
+              break;
+            case "permission":
+              if (p.name !== "recording" || recRef.current.state !== "pending") break;
+              // The host user answered our request (see cm_record_consent).
+              if (p.value) invoke("session_record", { key, start: true });
+              else {
+                setRec({ state: "idle", since: 0 });
+                toast.show("Recording declined by the other party");
+              }
               break;
             case "displays":
               setInfo((i) => (i ? { ...i, displays: p.displays } : i));
@@ -181,6 +225,8 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
     return () => {
       alive = false;
       clearInterval(t);
+      clearTimeout(retryTimer.current);
+      if (recRef.current.state === "on") invoke("recording_finished").catch(() => {});
       unsubs.forEach((u) => u());
       pipeRef.current?.close();
       invoke("session_close", { key });
@@ -188,12 +234,51 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   }, [key, peer]);
 
   const onMsgbox = (type: string, title: string, text: string, retry: boolean) => {
+    if (type === "connecting" && series.current) return; // keep the reconnect overlay
+    if (type === "input-password" || type === "re-input-password") series.current = null;
     if (type === "input-password") return setPhase({ kind: "password", wrong: false });
     if (type === "re-input-password") return setPhase({ kind: "password", wrong: true });
     if (type === "connecting") return setPhase({ kind: "connecting", text: friendly(text) || "Connecting…" });
     if (type === "success" || type === "info" || type === "nocancel-info") return;
     if (text.toLowerCase().includes("waiting") || type.includes("wait")) return setPhase({ kind: "connecting", text: "Waiting for the remote user to accept…" });
-    setPhase({ kind: "error", title: title || "Connection failed", text: friendly(text), retry });
+    // Only a session that was working reconnects on its own; a first connect shows the error.
+    if (everConnected.current) {
+      const step = onFailure(series.current, classify({ type, title, text, retry }), Date.now(), limitMin.current);
+      if (step.kind === "retry") {
+        if (!series.current) {
+          // The old connection's recorder is gone; a new one needs consent again.
+          if (recRef.current.state === "on") recordingStopped();
+          else setRec({ state: "idle", since: 0 });
+        }
+        series.current = step.series;
+        clearTimeout(retryTimer.current);
+        retryTimer.current = window.setTimeout(() => invoke("session_reconnect", { key, forceRelay: step.forceRelay }), step.delayMs);
+        return setPhase({ kind: "reconnecting", attempt: step.series.attempt, text: friendly(text) });
+      }
+    }
+    const gaveUp = series.current != null;
+    series.current = null;
+    setPhase({ kind: "error", title: title || "Connection failed", text: friendly(text), retry: retry || gaveUp });
+  };
+
+  const startRecording = () => {
+    setRec({ state: "pending", since: 0 });
+    invoke("session_record", { key, start: true }).catch((e) => {
+      setRec({ state: "idle", since: 0 });
+      toast.show(String(e));
+    });
+  };
+
+  const recordingStopped = () => {
+    if (recRef.current.state === "on") invoke("recording_finished").catch(() => {});
+    setRec({ state: "idle", since: 0 });
+  };
+
+  const toggleRecording = () => {
+    if (rec.state === "idle") return startRecording();
+    // Stopping (or withdrawing a pending request) is always allowed.
+    invoke("session_record", { key, start: false });
+    if (rec.state === "pending") setRec({ state: "idle", since: 0 });
   };
 
   // ---------------------------------------------------------------- input
@@ -321,11 +406,17 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
             ...(fit === "fit"
               ? { maxWidth: "100%", maxHeight: "100%", width: "auto", height: "auto", objectFit: "contain" }
               : { width: frameSize.w / devicePixelRatio, height: frameSize.h / devicePixelRatio }),
-            opacity: connected && frameSize.w ? 1 : 0,
+            opacity: connected && frameSize.w ? 1 : phase.kind === "reconnecting" ? 0.35 : 0,
           }}
           className="block outline-none transition-opacity duration-300"
         />
-        {phase.kind !== "connected" || !frameSize.w ? <Overlay phase={phase} name={name} peer={peer} sessionKey={key} /> : null}
+        {phase.kind === "reconnecting" ? (
+          <ReconnectOverlay attempt={phase.attempt} text={phase.text} />
+        ) : phase.kind !== "connected" || !frameSize.w ? (
+          <Overlay phase={phase} name={name} peer={peer} sessionKey={key} />
+        ) : null}
+        {rec.state === "on" && connected && <RecPill since={rec.since} />}
+        {toast.node}
       </div>
 
       {/* floating toolbar */}
@@ -376,6 +467,15 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           <TB label="Transfer files" onClick={() => api.openSession(peer, "file-transfer")}>
             <FolderSync size={17} />
           </TB>
+          {recMode !== "off" && (
+            <TB
+              label={rec.state === "on" ? "Stop recording" : rec.state === "pending" ? "Waiting for the remote user to allow recording" : "Record session"}
+              active={rec.state !== "idle"}
+              onClick={toggleRecording}
+            >
+              <Video size={17} className={rec.state === "on" ? "text-danger" : rec.state === "pending" ? "animate-pulse" : ""} />
+            </TB>
+          )}
           <TB label="Restart remote device" onClick={() => confirm("Restart the remote device?") && invoke("session_restart_remote", { key })}>
             <RotateCcw size={17} />
           </TB>
@@ -591,6 +691,40 @@ function Overlay({ phase, name, peer, sessionKey: key }: { phase: Phase; name: s
 
 function Spinner() {
   return <div className="h-7 w-7 animate-spin rounded-full border-2 border-white/15 border-t-[#2997ff]" />;
+}
+
+/** Over the dimmed last frame while the session reconnects on its own. */
+function ReconnectOverlay({ attempt, text }: { attempt: number; text: string }) {
+  const close = async () => (await import("@tauri-apps/api/window")).getCurrentWindow().close();
+  return (
+    <div className="absolute inset-0 grid place-items-center p-6">
+      <div role="status" className="animate-rise flex w-[320px] max-w-full flex-col items-center gap-3 rounded-2xl border border-white/10 glass p-6 text-center shadow-float">
+        <Spinner />
+        <div className="text-callout font-semibold">Reconnecting… (attempt {attempt})</div>
+        {text && <div className="text-caption text-white/60">{text}</div>}
+        <Button variant="ghost" size="sm" className="!text-white/60 hover:!bg-white/10" onClick={close}>
+          Disconnect
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function RecPill({ since }: { since: number }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => tick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const s = Math.max(0, Math.floor((Date.now() - since) / 1000));
+  const mmss = `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  return (
+    <div className="pointer-events-none absolute left-3 top-3 z-10 flex items-center gap-2 rounded-full border border-white/10 glass px-3 py-1 font-mono text-footnote">
+      <span className="h-2 w-2 animate-pulse rounded-full bg-danger" />
+      <span className="font-semibold text-danger">REC</span>
+      <span className="text-white/80">{mmss}</span>
+    </div>
+  );
 }
 
 function ChatPanel({ msgs, onSend, onClose }: { msgs: { me: boolean; text: string }[]; onSend: (t: string) => void; onClose: () => void }) {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Clipboard, FolderSync, Keyboard, MessageSquare, Mic, RotateCcw, Send, ShieldAlert, Video } from "lucide-react";
 import { formatId, invoke, listen } from "../lib/ipc";
-import { Button, Logo, Segmented, TitleBar, Toggle } from "../components/ui";
+import { Button, Logo, Modal, Segmented, TitleBar, Toggle } from "../components/ui";
 
 interface Client {
   id: number;
@@ -42,10 +42,18 @@ export function ConnectionManager() {
   const [active, setActive] = useState<number | null>(null);
   const [since] = useState(() => new Map<number, number>());
   const [chat, setChat] = useState<Record<number, { me: boolean; text: string }[]>>({});
+  const [consents, setConsents] = useState<ConsentRequest[]>([]);
+
+  const answerConsent = (r: ConsentRequest, allow: boolean) => {
+    invoke("cm_record_consent", { connId: r.conn_id, allow });
+    setConsents((cs) => cs.filter((c) => c.conn_id !== r.conn_id));
+    setClients((cs) => cs.map((c) => (c.id === r.conn_id ? { ...c, recording: allow } : c)));
+  };
 
   useEffect(() => {
     let un: (() => void) | undefined;
     (async () => {
+      invoke("cm_record_consent_init").catch(() => {});
       un = await listen("cm", (e) => {
         const p = e.payload;
         if (e.name === "add_connection") {
@@ -55,6 +63,10 @@ export function ConnectionManager() {
           bringToFront();
         } else if (e.name === "remove_connection") {
           setClients((cs) => cs.filter((c) => c.id !== p.id));
+          setConsents((cs) => cs.filter((c) => c.conn_id !== p.id));
+        } else if (e.name === "record_consent_request") {
+          setConsents((cs) => [...cs.filter((c) => c.conn_id !== p.conn_id), p]);
+          bringToFront();
         } else if (e.name === "chat") {
           setChat((c) => ({ ...c, [p.id]: [...(c[p.id] ?? []), { me: false, text: p.text }] }));
           bringToFront();
@@ -102,7 +114,39 @@ export function ConnectionManager() {
         </div>
       )}
       <ClientView key={c.id} c={c} since={since.get(c.id) ?? Date.now()} msgs={chat[c.id] ?? []} onMsg={(m) => setChat((x) => ({ ...x, [c.id]: [...(x[c.id] ?? []), m] }))} />
+      {consents[0] && <RecordConsent r={consents[0]} onAnswer={(allow) => answerConsent(consents[0], allow)} />}
     </div>
+  );
+}
+
+/** Payload of the `record_consent_request` CM event (shared contract with the customer app). */
+interface ConsentRequest {
+  conn_id: number;
+  peer_name: string;
+  text: string;
+}
+
+/** Nothing is recorded until the user answers; there is no way to dismiss it without answering. */
+function RecordConsent({ r, onAnswer }: { r: ConsentRequest; onAnswer: (allow: boolean) => void }) {
+  return (
+    <Modal width={340}>
+      <div className="flex flex-col items-center text-center">
+        <div className="grid h-12 w-12 place-items-center rounded-full bg-parchment">
+          <Video size={22} className="text-danger" />
+        </div>
+        <div className="mt-4 text-headline font-semibold">Recording request</div>
+        {r.peer_name && <div className="mt-1 text-caption text-muted">{r.peer_name}</div>}
+        <p className="mt-3 text-callout">{r.text || "The technician wants to record this session. Allow?"}</p>
+        <div className="mt-6 flex w-full gap-2">
+          <Button className="flex-1" onClick={() => onAnswer(false)}>
+            Deny
+          </Button>
+          <Button variant="primary" className="flex-1" autoFocus onClick={() => onAnswer(true)}>
+            Allow
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

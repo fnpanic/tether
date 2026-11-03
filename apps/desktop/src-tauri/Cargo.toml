@@ -21,6 +21,7 @@ rdev = { git = "https://github.com/rustdesk-org/rdev" }
 librustdesk = { package = "rustdesk", path = "../../../vendor/rustdesk", default-features = false, features = ["tauri", "hwcodec", "vram", "use_dasp"] }
 hbb_common = { path = "../../../vendor/rustdesk/libs/hbb_common" }
 base = { path = "../../../vendor/rustdesk/libs/base" }
+tether-trust = { path = "../../../crates/tether-trust" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_HiDpi", "Win32_Foundation", "Win32_Networking_WinHttp"] }
