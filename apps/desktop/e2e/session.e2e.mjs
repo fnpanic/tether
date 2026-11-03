@@ -222,8 +222,11 @@ function cleanup() {
       execFileSync("taskkill", ["/PID", String(p.pid), "/T", "/F"], { stdio: "ignore" });
     } catch {}
   }
+  // Helper processes the test hosts spawned (--cm, …): only those of the test binary, never the
+  // user's installed Tether.
   try {
-    execFileSync("taskkill", ["/IM", "tether.exe", "/F"], { stdio: "ignore" });
+    const exe = EXE.replace(/'/g, "''");
+    execFileSync("powershell", ["-NoProfile", "-Command", `Get-CimInstance Win32_Process -Filter "Name='tether.exe'" | Where-Object { $_.ExecutablePath -eq '${exe}' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`], { stdio: "ignore" });
   } catch {}
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, "e2e.json"), JSON.stringify(results, null, 2));
