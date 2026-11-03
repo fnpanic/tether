@@ -8,11 +8,14 @@
 """
 
 import json
+import os
 import time
 
 from mitmproxy import ctx, http
 
 LOG = "corp_proxy_log.jsonl"
+# Allowed CONNECT ports, e.g. CORP_PORTS=443,80 (default: 443 only).
+PORTS = {int(p) for p in os.environ.get("CORP_PORTS", "443").split(",")}
 
 
 def _log(**kv):
@@ -23,11 +26,15 @@ def _log(**kv):
 
 def http_connect(flow: http.HTTPFlow):
     host, port = flow.request.host, flow.request.port
-    if port != 443:
-        _log(event="blocked", host=host, port=port, reason="only 443 allowed")
-        flow.response = http.Response.make(403, b"Blocked by corporate policy: only port 443 is allowed")
+    if port not in PORTS:
+        _log(event="blocked", host=host, port=port, reason=f"allowed ports {sorted(PORTS)}")
+        flow.response = http.Response.make(403, b"Blocked by corporate policy")
         return
     _log(event="connect", host=host, port=port, client=flow.client_conn.peername[0])
+
+
+def tls_failed_client(data):
+    _log(event="tls_rejected_by_client", host=data.context.server.address[0] if data.context.server.address else None)
 
 
 def request(flow: http.HTTPFlow):

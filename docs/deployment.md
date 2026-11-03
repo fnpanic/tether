@@ -10,7 +10,7 @@ installed clients.
 | Server key (`TETHER_PUB_KEY`) | `fe8A7xTX72RJlJypn8aBxG3NZHHxygCLPQqCWxbeev8=` |
 | Host | OCI `VM.Standard.E2.1.Micro` (Always Free), Oracle Linux 9, region eu-amsterdam-1 |
 | Public IP | ephemeral (free); the DNS name follows it |
-| Ports | **TCP 443** (Caddy → `/ws/id`, `/ws/relay`; what Tether clients use). Legacy TCP 21115–21117 and UDP 21116 are still open for stock RustDesk clients and can be closed. |
+| Ports | **TCP 443** (Caddy → `/ws/id`, `/ws/relay`; what Tether clients use) and **TCP 80** (firewalld forwards it to 443, the fallback route; see [connection-resilience.md](connection-resilience.md)). Legacy TCP 21115–21117 and UDP 21116 are still open for stock RustDesk clients and can be closed. |
 | Services | `tether-hbbs`, `tether-hbbr` (patched for WebSocket hosts), `tether-https` (Caddy, Let's Encrypt), `tether-ddns.timer` (systemd, enabled at boot) |
 | Data | `/var/lib/tether` (key pair `id_ed25519` + peer DB). Back up `id_ed25519`; losing it means rebuilding every client. |
 
@@ -31,6 +31,7 @@ No other paid resources were created.
    - Caddy static binary at `/usr/local/bin/caddy`, system user `tether-https`;
    - `server/caddy/Caddyfile` copied to `/etc/tether/Caddyfile`, with `RELAY_HOST=tether-desk.duckdns.org` in `/etc/tether/server.env`;
    - `server/systemd/tether-https.service` enabled; TCP 443 opened in the OCI security list and firewalld;
+   - port 80 fallback: `firewall-cmd --permanent --add-forward-port=port=80:proto=tcp:toport=443 --add-port=80/tcp` plus an OCI ingress rule for TCP 80;
    - the certificate comes from Let's Encrypt via TLS-ALPN-01 on 443 (no port 80 needed) and renews automatically.
 5. VM tuning for the 1 GB micro shape:
    - kdump disabled and the `crashkernel` reservation removed (it reserved 448 MB, which starved

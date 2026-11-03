@@ -21,6 +21,9 @@ TLS alone. **It cannot see the session.** Screen, input, clipboard and files are
 encrypted between the two devices (X25519 + XSalsa20-Poly1305) inside the TLS tunnel. A
 Zscaler-style proxy that terminates TLS sees only ciphertext there.
 
+Tether also races port 443 against port 80, and proxy against direct, so the first route that
+works wins. See [connection-resilience.md](connection-resilience.md).
+
 ## Requirements for IT
 
 - Allow `https://tether-desk.duckdns.org` (TCP 443, WebSocket upgrade on `/ws/id` and `/ws/relay`).

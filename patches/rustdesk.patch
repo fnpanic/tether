@@ -104,6 +104,21 @@ index 53831cc..2204e07 100644
      {
          // One look and one claim of the minute, under one lock: two connections arriving
          // together would otherwise both find it over and both probe.
+diff --git a/src/hbbs_http/sync.rs b/src/hbbs_http/sync.rs
+index aac220b..2b67671 100644
+--- a/src/hbbs_http/sync.rs
++++ b/src/hbbs_http/sync.rs
+@@ -282,6 +282,10 @@ async fn start_hbbs_sync_async() {
+ }
+ 
+ fn heartbeat_url() -> String {
++    // Tether's relay has no API server; `api-server` only selects wss://.
++    if cfg!(feature = "tauri") {
++        return "".to_owned();
++    }
+     let url = crate::common::get_api_server(
+         Config::get_option("api-server"),
+         Config::get_option("custom-rendezvous-server"),
 diff --git a/src/lib.rs b/src/lib.rs
 index f6e48a1..600a09e 100644
 --- a/src/lib.rs

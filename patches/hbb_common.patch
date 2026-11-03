@@ -19,3 +19,171 @@ index 9ee5cac..dbd2afa 100644
  
  pub const RENDEZVOUS_PORT: i32 = 21116;
  pub const RELAY_PORT: i32 = 21117;
+diff --git a/src/websocket.rs b/src/websocket.rs
+index 3a98a84..bb49b4f 100644
+--- a/src/websocket.rs
++++ b/src/websocket.rs
+@@ -141,6 +141,38 @@ impl WsFramedStream {
+         .await
+     }
+ 
++    /// "Always connects": to this client's own relay, try every route (port 443 and 80, through
++    /// the detected proxy and direct), staggered like Happy Eyeballs. The first route that
++    /// completes the TLS + WebSocket handshake wins, and the winner is tried first next time.
++    /// Any other server keeps the single upstream route.
++    async fn race(
++        url: &str,
++        local_addr: Option<SocketAddr>,
++        proxy_conf: Option<Socks5Server>,
++        ms_timeout: u64,
++    ) -> ResultType<(WsStream, SocketAddr)> {
++        let routes = connect_routes(url, proxy_conf.is_some());
++        if routes.len() <= 1 {
++            return Self::connect(url, local_addr, proxy_conf.as_ref(), ms_timeout).await;
++        }
++        let attempts = routes.iter().enumerate().map(|(i, route)| {
++            let route = route.clone();
++            let proxy = if route.via_proxy { proxy_conf.clone() } else { None };
++            Box::pin(async move {
++                tokio::time::sleep(Duration::from_millis(i as u64 * ROUTE_STAGGER_MS)).await;
++                let r = Self::connect(&route.url, local_addr, proxy.as_ref(), ms_timeout).await;
++                if let Err(e) = &r {
++                    log::debug!("route {} (proxy: {}) failed: {}", route.url, route.via_proxy, e);
++                }
++                r.map(|s| (s, route))
++            })
++        });
++        let ((stream, route), _) = futures::future::select_ok(attempts).await?;
++        log::info!("connected via {} (proxy: {})", route.url, route.via_proxy);
++        remember_route(url, &route);
++        Ok(stream)
++    }
++
+     #[async_recursion]
+     async fn try_connect(
+         url: &str,
+@@ -304,8 +336,7 @@ impl WsFramedStream {
+         ms_timeout: u64,
+     ) -> ResultType<Self> {
+         let proxy_conf = Config::get_socks();
+-        let (stream, addr) =
+-            Self::connect(url.as_ref(), local_addr, proxy_conf.as_ref(), ms_timeout).await?;
++        let (stream, addr) = Self::race(url.as_ref(), local_addr, proxy_conf, ms_timeout).await?;
+ 
+         let ws = Self {
+             stream,
+@@ -533,6 +564,78 @@ pub fn check_ws(endpoint: &str) -> String {
+     format!("{}://{}", protocol, address)
+ }
+ 
++/// Delay between starting successive connection routes (Happy Eyeballs uses 250 ms).
++const ROUTE_STAGGER_MS: u64 = 300;
++/// Fallback port of this client's own relay: TLS on 80 gets through networks that allow only
++/// web ports, and through proxies that allow CONNECT to 80.
++const FALLBACK_WSS_PORT: u16 = 80;
++
++#[derive(Clone, Debug, PartialEq)]
++struct Route {
++    url: String,
++    via_proxy: bool,
++}
++
++lazy_static::lazy_static! {
++    /// Last route that worked, per original URL host.
++    static ref GOOD_ROUTE: std::sync::Mutex<std::collections::HashMap<String, Route>> = Default::default();
++}
++
++fn route_key(url: &str) -> String {
++    url::Url::parse(url)
++        .ok()
++        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
++        .unwrap_or_default()
++}
++
++fn remember_route(url: &str, route: &Route) {
++    // Store the route for the other path on the same host too: /ws/id and /ws/relay share routes.
++    GOOD_ROUTE.lock().unwrap().insert(route_key(url), route.clone());
++}
++
++/// Routes to try for `url`, best first. Only `wss://` URLs to this client's own (compiled-in)
++/// server on the default port get alternatives; a peer's server may not listen on port 80.
++fn connect_routes(url: &str, has_proxy: bool) -> Vec<Route> {
++    let single = vec![Route { url: url.to_owned(), via_proxy: has_proxy }];
++    let Ok(parsed) = url::Url::parse(url) else { return single };
++    let Some(host) = parsed.host_str() else { return single };
++    let exe = EXE_RENDEZVOUS_SERVER.read().unwrap().clone();
++    let is_own = crate::config::RENDEZVOUS_SERVERS
++        .iter()
++        .copied()
++        .chain(std::iter::once(exe.as_str()))
++        .filter(|s| !s.is_empty())
++        .any(|s| {
++            split_host_port(s)
++                .map(|(h, _)| h)
++                .unwrap_or_else(|| s.to_owned())
++                .eq_ignore_ascii_case(host)
++        });
++    if parsed.scheme() != "wss" || parsed.port().is_some() || !is_own {
++        return single;
++    }
++    let mut alt = parsed.clone();
++    let _ = alt.set_port(Some(FALLBACK_WSS_PORT));
++    let urls = [url.to_owned(), alt.to_string()];
++    let proxies: &[bool] = if has_proxy { &[true, false] } else { &[false] };
++    let mut routes: Vec<Route> = proxies
++        .iter()
++        .flat_map(|&via_proxy| urls.iter().map(move |u| Route { url: u.clone(), via_proxy }))
++        .collect();
++    let key = route_key(url);
++    if let Some(good) = GOOD_ROUTE.lock().unwrap().get(&key) {
++        // The cached route was stored for one path: map it onto this URL's path.
++        let port = url::Url::parse(&good.url).ok().and_then(|u| u.port());
++        if let Some(i) = routes.iter().position(|r| {
++            r.via_proxy == good.via_proxy && url::Url::parse(&r.url).ok().and_then(|u| u.port()) == port
++        }) {
++            let r = routes.remove(i);
++            routes.insert(0, r);
++        }
++    }
++    routes
++}
++
+ /// Port of the reverse proxy serving `/ws/id` and `/ws/relay` on this client's own servers, for
+ /// when it cannot listen on the scheme's default port. Any other host, such as a peer's server or
+ /// a relay on another machine, keeps the default port. IP endpoints never get here.
+@@ -902,3 +1005,35 @@ mod tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod route_tests {
++    use super::*;
++
++    #[test]
++    fn own_relay_gets_port_and_proxy_fallbacks_and_cached_winner_first() {
++        *EXE_RENDEZVOUS_SERVER.write().unwrap() = "relay.example.org".to_owned();
++        let id = "wss://relay.example.org/ws/id";
++        let routes = connect_routes(id, true);
++        let got: Vec<_> = routes.iter().map(|r| (r.url.as_str(), r.via_proxy)).collect();
++        assert_eq!(
++            got,
++            [
++                ("wss://relay.example.org/ws/id", true),
++                ("wss://relay.example.org:80/ws/id", true),
++                ("wss://relay.example.org/ws/id", false),
++                ("wss://relay.example.org:80/ws/id", false),
++            ]
++        );
++        // Other servers, explicit ports and plain ws keep one route.
++        assert_eq!(connect_routes("wss://peer.example.com/ws/relay", true).len(), 1);
++        assert_eq!(connect_routes("wss://relay.example.org:8443/ws/id", false).len(), 1);
++        // A winner on /ws/relay (direct, port 80) is tried first for /ws/id as well.
++        remember_route(
++            "wss://relay.example.org/ws/relay",
++            &Route { url: "wss://relay.example.org:80/ws/relay".into(), via_proxy: false },
++        );
++        let first = &connect_routes(id, true)[0];
++        assert_eq!((first.url.as_str(), first.via_proxy), ("wss://relay.example.org:80/ws/id", false));
++    }
++}

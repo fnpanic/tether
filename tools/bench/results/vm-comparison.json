@@ -112,5 +112,62 @@
     },
     "latency_corrected_ms": null,
     "screen_to_capture_ms": null
+  },
+  {
+    "label": "tether \u00b7 VM host \u00b7 balanced",
+    "seconds": 20.0,
+    "capture_fps": 76.2,
+    "valid_samples": 1400,
+    "distinct_remote_frames_per_s": 16.6,
+    "latency_ms": {
+      "n": 1400,
+      "median": 78.0,
+      "mean": 370.0,
+      "p10": 55,
+      "p95": 2360,
+      "min": 37,
+      "max": 3581,
+      "stdev": 753.6
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
+  },
+  {
+    "label": "tether \u00b7 VM host \u00b7 balanced",
+    "seconds": 30.0,
+    "capture_fps": 58.1,
+    "valid_samples": 1740,
+    "distinct_remote_frames_per_s": 27.6,
+    "latency_ms": {
+      "n": 1740,
+      "median": 56.0,
+      "mean": 58.6,
+      "p10": 41,
+      "p95": 85,
+      "min": 37,
+      "max": 110,
+      "stdev": 14.4
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
+  },
+  {
+    "label": "tether \u00b7 VM host \u00b7 balanced",
+    "seconds": 30.0,
+    "capture_fps": 42.8,
+    "valid_samples": 1283,
+    "distinct_remote_frames_per_s": 28.4,
+    "latency_ms": {
+      "n": 1283,
+      "median": 54,
+      "mean": 56.3,
+      "p10": 42,
+      "p95": 77,
+      "min": 37,
+      "max": 113,
+      "stdev": 12.3
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
   }
 ]

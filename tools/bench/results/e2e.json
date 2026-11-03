@@ -1,5 +1,5 @@
 {
-  "started": "2026-11-03T11:30:15.118Z",
+  "started": "2026-11-03T12:26:25.503Z",
   "tests": [
     {
       "name": "host registers with relay (pinned key)",
@@ -9,13 +9,13 @@
     {
       "name": "password login + first frame",
       "ok": true,
-      "ms_to_first_frame": 3
+      "ms_to_first_frame": 7
     },
     {
       "name": "file transfer 64 MB, SHA-256 verified",
       "ok": true,
-      "seconds": 14.07,
-      "MBps": 4.5
+      "seconds": 14.96,
+      "MBps": 4.3
     },
     {
       "name": "session reports end-to-end encryption",
