@@ -39,10 +39,23 @@ index 606a4be..2510d2a 100644
 +pub const EXTERNAL_DECODING_H264: u8 = 1;
 +pub const EXTERNAL_DECODING_H265: u8 = 2;
 diff --git a/src/client.rs b/src/client.rs
-index 597dc86..6127224 100644
+index 597dc86..faa3f22 100644
 --- a/src/client.rs
 +++ b/src/client.rs
-@@ -5043,6 +5043,19 @@ pub async fn confirm_insecure_connection(
+@@ -3002,6 +3002,12 @@ impl LoginConfigHandler {
+         self.shared_password = shared_password;
+         self.record_state = false;
+         self.record_permission = true;
++        // Tether: nothing is recorded until the host user consents. The host's initial "recording
++        // off" is sent before login and can be missed, so never assume the permission.
++        #[cfg(feature = "tauri")]
++        {
++            self.record_permission = false;
++        }
+ 
+         // `std::env::remove_var("IS_TERMINAL_ADMIN");` is called in `session_add_sync()` - `flutter_ffi.rs`.
+         let is_terminal_admin = conn_type == ConnType::TERMINAL
+@@ -5043,6 +5049,19 @@ pub async fn confirm_insecure_connection(
      interface: &impl Interface,
      receiver: &mut UnboundedReceiver<Data>,
  ) -> bool {
@@ -63,26 +76,31 @@ index 597dc86..6127224 100644
          "insecure-connection-nocancel-hasclose",
          "Insecure Connection",
 diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
-index 1b197a8..7114045 100644
+index 1b197a8..dfe0a78 100644
 --- a/src/client/io_loop.rs
 +++ b/src/client/io_loop.rs
-@@ -1315,6 +1315,15 @@ impl<T: InvokeUiSession> Remote<T> {
+@@ -1315,6 +1315,20 @@ impl<T: InvokeUiSession> Remote<T> {
                  }
              }
              Data::RecordScreen(start) => {
 +                // Tether: no permission yet, so ask the host user; recording starts once granted.
 +                #[cfg(feature = "tauri")]
 +                if start && !self.handler.lc.read().unwrap().record_permission {
++                    log::info!("asking the host to allow recording");
 +                    let mut misc = Misc::new();
 +                    misc.set_client_record_status(true);
 +                    let mut msg = Message::new();
 +                    msg.set_misc(misc);
 +                    allow_err!(peer.send(&msg).await);
++                    // Keep the wish pending: the host's answer (Permission::Recording) starts the
++                    // recorder via update_record_state, or clears the wish when declined.
++                    self.handler.lc.write().unwrap().record_state = true;
++                    return true;
 +                }
                  self.handler.lc.write().unwrap().record_state = start;
                  self.update_record_state();
              }
-@@ -1706,6 +1715,10 @@ impl<T: InvokeUiSession> Remote<T> {
+@@ -1706,6 +1720,10 @@ impl<T: InvokeUiSession> Remote<T> {
                      }
                      self.video_format = CodecFormat::from(&vf);
  
@@ -191,7 +209,7 @@ index 8e4c56c..995d6df 100644
                  } else {
                      bail!("Handshake failed: invalid message format");
 diff --git a/src/server/connection.rs b/src/server/connection.rs
-index e9ea313..7510ca0 100644
+index e9ea313..0a95160 100644
 --- a/src/server/connection.rs
 +++ b/src/server/connection.rs
 @@ -663,6 +663,11 @@ impl Connection {
@@ -206,21 +224,38 @@ index e9ea313..7510ca0 100644
          let addr = hbb_common::try_into_v4(addr);
          if !conn.on_open(addr).await {
              conn.closed = true;
-@@ -4032,6 +4037,14 @@ impl Connection {
+@@ -864,6 +869,7 @@ impl Connection {
+                                 conn.restart = enabled;
+                                 conn.send_permission(Permission::Restart, enabled).await;
+                             } else if &name == "recording" {
++                                log::info!("recording permission set to {enabled} by the connection manager");
+                                 conn.recording = enabled;
+                                 conn.send_permission(Permission::Recording, enabled).await;
+                             } else if &name == "block_input" {
+@@ -4032,10 +4038,19 @@ impl Connection {
                          .lock()
                          .unwrap()
                          .user_auto_adjust_fps(self.inner.id(), fps),
+-                    Some(misc::Union::ClientRecordStatus(status)) => video_service::VIDEO_QOS
+-                        .lock()
+-                        .unwrap()
+-                        .user_record(self.inner.id(), status),
 +                    // Tether: a viewer without the recording permission asks the host user.
 +                    #[cfg(feature = "tauri")]
 +                    Some(misc::Union::ClientRecordStatus(true)) if !self.recording => {
++                        log::info!("viewer asks to record: asking the local user");
 +                        self.send_to_cm(ipc::Data::SwitchPermission {
 +                            name: "recording-request".to_owned(),
 +                            enabled: true,
 +                        });
 +                    }
-                     Some(misc::Union::ClientRecordStatus(status)) => video_service::VIDEO_QOS
-                         .lock()
-                         .unwrap()
++                    Some(misc::Union::ClientRecordStatus(status)) => {
++                        log::info!("viewer record status {status} (recording permission {})", self.recording);
++                        video_service::VIDEO_QOS.lock().unwrap().user_record(self.inner.id(), status)
++                    }
+                     #[cfg(windows)]
+                     Some(misc::Union::SelectedSid(sid)) => {
+                         if let Some(current_process_sid) =
 diff --git a/src/server/video_qos.rs b/src/server/video_qos.rs
 index 96ffa63..d40ba0d 100644
 --- a/src/server/video_qos.rs
@@ -1218,15 +1253,16 @@ index 0000000..0a92403
 +    m
 +}
 diff --git a/src/ui_cm_interface.rs b/src/ui_cm_interface.rs
-index 64e1370..c655e13 100644
+index 64e1370..60651cb 100644
 --- a/src/ui_cm_interface.rs
 +++ b/src/ui_cm_interface.rs
-@@ -584,6 +584,11 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
+@@ -584,6 +584,12 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                  Data::ChatMessage { text } => {
                                      self.cm.new_message(self.conn_id, text);
                                  }
 +                                #[cfg(feature = "tauri")]
 +                                Data::SwitchPermission { name, .. } if name == "recording-request" => {
++                                    log::info!("recording consent requested for connection {}", self.conn_id);
 +                                    let peer_name = CLIENTS.read().unwrap().get(&self.conn_id).map(|c| c.name.clone()).unwrap_or_default();
 +                                    crate::ui::cm::record_consent_request(self.conn_id, peer_name);
 +                                }

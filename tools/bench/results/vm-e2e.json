@@ -1,0 +1,37 @@
+{
+  "when": "2026-11-03T17:27:28.639Z",
+  "vm": "172.30.252.30",
+  "results": [
+    {
+      "name": "TetherQS ready behind TLS-inspecting proxy as standard user",
+      "ok": true,
+      "id": "490209544",
+      "title": "ACME Support (test)",
+      "elevated": false
+    },
+    {
+      "name": "CLI connect (--password-stdin) + first frame",
+      "ok": true,
+      "ms": 1026
+    },
+    {
+      "name": "recording denied by customer: nothing recorded",
+      "ok": true,
+      "declined_shown": true,
+      "files": 0
+    },
+    {
+      "name": "recording allowed: file written and playable",
+      "ok": true,
+      "file": "C:\\Users\\Thomas\\Videos\\Tether\\outgoing_490209544_20261103182714796_display0_av1.webm",
+      "seconds": 7.461,
+      "size": 425897
+    },
+    {
+      "name": "relay restart mid-session: automatic reconnect",
+      "ok": true,
+      "saw_overlay": true,
+      "resumed_after_ms": 2730
+    }
+  ]
+}
