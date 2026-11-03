@@ -18,6 +18,9 @@ const ENFORCED: &[(&str, &str)] = &[
     // No session recordings written to disk unless the user starts one explicitly.
     ("allow-auto-record-incoming", "N"),
     ("allow-auto-record-outgoing", "N"),
+    // Tether has no "stop service" control. The core's --uninstall-service (run by every
+    // upgrade's old uninstaller) writes stop-service=Y, which would keep the app offline for good.
+    ("stop-service", "N"),
 ];
 
 /// Secure defaults the user may relax deliberately in Settings.

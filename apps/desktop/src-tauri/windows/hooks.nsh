@@ -9,7 +9,11 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  ; Stop and remove the background service (no-op if unattended access was never installed).
-  nsExec::Exec '"$INSTDIR\tether.exe" --uninstall-service'
+  ; Stop and remove the background service, only if unattended access was installed.
+  nsExec::ExecToStack 'sc.exe query Tether'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" 0 +2
+    nsExec::Exec '"$INSTDIR\tether.exe" --uninstall-service'
   nsExec::Exec 'netsh advfirewall firewall delete rule name="Tether"'
 !macroend

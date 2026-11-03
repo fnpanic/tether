@@ -4,6 +4,15 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.2.1] — 2026-11-03
+
+### Fixed
+- **The app stayed offline after an upgrade.** Installing over an older version runs the old
+  uninstaller, whose `--uninstall-service` step writes `stop-service = Y` to the user config even
+  when no background service exists. Tether then never connected to the relay. Tether now always
+  forces `stop-service` off (it has no "stop service" control), and the uninstaller only removes
+  the background service when one is installed.
+
 ## [0.2.0] — 2026-11-03
 
 Works in corporate networks and connects as reliably as AnyDesk.
