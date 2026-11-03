@@ -3,6 +3,7 @@
 # hbbs/hbbr (ID + relay), tether-api (relay API) and Caddy (HTTPS/WebSocket front end on 443).
 #   sudo ADMIN_PUB_KEY=<b64>[,<b64>] ./install.sh relay.example.com [path/to/binaries]
 # Optional env: DUCKDNS_DOMAIN + DUCKDNS_TOKEN (keep the name pointed at this host),
+# RELAY_SERVERS (every relay hbbs hands out, for several relays; see docs/relay-ha.md),
 # CADDY_VERSION (default below). Safe to re-run; an existing /etc/tether/api.env is kept unless
 # ADMIN_PUB_KEY is given.
 # Picks bin/ (x86_64) or bin-arm64/ (aarch64, e.g. Oracle Cloud Ampere) automatically.
@@ -44,7 +45,9 @@ if ! /usr/local/bin/caddy version 2>/dev/null | grep -q "^v$CADDY_VERSION "; the
   rm -rf "$tmp"
 fi
 
-echo "RELAY_HOST=$HOST" > /etc/tether/server.env
+# Relay list: this relay first (checked locally), then the others, e.g.
+#   RELAY_SERVERS="a.example|http://127.0.0.1:21121/readyz,b.example|https://b.example/readyz/relay"
+printf 'RELAY_HOST=%s\nRELAY_SERVERS=%s\n' "$HOST" "${RELAY_SERVERS:-$HOST|http://127.0.0.1:21121/readyz}" > /etc/tether/server.env
 install -m 0644 "$HERE/caddy/Caddyfile" /etc/tether/Caddyfile
 if [ -n "${ADMIN_PUB_KEY:-}" ]; then
   echo "ADMIN_PUB_KEY=$ADMIN_PUB_KEY" > /etc/tether/api.env
@@ -66,12 +69,7 @@ if command -v restorecon >/dev/null; then
   restorecon -R /usr/local/bin /etc/tether /etc/systemd/system /var/lib/tether /var/lib/tether-api /var/lib/tether-https
 fi
 
-systemctl daemon-reload
-systemctl enable tether-hbbr tether-hbbs tether-api tether-https
-systemctl restart tether-hbbr tether-hbbs tether-api tether-https
-[ -f /etc/tether/duckdns.env ] && systemctl enable --now tether-ddns.timer
-
-# Host firewall: relay ports, 443, and 80 forwarded to 443 (fallback route for clients).
+# Host firewall first, so Caddy can get its certificate on the first try: relay ports, 443, and 80 forwarded to 443 (fallback route for clients).
 if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
   # Oracle Linux / RHEL family.
   firewall-cmd --permanent --add-port=21115-21117/tcp --add-port=21116/udp --add-port=443/tcp --add-port=80/tcp
@@ -101,6 +99,11 @@ elif command -v iptables >/dev/null && iptables -S INPUT | grep -q -- "-j REJECT
     echo "note: install iptables-persistent to keep the firewall rules across reboots" >&2
   fi
 fi
+
+systemctl daemon-reload
+systemctl enable tether-hbbr tether-hbbs tether-api tether-https
+systemctl restart tether-hbbr tether-hbbs tether-api tether-https
+[ -f /etc/tether/duckdns.env ] && systemctl enable --now tether-ddns.timer
 
 # hbbs creates the key pair on first start.
 for _ in $(seq 1 40); do [ -s /var/lib/tether/id_ed25519.pub ] && break; sleep 0.5; done

@@ -1,0 +1,110 @@
+{
+  "date": "2026-11-03",
+  "cluster": "kind v0.33.0, Kubernetes v1.37.0, 1 control plane + 2 workers, Docker Desktop on Windows 11",
+  "chart": "deploy/helm/tether-relay, values deploy/kind/values-kind.yaml (hbbs x2, hbbr x3, proxy x2, api x1)",
+  "image": "tether-relay:ha4 (server/Dockerfile.static, static musl binaries)",
+  "harness": "relay-harness (vendor/rustdesk-server/src/bin/relay-harness.rs) as a pod: host registered at every hbbs over WebSocket, viewer PunchHoleRequest -> RelayResponse -> both pair at the hbbr URL hbbs hands out; 1 KiB frames every 20 ms host->viewer; reconnect = new punch on any relay drop or 1 s of silence; WS ping liveness 2.5 s on registrations",
+  "gap_definition": "time between the last frame on the old relay connection and the first frame on the new one, measured at the viewer (includes detection)",
+  "tests": {
+    "a1": {
+      "description": "hbbr rolling restart (kubectl rollout restart sts/tether-relay-hbbr) during churn: 6 workers x back-to-back 30 s sessions, 3 hbbr pods, drainSeconds 90",
+      "sessions": 30,
+      "seconds": 150,
+      "reconnects": 0,
+      "gaps_ms": [],
+      "max_gap_ms": 0,
+      "max_stall_ms": 56,
+      "incomplete_sessions": 0,
+      "latency_p50_ms_median": 0.346,
+      "rollout_seconds": 57
+    },
+    "a2": {
+      "description": "hbbs rolling restart (kubectl rollout restart sts/tether-relay-hbbs) during churn: 6 workers x 20 s sessions; hosts registered with both hbbs pods",
+      "sessions": 30,
+      "seconds": 90,
+      "reconnects": 0,
+      "gaps_ms": [],
+      "max_gap_ms": 0,
+      "max_stall_ms": 73,
+      "incomplete_sessions": 0,
+      "latency_p50_ms_median": 0.387,
+      "rollout_seconds": 7
+    },
+    "a3": {
+      "description": "proxy (Caddy) rolling update during 6 live sessions: WebSockets through old proxy pods are cut and re-paired",
+      "sessions": 6,
+      "seconds": 75,
+      "reconnects": 3,
+      "gaps_ms": [
+        19,
+        39,
+        40
+      ],
+      "max_gap_ms": 40,
+      "max_stall_ms": 70,
+      "incomplete_sessions": 0,
+      "latency_p50_ms_median": 0.343
+    },
+    "b1": {
+      "description": "kubectl delete pod tether-relay-hbbr-1 --grace-period=0 --force while it carries live streams",
+      "sessions": 6,
+      "seconds": 40,
+      "reconnects": 2,
+      "gaps_ms": [
+        39,
+        39
+      ],
+      "max_gap_ms": 39,
+      "max_stall_ms": 21,
+      "incomplete_sessions": 0,
+      "latency_p50_ms_median": 0.308
+    },
+    "b2": {
+      "description": "kubectl delete pod tether-relay-hbbr-2 --grace-period=15 (shorter than the drain): pod goes not-ready, streams continue until the kill at 15 s, then re-pair",
+      "sessions": 6,
+      "seconds": 45,
+      "reconnects": 2,
+      "gaps_ms": [
+        20,
+        20
+      ],
+      "max_gap_ms": 20,
+      "max_stall_ms": 42,
+      "incomplete_sessions": 0,
+      "latency_p50_ms_median": 0.31
+    },
+    "b3a": {
+      "description": "docker pause of the worker node holding hbbr-0, hbbr-1 and hbbs-0 (silent node death), proxy pods on the surviving node; detection by 1 s frame silence",
+      "sessions": 6,
+      "seconds": 60,
+      "reconnects": 5,
+      "gaps_ms": [
+        1019,
+        1020,
+        1020,
+        1020,
+        1020
+      ],
+      "max_gap_ms": 1020,
+      "max_stall_ms": 26,
+      "incomplete_sessions": 0,
+      "latency_p50_ms_median": 0.247
+    },
+    "b3": {
+      "description": "same node freeze, but one of the two proxy pods is on the frozen node: kube-proxy keeps its endpoint until the node is NotReady (~40 s in kind), so ~half of new connections hang",
+      "sessions": 6,
+      "seconds": 75,
+      "reconnects": 4,
+      "gaps_ms": [
+        9300,
+        43568,
+        43621,
+        43660
+      ],
+      "max_gap_ms": 43660,
+      "max_stall_ms": 34,
+      "incomplete_sessions": 0,
+      "latency_p50_ms_median": 0.381
+    }
+  }
+}

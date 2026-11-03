@@ -1,8 +1,592 @@
+diff --git a/src/bin/relay-harness.rs b/src/bin/relay-harness.rs
+new file mode 100644
+index 0000000..19ab20f
+--- /dev/null
++++ b/src/bin/relay-harness.rs
+@@ -0,0 +1,393 @@
++//! Tether relay HA test harness: N host/viewer pairs that connect the way Tether clients do
++//! (host registered over WebSocket at hbbs, viewer asks hbbs for the host, both pair at the relay
++//! hbbs hands out) and stream timestamped frames host -> viewer. When a relay connection drops,
++//! the viewer asks hbbs again and both re-pair on the relay it hands out, like the real client's
++//! reconnect. Prints one JSON report.
++//!
++//!   relay-harness hbbs=ws://proxy/ws/id/0[,ws://proxy/ws/id/1] key=<server pub key> sessions=4 seconds=60
++//!                 [session_seconds=20] [frame_ms=20] [frame_bytes=1024]
++//! session_seconds > 0 ends each session after that long and starts a new one (churn).
++use hbb_common::{
++    futures_util::{SinkExt, StreamExt},
++    protobuf::Message as _,
++    rendezvous_proto::*,
++    tokio::{
++        self,
++        sync::mpsc,
++        time::{interval, sleep, timeout, Duration, Instant},
++    },
++};
++use tokio_tungstenite::tungstenite::Message;
++
++type Ws = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
++type Error = Box<dyn std::error::Error + Send + Sync>;
++
++/// ws:// only (the harness runs next to the proxy); TCP_NODELAY like the real client and hbbr.
++async fn connect_async(url: &str) -> Result<(Ws, ()), Error> {
++    let rest = url.strip_prefix("ws://").ok_or("harness speaks ws:// only")?;
++    let host = rest.split('/').next().unwrap_or(rest);
++    let addr = if host.contains(':') { host.to_owned() } else { format!("{host}:80") };
++    let tcp = tokio::net::TcpStream::connect(addr).await?;
++    tcp.set_nodelay(true)?;
++    let (ws, _) = tokio_tungstenite::client_async(url, tcp).await?;
++    Ok((ws, ()))
++}
++
++#[derive(Clone)]
++struct Cfg {
++    /// Every rendezvous server, like the client's server list.
++    hbbs: Vec<String>,
++    key: String,
++    frame_ms: u64,
++    frame_bytes: usize,
++}
++
++#[derive(Default, Debug, serde_derive::Serialize)]
++struct Report {
++    id: String,
++    frames: u64,
++    /// Relay connections that broke mid-session and were re-paired.
++    reconnects: u32,
++    /// Gap in received frames across each reconnect, ms.
++    gaps_ms: Vec<u64>,
++    max_gap_ms: u64,
++    /// Longest silence between two frames on one connection, ms.
++    max_stall_ms: u64,
++    latency_p50_ms: f64,
++    latency_p99_ms: f64,
++    relays: Vec<String>,
++    completed: bool,
++}
++
++fn t0() -> Instant {
++    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
++    *T0.get_or_init(Instant::now)
++}
++
++fn bin(msg: &RendezvousMessage) -> Message {
++    Message::Binary(msg.write_to_bytes().unwrap_or_default())
++}
++
++async fn recv_msg(ws: &mut Ws, ms: u64) -> Option<RendezvousMessage> {
++    let deadline = Instant::now() + Duration::from_millis(ms);
++    loop {
++        let left = deadline.saturating_duration_since(Instant::now());
++        match timeout(left, ws.next()).await {
++            Ok(Some(Ok(Message::Binary(b)))) if !b.is_empty() => {
++                return RendezvousMessage::parse_from_bytes(&b).ok()
++            }
++            Ok(Some(Ok(_))) => continue,
++            _ => return None,
++        }
++    }
++}
++
++async fn connect_relay(cfg: &Cfg, relay: &str, uuid: &str, id: &str) -> Option<Ws> {
++    let (mut ws, _) = timeout(Duration::from_millis(1000), connect_async(relay)).await.ok()?.ok()?;
++    let mut m = RendezvousMessage::new();
++    m.set_request_relay(RequestRelay {
++        id: id.to_owned(),
++        uuid: uuid.to_owned(),
++        licence_key: cfg.key.clone(),
++        ..Default::default()
++    });
++    ws.send(bin(&m)).await.ok()?;
++    Some(ws)
++}
++
++/// One hbbs registration of the host, kept up like the real client does: re-register at once
++/// when the connection drops (e.g. that hbbs pod restarts). Forwards PunchHole with its hbbs URL.
++async fn registrar(url: String, id: String, ev: mpsc::UnboundedSender<(String, PunchHole)>) {
++    loop {
++        if let Ok(Ok((mut ws, _))) = timeout(Duration::from_millis(1000), connect_async(&url)).await {
++            let mut m = RendezvousMessage::new();
++            m.set_register_pk(RegisterPk {
++                id: id.clone(),
++                uuid: id.as_bytes().to_vec().into(),
++                pk: vec![7u8; 32].into(),
++                ..Default::default()
++            });
++            let mut ok = ws.send(bin(&m)).await.is_ok() && recv_msg(&mut ws, 2000).await.is_some();
++            if ok {
++                let mut m = RendezvousMessage::new();
++                m.set_register_peer(RegisterPeer { id: id.clone(), serial: 0, ..Default::default() });
++                ok = ws.send(bin(&m)).await.is_ok();
++            }
++            // Liveness like the client should do it: WebSocket ping each second (hbbs answers
++            // pongs on its own), dead after 2.5 s of silence. Every 5th tick also the protocol
++            // heartbeat (empty binary frame) that keeps the registration fresh at hbbs.
++            let mut hb = interval(Duration::from_secs(1));
++            let mut n = 0u32;
++            let mut last_rx = Instant::now();
++            while ok {
++                tokio::select! {
++                    _ = hb.tick() => {
++                        n += 1;
++                        let m = if n % 5 == 0 { Message::Binary(Vec::new()) } else { Message::Ping(Vec::new()) };
++                        ok = ws.send(m).await.is_ok() && last_rx.elapsed() < Duration::from_millis(2500);
++                    }
++                    m = ws.next() => match { last_rx = Instant::now(); m } {
++                        Some(Ok(Message::Binary(b))) => {
++                            if let Ok(RendezvousMessage { union: Some(rendezvous_message::Union::PunchHole(ph)), .. }) =
++                                RendezvousMessage::parse_from_bytes(&b)
++                            {
++                                ev.send((url.clone(), ph)).ok();
++                            }
++                        }
++                        Some(Ok(_)) => {}
++                        _ => ok = false,
++                    }
++                }
++            }
++        }
++        sleep(Duration::from_millis(100)).await;
++    }
++}
++
++/// The controlled side: registered at every hbbs, answers each PunchHole by pairing at the relay
++/// it names and streams frames on the newest relay connection.
++async fn host(cfg: Cfg, id: String, mut stop: mpsc::Receiver<()>) {
++    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
++    let regs: Vec<_> =
++        cfg.hbbs.iter().map(|u| tokio::spawn(registrar(u.clone(), id.clone(), ev_tx.clone()))).collect();
++    let (relay_tx, mut relay_rx) = mpsc::unbounded_channel::<Ws>();
++    let frame_ms = cfg.frame_ms;
++    let frame_bytes = cfg.frame_bytes.max(16);
++    let streamer = tokio::spawn(async move {
++        let mut cur: Option<Ws> = None;
++        let mut seq = 0u64;
++        let mut tick = interval(Duration::from_millis(frame_ms));
++        loop {
++            tokio::select! {
++                Some(ws) = relay_rx.recv() => { cur = Some(ws); }
++                _ = tick.tick() => {
++                    if let Some(ws) = cur.as_mut() {
++                        let mut f = vec![0u8; frame_bytes];
++                        f[..8].copy_from_slice(&seq.to_le_bytes());
++                        f[8..16].copy_from_slice(&(t0().elapsed().as_micros() as u64).to_le_bytes());
++                        if ws.send(Message::Binary(f)).await.is_err() {
++                            cur = None;
++                        } else {
++                            seq += 1;
++                        }
++                    }
++                }
++            }
++        }
++    });
++    loop {
++        tokio::select! {
++            _ = stop.recv() => break,
++            Some((url, ph)) = ev_rx.recv() => {
++                let (cfg, id, tx) = (cfg.clone(), id.clone(), relay_tx.clone());
++                tokio::spawn(async move {
++                    let uuid = uuid::Uuid::new_v4().to_string();
++                    // RelayResponse goes to the hbbs that sent the PunchHole; it forwards it to the viewer.
++                    if let Ok(Ok((mut ws, _))) = timeout(Duration::from_millis(1000), connect_async(&url)).await {
++                        let mut rr = RelayResponse {
++                            socket_addr: ph.socket_addr.clone(),
++                            uuid: uuid.clone(),
++                            relay_server: ph.relay_server.clone(),
++                            ..Default::default()
++                        };
++                        rr.set_id(id.clone());
++                        let mut m = RendezvousMessage::new();
++                        m.set_relay_response(rr);
++                        ws.send(bin(&m)).await.ok();
++                        ws.close(None).await.ok();
++                    }
++                    if let Some(ws) = connect_relay(&cfg, &ph.relay_server, &uuid, &id).await {
++                        tx.send(ws).ok();
++                    }
++                });
++            }
++        }
++    }
++    streamer.abort();
++    regs.iter().for_each(|r| r.abort());
++}
++
++/// Asks the hbbs servers for the host in turn; returns (uuid, relay) from the host's RelayResponse.
++async fn punch(cfg: &Cfg, id: &str, _start: usize) -> Option<(String, String)> {
++    // Race every hbbs, like the client: first RelayResponse wins.
++    let (tx, mut rx) = mpsc::unbounded_channel();
++    let tasks: Vec<_> = cfg
++        .hbbs
++        .iter()
++        .map(|url| {
++            let (cfg, url, id, tx) = (cfg.clone(), url.clone(), id.to_owned(), tx.clone());
++            tokio::spawn(async move { tx.send(punch_one(&cfg, &url, &id).await).ok() })
++        })
++        .collect();
++    drop(tx);
++    let mut r = None;
++    while let Some(x) = rx.recv().await {
++        if x.is_some() {
++            r = x;
++            break;
++        }
++    }
++    tasks.iter().for_each(|t| t.abort());
++    r
++}
++
++async fn punch_one(cfg: &Cfg, url: &str, id: &str) -> Option<(String, String)> {
++    let (mut ws, _) = timeout(Duration::from_millis(1000), connect_async(url)).await.ok()?.ok()?;
++    let mut m = RendezvousMessage::new();
++    m.set_punch_hole_request(PunchHoleRequest {
++        id: id.to_owned(),
++        nat_type: NatType::SYMMETRIC.into(),
++        licence_key: cfg.key.clone(),
++        ..Default::default()
++    });
++    ws.send(bin(&m)).await.ok()?;
++    let r = match recv_msg(&mut ws, 1500).await?.union {
++        Some(rendezvous_message::Union::RelayResponse(rr)) => Some((rr.uuid, rr.relay_server)),
++        _ => None,
++    };
++    ws.close(None).await.ok();
++    r
++}
++
++async fn viewer(cfg: Cfg, id: String, secs: u64) -> Report {
++    let mut rep = Report { id: id.clone(), ..Default::default() };
++    let end = Instant::now() + Duration::from_secs(secs);
++    let mut lat = Vec::new();
++    let mut last_frame: Option<Instant> = None;
++    let mut first = true;
++    while Instant::now() < end {
++        // Ask the hbbs servers in turn, starting with a different one per session.
++        let start = id.bytes().map(|b| b as usize).sum::<usize>();
++        let Some((uuid, relay)) = punch(&cfg, &id, start).await else {
++            sleep(Duration::from_millis(50)).await;
++            continue;
++        };
++        let Some(mut ws) = connect_relay(&cfg, &relay, &uuid, &id).await else { continue };
++        let mut got_one = false;
++        loop {
++            if Instant::now() >= end {
++                rep.completed = true;
++                break;
++            }
++            // Before the first frame, give up sooner: the pairing may have gone to a dead relay.
++            let wait = if got_one { 1000 } else { 700 };
++            match timeout(Duration::from_millis(wait), ws.next()).await {
++                Ok(Some(Ok(Message::Binary(f)))) if f.len() >= 16 => {
++                    let now = Instant::now();
++                    let sent = u64::from_le_bytes(f[8..16].try_into().unwrap());
++                    lat.push((t0().elapsed().as_micros() as u64).saturating_sub(sent) as f64 / 1000.);
++                    if let Some(prev) = last_frame {
++                        let gap = now.duration_since(prev).as_millis() as u64;
++                        if !got_one && !first {
++                            rep.gaps_ms.push(gap);
++                            rep.max_gap_ms = rep.max_gap_ms.max(gap);
++                        } else if got_one {
++                            rep.max_stall_ms = rep.max_stall_ms.max(gap);
++                        }
++                    }
++                    if !got_one {
++                        rep.relays.push(relay.clone());
++                    }
++                    got_one = true;
++                    last_frame = Some(now);
++                    rep.frames += 1;
++                }
++                Ok(Some(Ok(_))) => {}
++                _ => break,
++            }
++        }
++        if rep.completed {
++            break;
++        }
++        if got_one {
++            rep.reconnects += 1;
++            first = false;
++        }
++    }
++    lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
++    if !lat.is_empty() {
++        rep.latency_p50_ms = lat[lat.len() / 2];
++        rep.latency_p99_ms = lat[(lat.len() * 99 / 100).min(lat.len() - 1)];
++    }
++    rep
++}
++
++
++async fn session(cfg: Cfg, id: String, secs: u64) -> Report {
++    let (stop_tx, stop_rx) = mpsc::channel(1);
++    let h = tokio::spawn(host(cfg.clone(), id.clone(), stop_rx));
++    // Let the host register before the first request.
++    sleep(Duration::from_millis(300)).await;
++    let rep = viewer(cfg, id, secs).await;
++    stop_tx.send(()).await.ok();
++    h.await.ok();
++    rep
++}
++
++#[tokio::main]
++async fn main() {
++    let mut a = std::collections::HashMap::new();
++    for kv in std::env::args().skip(1) {
++        if let Some((k, v)) = kv.split_once('=') {
++            a.insert(k.to_owned(), v.to_owned());
++        }
++    }
++    let get = |k: &str, d: &str| a.get(k).cloned().unwrap_or_else(|| d.to_owned());
++    let cfg = Cfg {
++        hbbs: get("hbbs", "ws://127.0.0.1:21118").split(',').map(|s| s.to_owned()).collect(),
++        key: get("key", ""),
++        frame_ms: get("frame_ms", "20").parse().unwrap_or(20),
++        frame_bytes: get("frame_bytes", "1024").parse().unwrap_or(1024),
++    };
++    let sessions: usize = get("sessions", "4").parse().unwrap_or(4);
++    let seconds: u64 = get("seconds", "60").parse().unwrap_or(60);
++    let per: u64 = get("session_seconds", "0").parse().unwrap_or(0);
++    let run = format!("{:06x}", rand_suffix());
++    t0();
++    let started = std::time::SystemTime::now();
++    let mut tasks = Vec::new();
++    for i in 0..sessions {
++        let cfg = cfg.clone();
++        let run = run.clone();
++        tasks.push(tokio::spawn(async move {
++            let end = Instant::now() + Duration::from_secs(seconds);
++            let mut out = Vec::new();
++            let mut n = 0;
++            loop {
++                let left = end.saturating_duration_since(Instant::now()).as_secs();
++                if left == 0 {
++                    break;
++                }
++                let secs = if per > 0 { per.min(left) } else { left };
++                out.push(session(cfg.clone(), format!("h{run}{i:02}{n:03}"), secs).await);
++                n += 1;
++                if per == 0 {
++                    break;
++                }
++            }
++            out
++        }));
++    }
++    let mut all = Vec::new();
++    for t in tasks {
++        all.extend(t.await.unwrap_or_default());
++    }
++    let reconnects: u32 = all.iter().map(|r| r.reconnects).sum();
++    let max_gap = all.iter().map(|r| r.max_gap_ms).max().unwrap_or(0);
++    let max_stall = all.iter().map(|r| r.max_stall_ms).max().unwrap_or(0);
++    let incomplete = all.iter().filter(|r| !r.completed || r.frames == 0).count();
++    let out = serde_json::json!({
++        "started_unix": started.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
++        "hbbs": cfg.hbbs, "sessions": all.len(), "seconds": seconds,
++        "frame_ms": cfg.frame_ms, "frame_bytes": cfg.frame_bytes,
++        "reconnects": reconnects, "max_gap_ms": max_gap, "max_stall_ms": max_stall,
++        "incomplete_sessions": incomplete,
++        "per_session": all,
++    });
++    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
++}
++
++fn rand_suffix() -> u32 {
++    use hbb_common::rand::Rng;
++    hbb_common::rand::thread_rng().gen::<u32>() & 0xffffff
++}
+diff --git a/src/common.rs b/src/common.rs
+index 9c76f41..cf0c6ea 100644
+--- a/src/common.rs
++++ b/src/common.rs
+@@ -215,4 +215,97 @@ async fn check_software_update_() -> hbb_common::ResultType<()> {
+        log::info!("new version is available: {}", latest_release_version);
+     }
+     Ok(())
+-}
+\ No newline at end of file
++}
++/// Set on SIGTERM: the process reports not-ready and finishes what it has (Tether HA).
++static DRAIN_STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
++
++pub fn is_draining() -> bool {
++    DRAIN_STARTED.get().is_some()
++}
++
++/// How long ago draining started, if it has.
++pub fn draining_for() -> Option<std::time::Duration> {
++    DRAIN_STARTED.get().map(|t| t.elapsed())
++}
++
++/// Waits for SIGTERM/SIGINT, then drains: report not-ready at once and keep serving until
++/// `idle()` or DRAIN_TIMEOUT seconds pass (default 0: stop at once). A second signal stops now.
++pub async fn listen_signal_and_drain(idle: fn() -> bool) -> Result<()> {
++    listen_signal().await?;
++    DRAIN_STARTED.get_or_init(Instant::now);
++    let secs: u64 = std::env::var("DRAIN_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
++    if secs == 0 {
++        return Ok(());
++    }
++    log::info!("draining: not ready, waiting up to {secs}s for open sessions to end");
++    tokio::select! {
++        _ = async { while !idle() { tokio::time::sleep(std::time::Duration::from_millis(200)).await } } => {
++            log::info!("drained");
++        }
++        _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {
++            log::info!("drain timeout, closing remaining sessions");
++        }
++        _ = listen_signal() => {
++            log::info!("second signal, stopping now");
++        }
++    }
++    Ok(())
++}
++
++/// Plain HTTP health endpoint on HEALTH_PORT (default `default_port`, 0 = off), for Kubernetes
++/// probes and for hbbs checking its relays: `/healthz` is 200 while the process runs, `/readyz`
++/// is 200 `ready sessions=N` or 503 `draining sessions=N`.
++pub async fn serve_health(default_port: u16, sessions: fn() -> usize) {
++    let port: u16 = std::env::var("HEALTH_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(default_port);
++    if port == 0 {
++        return;
++    }
++    let listener = match hbb_common::tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
++        Ok(l) => l,
++        Err(err) => {
++            log::error!("health endpoint on :{port} failed: {err}");
++            return;
++        }
++    };
++    log::info!("Health endpoint on http :{port} (/healthz, /readyz)");
++    while let Ok((mut stream, _)) = listener.accept().await {
++        tokio::spawn(async move {
++            use hbb_common::tokio::io::{AsyncReadExt, AsyncWriteExt};
++            let mut buf = [0u8; 1024];
++            let n = match hbb_common::timeout(2_000, stream.read(&mut buf)).await {
++                Ok(Ok(n)) => n,
++                _ => return,
++            };
++            let req = String::from_utf8_lossy(&buf[..n]);
++            let path = req.split_whitespace().nth(1).unwrap_or("");
++            let (code, body) = health_response(path, is_draining(), sessions());
++            let res = format!(
++                "HTTP/1.1 {code}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
++                body.len()
++            );
++            stream.write_all(res.as_bytes()).await.ok();
++        });
++    }
++}
++
++fn health_response(path: &str, draining: bool, sessions: usize) -> (&'static str, String) {
++    match path.split('?').next().unwrap_or("") {
++        "/healthz" => ("200 OK", "ok\n".to_owned()),
++        "/readyz" if draining => ("503 Service Unavailable", format!("draining sessions={sessions}\n")),
++        "/readyz" => ("200 OK", format!("ready sessions={sessions}\n")),
++        _ => ("404 Not Found", "not found\n".to_owned()),
++    }
++}
++
++#[cfg(test)]
++mod health_tests {
++    use super::health_response;
++
++    #[test]
++    fn readyz_reflects_drain_and_load() {
++        assert_eq!(health_response("/readyz", false, 3), ("200 OK", "ready sessions=3\n".to_owned()));
++        assert_eq!(health_response("/readyz", true, 1).0, "503 Service Unavailable");
++        assert_eq!(health_response("/healthz", true, 0).0, "200 OK");
++        assert_eq!(health_response("/x", false, 0).0, "404 Not Found");
++    }
++}
+diff --git a/src/relay_server.rs b/src/relay_server.rs
+index 0ec190a..8044718 100644
+--- a/src/relay_server.rs
++++ b/src/relay_server.rs
+@@ -42,6 +42,12 @@ static DOWNGRADE_START_CHECK: AtomicUsize = AtomicUsize::new(1_800_000); // in m
+ static LIMIT_SPEED: AtomicUsize = AtomicUsize::new(32 * 1024 * 1024); // in bit/s
+ static TOTAL_BANDWIDTH: AtomicUsize = AtomicUsize::new(1024 * 1024 * 1024); // in bit/s
+ static SINGLE_BANDWIDTH: AtomicUsize = AtomicUsize::new(128 * 1024 * 1024); // in bit/s
++// Paired sessions being relayed now (reported by /readyz, waited for when draining).
++static SESSIONS: AtomicUsize = AtomicUsize::new(0);
++// While draining, new pairings are still taken this long: hbbs checks its relays every 3 s and
++// may hand this relay out until it notices.
++const DRAIN_ACCEPT_MS: u128 = 5_000;
++const HEALTH_PORT: u16 = 21121;
+ const BLACKLIST_FILE: &str = "blacklist.txt";
+ const BLOCKLIST_FILE: &str = "blocklist.txt";
+ 
+@@ -88,7 +94,10 @@ pub async fn start(port: &str, key: &str) -> ResultType<()> {
+             io_loop(listen_any(port).await?, listen_any(port2).await?, &key).await;
+         }
+     };
+-    let listen_signal = crate::common::listen_signal();
++    tokio::spawn(crate::common::serve_health(HEALTH_PORT, || SESSIONS.load(Ordering::SeqCst)));
++    let listen_signal = crate::common::listen_signal_and_drain(|| {
++        SESSIONS.load(Ordering::SeqCst) == 0 && PEERS.try_lock().map_or(false, |p| p.is_empty())
++    });
+     tokio::select!(
+         res = main_task => res,
+         res = listen_signal => res,
+@@ -442,13 +451,18 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
+                             stream.set_raw();
+                             log::info!("Both are raw");
+                         }
++                        SESSIONS.fetch_add(1, Ordering::SeqCst);
+                         if let Err(err) = relay(addr, &mut stream, peer, limiter, id.clone()).await
+                         {
+                             log::info!("Relay of {} closed: {}", addr, err);
+                         } else {
+                             log::info!("Relay of {} closed", addr);
+                         }
++                        SESSIONS.fetch_sub(1, Ordering::SeqCst);
+                         USAGE.write().await.remove(&id);
++                    } else if refuse_new_pairs() {
++                        // Draining: the client asks hbbs again and gets another relay.
++                        log::info!("Draining, refused new relay request {} from {}", rf.uuid, addr);
+                     } else {
+                         log::info!("New relay request {} from {}", rf.uuid, addr);
+                         PEERS.lock().await.insert(rf.uuid.clone(), Box::new(stream));
+@@ -565,6 +579,11 @@ async fn relay(
+     Ok(())
+ }
+ 
++/// Draining relays complete pairs already waiting but start no new ones (after a short window).
++fn refuse_new_pairs() -> bool {
++    crate::common::draining_for().map_or(false, |d| d.as_millis() > DRAIN_ACCEPT_MS)
++}
++
+ fn get_server_sk(key: &str) -> String {
+     let mut key = key.to_owned();
+     if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..c13f40c 100644
+index dff45eb..01593b7 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
-@@ -69,6 +69,12 @@ struct PunchReqEntry { tm: Instant, from_ip: String, to_ip: String, to_id: Strin
+@@ -44,7 +44,7 @@ use std::{
+ enum Data {
+     Msg(Box<RendezvousMessage>, SocketAddr),
+     RelayServers0(String),
+-    RelayServers(RelayServers),
++    RelayServers(HealthyRelays),
+ }
+ 
+ const REG_TIMEOUT: i64 = 30_000;
+@@ -57,7 +57,11 @@ enum Sink {
+ type Sender = mpsc::UnboundedSender<Data>;
+ type Receiver = mpsc::UnboundedReceiver<Data>;
+ static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
++/// `-r` entries as given: `<address>[|<health URL>]`.
+ type RelayServers = Vec<String>;
++/// Relays that passed the last check: (address handed to clients, open sessions).
++type HealthyRelays = Vec<(String, usize)>;
++const HEALTH_PORT: u16 = 21122;
+ const CHECK_RELAY_TIMEOUT: u64 = 3_000;
+ static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
+ 
+@@ -69,6 +73,12 @@ struct PunchReqEntry { tm: Instant, from_ip: String, to_ip: String, to_id: Strin
  static PUNCH_REQS: Lazy<TokioMutex<Vec<PunchReqEntry>>> = Lazy::new(|| TokioMutex::new(Vec::new()));
  const PUNCH_REQ_DEDUPE_SEC: u64 = 60;
  
@@ -15,7 +599,28 @@ index dff45eb..c13f40c 100644
  #[derive(Clone)]
  struct Inner {
      serial: i32,
-@@ -251,7 +257,13 @@ impl RendezvousServer {
+@@ -84,7 +94,7 @@ pub struct RendezvousServer {
+     tcp_punch: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
+     pm: PeerMap,
+     tx: Sender,
+-    relay_servers: Arc<RelayServers>,
++    relay_servers: Arc<HealthyRelays>,
+     relay_servers0: Arc<RelayServers>,
+     rendezvous_servers: Arc<Vec<String>>,
+     inner: Arc<Inner>,
+@@ -221,7 +231,10 @@ impl RendezvousServer {
+                 }
+             }
+         };
+-        let listen_signal = listen_signal();
++        tokio::spawn(serve_health(HEALTH_PORT, || TCP_PEERS.try_lock().map_or(0, |p| p.len())));
++        // Nothing to wait for: hosts registered here are registered with the other servers too
++        // and reconnect; DRAIN_TIMEOUT only gives proxies time to stop sending new requests.
++        let listen_signal = listen_signal_and_drain(|| false);
+         tokio::select!(
+             res = main_task => res,
+             res = listen_signal => res,
+@@ -251,7 +264,13 @@ impl RendezvousServer {
                  }
                  Some(data) = rx.recv() => {
                      match data {
@@ -30,7 +635,7 @@ index dff45eb..c13f40c 100644
                          Data::RelayServers0(rs) => { self.parse_relay_servers(&rs); }
                          Data::RelayServers(rs) => { self.relay_servers = Arc::new(rs); }
                      }
-@@ -340,89 +352,9 @@ impl RendezvousServer {
+@@ -340,89 +359,9 @@ impl RendezvousServer {
                      }
                  }
                  Some(rendezvous_message::Union::RegisterPk(rk)) => {
@@ -85,9 +690,7 @@ index dff45eb..c13f40c 100644
 -                        req_pk.0 = 0;
 -                    } else if req_pk.0 > 2 {
 -                        return send_rk_res(socket, addr, TOO_FREQUENT).await;
-+                    if let Some(msg_out) = self.register_pk(rk, addr).await {
-+                        socket.send(&msg_out, addr).await?
-                     }
+-                    }
 -                    req_pk.0 += 1;
 -                    req_pk.1 = Instant::now();
 -                    peer.write().await.reg_pk = req_pk;
@@ -109,7 +712,9 @@ index dff45eb..c13f40c 100644
 -                                (Instant::now(), HashMap::from([(ip.clone(), 1)])),
 -                            );
 -                        }
--                    }
++                    if let Some(msg_out) = self.register_pk(rk, addr).await {
++                        socket.send(&msg_out, addr).await?
+                     }
 -                    if changed {
 -                        self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
 -                    }
@@ -122,7 +727,7 @@ index dff45eb..c13f40c 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // UDP PunchHoleRequest is intentionally unsupported.
-@@ -479,9 +411,29 @@ impl RendezvousServer {
+@@ -479,9 +418,29 @@ impl RendezvousServer {
          addr: SocketAddr,
          key: &str,
          ws: bool,
@@ -152,7 +757,7 @@ index dff45eb..c13f40c 100644
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // there maybe several attempt, so sink can be none
                      if let Some(sink) = sink.take() {
-@@ -545,14 +497,19 @@ impl RendezvousServer {
+@@ -545,14 +504,19 @@ impl RendezvousServer {
                      msg_out.set_test_nat_response(res);
                      Self::send_to_sink(sink, msg_out).await;
                  }
@@ -180,7 +785,7 @@ index dff45eb..c13f40c 100644
                  }
                  _ => {}
              }
-@@ -567,6 +524,12 @@ impl RendezvousServer {
+@@ -567,6 +531,12 @@ impl RendezvousServer {
          socket_addr: SocketAddr,
          socket: &mut FramedSocket,
      ) -> ResultType<()> {
@@ -193,7 +798,7 @@ index dff45eb..c13f40c 100644
          let (request_pk, ip_change) = if let Some(old) = self.pm.get_in_memory(&id).await {
              let mut old = old.write().await;
              let ip = socket_addr.ip();
-@@ -601,7 +564,107 @@ impl RendezvousServer {
+@@ -601,7 +571,107 @@ impl RendezvousServer {
              request_pk,
              ..Default::default()
          });
@@ -302,7 +907,53 @@ index dff45eb..c13f40c 100644
      }
  
      #[inline]
-@@ -1148,20 +1211,27 @@ impl RendezvousServer {
+@@ -911,19 +981,25 @@ impl RendezvousServer {
+     }
+ 
+     fn parse_relay_servers(&mut self, relay_servers: &str) {
+-        let rs = get_servers(relay_servers, "relay-servers");
++        let rs: RelayServers = relay_servers
++            .split(',')
++            .filter(|x| {
++                let addr = relay_addr(x);
++                // ws(s):// URLs (e.g. per-pod relays behind a proxy) are handed out as they are.
++                !addr.is_empty()
++                    && (addr.starts_with("ws://")
++                        || addr.starts_with("wss://")
++                        || test_if_valid_server(addr, "relay-servers").is_ok())
++            })
++            .map(|x| x.to_owned())
++            .collect();
++        log::info!("relay-servers={:?}", rs);
++        self.relay_servers = Arc::new(rs.iter().map(|x| (relay_addr(x).to_owned(), 0)).collect());
+         self.relay_servers0 = Arc::new(rs);
+-        self.relay_servers = self.relay_servers0.clone();
+     }
+ 
+     fn get_relay_server(&self, _pa: IpAddr, _pb: IpAddr) -> String {
+-        if self.relay_servers.is_empty() {
+-            return "".to_owned();
+-        } else if self.relay_servers.len() == 1 {
+-            return self.relay_servers[0].clone();
+-        }
+-        let i = ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst) % self.relay_servers.len();
+-        self.relay_servers[i].clone()
++        pick_relay(&self.relay_servers, ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst))
+     }
+ 
+     async fn check_cmd(&self, cmd: &str) -> String {
+@@ -948,8 +1024,8 @@ impl RendezvousServer {
+                 if let Some(rs) = fds.next() {
+                     self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
+                 } else {
+-                    for ip in self.relay_servers.iter() {
+-                        let _ = writeln!(res, "{ip}");
++                    for (ip, sessions) in self.relay_servers.iter() {
++                        let _ = writeln!(res, "{ip} sessions={sessions}");
+                     }
+                 }
+             }
+@@ -1148,20 +1224,27 @@ impl RendezvousServer {
          key: &str,
          ws: bool,
      ) -> ResultType<()> {
@@ -333,7 +984,7 @@ index dff45eb..c13f40c 100644
                      }
                  }
                  Ok(response)
-@@ -1169,22 +1239,71 @@ impl RendezvousServer {
+@@ -1169,22 +1252,71 @@ impl RendezvousServer {
              let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
              let (a, mut b) = ws_stream.split();
              sink = Some(Sink::Ws(a));
@@ -412,7 +1063,57 @@ index dff45eb..c13f40c 100644
          if sink.is_none() {
              self.tcp_punch.lock().await.remove(&try_into_v4(addr));
          }
-@@ -1330,17 +1449,13 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+@@ -1268,18 +1400,43 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
+     let mut futs = Vec::new();
+     let rs = Arc::new(Mutex::new(Vec::new()));
+     for x in rs0.iter() {
+-        let mut host = x.to_owned();
+-        if !host.contains(':') {
+-            host = format!("{}:{}", host, config::RELAY_PORT);
+-        }
++        let addr = relay_addr(x).to_owned();
++        let check_url = x.split_once('|').map(|(_, url)| url.trim().to_owned());
+         let rs = rs.clone();
+-        let x = x.clone();
+         futs.push(tokio::spawn(async move {
++            if let Some(url) = check_url {
++                // Health URL (hbbr /readyz): 200 = takes new sessions; the body carries its load.
++                let res = async {
++                    let r = reqwest::Client::builder()
++                        .timeout(std::time::Duration::from_millis(CHECK_RELAY_TIMEOUT - 500))
++                        .build()?
++                        .get(&url)
++                        .send()
++                        .await?;
++                    let ok = r.status().is_success();
++                    Ok::<_, reqwest::Error>((ok, r.text().await.unwrap_or_default()))
++                };
++                match res.await {
++                    Ok((true, body)) => rs.lock().await.push((addr, parse_sessions(&body))),
++                    Ok((false, body)) => log::debug!("relay {addr} not ready: {}", body.trim()),
++                    Err(err) => log::debug!("relay {addr} check failed: {err}"),
++                }
++                return;
++            }
++            if addr.starts_with("ws://") || addr.starts_with("wss://") {
++                // No health URL for a WebSocket relay: nothing to check.
++                rs.lock().await.push((addr, 0));
++                return;
++            }
++            let mut host = addr.clone();
++            if !host.contains(':') {
++                host = format!("{}:{}", host, config::RELAY_PORT);
++            }
+             if FramedStream::new(&host, None, CHECK_RELAY_TIMEOUT)
+                 .await
+                 .is_ok()
+             {
+-                rs.lock().await.push(x);
++                rs.lock().await.push((addr, 0));
+             }
+         }));
+     }
+@@ -1330,17 +1487,13 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
  }
  
  #[inline]
@@ -432,10 +1133,33 @@ index dff45eb..c13f40c 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1476,28 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1514,73 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
++
++/// The address part of a `-r` entry `<address>[|<health URL>]`.
++fn relay_addr(entry: &str) -> &str {
++    entry.split('|').next().unwrap_or("").trim()
++}
++
++/// Open sessions from a relay's `/readyz` body (`ready sessions=N`); 0 if it does not say.
++fn parse_sessions(body: &str) -> usize {
++    body.split_whitespace()
++        .find_map(|w| w.strip_prefix("sessions=")?.parse().ok())
++        .unwrap_or(0)
++}
++
++/// The least loaded healthy relay; `rotation` spreads new sessions over equally loaded ones.
++// shortcut: load is sampled every 3 s, so a burst inside one interval goes to the same relay;
++// count handed-out sessions locally if bursts matter.
++fn pick_relay(relays: &[(String, usize)], rotation: usize) -> String {
++    let Some(min) = relays.iter().map(|r| r.1).min() else {
++        return "".to_owned();
++    };
++    let best: Vec<&String> = relays.iter().filter(|r| r.1 == min).map(|r| &r.0).collect();
++    best[rotation % best.len()].clone()
++}
 +
 +/// Canonical text form of an IP: IPv4-mapped IPv6 (`::ffff:a.b.c.d`) becomes `a.b.c.d`.
 +fn norm_ip(ip: &str) -> String {
@@ -446,6 +1170,28 @@ index dff45eb..c13f40c 100644
 +        },
 +        Ok(v4) => v4.to_string(),
 +        Err(_) => ip.to_owned(),
++    }
++}
++
++#[cfg(test)]
++mod relay_choice_tests {
++    use super::*;
++
++    #[test]
++    fn entries_and_load() {
++        assert_eq!(relay_addr("a.example|https://a.example/readyz/relay"), "a.example");
++        assert_eq!(relay_addr("wss://k8s.example/ws/relay/1"), "wss://k8s.example/ws/relay/1");
++        assert_eq!(parse_sessions("ready sessions=7\n"), 7);
++        assert_eq!(parse_sessions("Tether relay"), 0);
++    }
++
++    #[test]
++    fn least_loaded_then_rotation() {
++        let rs = vec![("a".to_owned(), 2), ("b".to_owned(), 0), ("c".to_owned(), 0)];
++        assert_eq!(pick_relay(&rs, 0), "b");
++        assert_eq!(pick_relay(&rs, 1), "c");
++        assert_eq!(pick_relay(&rs, 2), "b");
++        assert_eq!(pick_relay(&[], 0), "");
 +    }
 +}
 +

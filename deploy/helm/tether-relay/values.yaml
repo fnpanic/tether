@@ -1,0 +1,90 @@
+# Tether relay on Kubernetes. See docs/kubernetes.md for install, rollout procedure and numbers.
+
+image:
+  # Built from server/Dockerfile.static (static musl hbbs, hbbr, tether-api, relay-harness).
+  repository: tether-relay
+  tag: ""            # default: chart appVersion
+  pullPolicy: IfNotPresent
+
+# Base URL clients use for this cluster's front end, without path. hbbs hands out
+# <publicUrl>/ws/relay/<n> so both peers of a session reach the same hbbr pod.
+# Production: wss://relay.example.com (TLS at the proxy or at your load balancer/ingress).
+publicUrl: wss://relay.example.com
+
+# Server key pair; must be the same on every relay (clients pin TETHER_PUB_KEY).
+key:
+  # Name of an existing Secret with key `id_ed25519` (contents of /var/lib/tether/id_ed25519).
+  existingSecret: ""
+  # Or the private key itself (base64, 64 bytes); the chart then creates the Secret.
+  privateKey: ""
+
+hbbs:
+  # Each pod is an independent rendezvous server at <publicUrl>/ws/id/<n> (/ws/id = pod 0).
+  # Hosts register with every one of them (client list), so a restarting pod loses nothing.
+  replicas: 2
+  # Seconds a terminating pod stays (not ready) before it exits; its hosts then reconnect.
+  drainSeconds: 2
+  # Relays outside this cluster, as `<address>[|<health URL>]`, e.g.
+  # "tether-desk.duckdns.org|https://tether-desk.duckdns.org/readyz/relay".
+  extraRelays: []
+  extraArgs: []
+  env: {}
+  persistence:
+    # Peer DB (ID -> key binding). Without it a restarted pod re-learns hosts on their next
+    # registration, which lets the first registrant of an ID claim it on that pod.
+    enabled: true
+    size: 256Mi
+    storageClass: ""
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits: { cpu: "1", memory: 256Mi }
+
+hbbr:
+  # Each pod is addressed as <publicUrl>/ws/relay/<n>; at least 2 so one can drain.
+  replicas: 2
+  # On SIGTERM a pod reports not-ready (hbbs stops handing it out within 3 s), keeps relaying
+  # open sessions until they end or this many seconds pass, then exits. Sessions still open then
+  # reconnect through another pod (client reconnect, measured <= 2 s).
+  drainSeconds: 3600
+  # Bandwidth limits passed to hbbr (Mb/s); empty = hbbr defaults.
+  env: {}
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits: { cpu: "1", memory: 256Mi }
+
+proxy:
+  # Caddy: routes /ws/id/<n>, /ws/relay/<n> to the pods, /api and /download to tether-api.
+  # Disable to bring your own ingress (see examples/ingress-nginx.yaml).
+  enabled: true
+  image: caddy:2.10.2
+  replicas: 2
+  service:
+    type: ClusterIP   # LoadBalancer in the cloud, NodePort for kind
+    port: 80          # plain HTTP/WebSocket (TLS terminated in front)
+    nodePort: null
+    tlsPort: 443      # served when tls.secretName is set
+    tlsNodePort: null
+    annotations: {}
+  # Secret of type kubernetes.io/tls (e.g. from cert-manager); serves TLS on tlsPort.
+  tls:
+    secretName: ""
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits: { cpu: "1", memory: 256Mi }
+
+api:
+  # tether-api (policy, heartbeats, releases, diagnostics) with a PVC; one replica (flat files).
+  enabled: false
+  adminPubKey: ""     # Tether Manage admin public key(s), comma-separated
+  persistence:
+    size: 5Gi         # tether-api refuses uploads leaving < 2 GiB free
+    storageClass: ""
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { cpu: 500m, memory: 64Mi }
+
+podDisruptionBudget:
+  maxUnavailable: 1
+
+nodeSelector: {}
+tolerations: []

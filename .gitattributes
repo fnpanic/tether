@@ -1,1 +1,4 @@
+# Files copied to Linux relays and Macs as they are: keep LF on Windows checkouts too.
 *.sh text eol=lf
+server/systemd/* text eol=lf
+server/caddy/Caddyfile text eol=lf

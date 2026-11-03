@@ -1,0 +1,8 @@
+# Tether relay image from the prebuilt static musl binaries of scripts/build-relay.sh:
+# hbbs, hbbr, tether-api and relay-harness (the HA test client, a few MB).
+#   docker build -f server/Dockerfile.static -t tether-relay:<tag> <dir holding the binaries>
+# distroless/static: CA certificates (hbbs checks https:// relay health URLs), no shell, nonroot.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY hbbs hbbr tether-api relay-harness /usr/local/bin/
+WORKDIR /data
+USER nonroot

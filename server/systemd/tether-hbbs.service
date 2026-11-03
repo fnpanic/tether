@@ -9,7 +9,8 @@ User=tether
 Group=tether
 WorkingDirectory=/var/lib/tether
 EnvironmentFile=-/etc/tether/server.env
-ExecStart=/usr/local/bin/hbbs -r ${RELAY_HOST} -k _
+# RELAY_SERVERS (server.env): every relay hbbs may hand out, `<host>|<health URL>` (docs/relay-ha.md).
+ExecStart=/usr/local/bin/hbbs -r ${RELAY_SERVERS} -k _
 Restart=always
 RestartSec=3
 LimitNOFILE=1000000

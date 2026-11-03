@@ -8,6 +8,10 @@ Type=simple
 User=tether
 Group=tether
 WorkingDirectory=/var/lib/tether
+# On stop: not ready at once (other relays' hbbs stop handing this one out within 3 s), open
+# sessions keep running for up to DRAIN_TIMEOUT s, then the rest reconnect via another relay.
+Environment=DRAIN_TIMEOUT=300
+TimeoutStopSec=330
 ExecStart=/usr/local/bin/hbbr -k _
 Restart=always
 RestartSec=3

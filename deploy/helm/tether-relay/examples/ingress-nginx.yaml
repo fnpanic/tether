@@ -1,0 +1,32 @@
+# Bring-your-own ingress instead of the chart's Caddy proxy (proxy.enabled=false), for
+# ingress-nginx. Release name `tether-relay`, 2 hbbs and 3 hbbr pods: one path per pod, pointing
+# at the chart's per-pod Services (<release>-hbbs-<n>, <release>-hbbr-<n>). Add a path per pod
+# when you scale up. The proxy-*-timeout annotations keep WebSocket sessions open for hours
+# (ingress-nginx defaults to 60 s of silence). Keep the controller's worker-shutdown-timeout long
+# (e.g. 3600s) so controller reloads do not cut sessions.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tether-relay
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [relay.example.com]
+      secretName: relay-example-com-tls
+  rules:
+    - host: relay.example.com
+      http:
+        paths:
+          - { path: /ws/id, pathType: Exact, backend: { service: { name: tether-relay-hbbs-0, port: { number: 21118 } } } }
+          - { path: /ws/id/0, pathType: Exact, backend: { service: { name: tether-relay-hbbs-0, port: { number: 21118 } } } }
+          - { path: /ws/id/1, pathType: Exact, backend: { service: { name: tether-relay-hbbs-1, port: { number: 21118 } } } }
+          - { path: /ws/relay/0, pathType: Exact, backend: { service: { name: tether-relay-hbbr-0, port: { number: 21119 } } } }
+          - { path: /ws/relay/1, pathType: Exact, backend: { service: { name: tether-relay-hbbr-1, port: { number: 21119 } } } }
+          - { path: /ws/relay/2, pathType: Exact, backend: { service: { name: tether-relay-hbbr-2, port: { number: 21119 } } } }
+          # With api.enabled=true:
+          - { path: /api, pathType: Prefix, backend: { service: { name: tether-relay-api, port: { number: 21120 } } } }
+          - { path: /download, pathType: Prefix, backend: { service: { name: tether-relay-api, port: { number: 8081 } } } }
