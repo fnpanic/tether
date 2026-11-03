@@ -1,0 +1,16 @@
+[Unit]
+Description=Update the relay's DuckDNS name to this host's public IP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# /etc/tether/duckdns.env (mode 0600): DUCKDNS_DOMAIN=<name without .duckdns.org>, DUCKDNS_TOKEN=<token>
+EnvironmentFile=/etc/tether/duckdns.env
+# Empty ip= makes DuckDNS use the request's source address, i.e. this host's public IP.
+ExecStart=/bin/sh -c 'r=$(curl -fsS --max-time 20 "https://www.duckdns.org/update?domains=$DUCKDNS_DOMAIN&token=$DUCKDNS_TOKEN&ip="); echo "duckdns: $r"; [ "$r" = OK ]'
+TimeoutStartSec=60
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

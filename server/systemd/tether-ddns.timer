@@ -1,0 +1,10 @@
+[Unit]
+Description=Keep the relay's DuckDNS name pointed at this host
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
