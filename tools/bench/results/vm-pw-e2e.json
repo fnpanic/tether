@@ -1,0 +1,16 @@
+{
+  "when": "2026-11-04T13:21:38.712Z",
+  "results": [
+    {
+      "name": "password login: session starts without Accept, TetherQS shows it",
+      "ok": true,
+      "ms": 49,
+      "askedAccept": false,
+      "active": true
+    },
+    {
+      "name": "after the session the one-time password is new",
+      "ok": true
+    }
+  ]
+}
