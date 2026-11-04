@@ -321,7 +321,7 @@ async function main() {
     await s.getByRole("button", { name: "Minimize" }).click();
     await until("minimized", () => ipc(s, "plugin:window|is_minimized", { label }), 5000, 100);
     await noToast(s);
-    await ipc(s, "plugin:window|set_focus", { label }); // restores it for the steps below
+    await ipc(s, "plugin:window|unminimize", { label }); // restore it for the steps below
     await until("restored", async () => !(await ipc(s, "plugin:window|is_minimized", { label })), 5000, 100);
   });
 
