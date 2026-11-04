@@ -2,3 +2,6 @@
 *.sh text eol=lf
 server/systemd/* text eol=lf
 server/caddy/Caddyfile text eol=lf
+
+# Patches are applied to LF checkouts of upstream (scripts/bootstrap.sh): keep them LF everywhere.
+patches/*.patch text eol=lf

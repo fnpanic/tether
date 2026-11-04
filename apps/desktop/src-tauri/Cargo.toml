@@ -18,7 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 rdev = { git = "https://github.com/rustdesk-org/rdev" }
-librustdesk = { package = "rustdesk", path = "../../../vendor/rustdesk", default-features = false, features = ["tauri", "hwcodec", "vram", "use_dasp"] }
+librustdesk = { package = "rustdesk", path = "../../../vendor/rustdesk", default-features = false, features = ["tauri", "hwcodec", "use_dasp"] }
 hbb_common = { path = "../../../vendor/rustdesk/libs/hbb_common" }
 base = { path = "../../../vendor/rustdesk/libs/base" }
 tether-trust = { path = "../../../crates/tether-trust" }
@@ -31,6 +31,8 @@ url = "2"
 tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
+# VRAM (D3D11) zero-copy encoding exists on Windows only (hwcodec's ffmpeg_vram is D3D11 code).
+librustdesk = { package = "rustdesk", path = "../../../vendor/rustdesk", default-features = false, features = ["vram"] }
 windows-sys = { version = "0.59", features = ["Win32_UI_HiDpi", "Win32_Foundation", "Win32_Networking_WinHttp", "Win32_System_Registry", "Win32_System_Console", "Win32_System_DataExchange", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
