@@ -24,6 +24,7 @@ States per layer: `on` (user may change, `value` is the default), `off` (locked 
 | `connect.reconnect-minutes` | connections | Keep reconnecting after a connection loss (minutes) | `10` | technician, customer | – |
 | `settings.server` | connections | Allow changing the relay server | `N` | technician | – |
 | `servers.list` | connections | Additional relay servers (host names or wss:// URLs, comma-separated) | – | technician, customer | – |
+| `network.direct` | connections | Direct connections (same network) beside the relay (auto, off) | `auto` | technician, customer | – |
 | `video.quality` | video | Default image quality (best, balanced, low) | `balanced` | technician | `image-quality` |
 | `video.codec` | video | Preferred codec (auto, h264, h265, av1, vp9, vp8) | `auto` | technician | `codec-preference` |
 | `recording.mode` | recording | Session recording (off, on-request, always) | `on-request` | technician | – |
@@ -50,3 +51,9 @@ States per layer: `on` (user may change, `value` is the default), `off` (locked 
 | `customer.welcome` | customer | Welcome text | `Give this ID and password to your support technician.` | customer | – |
 | `customer.close-after-session` | customer | Quit when the session ends | `N` | customer | – |
 | `customer.elevate` | customer | Offer "Elevate" (admin access for UAC prompts) | `Y` | customer | – |
+
+## Direct connections (`network.direct`)
+
+`auto` (default): when a session starts, the viewer also asks the local network for the host (one UDP broadcast lookup on port 21119, answered only by a host with direct connections on, and only with its listener port) and races a direct TCP connection to it (port 21118) against the relay. The first path that completes the end-to-end key exchange wins; the host must prove the key the rendezvous server signed for its ID, and applies the same password / Accept / permissions as on the relay. When no host answers within 300 ms, or on corporate networks where the lookup cannot leave the PC, the session uses the relay exactly as before (no added delay). The session window shows the path: `Direct (LAN)` or `Relay`.
+
+A host listens only where that raises no firewall prompt: on Windows the installed Tether gets an inbound rule `Tether` (local subnet only) from its installer; TetherQS listens only when an admin created an inbound rule named `Tether QS` for it; on macOS only while the application firewall is off. `off`: never look up, never listen, always relay.

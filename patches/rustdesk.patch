@@ -153,7 +153,7 @@ index 137d648..c6fa75e 100644
                  return s;
              }
 diff --git a/src/client.rs b/src/client.rs
-index 597dc86..76caf85 100644
+index 597dc86..b8f0a8b 100644
 --- a/src/client.rs
 +++ b/src/client.rs
 @@ -114,6 +114,8 @@ const MAX_DECODE_FAIL_COUNTER: usize = 3;
@@ -165,7 +165,7 @@ index 597dc86..76caf85 100644
  pub const LOGIN_MSG_2FA_WRONG: &str = "Wrong 2FA Code";
  pub const REQUIRE_2FA: &'static str = "2FA Required";
  pub const LOGIN_MSG_NO_PASSWORD_ACCESS: &str = "No Password Access";
-@@ -212,6 +214,78 @@ impl Drop for OffererGuard {
+@@ -212,6 +214,162 @@ impl Drop for OffererGuard {
      }
  }
  
@@ -182,6 +182,90 @@ index 597dc86..76caf85 100644
 +/// How long to wait on a relay for the host's first message (see `secure_connection`).
 +#[cfg(feature = "tauri")]
 +const RELAY_PAIR_TIMEOUT: u64 = 5_000;
++
++/// Tether direct paths: how long the LAN lookup listens for the host's answer. It starts with the
++/// connection and runs beside the rendezvous request, so on a LAN it is done long before the
++/// relay; a network where nobody answers only ever waits beside the relay, never in front of it.
++#[cfg(feature = "tauri")]
++const LAN_FIND_WAIT: Duration = Duration::from_millis(300);
++/// A ready relay is held this long while a direct attempt is still in flight.
++#[cfg(feature = "tauri")]
++const DIRECT_HOLD_MS: u64 = 300;
++#[cfg(feature = "tauri")]
++const LAN_CONNECT_TIMEOUT: u64 = 1_500;
++
++#[cfg(feature = "tauri")]
++type LanFind = hbb_common::futures::future::Shared<BoxFuture<'static, Option<SocketAddr>>>;
++
++/// One LAN lookup per peer and connection attempt, shared by the rendezvous servers raced for it.
++#[cfg(feature = "tauri")]
++static LAN_FINDS: Mutex<Vec<(String, std::time::Instant, LanFind)>> = Mutex::new(Vec::new());
++
++/// Tether: direct connections are allowed (policy `network.direct`, applied by the app as
++/// `tether-direct`). A SOCKS proxy is no reason to skip: it never carries LAN traffic.
++#[cfg(feature = "tauri")]
++pub fn direct_enabled() -> bool {
++    Config::get_option("tether-direct") == "Y"
++}
++
++/// The LAN lookup for `peer`, started on first use (see `crate::lan::find_peer`).
++#[cfg(feature = "tauri")]
++fn lan_find(peer: &str) -> Option<LanFind> {
++    if !direct_enabled() {
++        return None;
++    }
++    let mut finds = LAN_FINDS.lock().unwrap();
++    finds.retain(|(_, t, _)| t.elapsed() < Duration::from_secs(5));
++    if let Some((_, _, f)) = finds.iter().find(|(p, _, _)| p == peer) {
++        return Some(f.clone());
++    }
++    let id = peer.to_owned();
++    let f = async move {
++        tokio::task::spawn_blocking(move || crate::lan::find_peer(&id, LAN_FIND_WAIT))
++            .await
++            .ok()
++            .flatten()
++    }
++    .boxed()
++    .shared();
++    // Polled from now on, not only once the relay answer arrives.
++    tokio::spawn(f.clone());
++    finds.push((peer.to_owned(), std::time::Instant::now(), f.clone()));
++    Some(f)
++}
++
++/// Direct TCP to the host found on the LAN, secured like every other path: the host must prove
++/// the key the rendezvous server signed for `peer`, or this attempt fails and the relay wins.
++/// The verified key goes to `slot` (the race result has no place for it).
++#[cfg(feature = "tauri")]
++fn lan_attempt(
++    find: LanFind,
++    peer: String,
++    key: String,
++    signed_id_pk: Vec<u8>,
++    slot: Arc<Mutex<Option<Option<Vec<u8>>>>>,
++) -> BoxFuture<'static, ResultType<(Stream, Option<KcpStream>, &'static str, bool)>> {
++    async move {
++        let Some(addr) = find.await else {
++            bail!("peer not found on the LAN");
++        };
++        if signed_id_pk.is_empty() {
++            bail!("no signed peer key: direct path refused");
++        }
++        let t = std::time::Instant::now();
++        // Never through the proxy: it cannot reach a LAN address.
++        let stream = hbb_common::tcp::FramedStream::new(addr, None, LAN_CONNECT_TIMEOUT).await?;
++        let mut conn = Stream::Tcp(stream);
++        let pk = Client::secure_connection(&peer, signed_id_pk, &key, &mut conn).await?;
++        if !conn.is_secured() {
++            bail!("direct path to {addr} not end-to-end encrypted: refused");
++        }
++        log::info!("LAN direct to {addr} secured in {:?}", t.elapsed());
++        *slot.lock().unwrap() = Some(pk);
++        Ok((conn, None, "LAN", true))
++    }
++    .boxed()
++}
 +
 +/// `servers` with the last one that worked first.
 +#[cfg(feature = "tauri")]
@@ -244,13 +328,16 @@ index 597dc86..76caf85 100644
  /// Race WebRTC against the other transports, preferring P2P: `select_ok` would always pick the
  /// relay, whose TCP connect beats ICE + DTLS + SCTP by an order of magnitude. An `is_p2p` result
  /// wins outright; a relayed one — from either side, since `webrtc_fut` is a whole punch attempt
-@@ -487,6 +561,46 @@ impl Client {
+@@ -487,6 +645,49 @@ impl Client {
              }
          };
  
 +        // Tether: with several rendezvous servers, ask each (the last good one first) and take the
 +        // first that reaches the peer. Relay-only, so there is no punch state to share; the relay
 +        // comes from that server's answer.
++        // Tether: look for the host on the LAN while the rendezvous request runs.
++        #[cfg(feature = "tauri")]
++        lan_find(peer);
 +        #[cfg(feature = "tauri")]
 +        if other_server.is_empty() && !servers.is_empty() && interface.is_force_relay() {
 +            let mut all = servers;
@@ -291,7 +378,78 @@ index 597dc86..76caf85 100644
          // Same relay gate as the v6 socket below: under any forced relay the v6 punch cannot
          // be used, so probing v6 reachability is wasted work on every such connection.
          if crate::get_ipv6_punch_enabled() && !interface.is_force_relay() {
-@@ -1697,7 +1811,14 @@ impl Client {
+@@ -1072,6 +1273,7 @@ impl Client {
+                             }
+                         }
+                         signed_id_pk = rr.pk().into();
++                        let lan_pk: Arc<Mutex<Option<Option<Vec<u8>>>>> = Default::default();
+                         let mut webrtc_bridge_stop = None;
+                         let mut webrtc_for_connect = None;
+                         if !rr.webrtc_sdp_answer.is_empty() {
+@@ -1184,8 +1386,38 @@ impl Client {
+                                 .await
+                             }
+                         } else {
+-                            // Run all connection attempts concurrently, take the first success.
+-                            select_ok(connect_futures).await.map(|r| r.0)
++                            // Tether: a host found on the LAN races the relay; a ready relay is
++                            // held briefly while that direct attempt is still in flight.
++                            #[cfg(feature = "tauri")]
++                            let lan = lan_find(&peer).map(|find| {
++                                lan_attempt(
++                                    find,
++                                    peer.clone(),
++                                    key.clone(),
++                                    signed_id_pk.clone(),
++                                    lan_pk.clone(),
++                                )
++                            });
++                            #[cfg(not(feature = "tauri"))]
++                            let lan: Option<
++                                BoxFuture<
++                                    '_,
++                                    ResultType<(Stream, Option<KcpStream>, &'static str, bool)>,
++                                >,
++                            > = None;
++                            match lan {
++                                Some(direct) => {
++                                    race_transports_prefer_webrtc(
++                                        direct,
++                                        connect_futures,
++                                        DIRECT_HOLD_MS,
++                                        |r| r.3,
++                                    )
++                                    .await
++                                }
++                                // Run all connection attempts concurrently, take the first success.
++                                None => select_ok(connect_futures).await.map(|r| r.0),
++                            }
+                         };
+                         if let Some(stop) = webrtc_bridge_stop {
+                             let _ = stop.send(());
+@@ -1195,7 +1427,12 @@ impl Client {
+                         let (mut conn, kcp, mut typ, mut direct) = race_result?;
+                         feedback = rr.feedback;
+                         log::info!("{:?} used to establish {typ} connection", start.elapsed());
+-                        let pk = match Self::secure_connection(
++                        // The LAN attempt secured itself before it could win.
++                        let secured = if typ == "LAN" { lan_pk.lock().unwrap().take() } else { None };
++                        let pk = if let Some(pk) = secured {
++                            pk
++                        } else {
++                            match Self::secure_connection(
+                             &peer,
+                             signed_id_pk.clone(),
+                             &key,
+@@ -1249,6 +1486,7 @@ impl Client {
+                                 pk
+                             }
+                             Err(e) => return Err(e),
++                            }
+                         };
+                         // `direct` came from the winning future, which resolved it while the pc was
+                         // definitely alive — the race needed it to pick a winner at all.
+@@ -1697,7 +1935,14 @@ impl Client {
                  return Ok(option_pk);
              }
          };
@@ -307,7 +465,7 @@ index 597dc86..76caf85 100644
              Some(res) => {
                  let bytes = res?;
                  if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
-@@ -2851,6 +2972,8 @@ pub struct LoginConfigHandler {
+@@ -2851,6 +3096,8 @@ pub struct LoginConfigHandler {
      pub version: i64,
      features: Option<Features>,
      pub session_id: u64, // used for local <-> server communication
@@ -316,7 +474,7 @@ index 597dc86..76caf85 100644
      pub supported_encoding: SupportedEncoding,
      restarting_remote_device: bool,
      // Start time of the restart grace window. On Windows the peer may briefly
-@@ -2972,6 +3095,7 @@ impl LoginConfigHandler {
+@@ -2972,6 +3219,7 @@ impl LoginConfigHandler {
              }
          }
          self.session_id = sid;
@@ -324,7 +482,7 @@ index 597dc86..76caf85 100644
          self.supported_encoding = Default::default();
          self.clear_restarting_remote_device();
          // Three scopes: what was decided about this PEER, what this CLIENT is set up as (proxy),
-@@ -3002,6 +3126,12 @@ impl LoginConfigHandler {
+@@ -3002,6 +3250,12 @@ impl LoginConfigHandler {
          self.shared_password = shared_password;
          self.record_state = false;
          self.record_permission = true;
@@ -337,7 +495,7 @@ index 597dc86..76caf85 100644
  
          // `std::env::remove_var("IS_TERMINAL_ADMIN");` is called in `session_add_sync()` - `flutter_ffi.rs`.
          let is_terminal_admin = conn_type == ConnType::TERMINAL
-@@ -3854,6 +3984,7 @@ impl LoginConfigHandler {
+@@ -3854,6 +4108,7 @@ impl LoginConfigHandler {
              my_platform,
              option: self.get_option_message(true).into(),
              session_id: self.session_id,
@@ -345,7 +503,7 @@ index 597dc86..76caf85 100644
              version: crate::VERSION.to_string(),
              os_login,
              hwid,
-@@ -3951,6 +4082,17 @@ impl LoginConfigHandler {
+@@ -3951,6 +4206,17 @@ impl LoginConfigHandler {
          &self.id
      }
  
@@ -363,7 +521,7 @@ index 597dc86..76caf85 100644
      pub fn get_key_terminal_service_id(&self) -> &'static str {
          if self.is_terminal_admin {
              "terminal-admin-service-id"
-@@ -4510,8 +4652,22 @@ pub fn handle_login_error(
+@@ -4510,8 +4776,22 @@ pub fn handle_login_error(
          interface.msgbox("input-password", "Password Required", "", "");
          true
      } else if err == LOGIN_MSG_PASSWORD_WRONG {
@@ -388,7 +546,7 @@ index 597dc86..76caf85 100644
          true
      } else if err == LOGIN_MSG_2FA_WRONG || err == REQUIRE_2FA {
          let enabled = lc.read().unwrap().get_option("trust-this-device") == "Y";
-@@ -5043,6 +5199,19 @@ pub async fn confirm_insecure_connection(
+@@ -5043,6 +5323,19 @@ pub async fn confirm_insecure_connection(
      interface: &impl Interface,
      receiver: &mut UnboundedReceiver<Data>,
  ) -> bool {
@@ -408,7 +566,7 @@ index 597dc86..76caf85 100644
      interface.msgbox(
          "insecure-connection-nocancel-hasclose",
          "Insecure Connection",
-@@ -5562,6 +5731,69 @@ async fn udp_nat_connect(
+@@ -5562,6 +5855,69 @@ async fn udp_nat_connect(
      Ok((res.1, Some(res.0), typ))
  }
  
@@ -626,6 +784,113 @@ index aac220b..2b67671 100644
      let url = crate::common::get_api_server(
          Config::get_option("api-server"),
          Config::get_option("custom-rendezvous-server"),
+diff --git a/src/lan.rs b/src/lan.rs
+index 2a648aa..4619d27 100644
+--- a/src/lan.rs
++++ b/src/lan.rs
+@@ -25,6 +25,12 @@ type Message = RendezvousMessage;
+ 
+ #[cfg(not(target_os = "ios"))]
+ pub(super) fn start_listening() -> ResultType<()> {
++    // Tether: bind only once this host accepts direct connections (the app checked that it may
++    // listen, e.g. a Windows firewall rule exists, so binding raises no firewall prompt).
++    #[cfg(feature = "tauri")]
++    while !direct_host_enabled() {
++        std::thread::sleep(std::time::Duration::from_secs(2));
++    }
+     let addr = SocketAddr::from(([0, 0, 0, 0], get_broadcast_port()));
+     let socket = std::net::UdpSocket::bind(addr)?;
+     socket.set_read_timeout(Some(std::time::Duration::from_millis(1000)))?;
+@@ -35,6 +41,21 @@ pub(super) fn start_listening() -> ResultType<()> {
+             if let Ok(msg_in) = Message::parse_from_bytes(&buf[0..len]) {
+                 match msg_in.union {
+                     Some(rendezvous_message::Union::PeerDiscovery(p)) => {
++                        // Tether: answer a lookup for our own id with the direct port only (no
++                        // host or user names), and only while direct connections are on.
++                        if p.cmd == TETHER_FIND {
++                            if direct_host_enabled() && p.id == Config::get_id() {
++                                let mut msg_out = Message::new();
++                                msg_out.set_peer_discovery(PeerDiscovery {
++                                    cmd: TETHER_HERE.to_owned(),
++                                    id: p.id,
++                                    misc: crate::rendezvous_mediator::get_direct_port().to_string(),
++                                    ..Default::default()
++                                });
++                                socket.send_to(&msg_out.write_to_bytes()?, addr).ok();
++                            }
++                            continue;
++                        }
+                         if p.cmd == "ping"
+                             && config::option2bool(
+                                 "enable-lan-discovery",
+@@ -104,6 +125,67 @@ pub fn send_wol(id: String) {
+     }
+ }
+ 
++/// Tether direct-path lookup: "who has id X" and the host's answer (its direct listener port).
++const TETHER_FIND: &str = "tether-find";
++const TETHER_HERE: &str = "tether-here";
++
++/// The host accepts direct connections (the app sets `direct-server` from policy `network.direct`).
++fn direct_host_enabled() -> bool {
++    Config::get_option(config::keys::OPTION_DIRECT_SERVER) == "Y"
++}
++
++/// Tether: find `id` on the LAN. Broadcasts a lookup on every IPv4 interface and returns the
++/// first answer's address with the port it names, or None after `wait`. The answer is not
++/// trusted: the caller connects there and the key exchange proves (or disproves) the host.
++#[cfg(not(target_os = "ios"))]
++pub fn find_peer(id: &str, wait: std::time::Duration) -> Option<SocketAddr> {
++    let sockets = create_broadcast_sockets();
++    let mut msg = Message::new();
++    msg.set_peer_discovery(PeerDiscovery {
++        cmd: TETHER_FIND.to_owned(),
++        id: id.to_owned(),
++        ..Default::default()
++    });
++    let out = msg.write_to_bytes().ok()?;
++    let to = SocketAddr::from(([255, 255, 255, 255], get_broadcast_port()));
++    let send = || {
++        for s in &sockets {
++            s.send_to(&out, to).ok();
++        }
++    };
++    for s in &sockets {
++        s.set_nonblocking(true).ok();
++    }
++    send();
++    let start = Instant::now();
++    let mut resent = false;
++    while start.elapsed() < wait {
++        for s in &sockets {
++            let mut buf = [0u8; 512];
++            while let Ok((len, from)) = s.recv_from(&mut buf) {
++                let Ok(m) = Message::parse_from_bytes(&buf[..len]) else { continue };
++                if let Some(rendezvous_message::Union::PeerDiscovery(p)) = m.union {
++                    if p.cmd == TETHER_HERE && p.id == id {
++                        if let Ok(port) = p.misc.parse::<u16>() {
++                            if port > 0 {
++                                log::info!("LAN lookup: {id} at {} in {:?}", from.ip(), start.elapsed());
++                                return Some(SocketAddr::new(from.ip(), port));
++                            }
++                        }
++                    }
++                }
++            }
++        }
++        // One resend covers a lost broadcast; UDP on a LAN rarely loses two.
++        if !resent && start.elapsed() > std::time::Duration::from_millis(100) {
++            send();
++            resent = true;
++        }
++        std::thread::sleep(std::time::Duration::from_millis(5));
++    }
++    None
++}
++
+ #[inline]
+ fn get_broadcast_port() -> u16 {
+     (RENDEZVOUS_PORT + 3) as _
 diff --git a/src/lib.rs b/src/lib.rs
 index f6e48a1..600a09e 100644
 --- a/src/lib.rs
@@ -646,7 +911,7 @@ index f6e48a1..600a09e 100644
  pub(crate) mod update_hash;
  #[cfg(target_os = "macos")]
 diff --git a/src/rendezvous_mediator.rs b/src/rendezvous_mediator.rs
-index b1e523d..1223bfa 100644
+index b1e523d..7bbff3f 100644
 --- a/src/rendezvous_mediator.rs
 +++ b/src/rendezvous_mediator.rs
 @@ -264,6 +264,18 @@ async fn wait_for_retry(delay: f32, restarted: tokio::sync::futures::Notified<'_
@@ -668,7 +933,17 @@ index b1e523d..1223bfa 100644
  #[derive(Clone)]
  pub struct RendezvousMediator {
      addr: TargetAddr<'static>,
-@@ -326,6 +338,15 @@ impl RendezvousMediator {
+@@ -304,7 +316,8 @@ impl RendezvousMediator {
+         #[cfg(target_os = "android")]
+         let start_lan_listening = true;
+         #[cfg(not(any(target_os = "android", target_os = "ios")))]
+-        let start_lan_listening = crate::platform::is_installed();
++        // Tether: always; the listener binds once direct connections are on (lan.rs).
++        let start_lan_listening = crate::platform::is_installed() || cfg!(feature = "tauri");
+         if start_lan_listening {
+             std::thread::spawn(move || {
+                 allow_err!(super::lan::start_listening());
+@@ -326,6 +339,15 @@ impl RendezvousMediator {
                  for host in servers.clone() {
                      let server = server.clone();
                      let timeout = timeout.clone();
@@ -684,7 +959,7 @@ index b1e523d..1223bfa 100644
                      futs.push(tokio::spawn(async move {
                          if let Err(err) = Self::start(server, host).await {
                              let err = format!("rendezvous mediator error: {err}");
-@@ -362,7 +383,38 @@ impl RendezvousMediator {
+@@ -362,7 +384,38 @@ impl RendezvousMediator {
          }
      }
  
@@ -723,7 +998,7 @@ index b1e523d..1223bfa 100644
          host.split(".")
              .next()
              .map(|x| {
-@@ -643,6 +695,14 @@ impl RendezvousMediator {
+@@ -643,6 +696,14 @@ impl RendezvousMediator {
                      if last_recv_msg.elapsed().as_millis() as u64 > rz.keep_alive as u64 * 3 / 2 {
                          bail!("Rendezvous connection is timeout");
                      }
@@ -738,7 +1013,7 @@ index b1e523d..1223bfa 100644
                      if (!Config::get_key_confirmed() ||
                          !Config::get_host_key_confirmed(&rz.host_prefix)) &&
                          last_register_sent.map(|x| x.elapsed().as_millis() as i64).unwrap_or(REG_INTERVAL) >= REG_INTERVAL {
-@@ -717,48 +777,63 @@ impl RendezvousMediator {
+@@ -717,48 +778,63 @@ impl RendezvousMediator {
              secure,
          );
  
@@ -837,7 +1112,26 @@ index b1e523d..1223bfa 100644
      }
  
      async fn handle_intranet(&self, fla: FetchLocalAddr, server: ServerPtr) -> ResultType<()> {
-@@ -1737,6 +1812,17 @@ mod tests {
+@@ -1341,7 +1417,7 @@ impl RendezvousMediator {
+     }
+ }
+ 
+-fn get_direct_port() -> i32 {
++pub(crate) fn get_direct_port() -> i32 {
+     let mut port = Config::get_option("direct-access-port")
+         .parse::<i32>()
+         .unwrap_or(0);
+@@ -1404,7 +1480,8 @@ async fn direct_server(server: ServerPtr) {
+                             server,
+                             hbb_common::Stream::from(stream, local_addr),
+                             addr,
+-                            false,
++                            // Tether: a direct connection gets the same key exchange as a relayed one.
++                            cfg!(feature = "tauri"),
+                             ConnectionMeta::default(), // Direct connections don't have server-side user context.
+                         )
+                         .await
+@@ -1737,6 +1814,17 @@ mod tests {
      };
      use hbb_common::protobuf::Message as _;
  

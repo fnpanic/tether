@@ -134,6 +134,7 @@ pub const FEATURES: &[Feature] = &[
     t!("connect.reconnect-minutes", "connections", "Keep reconnecting after a connection loss (minutes)", "Nach Verbindungsverlust erneut verbinden (Minuten)", Kind::Number, "10", BOTH),
     b!("settings.server", "connections", "Allow changing the relay server", "Relay-Server ändern erlauben", "N", None, TECH),
     t!("servers.list", "connections", "Additional relay servers (host names or wss:// URLs, comma-separated)", "Weitere Relay-Server (Hostnamen oder wss://-URLs, kommagetrennt)", Kind::Text, "", BOTH),
+    c!("network.direct", "connections", "Direct connections (same network) beside the relay", "Direktverbindungen (gleiches Netzwerk) neben dem Relay", "auto", &["auto", "off"], "off", None, BOTH),
     // Video.
     c!("video.quality", "video", "Default image quality", "Standard-Bildqualität", "balanced", &["best", "balanced", "low"], "balanced", Some("image-quality"), TECH),
     c!("video.codec", "video", "Preferred codec", "Bevorzugter Codec", "auto", &["auto", "h264", "h265", "av1", "vp9", "vp8"], "auto", Some("codec-preference"), TECH),
@@ -215,6 +216,8 @@ fn check_value(f: &Feature, v: &str) -> Result<(), String> {
 
 /// Feature holding extra rendezvous servers.
 pub const SERVERS_LIST: &str = "servers.list";
+/// Feature switching direct paths (LAN) beside the relay: `auto` or `off`.
+pub const DIRECT: &str = "network.direct";
 /// Most servers a policy may add.
 pub const MAX_SERVERS: usize = 8;
 

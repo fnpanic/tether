@@ -2,8 +2,11 @@
 //! behind corporate proxies and zero-trust filters (e.g. Zscaler) that only allow HTTPS.
 //!
 //! - Rendezvous and relay run over `wss://<relay>/ws/id` and `wss://<relay>/ws/relay` (443).
-//! - No UDP at all: no STUN, NAT tests, hole punching, WebRTC/ICE or LAN discovery.
-//! - Sessions are always relayed (WebSocket mode forces relay); end-to-end encryption between the
+//! - No UDP to the internet: no STUN, NAT tests, hole punching or WebRTC/ICE.
+//! - Direct on the LAN (policy `network.direct`, default auto): the viewer asks the LAN for the
+//!   host (UDP broadcast lookup) beside the relay request and races a direct TCP connection
+//!   against the relay; the key exchange is the same on both, the first secured path wins.
+//! - Otherwise sessions are relayed (WebSocket mode forces relay); end-to-end encryption between the
 //!   two peers is unchanged, the relay and any TLS-inspecting proxy only see ciphertext.
 //! - The system proxy (env, Windows static/PAC/WPAD, macOS) is detected and used automatically;
 //!   a proxy configured explicitly by the user still wins.
@@ -34,12 +37,63 @@ pub fn apply() {
     });
 }
 
+/// Windows inbound firewall rule an admin creates to let TetherQS accept LAN connections
+/// (docs/policy.md `network.direct`); without it QS stays relay-only and never prompts.
+const FIREWALL_RULE: &str = "Tether QS";
+
+/// Policy `network.direct` (same as apps/desktop netpolicy.rs).
+pub fn apply_direct(mode: &str) {
+    let on = mode != "off";
+    let listen = on && host_may_listen(FIREWALL_RULE);
+    let mut o = OVERWRITE_SETTINGS.write().unwrap();
+    o.insert("tether-direct".to_owned(), if on { "Y" } else { "N" }.to_owned());
+    o.insert("direct-server".to_owned(), if listen { "Y" } else { "N" }.to_owned());
+}
+
+/// See apps/desktop netpolicy.rs. Checked once per process.
+pub fn host_may_listen(rule: &str) -> bool {
+    static MAY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MAY.get_or_init(|| {
+        let ok = may_listen(rule);
+        hbb_common::log::info!("direct listener allowed: {ok}");
+        ok
+    })
+}
+
+#[cfg(windows)]
+fn may_listen(rule: &str) -> bool {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("netsh")
+        .args(["advfirewall", "firewall", "show", "rule", &format!("name={rule}"), "dir=in"])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn may_listen(_rule: &str) -> bool {
+    std::process::Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw")
+        .arg("--getglobalstate")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("disabled"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn may_listen(_rule: &str) -> bool {
+    true
+}
+
 /// Settings forced for every process role.
 fn enforced(relay: Option<&str>) -> Vec<(String, String)> {
     let mut v = vec![
         ("allow-websocket", "Y".to_owned()),
         ("disable-udp", "Y".to_owned()),
         ("enable-lan-discovery", "N".to_owned()),
+        // Off until the policy is applied (apply_direct).
+        ("direct-server", "N".to_owned()),
+        ("tether-direct", "N".to_owned()),
     ];
     // `TETHER_SERVER` may list several servers; they all share the scheme, the first decides it.
     let first = relay.and_then(|h| h.split(',').next()).map(str::trim);

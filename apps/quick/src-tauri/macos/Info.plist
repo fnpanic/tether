@@ -5,6 +5,7 @@
   <key>NSMicrophoneUsageDescription</key><string>TetherQS can transmit audio while your support technician is connected.</string>
   <key>NSScreenCaptureUsageDescription</key><string>TetherQS shows your screen to the support technician you allow to connect.</string>
   <key>NSAppleEventsUsageDescription</key><string>TetherQS lets the support technician you allow control this Mac.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>TetherQS lets your support technician connect directly when they are on the same network.</string>
   <key>LSUIElement</key><false/>
 </dict>
 </plist>

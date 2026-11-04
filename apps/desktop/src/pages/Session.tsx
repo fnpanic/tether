@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { routeLabel } from "../lib/route";
 import {
   Activity,
   ChevronDown,
@@ -112,7 +113,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const [fit, setFit] = useState<Fit>("fit");
   const [quality, setQuality] = useState<Quality>({});
   const [vstats, setVstats] = useState<VideoStats | null>(null);
-  const [direct, setDirect] = useState<boolean | null>(null);
+  const [route, setRoute] = useState<string | null>(null);
   const [secured, setSecured] = useState<boolean | null>(null);
   const [fingerprint, setFingerprint] = useState("");
   const [showStats, setShowStats] = useState(false);
@@ -227,7 +228,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           setPhase({ kind: "connected" });
           break;
         case "connection_type":
-          setDirect(p.direct);
+          setRoute(routeLabel(p.direct, p.stream_type));
           setSecured(p.secured);
           break;
         case "fingerprint":
@@ -515,7 +516,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
                 <ShieldCheck size={14} />
               </span>
             )}
-            {direct != null && <span className="rounded-[5px] bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white/70">{direct ? "P2P" : "Relay"}</span>}
+            {route && <span className="rounded-[5px] bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white/70">{route}</span>}
           </div>
           <Sep />
           {info && info.displays.length > 1 && (
@@ -606,7 +607,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           <Stat k="bitrate" v={quality.target_bitrate ? `${(quality.target_bitrate / 1000).toFixed(1)} Mbps` : "–"} />
           <Stat k="speed" v={quality.speed ?? "–"} />
           <Stat k="frame" v={vstats?.width ? `${vstats.width}×${vstats.height} (coded ${vstats.coded})` : "–"} />
-          <Stat k="route" v={direct == null ? "–" : direct ? "direct" : "relay"} />
+          <Stat k="route" v={route ?? "–"} />
           <Stat k="encryption" v={secured == null ? "–" : secured ? "end-to-end" : "NONE"} />
           {fingerprint && <Stat k="fingerprint" v={fingerprint.slice(0, 23)} />}
         </div>

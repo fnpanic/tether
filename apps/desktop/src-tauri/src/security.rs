@@ -14,7 +14,7 @@ pub(crate) const ENFORCED: &[(&str, &str)] = &[
     ("allow-insecure-tls-fallback", "N"),
     // Reduce attack surface: features that install drivers or open listeners.
     ("enable-remote-printer", "N"),
-    ("direct-server", "N"),
+    // `direct-server` (the direct listener) is set by netpolicy.rs from policy `network.direct`.
     // No session recordings written to disk unless the user starts one explicitly.
     ("allow-auto-record-incoming", "N"),
     ("allow-auto-record-outgoing", "N"),

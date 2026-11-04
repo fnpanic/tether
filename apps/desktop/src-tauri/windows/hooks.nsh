@@ -30,9 +30,12 @@ Var TetherRelaunch
   Pop $1
   StrCmp $0 "0" 0 +2
     nsExec::Exec 'sc.exe start Tether'
-  ; 443-only (0.2+): Tether never listens for incoming connections, so no inbound firewall rule.
-  ; Remove the rules older versions created.
+  ; Direct LAN connections (policy network.direct): Tether listens on TCP 21118 and answers the
+  ; LAN lookup on UDP 21119, from the local subnet only. The app listens only while this rule
+  ; exists (netpolicy.rs), so it never raises a firewall prompt. Replaces older versions' rules.
   nsExec::Exec 'netsh advfirewall firewall delete rule name="Tether"'
+  nsExec::Exec 'netsh advfirewall firewall add rule name="Tether" dir=in action=allow program="$INSTDIR\${MAINBINARYNAME}.exe" protocol=TCP localport=21118 remoteip=localsubnet profile=any enable=yes'
+  nsExec::Exec 'netsh advfirewall firewall add rule name="Tether" dir=in action=allow program="$INSTDIR\${MAINBINARYNAME}.exe" protocol=UDP localport=21119 remoteip=localsubnet profile=any enable=yes'
   ; Reopen Tether for the signed-in user (unelevated, like "Run Tether" on the finish page) if we
   ; closed it. With /R (in-app update) the bundler restarts it itself.
   ${If} $TetherRelaunch == "1"

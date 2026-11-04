@@ -5,6 +5,7 @@
   <key>NSMicrophoneUsageDescription</key><string>Tether can transmit audio during remote sessions.</string>
   <key>NSScreenCaptureUsageDescription</key><string>Tether shares your screen with people you allow to connect.</string>
   <key>NSAppleEventsUsageDescription</key><string>Tether controls this Mac on behalf of an allowed remote user.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Tether connects directly to devices on your network when they are nearby, instead of through the relay.</string>
   <key>LSUIElement</key><false/>
 </dict>
 </plist>

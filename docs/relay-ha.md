@@ -67,6 +67,61 @@ Until relay 1 runs the new Caddyfile, `/readyz/relay` on relay 1 hits Caddy's ca
 `200 Tether relay`. Relay 2's hbbs reads that as healthy with load 0, so the two versions work
 together.
 
+## Direct paths beside the relay
+
+With policy `network.direct = auto` (default, [policy.md](policy.md#direct-connections-networkdirect))
+the viewer races a direct path against the relay flow above. Nothing changes on the relays.
+
+| Path | Badge | Status | Needs |
+| --- | --- | --- | --- |
+| Same LAN | `Direct (LAN)` | shipped | host with the direct listener (see below); no relay change |
+| IPv6, both global | `Direct (IPv6)` | not yet | hbbs forwarding `socket_addr_v6` (newer rendezvous protocol), host side change |
+| NAT hole punching | `P2P` | not yet | hbbs forwarding WebRTC offer/answer/ICE, STUN server, host side change |
+| Relay (WSS/443) | `Relay` | unchanged | – |
+
+LAN flow:
+
+1. When the session starts, the viewer broadcasts a lookup for the host's ID (UDP 21119, every
+   IPv4 interface) while it sends the PunchHoleRequest. A host with direct connections on answers
+   with its listener port (21118), nothing else.
+2. When the relay answer (`RelayResponse`, step 4 above) arrives, the viewer connects to the relay
+   **and** to the host's LAN address at the same time. The LAN attempt runs the normal key
+   exchange (the host proves the key hbbs signed for its ID, `RelayResponse.pk`) before it
+   can win; a ready relay is held up to 300 ms while it is in flight.
+3. The first secured path carries the session; the other is dropped (the host's relay leg times
+   out at hbbr, no Accept prompt appears for it because no login is sent).
+
+Measured 2026-11-04 (Windows PC → TetherQS in the Hyper-V VM, same subnet): LAN lookup answered in
+5 ms, LAN connection secured 2–56 ms after the relay answer, badge 1.3–1.7 s and first frame
+1.5–1.9 s after `--connect` (relay run before: 1.8 s / 2.5 s). Corporate VM (technician inside
+the VM, egress blocked): relay as before, relay leg 118–183 ms, 19/19 `vm-ft-e2e` checks.
+
+When nobody answers the lookup within 300 ms (other network, corporate PC whose firewall blocks
+outbound UDP, also a host whose firewall blocks its own outbound answer) there is no LAN attempt and the relay is used exactly as before. The host's
+password / Accept / companion-secret and permission checks run on the LAN connection like on a
+relayed one (same `Connection` code; an unencrypted handshake is refused).
+
+
+### IPv6 and NAT hole punching (not enabled yet)
+
+The core already contains both (WebRTC/ICE is the path RustDesk built for WebSocket deployments:
+host candidates = LAN and global IPv6, server-reflexive candidates = NAT hole punching, DTLS
+bound to the signed host identity). They are off in Tether (`enable-webrtc`, `enable-udp-punch`,
+`enable-ipv6-punch` = N) because the production hbbs (rustdesk-server protocol before WebRTC)
+drops what they need: it rebuilds `PunchHole` without `webrtc_sdp_offer` / `socket_addr_v6`,
+and does not know `IceCandidate` (rendezvous field 29). Needed, in order:
+
+1. hbbs: update `libs/hbb_common/protos/rendezvous.proto` in vendor/rustdesk-server to the
+   client's version and forward `PunchHoleRequest.{webrtc_sdp_offer,socket_addr_v6}` into
+   `PunchHole`, `RelayResponse/PunchHoleSent.{webrtc_sdp_answer,socket_addr_v6}` back, and
+   `IceCandidate` both ways (by peer id, over the host's WebSocket registration); test with the
+   local relays (WSL) and the relay harness, then deploy to both relays.
+2. A STUN server for server-reflexive candidates: coturn (STUN only, no TURN) on each relay on
+   UDP 3478, or a public STUN server in `ice-servers`.
+3. Clients (both ends, policy `network.direct = auto`, no proxy): `enable-webrtc = Y`,
+   `ice-servers = stun:<relay>:3478`, `relay-fallback-delay` ≈ 0.5 s so a UDP-blocked network
+   without a proxy waits at most that long (with a proxy no offer is made at all).
+
 ## Failures
 
 | Event | Effect | Recovery |

@@ -10,7 +10,7 @@ use std::{
 use hbb_common::config::{Config, LocalConfig, DEFAULT_SETTINGS, OVERWRITE_SETTINGS};
 use tether_trust::{
     envelope,
-    policy::{parse_servers, resolve_with, server_host, Bundle, Effective, FLOOR, PROFILE_CUSTOMER, SERVERS_LIST},
+    policy::{parse_servers, resolve_with, server_host, Bundle, Effective, FLOOR, PROFILE_CUSTOMER, SERVERS_LIST, DIRECT},
     VerifyingKey,
 };
 
@@ -131,6 +131,7 @@ pub fn device_uuid() -> String {
 fn set(bundle: Option<&Bundle>) {
     let eff = resolved(bundle, &device_uuid());
     apply_core(&eff);
+    crate::netpolicy::apply_direct(eff.get(DIRECT));
     let servers_changed = apply_servers(&eff);
     *EFFECTIVE.write().unwrap() = Some(eff);
     if servers_changed {

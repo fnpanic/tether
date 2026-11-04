@@ -18,7 +18,7 @@ use hbb_common::{
 use serde_json::{json, Value};
 use tether_trust::{
     envelope,
-    policy::{parse_servers, resolve, server_host, Bundle, Effective, Layer, FEATURES, FLOOR, PROFILE_TECHNICIAN, SERVERS_LIST},
+    policy::{parse_servers, resolve, server_host, Bundle, Effective, Layer, FEATURES, FLOOR, PROFILE_TECHNICIAN, SERVERS_LIST, DIRECT},
     VerifyingKey,
 };
 
@@ -205,6 +205,7 @@ fn apply(bundle: Option<Bundle>) -> bool {
     let mut st = STATE.write().unwrap();
     let changed = st.eff != eff;
     apply_core(&eff, &mut st.applied);
+    crate::netpolicy::apply_direct(eff.get(DIRECT));
     let servers_changed = apply_servers(&eff);
     st.eff = eff;
     st.bundle = bundle;
@@ -534,6 +535,11 @@ mod tests {
                 f.profiles.join(", "),
                 f.option.map(|o| format!("`{o}`")).unwrap_or_else(|| "–".into()),
             ));
+        }
+        // Hand-written notes after the table survive a regeneration.
+        let old = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../docs/policy.md")).unwrap_or_default();
+        if let Some(i) = old.find("\n## ") {
+            s.push_str(&old[i..]);
         }
         s
     }

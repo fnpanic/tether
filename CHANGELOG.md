@@ -6,6 +6,20 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Added
+- **Direct connections on the same network.** Two devices on one LAN (e.g. a Windows PC and a Mac
+  at home) no longer send the picture through the relay in Amsterdam: the viewer looks for the
+  host on the LAN while it asks the relay, and races a direct connection against the relay. The
+  first path that completes the end-to-end key exchange wins, so nothing gets slower when direct
+  fails; corporate PCs (proxy, outbound UDP blocked) keep using the relay with no added delay.
+  The host must prove its relay-signed key on the direct path too, and applies the same password
+  / Accept / permission checks. The session window shows **Direct (LAN)** or **Relay**.
+  New policy `network.direct` (`auto`, default / `off`). The host listens (TCP 21118, UDP 21119,
+  local subnet) only where that raises no firewall prompt: the Windows installer adds the rule
+  `Tether`; TetherQS on Windows only with an admin-created rule `Tether QS`; macOS while the
+  application firewall is off (the Mac asks once for Local Network access). Both devices need
+  this version. Direct IPv6 and NAT hole punching need a relay update first (docs/relay-ha.md).
+
 ### Fixed
 - **TetherQS did not notice a release published while it was running.** It checked only at start
   and then every `update.check-hours` (6 h), with no way to check by hand and no result shown.

@@ -59,7 +59,13 @@ Neither the user nor a remote peer can change them (`apps/desktop/src-tauri/src/
 - `allow-remote-config-modification = N`: a connected peer can never change this machine's settings.
 - `enable-check-update = N`, `allow-auto-update = N`: no requests to third-party update servers.
 - `allow-insecure-tls-fallback = N`: HTTPS never downgrades.
-- `direct-server = N`: no unauthenticated direct-IP listener.
+- `direct-server`: the direct listener (TCP 21118, LAN lookup answer on UDP 21119) runs only with
+  policy `network.direct = auto` **and** where it raises no firewall prompt (Windows inbound rule
+  `Tether` from the installer, limited to the local subnet; `Tether QS` created by an admin; macOS
+  application firewall off). It accepts only the same end-to-end key exchange as the relay (the
+  host proves the key the rendezvous server signed for its ID; an unencrypted handshake is
+  refused) and the same password / Accept / permission checks. The LAN lookup answer carries the
+  ID and port only (no host or user names).
 - `enable-remote-printer = N`: no virtual printer driver.
 - `allow-auto-record-incoming/outgoing = N`: nothing is written to disk without an explicit action.
 
