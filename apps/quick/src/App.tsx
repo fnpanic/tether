@@ -345,17 +345,17 @@ function MacBanner({ s, onError }: { s: State; onError: (m: string) => void }) {
     <div role="alert" data-testid="qs-mac-perms" className="mb-2 rounded-xl border border-warn/40 bg-warn/10 px-3 py-2.5 text-caption">
       <div className="font-semibold">{m.screen ? "Your technician cannot control this Mac yet" : "Your technician cannot see this screen yet"}</div>
       <div className="mt-0.5 text-footnote text-muted">
-        Allow {[!m.screen && "Screen Recording", !m.accessibility && "Accessibility"].filter(Boolean).join(" and ")} for TetherQS in System Settings, then quit and reopen it. After an update: remove it there with − and add it again.
+        Click Fix, switch TetherQS on in System Settings, then choose Quit &amp; Reopen. A switch that is already on can belong to an older version; Fix clears it.
       </div>
       <div className="mt-1.5 flex gap-3">
         {!m.screen && (
           <button className="text-caption text-accent" onClick={() => fix("screen")}>
-            Open Screen Recording
+            Fix Screen Recording
           </button>
         )}
         {!m.accessibility && (
           <button className="text-caption text-accent" onClick={() => fix("accessibility")}>
-            Open Accessibility
+            Fix Accessibility
           </button>
         )}
       </div>

@@ -119,13 +119,15 @@ used. Without the secrets CI signs ad-hoc as before. The certificate and its key
 secrets and in the admin's own backup (not in the repository); renewing it means one more re-grant
 on every Mac. A Developer ID identity (`APPLE_SIGNING_IDENTITY` secret) takes precedence.
 
-What the apps do about it (0.5.3):
+What the apps do about it (0.5.4):
 
 - **On the Mac:** Tether (home page) and TetherQS show a warning while Screen Recording or
-  Accessibility is missing, with **Open Screen Recording** / **Open Accessibility** buttons
-  (macOS prompt, then the System Settings page).
-- **When a session starts** on a Mac without these permissions, the Mac asks again and tells the
-  technician. The technician's window shows "The Mac does not share its screen yet" with the
+  Accessibility is missing, with **Fix Screen Recording** / **Fix Accessibility** buttons. Fix
+  runs the `tccutil reset` above for this app only (no admin needed), so a switch that is on but
+  belongs to an older build is cleared; macOS then asks afresh and opens the System Settings page.
+  Switch the app on and choose **Quit & Reopen**.
+- **When a session starts** on a Mac without these permissions, the Mac asks once per app run (not
+  on every connection) and tells the technician. The technician's window shows "The Mac does not share its screen yet" with the
   steps above; with only Accessibility missing, a message says that input is ignored.
 - Without that message (an older Mac app), the technician's window explains the likely cause
   after 8 s without a picture.

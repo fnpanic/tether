@@ -147,5 +147,6 @@ The Mac has not allowed Tether (or TetherQS) to record its screen. This always h
 update of the unsigned Mac app: macOS ties the permission to the app's signature, and the switch
 can still look on. On the Mac: **System Settings → Privacy & Security → Screen & System Audio
 Recording**, remove the app with −, add it again, quit and reopen it, connect again. Also check
-**Accessibility** (mouse and keyboard). Since 0.5.3 both apps show a warning with buttons for this,
-and the technician is told what is missing. See [macos.md](macos.md#permissions).
+**Accessibility** (mouse and keyboard). Since 0.5.3 both apps show a warning and the technician is
+told what is missing; since 0.5.4 its **Fix** button clears the old entry itself (use it when the
+switch is already on but the warning stays), then switch the app on and choose Quit & Reopen. See [macos.md](macos.md#permissions).

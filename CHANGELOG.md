@@ -4,6 +4,18 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.5.4] — 2026-11-04
+
+### Fixed
+- **Mac: "cannot see this screen yet" and the Screen Recording prompt kept coming back
+  although System Settings showed the app as allowed.** The switch belonged to the earlier
+  ad-hoc signed build; macOS does not count it for the newly signed app and asks again. The
+  warning's button is now **Fix Screen Recording** / **Fix Accessibility**: it clears this app's
+  old entry (`tccutil reset`, no admin), lets macOS add it afresh and opens System Settings;
+  switch the app on and choose Quit & Reopen. Needed once; later updates keep the permission.
+- **The macOS permission prompt appeared on every connection.** It now appears once per app run;
+  the technician is still told on every connection what is missing.
+
 ## [0.5.3] — 2026-11-04
 
 ### Fixed

@@ -76,28 +76,10 @@ fn mac_perms() -> Option<MacPerms> {
     cfg!(target_os = "macos").then(|| MacPerms { screen: api::is_can_screen_recording(false), accessibility: api::is_process_trusted(false) })
 }
 
-/// Let macOS ask, then open the matching System Settings page (the switch may be on but stale
-/// after an update: the user removes and re-adds the app there).
+/// Clear a stale grant, let macOS ask, open the matching System Settings page.
 #[tauri::command]
-fn mac_fix(which: String) -> R<()> {
-    let pane = match which.as_str() {
-        "screen" => {
-            api::is_can_screen_recording(true);
-            "Privacy_ScreenCapture"
-        }
-        "accessibility" => {
-            api::is_process_trusted(true);
-            "Privacy_Accessibility"
-        }
-        _ => return Err("unknown permission".into()),
-    };
-    if cfg!(target_os = "macos") {
-        std::process::Command::new("open")
-            .arg(format!("x-apple.systempreferences:com.apple.preference.security?{pane}"))
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+fn mac_fix(app: tauri::AppHandle, which: String) -> R<()> {
+    api::mac_fix(&app.config().identifier, &which)
 }
 
 fn branding() -> Branding {

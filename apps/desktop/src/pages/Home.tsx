@@ -187,17 +187,17 @@ function MacPermissions() {
     <div role="alert" className="mb-6 rounded-2xl border border-warn/40 bg-warn/10 px-5 py-4">
       <div className="text-callout font-semibold">{m.screen ? "A technician cannot control this Mac yet" : "A technician cannot see this Mac's screen yet"}</div>
       <div className="mt-1 text-caption text-muted">
-        Allow {[!m.screen && "Screen Recording", !m.accessibility && "Accessibility"].filter(Boolean).join(" and ")} for Tether in System Settings, then quit and reopen Tether. After an update the switch can be on but stale: remove Tether there with − and add it again.
+        Click Fix, switch Tether on in System Settings, then choose Quit &amp; Reopen. A switch that is already on can belong to an older version; Fix clears it.
       </div>
       <div className="mt-3 flex gap-2">
         {!m.screen && (
           <Button size="sm" variant="secondary" onClick={() => fix("screen")}>
-            Open Screen Recording
+            Fix Screen Recording
           </Button>
         )}
         {!m.accessibility && (
           <Button size="sm" variant="secondary" onClick={() => fix("accessibility")}>
-            Open Accessibility
+            Fix Accessibility
           </Button>
         )}
       </div>

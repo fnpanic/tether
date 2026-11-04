@@ -825,7 +825,7 @@ function FirstImage({ hostMissing }: { hostMissing: string[] }) {
         <div role="status" className="max-w-[420px] rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left text-footnote leading-relaxed text-white/70">
           {screen ? "The Mac has not allowed Tether to record its screen. " : "Still no picture. If the remote computer is a Mac, it probably has not allowed Tether to record its screen. "}
           Ask the person there to open <b className="font-semibold text-white/85">System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording</b> and switch Tether on
-          {hostMissing.includes("accessibility") ? <> (and Tether under <b className="font-semibold text-white/85">Accessibility</b>, for mouse and keyboard)</> : null}. After an update the switch can be on but stale: remove Tether with −, add it again, then quit and reopen Tether there and connect again.
+          {hostMissing.includes("accessibility") ? <> (and Tether under <b className="font-semibold text-white/85">Accessibility</b>, for mouse and keyboard)</> : null}. If it is already on, it belongs to an older version: the warning in the Mac app has a Fix button that clears it. Then quit and reopen the app there and connect again.
         </div>
       )}
     </div>
