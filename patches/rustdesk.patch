@@ -419,7 +419,7 @@ index 597dc86..466c1b5 100644
  mod webrtc_race_tests {
      use super::race_transports_prefer_webrtc;
 diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
-index 1b197a8..def9c12 100644
+index 1b197a8..54b5e4c 100644
 --- a/src/client/io_loop.rs
 +++ b/src/client/io_loop.rs
 @@ -14,6 +14,9 @@ use crate::{
@@ -432,27 +432,45 @@ index 1b197a8..def9c12 100644
  const KCP_CLOSE_REASON_FLUSH_DELAY: Duration = Duration::from_millis(30);
  // Deadline for the parting close-reason send once the peer is presumed gone; KCP waits for send
  // capacity with no deadline of its own.
-@@ -355,6 +358,19 @@ impl<T: InvokeUiSession> Remote<T> {
-                                 self.handler.msgbox("restarting-show", "Restarting remote device", "Connection in progress. Please wait.", "");
-                                 break;
-                             }
+@@ -288,6 +291,9 @@ impl<T: InvokeUiSession> Remote<T> {
+                 let mut last_recv_time = Instant::now();
+                 let mut webrtc_suspect_since: Option<Instant> = None;
+                 let mut last_rx_progress = peer.rx_progress();
++                // Last status tick that saw bytes arrive, a message still incomplete included.
++                #[cfg(feature = "tauri")]
++                let mut last_rx_bytes_time = Instant::now();
+                 let mut peer_gone = false;
+ 
+                 loop {
+@@ -360,6 +366,27 @@ impl<T: InvokeUiSession> Remote<T> {
+                             // given one, so they are inert here.
+                             let progressed = rx_progress != last_rx_progress;
+                             last_rx_progress = rx_progress;
 +                            // Tether: a logged-in host answers a delay test every second, so a
 +                            // relay path that went silent is dead (node gone without a FIN); do
-+                            // not wait 30 s for it, reconnect.
++                            // not wait 30 s for it, reconnect. Silent means no bytes at all: on a
++                            // slow path one large frame (a Retina key frame, an app switch) takes
++                            // seconds to arrive whole, and a reconnect would only resend it.
 +                            #[cfg(feature = "tauri")]
-+                            if hbb_common::config::use_ws()
-+                                && !self.handler.is_restarting_remote_device()
-+                                && self.handler.lc.read().unwrap().peer_info.is_some()
-+                                && last_recv_time.elapsed() >= RELAY_SILENCE_LIMIT
 +                            {
-+                                log::info!("relay silent for {:?}, reconnecting", last_recv_time.elapsed());
-+                                self.handler.msgbox("error", "Connection Error", "Timeout", "");
-+                                break;
++                                if progressed {
++                                    last_rx_bytes_time = Instant::now();
++                                }
++                                let silent = last_recv_time.max(last_rx_bytes_time).elapsed();
++                                if hbb_common::config::use_ws()
++                                    && !self.handler.is_restarting_remote_device()
++                                    && self.handler.lc.read().unwrap().peer_info.is_some()
++                                    && silent >= RELAY_SILENCE_LIMIT
++                                {
++                                    log::info!("relay silent for {:?}, reconnecting", silent);
++                                    self.handler.msgbox("error", "Connection Error", "Timeout", "");
++                                    break;
++                                }
 +                            }
-                             let rx_progress = peer.rx_progress();
-                             // `None` for transports that report none, and it never changes for a
-                             // given one, so they are inert here.
-@@ -1315,6 +1331,20 @@ impl<T: InvokeUiSession> Remote<T> {
+                             if peer.webrtc_disconnected() && !progressed {
+                                 webrtc_suspect_since.get_or_insert_with(Instant::now);
+                             } else {
+@@ -1315,6 +1342,20 @@ impl<T: InvokeUiSession> Remote<T> {
                  }
              }
              Data::RecordScreen(start) => {
@@ -473,7 +491,7 @@ index 1b197a8..def9c12 100644
                  self.handler.lc.write().unwrap().record_state = start;
                  self.update_record_state();
              }
-@@ -1706,6 +1736,10 @@ impl<T: InvokeUiSession> Remote<T> {
+@@ -1706,6 +1747,10 @@ impl<T: InvokeUiSession> Remote<T> {
                      }
                      self.video_format = CodecFormat::from(&vf);
  

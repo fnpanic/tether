@@ -48,7 +48,7 @@ index 9ee5cac..6264678 100644
  
      pub fn reset_online() {
 diff --git a/src/stream.rs b/src/stream.rs
-index 126d08a..5e09dd2 100644
+index 126d08a..258b776 100644
 --- a/src/stream.rs
 +++ b/src/stream.rs
 @@ -14,6 +14,17 @@ pub enum Stream {
@@ -69,20 +69,136 @@ index 126d08a..5e09dd2 100644
      #[inline]
      pub fn set_send_timeout(&mut self, ms: u64) {
          match self {
+@@ -113,13 +124,15 @@ impl Stream {
+     /// peer sending a large one — a clipboard image is the case that occurs — from one that died
+     /// mid-message. Sampling this alongside the last received message tells them apart.
+     ///
+-    /// TCP and WebSocket answer `None` on purpose: this change leaves their existing close, error
+-    /// and 30s-timeout behaviour exactly as it was, and giving them a value would alter it.
++    /// TCP answers `None` on purpose: this change leaves its existing close, error and 30s-timeout
++    /// behaviour exactly as it was. WebSocket (Tether's relay path) reports its received bytes, so
++    /// a large frame on a slow link does not look like a dead relay (client io_loop).
+     #[inline]
+     pub fn rx_progress(&self) -> Option<u64> {
+         match self {
+             #[cfg(feature = "webrtc")]
+             Stream::WebRTC(s) => Some(s.rx_progress()),
++            Stream::WebSocket(s) => Some(s.rx_bytes()),
+             #[allow(unreachable_patterns)]
+             _ => None,
+         }
 diff --git a/src/websocket.rs b/src/websocket.rs
-index 3a98a84..7c98661 100644
+index 3a98a84..87bfdd5 100644
 --- a/src/websocket.rs
 +++ b/src/websocket.rs
-@@ -86,6 +86,8 @@ pub struct WsFramedStream {
+@@ -19,7 +19,10 @@ use std::{
+     io::{self, Error, ErrorKind},
+     net::SocketAddr,
+     pin::Pin,
+-    sync::Arc,
++    sync::{
++        atomic::{AtomicU64, Ordering},
++        Arc,
++    },
+     task::{Context, Poll},
+     time::Duration,
+ };
+@@ -30,7 +33,7 @@ use tokio::{
+ };
+ use tokio_native_tls::native_tls::TlsConnector;
+ use tokio_tungstenite::{
+-    client_async_tls_with_config, connect_async_tls_with_config,
++    client_async_tls_with_config,
+     tungstenite::protocol::Message as WsMessage, Connector, MaybeTlsStream, WebSocketStream,
+ };
+ use tungstenite::client::IntoClientRequest;
+@@ -75,17 +78,74 @@ impl AsyncWrite for FlushBeforeRead {
+     }
+ }
+ 
++/// Tether: counts bytes read from the socket. A message reaches the session only once it is whole,
++/// and one large video frame on a slow relay path can take seconds; the count tells that apart
++/// from a dead path (see `WsFramedStream::rx_bytes`).
++struct RxCount<S>(S, Arc<AtomicU64>);
++
++impl<S: AsyncRead + Unpin> AsyncRead for RxCount<S> {
++    fn poll_read(
++        mut self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++        buf: &mut ReadBuf<'_>,
++    ) -> Poll<io::Result<()>> {
++        let before = buf.filled().len();
++        let r = Pin::new(&mut self.0).poll_read(cx, buf);
++        let n = buf.filled().len() - before;
++        if n > 0 {
++            self.1.fetch_add(n as u64, Ordering::Relaxed);
++        }
++        r
++    }
++}
++
++impl<S: AsyncWrite + Unpin> AsyncWrite for RxCount<S> {
++    fn poll_write(
++        mut self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++        buf: &[u8],
++    ) -> Poll<io::Result<usize>> {
++        Pin::new(&mut self.0).poll_write(cx, buf)
++    }
++
++    fn poll_write_vectored(
++        mut self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++        bufs: &[io::IoSlice<'_>],
++    ) -> Poll<io::Result<usize>> {
++        Pin::new(&mut self.0).poll_write_vectored(cx, bufs)
++    }
++
++    fn is_write_vectored(&self) -> bool {
++        self.0.is_write_vectored()
++    }
++
++    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        Pin::new(&mut self.0).poll_flush(cx)
++    }
++
++    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        Pin::new(&mut self.0).poll_shutdown(cx)
++    }
++}
++
+ // Keep the original non-proxy connection path while supporting proxy streams.
+ type WsStream = Either<
+-    WebSocketStream<MaybeTlsStream<TcpStream>>,
+-    WebSocketStream<MaybeTlsStream<DynTcpStream>>,
++    WebSocketStream<MaybeTlsStream<RxCount<TcpStream>>>,
++    WebSocketStream<MaybeTlsStream<RxCount<DynTcpStream>>>,
+ >;
++/// A connected stream, its local address and its received-bytes counter.
++type Connected = (WsStream, SocketAddr, Arc<AtomicU64>);
+ 
+ pub struct WsFramedStream {
+     stream: WsStream,
      addr: SocketAddr,
      encrypt: Option<Encrypt>,
      send_timeout: u64,
 +    /// Last frame of any kind (data, ping, pong) from the peer.
 +    last_rx: std::time::Instant,
++    /// Bytes read from the socket so far (see `RxCount`).
++    rx: Arc<AtomicU64>,
  }
  
  impl WsFramedStream {
-@@ -141,6 +143,40 @@ impl WsFramedStream {
+@@ -123,7 +183,7 @@ impl WsFramedStream {
+         local_addr: Option<SocketAddr>,
+         proxy_conf: Option<&Socks5Server>,
+         ms_timeout: u64,
+-    ) -> ResultType<(WsStream, SocketAddr)> {
++    ) -> ResultType<Connected> {
+         let tls_type = get_cached_tls_type(url);
+         let is_tls_type_cached = tls_type.is_some();
+         let tls_type = tls_type.unwrap_or(TlsType::Rustls);
+@@ -141,6 +201,40 @@ impl WsFramedStream {
          .await
      }
  
@@ -95,7 +211,7 @@ index 3a98a84..7c98661 100644
 +        local_addr: Option<SocketAddr>,
 +        proxy_conf: Option<Socks5Server>,
 +        ms_timeout: u64,
-+    ) -> ResultType<(WsStream, SocketAddr)> {
++    ) -> ResultType<Connected> {
 +        let routes = connect_routes(url, proxy_conf.is_some());
 +        if routes.len() <= 1 {
 +            return Self::connect(url, local_addr, proxy_conf.as_ref(), ms_timeout).await;
@@ -123,13 +239,99 @@ index 3a98a84..7c98661 100644
      #[async_recursion]
      async fn try_connect(
          url: &str,
-@@ -304,14 +340,14 @@ impl WsFramedStream {
+@@ -151,29 +245,28 @@ impl WsFramedStream {
+         is_tls_type_cached: bool,
+         danger_accept_invalid_cert: Option<bool>,
+         original_danger_accept_invalid_certs: Option<bool>,
+-    ) -> ResultType<(WsStream, SocketAddr)> {
++    ) -> ResultType<Connected> {
+         let ws_config = None;
+         let request = url
+             .into_client_request()
+             .map_err(|e| Error::new(ErrorKind::Other, e))?;
+         let connector =
+             Self::get_connector(&tls_type, danger_accept_invalid_cert.unwrap_or(false))?;
++        let host = request.uri().host().ok_or_else(|| {
++            Error::new(ErrorKind::InvalidInput, "Invalid WebSocket URL: no host")
++        })?;
++        let port = request
++            .uri()
++            .port_u16()
++            .or_else(|| match request.uri().scheme_str() {
++                Some("wss") => Some(443),
++                Some("ws") => Some(80),
++                _ => None,
++            })
++            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Invalid WebSocket URL scheme"))?;
++        let target = format!("{host}:{port}");
++        let rx = Arc::new(AtomicU64::new(0));
+         let result = if let Some(proxy_conf) = proxy_conf {
+-            let host = request.uri().host().ok_or_else(|| {
+-                Error::new(ErrorKind::InvalidInput, "Invalid WebSocket URL: no host")
+-            })?;
+-            let port = request
+-                .uri()
+-                .port_u16()
+-                .or_else(|| match request.uri().scheme_str() {
+-                    Some("wss") => Some(443),
+-                    Some("ws") => Some(80),
+-                    _ => None,
+-                })
+-                .ok_or_else(|| {
+-                    Error::new(ErrorKind::InvalidInput, "Invalid WebSocket URL scheme")
+-                })?;
+-            let target = format!("{host}:{port}");
+             timeout(Duration::from_millis(ms_timeout), async {
+                 let stream = crate::tcp::FramedStream::connect(
+                     target.as_str(),
+@@ -193,7 +286,7 @@ impl WsFramedStream {
+                     stream = DynTcpStream(Box::new(FlushBeforeRead(stream)));
+                 }
+                 Ok::<_, anyhow::Error>(
+-                    client_async_tls_with_config(request, stream, ws_config, connector)
++                    client_async_tls_with_config(request, RxCount(stream, rx.clone()), ws_config, connector)
+                         .await
+                         .map(|(stream, _)| (stream, addr)),
+                 )
+@@ -201,11 +294,11 @@ impl WsFramedStream {
+             .await??
+             .map(Either::Right)
+         } else {
+-            let disable_nagle = false;
+-            timeout(
+-                Duration::from_millis(ms_timeout),
+-                connect_async_tls_with_config(request, ws_config, disable_nagle, connector),
+-            )
++            // What connect_async_tls_with_config does (Nagle left on), with the socket counted.
++            timeout(Duration::from_millis(ms_timeout), async {
++                let tcp = TcpStream::connect(target.as_str()).await.map_err(tungstenite::Error::Io)?;
++                client_async_tls_with_config(request, RxCount(tcp, rx.clone()), ws_config, connector).await
++            })
+             .await?
+             .map(|(stream, _)| Either::Left(stream))
+         };
+@@ -216,10 +309,10 @@ impl WsFramedStream {
+                     Either::Left(stream) => {
+                         // MaybeTlsStream::get_ref() handles Plain, NativeTls and Rustls,
+                         // returning the underlying TcpStream for local_addr().
+-                        let addr = stream.get_ref().get_ref().local_addr()?;
+-                        Ok((Either::Left(stream), addr))
++                        let addr = stream.get_ref().get_ref().0.local_addr()?;
++                        Ok((Either::Left(stream), addr, rx))
+                     }
+-                    Either::Right((stream, addr)) => Ok((Either::Right(stream), addr)),
++                    Either::Right((stream, addr)) => Ok((Either::Right(stream), addr, rx)),
+                 }
+             }
+             Err(e) => match (tls_type, is_tls_type_cached, danger_accept_invalid_cert) {
+@@ -304,14 +397,16 @@ impl WsFramedStream {
          ms_timeout: u64,
      ) -> ResultType<Self> {
          let proxy_conf = Config::get_socks();
 -        let (stream, addr) =
 -            Self::connect(url.as_ref(), local_addr, proxy_conf.as_ref(), ms_timeout).await?;
-+        let (stream, addr) = Self::race(url.as_ref(), local_addr, proxy_conf, ms_timeout).await?;
++        let (stream, addr, rx) =
++            Self::race(url.as_ref(), local_addr, proxy_conf, ms_timeout).await?;
  
          let ws = Self {
              stream,
@@ -137,10 +339,11 @@ index 3a98a84..7c98661 100644
              encrypt: None,
              send_timeout: ms_timeout,
 +            last_rx: std::time::Instant::now(),
++            rx,
          };
  
          Ok(ws)
-@@ -397,9 +433,22 @@ impl WsFramedStream {
+@@ -397,9 +492,27 @@ impl WsFramedStream {
          Ok(())
      }
  
@@ -156,6 +359,11 @@ index 3a98a84..7c98661 100644
 +        self.last_rx.elapsed()
 +    }
 +
++    /// Bytes received from the socket so far, a message still arriving included.
++    pub fn rx_bytes(&self) -> u64 {
++        self.rx.load(Ordering::Relaxed)
++    }
++
      #[inline]
      pub async fn next(&mut self) -> Option<Result<BytesMut, Error>> {
          while let Some(msg) = self.stream.next().await {
@@ -163,7 +371,7 @@ index 3a98a84..7c98661 100644
              let msg = match msg {
                  Ok(msg) => msg,
                  Err(e) => {
-@@ -494,7 +543,9 @@ pub fn check_ws(endpoint: &str) -> String {
+@@ -494,7 +607,9 @@ pub fn check_ws(endpoint: &str) -> String {
          .map(|(_, p)| p)
          .unwrap_or(RELAY_PORT);
  
@@ -174,7 +382,7 @@ index 3a98a84..7c98661 100644
          // rendezvous
          (false, endpoint_port + 2)
      } else if endpoint_port == rendezvous_port - 1 {
-@@ -533,6 +584,139 @@ pub fn check_ws(endpoint: &str) -> String {
+@@ -533,6 +648,139 @@ pub fn check_ws(endpoint: &str) -> String {
      format!("{}://{}", protocol, address)
  }
  
@@ -314,15 +522,58 @@ index 3a98a84..7c98661 100644
  /// Port of the reverse proxy serving `/ws/id` and `/ws/relay` on this client's own servers, for
  /// when it cannot listen on the scheme's default port. Any other host, such as a peer's server or
  /// a relay on another machine, keeps the default port. IP endpoints never get here.
-@@ -592,6 +776,7 @@ mod tests {
+@@ -583,15 +831,21 @@ mod tests {
+     use tungstenite::protocol::Role;
+ 
+     async fn ws_from_tcp(stream: TcpStream, addr: SocketAddr) -> WsFramedStream {
+-        let ws_stream =
+-            WebSocketStream::from_raw_socket(MaybeTlsStream::Plain(stream), Role::Client, None)
+-                .await;
++        let rx = Arc::new(AtomicU64::new(0));
++        let ws_stream = WebSocketStream::from_raw_socket(
++            MaybeTlsStream::Plain(RxCount(stream, rx.clone())),
++            Role::Client,
++            None,
++        )
++        .await;
+ 
+         WsFramedStream {
+             stream: Either::Left(ws_stream),
              addr,
              encrypt: None,
              send_timeout: 0,
 +            last_rx: std::time::Instant::now(),
++            rx,
          }
      }
  
-@@ -902,3 +1087,45 @@ mod tests {
+@@ -622,6 +876,25 @@ mod tests {
+         server.await.unwrap();
+     }
+ 
++    // A message still arriving is progress: the counter moves before next() returns it.
++    #[tokio::test(flavor = "current_thread")]
++    async fn test_rx_bytes_counts_incomplete_message() {
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let addr = listener.local_addr().unwrap();
++        let server = tokio::spawn(async move {
++            let (mut tcp, _) = listener.accept().await.unwrap();
++            // Binary frame header announcing 1000 bytes, then only the first 100 of them.
++            tcp.write_all(&[0x82, 126, 0x03, 0xE8]).await.unwrap();
++            tcp.write_all(&[7u8; 100]).await.unwrap();
++            tokio::time::sleep(Duration::from_millis(500)).await;
++        });
++        let tcp = TcpStream::connect(addr).await.unwrap();
++        let mut client = ws_from_tcp(tcp, addr).await;
++        assert!(client.next_timeout(200).await.is_none());
++        assert_eq!(client.rx_bytes(), 104);
++        server.await.unwrap();
++    }
++
+     #[test]
+     fn test_check_ws() {
+         let options = Config::get_options();
+@@ -902,3 +1175,45 @@ mod tests {
          }
      }
  }
