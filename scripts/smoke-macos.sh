@@ -17,7 +17,8 @@ ditto -x -k "$SRC"/TetherQS-*-universal.zip "$work"
 # On-screen windows as "owner<TAB>title<TAB>layer"; owner names need no Screen Recording permission.
 cat >"$work/windows.swift" <<'EOF'
 import CoreGraphics
-let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+import Foundation
+let list = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as NSArray?) as? [[String: Any]] ?? []
 for w in list {
   let owner = w["kCGWindowOwnerName"] as? String ?? ""
   let name = w["kCGWindowName"] as? String ?? ""
@@ -30,7 +31,8 @@ swiftc -O -o "$work/windows" "$work/windows.swift" || { echo "error: swiftc fail
 
 fail=0
 check() { # app-name binary-name
-  local app=$1 bin=$2 log="$OUT/$bin.out"
+  local app=$1 bin=$2
+  local log="$OUT/$bin.out"
   echo "== $app"
   RUST_LOG=info "$work/$app/Contents/MacOS/$bin" >"$log" 2>&1 &
   local pid=$!
