@@ -1326,7 +1326,7 @@ index 0000000..eaa6333
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..5a4f91e
+index 0000000..6644b3f
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
 @@ -0,0 +1,386 @@
@@ -1584,7 +1584,7 @@ index 0000000..5a4f91e
 +            let granted = if which == "screen" { is_can_screen_recording(false) } else { is_process_trusted(false) };
 +            if !granted {
 +                let out = Command::new("tccutil").args(["reset", service, bundle_id]).output();
-+                log::info!("tccutil reset {service} {bundle_id}: {:?}", out.map(|o| o.status));
++                hbb_common::log::info!("tccutil reset {service} {bundle_id}: {:?}", out.map(|o| o.status));
 +            }
 +            if which == "screen" { is_can_screen_recording(true) } else { is_process_trusted(true) };
 +            Command::new("open")
