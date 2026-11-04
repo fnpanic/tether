@@ -140,3 +140,12 @@ Exit codes: [cli.md](cli.md#exit-codes).
 | "Allow admin access" does nothing useful | The customer has no admin rights and does not know admin credentials, or declined the UAC prompt | TetherQS keeps running without admin rights. Someone with admin credentials must confirm the prompt (over-the-shoulder credentials work). |
 | TetherQS update fails with "signature does not match" | The exe on the server does not match `latest.json` (upload in progress, or signed with another key) | Wait for the release upload to finish; if it persists, republish the release from Tether Manage |
 | Toggles for verbose logging or Send to support are missing | Policy `diagnostics.verbose-logging` / `diagnostics.upload` is off | Use **Export diagnostics**, or change the policy |
+
+## Connected, but "Waiting for the first image…" (Mac)
+
+The Mac has not allowed Tether (or TetherQS) to record its screen. This always happens after an
+update of the unsigned Mac app: macOS ties the permission to the app's signature, and the switch
+can still look on. On the Mac: **System Settings → Privacy & Security → Screen & System Audio
+Recording**, remove the app with −, add it again, quit and reopen it, connect again. Also check
+**Accessibility** (mouse and keyboard). Since 0.5.3 both apps show a warning with buttons for this,
+and the technician is told what is missing. See [macos.md](macos.md#permissions).

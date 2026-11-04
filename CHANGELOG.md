@@ -4,6 +4,24 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.5.3] — 2026-11-04
+
+### Fixed
+- **Mac host: "Waiting for the first image…" forever, with no reason given.** An updated
+  ad-hoc signed Mac app loses its Screen Recording permission (macOS ties it to the code
+  signature; the switch can still look on). The Mac then sends no picture, silently.
+  - The Mac host now checks Screen Recording and Accessibility when a session starts, lets
+    macOS show its prompt, and tells the technician what is missing.
+  - The technician's window says so ("The Mac does not share its screen yet") with the steps,
+    and after 8 s without a picture explains the likely cause for any host.
+  - Tether and TetherQS on a Mac show a banner while either permission is missing, with buttons
+    that open the right System Settings page.
+- **Mac: the Screen Recording prompt came back after every update although System Settings
+  showed it allowed.** CI now signs both Mac apps with one self-signed code-signing certificate
+  (repository secrets `MACOS_SIGNING_P12`, `MACOS_SIGNING_PASSWORD`), so macOS keeps the
+  permissions across updates. One last re-grant is needed when moving from an ad-hoc build
+  (`tccutil reset ScreenCapture app.tether.desktop` / `net.tether.quick`, docs/macos.md).
+
 ## [0.5.2] — 2026-11-04
 
 ### Fixed

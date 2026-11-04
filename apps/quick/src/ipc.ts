@@ -26,6 +26,8 @@ export interface State {
   version: string;
   elevated: boolean;
   blocked: boolean;
+  /** macOS only. */
+  mac: { screen: boolean; accessibility: boolean } | null;
   branding: {
     title: string;
     accent: string;
@@ -68,6 +70,7 @@ export const api = {
   permission: (id: number, name: string, enabled: boolean) => invoke("cm_permission", { id, name, enabled }),
   recordConsent: (connId: number, allow: boolean) => invoke("cm_record_consent", { connId, allow }),
   elevate: () => invoke("elevate"),
+  macFix: (which: "screen" | "accessibility") => invoke("mac_fix", { which }),
   installUpdate: () => invoke("update_install"),
   diagnostics: () => invoke<Diagnostics>("diagnostics"),
   diagnosticsProbe: (server: string) => invoke<Probe>("diagnostics_probe", { server }),

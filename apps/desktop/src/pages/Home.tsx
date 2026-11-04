@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Copy, Eye, EyeOff, FolderSync, Lock, MoreHorizontal, RefreshCw, Search, Settings as SettingsIcon, Trash2 } from "lucide-react";
-import { api, formatId, type Peer, type Status } from "../lib/ipc";
+import { api, formatId, invoke, type Peer, type Status } from "../lib/ipc";
 import { Button, IconButton, Logo, PlatformIcon, StatusDot, TitleBar, useToast } from "../components/ui";
 import { Settings } from "./Settings";
 import { UpdateCard } from "../components/UpdateCard";
@@ -172,6 +172,39 @@ function PeerCard({ p, onConnect, onRemove }: { p: Peer; onConnect: () => void; 
   );
 }
 
+/** A Mac that has not allowed Tether these sends a technician no picture / ignores input, silently. */
+function MacPermissions() {
+  const [m, setM] = useState<{ screen: boolean; accessibility: boolean } | null>(null);
+  useEffect(() => {
+    const load = () => invoke<{ screen: boolean; accessibility: boolean } | null>("mac_permissions").then(setM).catch(() => {});
+    load();
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, []);
+  if (!m || (m.screen && m.accessibility)) return null;
+  const fix = (which: string) => invoke("mac_fix", { which }).catch(() => {});
+  return (
+    <div role="alert" className="mb-6 rounded-2xl border border-warn/40 bg-warn/10 px-5 py-4">
+      <div className="text-callout font-semibold">{m.screen ? "A technician cannot control this Mac yet" : "A technician cannot see this Mac's screen yet"}</div>
+      <div className="mt-1 text-caption text-muted">
+        Allow {[!m.screen && "Screen Recording", !m.accessibility && "Accessibility"].filter(Boolean).join(" and ")} for Tether in System Settings, then quit and reopen Tether. After an update the switch can be on but stale: remove Tether there with − and add it again.
+      </div>
+      <div className="mt-3 flex gap-2">
+        {!m.screen && (
+          <Button size="sm" variant="secondary" onClick={() => fix("screen")}>
+            Open Screen Recording
+          </Button>
+        )}
+        {!m.accessibility && (
+          <Button size="sm" variant="secondary" onClick={() => fix("accessibility")}>
+            Open Accessibility
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function Home() {
   const { s, refresh } = useStatus();
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -206,6 +239,7 @@ export function Home() {
 
       <main className="min-h-0 flex-1 overflow-y-auto px-8 pb-12 pt-4">
         <div className="mx-auto max-w-[980px]">
+          <MacPermissions />
           <div className="grid grid-cols-1 gap-6 min-[834px]:grid-cols-[1.1fr_1fr]">
             <ThisDevice s={s} onToast={toast.show} onRefresh={refresh} />
             <ConnectBox peers={peers} onConnect={connect} />

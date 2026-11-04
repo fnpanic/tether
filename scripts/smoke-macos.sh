@@ -30,6 +30,15 @@ EOF
 swiftc -O -o "$work/windows" "$work/windows.swift" || { echo "error: swiftc failed"; exit 1; }
 
 fail=0
+# Signature: with a certificate (EXPECT_SIGNED=1) the designated requirement names it, so macOS keeps
+# Screen Recording / Accessibility across updates; ad-hoc ("cdhash") loses them on every update.
+for app in Tether.app TetherQS.app; do
+  dr=$(codesign -d -r- "$work/$app" 2>&1 | grep designated || true)
+  echo "== $app signature: $(codesign -dv "$work/$app" 2>&1 | grep -E '^Authority=|Signature=adhoc' | head -1) | $dr"
+  if [ "${EXPECT_SIGNED:-}" = 1 ] && ! echo "$dr" | grep -q "certificate"; then
+    echo "FAIL: $app is not signed with the certificate"; fail=1
+  fi
+done
 check() { # app-name binary-name
   local app=$1 bin=$2
   local log="$OUT/$bin.out"

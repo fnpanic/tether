@@ -88,17 +88,47 @@ Security**. macOS asks for Screen Recording the first time the screen is shared;
 
 | Permission | Needed for | Without it |
 | --- | --- | --- |
-| **Screen Recording** (Screen & System Audio Recording) | Sharing the screen | The technician sees a black or frozen screen |
+| **Screen Recording** (Screen & System Audio Recording) | Sharing the screen | The technician waits for the first image forever (no picture is sent) |
 | **Accessibility** | Remote mouse and keyboard | View only; input is ignored |
 | Input Monitoring (only if listed) | Keyboard in some apps | Some keys do not arrive |
 | Microphone (optional) | Sending audio | No audio |
 
 After enabling Screen Recording macOS asks to quit and reopen the app; do that, then reconnect.
 
-Ad-hoc signed builds have a new code signature on every build, and macOS ties these permissions
-to the signature: **after an update the permissions must be granted again** (remove the old
-entry with `–` and add the app again if the switch is on but nothing works). A Developer ID
-signed build (`APPLE_SIGNING_IDENTITY`) keeps them across updates.
+macOS ties these permissions to the app's code signature. Ad-hoc signed builds get a new signature
+on every build: **after an update macOS asks again, although System Settings still shows the old
+entry as allowed** (that entry belongs to the previous build). Fix on the Mac, once per app:
+
+```sh
+tccutil reset ScreenCapture app.tether.desktop    # Tether
+tccutil reset ScreenCapture net.tether.quick      # TetherQS
+tccutil reset Accessibility app.tether.desktop
+tccutil reset Accessibility net.tether.quick
+```
+
+then quit and reopen the app and allow it once more (or remove the entries with − in System
+Settings and add the apps again).
+
+**Stable signature (from 0.5.3, free):** CI signs both apps with one self-signed code-signing
+certificate (`Tether Code Signing`) when the repository secrets `MACOS_SIGNING_P12` (base64 of the
+.p12) and `MACOS_SIGNING_PASSWORD` exist. The designated requirement then names that certificate
+instead of one build's hash, so the permissions survive updates (one last re-grant when moving from
+an ad-hoc build). Gatekeeper still needs **Open Anyway** once (no Apple notarization), as before.
+The smoke test prints each app's signature and fails when the certificate was expected but not
+used. Without the secrets CI signs ad-hoc as before. The certificate and its key live only in the
+secrets and in the admin's own backup (not in the repository); renewing it means one more re-grant
+on every Mac. A Developer ID identity (`APPLE_SIGNING_IDENTITY` secret) takes precedence.
+
+What the apps do about it (0.5.3):
+
+- **On the Mac:** Tether (home page) and TetherQS show a warning while Screen Recording or
+  Accessibility is missing, with **Open Screen Recording** / **Open Accessibility** buttons
+  (macOS prompt, then the System Settings page).
+- **When a session starts** on a Mac without these permissions, the Mac asks again and tells the
+  technician. The technician's window shows "The Mac does not share its screen yet" with the
+  steps above; with only Accessibility missing, a message says that input is ignored.
+- Without that message (an older Mac app), the technician's window explains the likely cause
+  after 8 s without a picture.
 
 ## Publish with Tether Manage
 

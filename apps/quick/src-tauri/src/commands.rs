@@ -60,6 +60,44 @@ pub struct State {
     update: update::State,
     blocked: bool,
     clients: Vec<Value>,
+    /// macOS only: what the Mac allows TetherQS (None elsewhere).
+    mac: Option<MacPerms>,
+}
+
+#[derive(Serialize)]
+pub struct MacPerms {
+    /// Screen Recording: without it the technician gets no picture.
+    screen: bool,
+    /// Accessibility: without it mouse and keyboard are ignored.
+    accessibility: bool,
+}
+
+fn mac_perms() -> Option<MacPerms> {
+    cfg!(target_os = "macos").then(|| MacPerms { screen: api::is_can_screen_recording(false), accessibility: api::is_process_trusted(false) })
+}
+
+/// Let macOS ask, then open the matching System Settings page (the switch may be on but stale
+/// after an update: the user removes and re-adds the app there).
+#[tauri::command]
+fn mac_fix(which: String) -> R<()> {
+    let pane = match which.as_str() {
+        "screen" => {
+            api::is_can_screen_recording(true);
+            "Privacy_ScreenCapture"
+        }
+        "accessibility" => {
+            api::is_process_trusted(true);
+            "Privacy_Accessibility"
+        }
+        _ => return Err("unknown permission".into()),
+    };
+    if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+            .arg(format!("x-apple.systempreferences:com.apple.preference.security?{pane}"))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn branding() -> Branding {
@@ -135,6 +173,7 @@ fn state() -> State {
         update: update::state(),
         blocked: update::blocked(),
         clients: sink::clients(),
+        mac: mac_perms(),
     }
 }
 
@@ -288,5 +327,6 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         update_install,
         diagnostics,
         diagnostics_probe,
+        mac_fix,
     ]
 }

@@ -230,7 +230,7 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
   <li>The current builds are not notarized. On first start, Control-click the app → <strong>Open</strong> → <strong>Open</strong>. On macOS 15 and later, try once, then <strong>System Settings → Privacy &amp; Security → Open Anyway</strong>; macOS asks for an administrator password for that step (it changes a macOS security setting; Tether itself needs no admin rights). Without the password: <code>xattr -dr com.apple.quarantine /Applications/Tether.app</code> in Terminal.</li>
   <li>To be controlled remotely, allow <strong>Screen Recording</strong> and <strong>Accessibility</strong> in <strong>System Settings → Privacy &amp; Security</strong>, then quit and reopen Tether.</li>
 </ol>
-<div class="note warn"><strong>macOS permissions after updates.</strong> Ad-hoc signed builds get a new signature with every build, and macOS ties Screen Recording and Accessibility to it. After an update, grant them again (remove the old entry with “–” and add the app again if the switch is on but nothing works).</div>
+<div class="note warn"><strong>macOS asks for Screen Recording although it is allowed?</strong> macOS ties Screen Recording and Accessibility to the app's signature; builds before 0.5.3 had a new one with every update, so the entry you see belongs to the old version. In Terminal run <code>tccutil reset ScreenCapture app.tether.desktop</code> and <code>tccutil reset Accessibility app.tether.desktop</code> (TetherQS: <code>net.tether.quick</code>), quit and reopen the app and allow it once more. From 0.5.3 on, the Mac apps are signed with one fixed certificate and keep the permissions across updates. While a permission is missing, Tether and TetherQS show a warning with buttons that open the right settings page, and the technician is told what is missing instead of waiting for the first image.</div>
 
 <h2 id="tech-home">Your ID and password</h2>
 <p>The main window has two halves.</p>
@@ -562,7 +562,7 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <tr><td>TetherQS update: “signature does not match”</td><td>Upload still in progress, or signed with another key</td><td>Wait for the upload to finish; otherwise republish the release</td></tr>
 <tr><td>“This code is not valid or was already used.”</td><td>Typo, older than 24 h, or used</td><td>Create a new ticket</td></tr>
 <tr><td>“Your organisation does not allow sending diagnostics.”</td><td>Policy <code>diagnostics.upload</code> is off</td><td>Use <strong>Export diagnostics</strong> and another channel</td></tr>
-<tr><td>Mac: black screen or input ignored</td><td>Screen Recording or Accessibility not granted (or lost after an update)</td><td>Grant both again in System Settings → Privacy &amp; Security, then quit and reopen</td></tr>
+<tr><td>Mac: “Waiting for the first image…”, black screen or input ignored</td><td>Screen Recording or Accessibility not granted, or the entry is from an older build (macOS keeps asking although it looks allowed)</td><td><code>tccutil reset ScreenCapture app.tether.desktop</code> (TetherQS: <code>net.tether.quick</code>), same for <code>Accessibility</code>, quit and reopen, allow once more</td></tr>
 </tbody></table></div>
 <p>A bundle larger than 2 MiB is sent without logs and configuration; ask for an exported file in that case.</p>
 
