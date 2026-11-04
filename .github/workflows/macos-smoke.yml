@@ -1,0 +1,25 @@
+name: macos-smoke
+# Smoke test of an already built macOS artifact (no rebuild): window shown, no admin prompt.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id: { description: "desktop run whose tether-macos-universal artifact to test", required: true }
+jobs:
+  smoke:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tether-macos-universal
+          path: dist/macos
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Smoke test
+        shell: bash
+        run: bash scripts/smoke-macos.sh dist/macos
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tether-macos-smoke
+          path: dist/smoke/*
