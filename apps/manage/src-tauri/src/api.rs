@@ -53,6 +53,28 @@ pub async fn admin(server: &str, key: &SigningKey, method: &str, path: &str, bod
     finish(req.send().await).await
 }
 
+/// Signed `PUT` of a large file; `sent(bytes so far)` runs as the body goes out (256 KiB steps).
+pub async fn admin_upload(server: &str, key: &SigningKey, path: &str, body: Vec<u8>, content_type: &str, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<Vec<u8>, String> {
+    let sig = reqauth::sign_request(key, "PUT", path, &body, now());
+    let len = body.len();
+    let chunks: Vec<Vec<u8>> = body.chunks(256 * 1024).map(<[u8]>::to_vec).collect();
+    let mut done = 0u64;
+    // Lazy: a chunk is counted when the connection pulls it.
+    let stream = futures_util::stream::iter(chunks.into_iter().map(move |c| {
+        done += c.len() as u64;
+        sent(done);
+        Ok::<_, std::io::Error>(c)
+    }));
+    let req = client()
+        .put(url(server, path))
+        .header(reqauth::HEADER, sig)
+        .header("Content-Type", content_type)
+        // Explicit length: a streamed body would otherwise go out chunked.
+        .header("Content-Length", len)
+        .body(reqwest::Body::wrap_stream(stream));
+    finish(req.send().await).await
+}
+
 /// Unauthenticated GET (public `latest.json`, `/api/policy`). `Ok(None)` on 404.
 pub async fn public(server: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
     match finish(client().get(url(server, path)).send().await).await {
@@ -80,10 +102,7 @@ mod tests {
     use std::net::TcpListener;
 
     /// A one-shot HTTP server that checks the `Tether-Sig` header the way tether-api does.
-    #[test]
-    fn signed_request_is_accepted_by_verify_request() {
-        let key = tether_trust::generate_key();
-        let pk = key.verifying_key();
+    fn one_shot(pk: tether_trust::VerifyingKey) -> (String, std::thread::JoinHandle<(String, String, Vec<u8>)>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let server = format!("http://{}", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
@@ -114,10 +133,33 @@ mod tests {
             write!(&s, "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).unwrap();
             (method, path, body)
         });
+        (server, handle)
+    }
+
+    #[test]
+    fn signed_request_is_accepted_by_verify_request() {
+        let key = tether_trust::generate_key();
+        let (server, handle) = one_shot(key.verifying_key());
         let out = tauri::async_runtime::block_on(admin(&server, &key, "POST", "/api/admin/diag-ticket?x=1", br#"{"note":"hi"}"#.to_vec(), "application/json"));
         assert_eq!(out.unwrap(), b"{\"ok\":true}");
         let (m, p, b) = handle.join().unwrap();
         assert_eq!((m.as_str(), p.as_str(), b.as_slice()), ("POST", "/api/admin/diag-ticket?x=1", &br#"{"note":"hi"}"#[..]));
+    }
+
+    /// Streamed with a Content-Length (the test server reads exactly that), signed over the whole
+    /// body, and the progress ends at the full size.
+    #[test]
+    fn upload_streams_with_progress() {
+        let key = tether_trust::generate_key();
+        let (server, handle) = one_shot(key.verifying_key());
+        let data: Vec<u8> = (0..600_000u32).map(|i| i as u8).collect();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let out = tauri::async_runtime::block_on(admin_upload(&server, &key, "/api/admin/release/stable/x/a.exe", data.clone(), "application/octet-stream", move |n| s2.lock().unwrap().push(n)));
+        assert_eq!(out.unwrap(), b"{\"ok\":true}");
+        let (m, _, b) = handle.join().unwrap();
+        assert_eq!((m.as_str(), b == data), ("PUT", true));
+        assert_eq!(*seen.lock().unwrap(), [262_144, 524_288, 600_000]);
     }
 
     #[test]

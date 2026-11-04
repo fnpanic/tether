@@ -253,6 +253,12 @@ version) and, on `stable`, then rebuilds the download page with its saved title 
 macOS technician build without its `.dmg` next to it is skipped and marked. Use the form below
 for mandatory, forced or minimum-version releases.
 
+While it publishes, the sheet shows the build being signed or uploaded, the relay (**Relay 1 of
+2 · host**) and the file, with a progress bar (MB sent and percent), and below it every build ×
+relay that has finished, failed ones with their error. The same progress shows for **Sign and
+publish** and **Publish to missing relays**. The result lists per relay what it now publishes,
+or every error there.
+
 **What devices get** lists every channel × app × platform with:
 
 - **Latest**: the highest version uploaded to any relay (from `GET /api/admin/releases`);

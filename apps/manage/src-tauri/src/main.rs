@@ -13,7 +13,7 @@ use std::fs;
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tether_trust::custom::{self, CustomProfile};
 use tether_trust::policy::{self, Bundle, Effective, Layer};
 use tether_trust::{envelope, SigningKey, VerifyingKey};
@@ -528,9 +528,40 @@ struct Upload {
     pub_date: String,
 }
 
+/// Event `release-progress` for the publish sheet: one release (`dir`, `version`) going to one
+/// relay. `file` "" = signing; `done` = this relay is finished with it (failed if `error`).
+#[derive(Serialize, Clone)]
+struct Progress {
+    dir: String,
+    version: String,
+    server: String,
+    file: String,
+    sent: u64,
+    total: u64,
+    done: bool,
+    error: Option<String>,
+}
+
+impl Progress {
+    fn new(u: &Upload, server: &str, file: &str) -> Self {
+        Progress { dir: u.dir.clone(), version: u.version.clone(), server: server.to_owned(), file: file.to_owned(), sent: 0, total: 0, done: false, error: None }
+    }
+}
+
+fn emit(ui: &AppHandle, p: Progress) {
+    let _ = ui.emit("release-progress", p);
+}
+
+/// [`upload_release`] with its outcome reported as the relay's `done` event.
+async fn upload_release_reported(app: &App, ui: &AppHandle, server: &str, u: &Upload) -> R<String> {
+    let r = upload_release(app, ui, server, u).await;
+    emit(ui, Progress { done: true, error: r.as_ref().err().cloned(), ..Progress::new(u, server, "") });
+    r
+}
+
 /// Every node gets the files and its own manifest: its download URL points at itself, so a node
 /// can serve updates even when the others are down. Returns the update URL.
-async fn upload_release(app: &App, server: &str, u: &Upload) -> R<String> {
+async fn upload_release(app: &App, ui: &AppHandle, server: &str, u: &Upload) -> R<String> {
     let url = format!("{server}/download/{}/{}/{}", u.channel, u.dir, u.name);
     let new = release::platform_keys(&u.platform).iter().map(|k| (k.to_string(), release::Platform { signature: u.sig.clone(), url: url.clone() })).collect();
     // Read before writing: another OS's build of the same version in this manifest stays listed.
@@ -548,8 +579,12 @@ async fn upload_release(app: &App, server: &str, u: &Upload) -> R<String> {
     // Artifacts first, manifest last: clients never see a latest.json pointing at a missing file.
     for (f, bytes) in &u.files {
         let ct = if f.ends_with(".sig") { "text/plain" } else { "application/octet-stream" };
-        app.call_on(server, "PUT", &format!("{base}/{f}"), bytes.clone(), ct).await?;
+        let p = Progress { total: bytes.len() as u64, ..Progress::new(u, server, f) };
+        emit(ui, p.clone());
+        let ui = ui.clone();
+        api::admin_upload(server, &app.admin_key()?, &format!("{base}/{f}"), bytes.clone(), ct, move |sent| emit(&ui, Progress { sent, ..p.clone() })).await?;
     }
+    emit(ui, Progress::new(u, server, "latest.json"));
     app.call_on(server, "PUT", &format!("{base}/latest.json"), serde_json::to_vec_pretty(&manifest).unwrap(), "application/json").await?;
     Ok(url)
 }
@@ -567,7 +602,7 @@ fn release_files(kind: &str, platform: &str, version: &str, name: &str) -> Vec<S
 }
 
 #[tauri::command]
-async fn release_publish(app: State<'_, App>, args: ReleaseArgs) -> R<Vec<RelayResult>> {
+async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs) -> R<Vec<RelayResult>> {
     let a = args;
     if !release::valid_channel(&a.channel) {
         return Err("Channel: use 1-32 lowercase letters, digits or dashes.".into());
@@ -581,6 +616,8 @@ async fn release_publish(app: State<'_, App>, args: ReleaseArgs) -> R<Vec<RelayR
     let (dir, name) = release::target(&a.kind, &a.platform, &a.version)?;
     let data = fs::read(&a.file).map_err(|e| format!("Could not read the file: {e}"))?;
     let sign = |bytes: &[u8], file: &str| -> R<String> {
+        // No server yet: the sheet shows "Signing <file>".
+        emit(&ui, Progress { dir: dir.clone(), version: a.version.clone(), server: String::new(), file: file.to_owned(), sent: 0, total: bytes.len() as u64, done: false, error: None });
         let k = app.keys.lock().unwrap();
         k.as_ref().ok_or("Unlock the keys first.")?.sign_update(bytes, file, &a.version)
     };
@@ -611,7 +648,7 @@ async fn release_publish(app: State<'_, App>, args: ReleaseArgs) -> R<Vec<RelayR
     };
     let mut out = Vec::new();
     for server in app.servers() {
-        let r = upload_release(&app, &server, &u).await;
+        let r = upload_release_reported(&app, &ui, &server, &u).await;
         out.push(RelayResult::of(&server, r.map(|url| json!({ "url": url }))));
     }
     if let Some(e) = none_ok(&out) {
@@ -713,7 +750,7 @@ async fn releases_overview(app: State<'_, App>) -> R<Value> {
 /// whose `latest.json` has that version (signatures included, nothing is re-signed), and each
 /// target gets its own manifest pointing at itself.
 #[tauri::command]
-async fn release_sync(app: State<'_, App>, channel: String, kind: String, platform: String, version: String) -> R<Vec<RelayResult>> {
+async fn release_sync(app: State<'_, App>, ui: AppHandle, channel: String, kind: String, platform: String, version: String) -> R<Vec<RelayResult>> {
     if !release::valid_channel(&channel) || !release::valid_version(&version) {
         return Err("invalid channel or version".into());
     }
@@ -753,7 +790,7 @@ async fn release_sync(app: State<'_, App>, channel: String, kind: String, platfo
     };
     let mut out = Vec::new();
     for sv in &servers {
-        let r = if targets.contains(sv) { upload_release(&app, sv, &u).await.map(|url| json!({ "url": url })) } else { Ok(json!({ "already": true })) };
+        let r = if targets.contains(sv) { upload_release_reported(&app, &ui, sv, &u).await.map(|url| json!({ "url": url })) } else { Ok(json!({ "already": true })) };
         out.push(RelayResult::of(sv, r));
     }
     Ok(out)

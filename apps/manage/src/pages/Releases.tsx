@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
-import { ChevronRight, RefreshCw, Trash2 } from "lucide-react";
+import { Check, ChevronRight, RefreshCw, Trash2, X } from "lucide-react";
 import { useApp } from "../App";
-import { api, bytes, host, invoke, when, type RelayResult } from "../lib/ipc";
+import { api, bytes, host, inTauri, invoke, when, type RelayResult } from "../lib/ipc";
+import { idle, percent, track, type Progress } from "../lib/progress";
 import { PublishSheet } from "../components/publish";
 import { groupReleases, type ReleaseGroup } from "../lib/releases";
 import { Badge, Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Table, TextArea, TextField, Toggle } from "../components/ui";
@@ -37,6 +39,63 @@ const fileName = (kind: Kind, platform: Platform, v: string) =>
 
 const APP: Record<Kind, string> = { technician: "Technician app", customer: "Customer module" };
 const OS: Record<Platform, string> = { "windows-x86_64": "Windows", "darwin-universal": "macOS" };
+
+const release = (p: Progress) => {
+  const [kind, platform] = p.dir.split("/") as [Kind, Platform];
+  return `${APP[kind] ?? kind} for ${OS[platform] ?? platform} ${p.version}`;
+};
+
+/** Live view of a release upload (events from release_publish / release_sync). */
+function UploadProgress() {
+  const { state } = useApp();
+  const [s, setS] = useState(idle);
+  useEffect(() => {
+    if (!inTauri) return;
+    const un = listen<Progress>("release-progress", (e) => setS((s) => track(s, e.payload)));
+    return () => void un.then((f) => f());
+  }, []);
+  const c = s.current;
+  const n = state.servers.length;
+  return (
+    <div className="mt-4 rounded-xl border border-hairline p-3" aria-live="polite">
+      {!c ? (
+        <p className="text-caption text-muted">Working…</p>
+      ) : (
+        <>
+          <p className="text-callout font-semibold">{release(c)}</p>
+          <p className="mt-1 text-caption text-muted">
+            {!c.server
+              ? `Signing ${c.file}…`
+              : `Relay ${state.servers.indexOf(c.server) + 1} of ${n} · ${host(c.server)} · ${c.file === "latest.json" ? "writing latest.json" : `uploading ${c.file}`}`}
+          </p>
+          {c.server && c.total > 0 && (
+            <>
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-tile-2" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent(c)}>
+                <div className="h-full rounded-full bg-accent" style={{ width: `${percent(c)}%` }} />
+              </div>
+              <p className="mt-1 text-footnote text-muted">
+                {bytes(c.sent)} of {bytes(c.total)} · {percent(c)}%
+              </p>
+            </>
+          )}
+        </>
+      )}
+      {s.finished.length > 0 && (
+        <ul className="mt-3 flex flex-col gap-1">
+          {s.finished.map((f, i) => (
+            <li key={i} className="flex items-start gap-2 text-caption">
+              {f.error ? <X size={16} className="mt-0.5 shrink-0 text-danger" aria-label="Failed" /> : <Check size={16} className="mt-0.5 shrink-0 text-ok" aria-label="Done" />}
+              <span>
+                {release(f)} · <span className="font-semibold">{host(f.server)}</span>
+              </span>
+              {f.error && <span className="min-w-0 flex-1 select-text text-danger">{f.error}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 /** What a relay publishes for one release row, as a badge. */
 function Published({ r, latest }: { r: OverviewRow["relays"][number]; latest: string }) {
@@ -100,6 +159,7 @@ function Overview() {
         <PublishSheet
           title={`Publish ${sync.latest} to the missing relays`}
           action="Copy and publish"
+          progress={<UploadProgress />}
           onClose={() => {
             setSync(null);
             load();
@@ -169,10 +229,11 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
 
   /** Every release, then the page; one result row per relay, failed if anything failed there. */
   const publishAll = async (): Promise<RelayResult[]> => {
-    const per = new Map<string, string[]>(state.servers.map((sv) => [sv, []]));
-    const add = (server: string, err?: string) => {
-      if (!per.has(server)) per.set(server, []);
-      if (err) per.get(server)!.push(err);
+    const per = new Map<string, { errs: string[]; done: string[] }>(state.servers.map((sv) => [sv, { errs: [], done: [] }]));
+    const add = (server: string, what: string, err?: string) => {
+      if (!per.has(server)) per.set(server, { errs: [], done: [] });
+      if (err) per.get(server)!.errs.push(`${what}: ${err}`);
+      else per.get(server)!.done.push(what);
     };
     for (const b of todo) {
       const label = `${APP[b.kind]} ${OS[b.platform]} ${b.version}`;
@@ -180,9 +241,9 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
         const r = await invoke<RelayResult[]>("release_publish", {
           args: { file: b.file, kind: b.kind, platform: b.platform, channel: channel.trim(), version: b.version, notes, mandatory: false, minimum_version: "", forced: false },
         });
-        r.forEach((x) => add(x.server, x.ok ? undefined : `${label}: ${x.error}`));
+        r.forEach((x) => add(x.server, label, x.ok ? undefined : x.error));
       } catch (e: any) {
-        state.servers.forEach((sv) => add(sv, `${label}: ${e.message}`));
+        state.servers.forEach((sv) => add(sv, label, e.message));
       }
     }
     if (page && stable) {
@@ -194,12 +255,13 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
           customer: s.page_customer ?? true,
         });
         const r = await invoke<RelayResult[]>("page_publish", { html });
-        r.forEach((x) => add(x.server, x.ok ? undefined : `Download page: ${x.error}`));
+        r.forEach((x) => add(x.server, "Download page", x.ok ? undefined : x.error));
       } catch (e: any) {
-        state.servers.forEach((sv) => add(sv, `Download page: ${e.message}`));
+        state.servers.forEach((sv) => add(sv, "Download page", e.message));
       }
     }
-    const results = [...per].map(([server, errs]): RelayResult => ({ server, ok: !errs.length, error: errs.join("; ") || undefined, detail: null }));
+    // Failed relays list every error; the others what they now publish.
+    const results = [...per].map(([server, { errs, done }]): RelayResult => ({ server, ok: !errs.length, error: errs.join("; ") || undefined, detail: { published: done } }));
     if (results.every((r) => r.ok)) toast(`Published ${[...new Set(todo.map((b) => b.version))].join(", ")}`);
     return results;
   };
@@ -260,6 +322,7 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
         <PublishSheet
           title="Publish the latest builds"
           action="Sign and publish"
+          progress={<UploadProgress />}
           onClose={() => {
             setReviewing(false);
             scan();
@@ -420,6 +483,7 @@ export function Releases() {
         <PublishSheet
           title="Sign and publish release"
           action="Sign and publish"
+          progress={<UploadProgress />}
           onClose={() => {
             setReviewing(false);
             setRound((r) => r + 1);

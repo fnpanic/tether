@@ -1,12 +1,12 @@
 {
   "name": "tether-manage",
   "private": true,
-  "version": "0.5.2",
+  "version": "0.5.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "node --test src/lib/releases.test.ts",
+    "test": "node --test src/lib/releases.test.ts src/lib/progress.test.ts",
     "tauri": "tauri"
   },
   "dependencies": {

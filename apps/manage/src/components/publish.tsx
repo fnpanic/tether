@@ -22,6 +22,7 @@ export function RelayResults({ results, ok = describe }: { results: RelayResult[
 
 function describe(r: RelayResult) {
   if (r.detail?.already) return "Already up to date";
+  if (r.detail?.published?.length) return r.detail.published.join(" · ");
   if (r.detail?.serial != null) return `Serial ${r.detail.serial} is live`;
   return "Done";
 }
@@ -62,6 +63,7 @@ export function PublishSheet({
   after,
   onClose,
   warning,
+  progress,
 }: {
   title: string;
   children?: ReactNode;
@@ -71,6 +73,8 @@ export function PublishSheet({
   onClose: () => void;
   /** Blocks nothing; shown above the targets. */
   warning?: ReactNode;
+  /** Shown while publishing (e.g. upload progress); mounted, hidden, while reviewing. */
+  progress?: ReactNode;
 }) {
   const [check, setCheck] = useState<RelayResult[] | null>(null);
   const [anyway, setAnyway] = useState(false);
@@ -126,6 +130,8 @@ export function PublishSheet({
               </span>
             </label>
           )}
+          {/* Mounted from the start so it already listens when the first event comes. */}
+          {progress && <div hidden={phase !== "busy"}>{progress}</div>}
           <div className="mt-3">
             <ErrorText error={error} />
           </div>

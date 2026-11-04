@@ -6,6 +6,14 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [0.5.4] — 2026-11-04
 
+### Added
+- **Tether Manage 0.5.3: progress while publishing releases.** Publish the latest builds, Sign
+  and publish and Publish to missing relays used to show only "Publishing…" for minutes while
+  30–40 MB files went to every relay. The sheet now shows which build is being signed or
+  uploaded, to which relay (1 of 2) and which file, with a progress bar in MB and percent, and
+  lists each finished build × relay with its error as it happens. The result lists per relay
+  what it now publishes (or every error).
+
 ### Fixed
 - **Mac: "cannot see this screen yet" and the Screen Recording prompt kept coming back
   although System Settings showed the app as allowed.** The switch belonged to the earlier
