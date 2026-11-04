@@ -4,6 +4,42 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.5.0] — 2026-11-04
+
+Branded TetherQS downloads, a much clearer Tether Manage, and HTML documentation.
+
+### Added
+- **Custom TetherQS apps.** Tether Manage creates a branded TetherQS (name, logo, accent colour,
+  welcome text, customer settings) signed with the admin key, and a private download link
+  `https://<relay>/q/<token>` (256-bit random, expires after at most 366 days, revocable, new link
+  on demand, download counter). TetherQS verifies the signature itself; a damaged or foreign
+  profile runs as plain TetherQS. Self-updates keep the branding. Windows only. See
+  `docs/api.md` ("Custom apps") and `docs/quick-support.md`.
+- **Live policy view** in Tether Manage: what each relay serves now (serial, time, signature check),
+  effective values per profile with their source, and the draft ↔ live difference.
+- **Devices filters:** active today (since local midnight), OS family, version, profile, group;
+  devices from all relays merged; "stale" badge when a device runs an older policy serial.
+- **Releases overview:** per channel × app × platform which version is published on each relay and
+  which is the latest; "Publish to missing relays" copies a release to relays that lack it.
+- HTML documentation: `docs/site/index.html` (user guide) and `docs/site/architecture.html`
+  (architecture with diagrams).
+
+### Changed
+- **Publishing in Tether Manage** is one flow: a status bar on every screen ("Draft has N changes ·
+  Live: serial S on X/Y relays"), one **Publish…** button, a review sheet listing the changes and
+  checking every relay, then a per-relay result that is only ✓ once the relay serves the new
+  serial, and a live count of devices that picked it up. Warns when the policy names a relay that
+  is not in the relay list. The relay list is a setting on "Status and relays".
+- Policy editor: selected state filled in the accent colour, changed features marked, "Changed
+  only" / "Not published" filters. Selections, tabs, toggles and focus rings are clearly visible
+  throughout Tether Manage, light and dark.
+- Download page: one card per app with one download button; signatures and updater archives under
+  "More files".
+- TetherQS masks the one-time password by default (eye to show, copy still works).
+
+### Fixed
+- CI: patches apply on Windows runners (LF), macOS links (VRAM encoding Windows-only, clang runtime).
+
 ## [0.4.0] — 2026-11-04
 
 Faster, steadier sessions, a working toolbar and file transfer, and relays that keep sessions
