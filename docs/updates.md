@@ -89,8 +89,10 @@ Unsigned builds lose their Screen Recording / Accessibility permissions with eve
 
 ## TetherQS (portable self-update)
 
-TetherQS has no installer. At start and every `update.check-hours` (only if `update.enabled`) it
-reads `…/customer/windows-x86_64/latest.json`. If the version is newer:
+TetherQS has no installer. At start, every `update.check-hours` (only if `update.enabled`; after a
+failed check again in 15 minutes) and on **Help → Check for updates** it reads
+`…/customer/windows-x86_64/latest.json` from each server in turn (first one with a release wins).
+If the version is newer:
 
 1. Download the exe (HTTPS only, at most 200 MiB).
 2. Verify its minisign signature (`platforms["windows-x86_64"].signature`, base64 of the `.sig`

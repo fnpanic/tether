@@ -4,6 +4,19 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Fixed
+- **TetherQS did not notice a release published while it was running.** It checked only at start
+  and then every `update.check-hours` (6 h), with no way to check by hand and no result shown.
+  **Help → Check for updates** now checks at once and shows the result (up to date, version
+  available, or why the check failed per server); Help also shows the result of the automatic
+  check. A failed check is retried after 15 minutes instead of 6 hours.
+- **TetherQS asked only the first relay for updates.** It now asks each relay in turn; the first
+  one with a release wins, so a relay that is down no longer hides the update.
+- **"Updating…" showed no progress** while the 35 MB download ran (a minute or more at the relays'
+  speed); the button now shows the percentage. The download is also capped while streaming.
+
 ## [0.5.4] — 2026-11-04
 
 ### Added

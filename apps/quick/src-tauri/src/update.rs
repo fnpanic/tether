@@ -57,9 +57,13 @@ pub struct State {
     pub forced_at: Option<u64>,
     pub installing: bool,
     pub error: Option<String>,
+    /// Result of the last check, for the help page.
+    pub last_check: Option<String>,
+    /// Download progress while installing: `[bytes, total]` (total 0 = unknown).
+    pub progress: Option<[u64; 2]>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { available: None, notes: String::new(), required: false, forced_at: None, installing: false, error: None });
+static STATE: Mutex<State> = Mutex::new(State { available: None, notes: String::new(), required: false, forced_at: None, installing: false, error: None, last_check: None, progress: None });
 static MANIFEST: Mutex<Option<Manifest>> = Mutex::new(None);
 
 pub fn state() -> State {
@@ -221,20 +225,77 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn check() -> Result<(), String> {
-    let eff = policy::current();
-    let base = policy::base_url().ok_or("no server")?;
-    let channel = eff.get("update.channel");
-    // Same rule as the technician app and the relay: [a-z0-9-]{1,32}.
-    let channel = if (1..=32).contains(&channel.len()) && channel.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') { channel } else { "stable" };
-    let resp = policy::http()?
-        .get(format!("{base}/download/{channel}/customer/{PLATFORM}/latest.json"))
-        .send()
-        .map_err(|e| e.to_string())?;
-    if resp.status().as_u16() == 404 {
-        return Ok(());
+/// Policy `update.channel`, or `stable` if it breaks the rule of the technician app and the relay:
+/// `[a-z0-9-]{1,32}`.
+fn channel(raw: &str) -> &str {
+    if (1..=32).contains(&raw.len()) && raw.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {
+        raw
+    } else {
+        "stable"
     }
-    let m: Manifest = resp.error_for_status().map_err(|e| e.to_string())?.json().map_err(|e| e.to_string())?;
+}
+
+fn manifest_url(base: &str, channel: &str) -> String {
+    format!("{base}/download/{channel}/customer/{PLATFORM}/latest.json")
+}
+
+/// The first server with a release wins. An unreachable server, or one without a release on the
+/// channel (`Ok(None)`, HTTP 404), passes on to the next. `Ok(None)`: no server has a release.
+fn first_manifest(urls: &[String], get: impl Fn(&str) -> Result<Option<Manifest>, String>) -> Result<Option<Manifest>, String> {
+    let mut errors = Vec::new();
+    let mut answered = false;
+    for u in urls {
+        match get(u) {
+            Ok(Some(m)) => return Ok(Some(m)),
+            Ok(None) => answered = true,
+            Err(e) => errors.push(format!("{}: {e}", u.split('/').nth(2).unwrap_or(u))),
+        }
+    }
+    if answered {
+        Ok(None)
+    } else if errors.is_empty() {
+        Err("no server".into())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn get_manifest(client: &reqwest::blocking::Client, url: &str) -> Result<Option<Manifest>, String> {
+    let resp = client.get(url).send().map_err(|e| crate::commands::with_causes(&e))?;
+    match resp.status().as_u16() {
+        404 => Ok(None),
+        200 => resp.json().map(Some).map_err(|e| format!("invalid update manifest: {e}")),
+        s => Err(format!("HTTP {s}")),
+    }
+}
+
+/// One check against every server (first with a release wins). Returns the text for
+/// "Check for updates"; the same text (or the error) is kept in the state for the help page.
+pub fn check() -> Result<String, String> {
+    let r = check_inner();
+    STATE.lock().unwrap().last_check = Some(match &r {
+        Ok(t) => t.clone(),
+        Err(e) => format!("Check failed: {e}"),
+    });
+    r
+}
+
+fn check_inner() -> Result<String, String> {
+    let eff = policy::current();
+    if PUBKEY.is_none() {
+        return Err("updates are not configured in this build".into());
+    }
+    if !eff.on("update.enabled") {
+        return Ok("Your organisation installs updates for you.".into());
+    }
+    let channel = channel(eff.get("update.channel"));
+    let client = policy::http()?;
+    let urls: Vec<String> = policy::base_urls().iter().map(|b| manifest_url(b, channel)).collect();
+    let Some(m) = first_manifest(&urls, |u| get_manifest(&client, u))? else {
+        *MANIFEST.lock().unwrap() = None;
+        STATE.lock().unwrap().available = None;
+        return Ok(format!("TetherQS {VERSION} is up to date (no release on channel \"{channel}\")."));
+    };
     let (newer, required) = evaluate(VERSION, &m, eff.get("update.minimum-version"));
     let auto = newer && (m.forced || (required && eff.on("update.force")));
     {
@@ -253,8 +314,9 @@ fn check() -> Result<(), String> {
             });
         }
     }
+    let text = if newer { format!("Version {} is available (this is {VERSION}).", m.version) } else { format!("TetherQS {VERSION} is up to date.") };
     *MANIFEST.lock().unwrap() = newer.then_some(m);
-    Ok(())
+    Ok(text)
 }
 
 /// Download, verify, swap and relaunch. Only returns on failure.
@@ -266,15 +328,26 @@ pub fn install() -> Result<(), String> {
             return Err("update URL must be https".to_owned());
         }
         STATE.lock().unwrap().installing = true;
-        let bytes = policy::http()?
+        let mut resp = policy::http()?
             .get(&p.url)
             .timeout(Duration::from_secs(600))
             .send()
             .and_then(|r| r.error_for_status())
-            .and_then(|r| r.bytes())
-            .map_err(|e| format!("download failed: {e}"))?;
-        if bytes.len() > MAX_EXE {
-            return Err("update too large".into());
+            .map_err(|e| format!("download failed: {}", crate::commands::with_causes(&e)))?;
+        // Relays serve a few hundred KB/s: show progress, the download can take minutes.
+        let total = resp.content_length().unwrap_or(0);
+        let mut bytes = Vec::with_capacity((total as usize).min(MAX_EXE));
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let n = io::Read::read(&mut resp, &mut buf).map_err(|e| format!("download failed: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buf[..n]);
+            if bytes.len() > MAX_EXE {
+                return Err("update too large".into());
+            }
+            STATE.lock().unwrap().progress = Some([bytes.len() as u64, total]);
         }
         verify(&bytes, &p.signature, PUBKEY.ok_or("no updater key in this build")?)?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -291,11 +364,12 @@ pub fn install() -> Result<(), String> {
     })();
     let mut s = STATE.lock().unwrap();
     s.installing = false;
+    s.progress = None;
     s.error = r.as_ref().err().cloned();
     r
 }
 
-/// Check at start and every `update.check-hours` while `update.enabled`.
+/// Check at start and every `update.check-hours` (after a failed check: 15 minutes).
 pub fn spawn() {
     std::thread::spawn(|| {
         cleanup_old();
@@ -305,13 +379,19 @@ pub fn spawn() {
         }
         loop {
             let eff = policy::current();
-            if eff.on("update.enabled") {
-                if let Err(e) = check() {
-                    hbb_common::log::warn!("update check: {e}");
-                }
-            }
             let hours: u64 = eff.get("update.check-hours").parse().unwrap_or(6);
-            std::thread::sleep(Duration::from_secs(hours.max(1) * 3600));
+            let wait = match check() {
+                Ok(t) => {
+                    hbb_common::log::info!("update check: {t}");
+                    hours.max(1) * 3600
+                }
+                // No network yet or every server down: try again soon, not in `check-hours`.
+                Err(e) => {
+                    hbb_common::log::warn!("update check: {e}");
+                    15 * 60
+                }
+            };
+            std::thread::sleep(Duration::from_secs(wait));
         }
     });
 }
@@ -333,6 +413,49 @@ mod tests {
         assert_eq!(evaluate("0.3.0", &manifest("0.3.2", false, "0.3.1"), ""), (true, true));
         assert_eq!(evaluate("0.3.0", &manifest("0.3.0", false, ""), "0.3.1"), (false, true));
         assert_eq!(evaluate("0.3.1-test", &manifest("0.3.1", false, ""), ""), (true, false));
+    }
+
+    #[test]
+    fn manifest_urls_and_channel() {
+        assert_eq!(channel("beta-2"), "beta-2");
+        assert_eq!(channel(""), "stable");
+        assert_eq!(channel("Beta"), "stable");
+        assert_eq!(channel("../x"), "stable");
+        assert_eq!(channel(&"a".repeat(33)), "stable");
+        let platform = if cfg!(target_os = "macos") { "darwin-universal" } else { "windows-x86_64" };
+        assert_eq!(manifest_url("https://r1", "stable"), format!("https://r1/download/stable/customer/{platform}/latest.json"));
+    }
+
+    #[test]
+    fn first_server_with_a_release_wins() {
+        let urls = ["https://r1/x".to_owned(), "https://r2/x".to_owned()];
+        let got = |r1: Result<Option<&str>, &str>, r2: Result<Option<&str>, &str>| {
+            first_manifest(&urls, |u| {
+                let r = if u.starts_with("https://r1") { r1 } else { r2 };
+                r.map(|o| o.map(|v| manifest(v, false, ""))).map_err(str::to_owned)
+            })
+            .map(|m| m.map(|m| m.version))
+        };
+        assert_eq!(got(Ok(Some("1.0.0")), Ok(Some("2.0.0"))), Ok(Some("1.0.0".into())));
+        assert_eq!(got(Err("down"), Ok(Some("2.0.0"))), Ok(Some("2.0.0".into())));
+        assert_eq!(got(Ok(None), Ok(Some("2.0.0"))), Ok(Some("2.0.0".into())));
+        assert_eq!(got(Ok(None), Err("down")), Ok(None));
+        assert_eq!(got(Err("refused"), Err("timeout")), Err("r1: refused; r2: timeout".into()));
+        assert_eq!(first_manifest(&[], |_| Ok(None)).unwrap_err(), "no server");
+    }
+
+    /// Against the production relays (read-only): `cargo test -- --ignored prod_release`.
+    #[test]
+    #[ignore]
+    fn prod_release() {
+        let client = policy::http().unwrap();
+        for base in policy::base_urls() {
+            let m = get_manifest(&client, &manifest_url(&base, "stable")).unwrap().expect("no release");
+            let p = &m.platforms[PLATFORM];
+            let bytes = client.get(&p.url).timeout(Duration::from_secs(600)).send().unwrap().bytes().unwrap();
+            verify(&bytes, &p.signature, PUBKEY.unwrap()).unwrap();
+            println!("{base}: {} {} bytes, signature ok, newer than {VERSION}: {:?}", m.version, bytes.len(), evaluate(VERSION, &m, "").0);
+        }
     }
 
     #[test]

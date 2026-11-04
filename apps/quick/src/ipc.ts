@@ -42,7 +42,7 @@ export interface State {
     /** data: URL of the custom app's logo, "" = none. */
     logo: string;
   };
-  update: { available: string | null; notes: string; required: boolean; forced_at: number | null; installing: boolean; error: string | null };
+  update: { available: string | null; notes: string; required: boolean; forced_at: number | null; installing: boolean; error: string | null; last_check: string | null; progress: [number, number] | null };
   clients: Client[];
 }
 
@@ -71,6 +71,8 @@ export const api = {
   recordConsent: (connId: number, allow: boolean) => invoke("cm_record_consent", { connId, allow }),
   elevate: () => invoke("elevate"),
   macFix: (which: "screen" | "accessibility") => invoke("mac_fix", { which }),
+  /** Result text ("… is up to date", "Version … is available"); rejects with the reason. */
+  checkUpdate: () => invoke<string>("update_check"),
   installUpdate: () => invoke("update_install"),
   diagnostics: () => invoke<Diagnostics>("diagnostics"),
   diagnosticsProbe: (server: string) => invoke<Probe>("diagnostics_probe", { server }),

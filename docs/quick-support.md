@@ -98,10 +98,15 @@ defaults and make no policy/heartbeat requests.
 
 ## Updates (portable, no installer)
 
-At start and every `update.check-hours` (if `update.enabled`): fetch
+At start and every `update.check-hours` (if `update.enabled`; 15 minutes after a failed check),
+and when the customer clicks **Help → Check for updates**: fetch
 `https://<relay>/download/<update.channel>/customer/windows-x86_64/latest.json` (macOS:
 `…/customer/darwin-universal/latest.json`, a zipped `.app`, see [updates.md](updates.md)) (Tauri
-updater format, docs/api.md). If the version is newer:
+updater format, docs/api.md) from each server in turn; the first one with a release wins, an
+unreachable one or one without a release (`404`) passes on to the next. Help shows the result of
+the last check ("… is up to date", "Version … is available", or "Check failed: <server>: <reason>").
+A TetherQS that was already running when a release was published sees it only at its next check:
+use **Check for updates** or restart it. If the version is newer:
 
 - The exe is downloaded (https only, ≤ 200 MiB) and its minisign signature is verified against the
   compiled-in `TETHER_UPDATER_PUB_KEY` (Tauri format: `signature` is base64 of the `.sig` file text;
@@ -114,7 +119,8 @@ updater format, docs/api.md). If the version is newer:
   running version make the update **required**: the backend closes incoming connections and the
   Accept button is disabled until it is installed.
 - `forced` (or a required update with policy `update.force`) installs automatically after
-  `update.restart-seconds`; otherwise the customer clicks **Update**.
+  `update.restart-seconds`; otherwise the customer clicks **Update**. The button shows the download
+  in percent (the relays serve a few hundred KB/s, so the 35 MB exe can take a minute or two).
 
 Publishing: upload `TetherQS.exe` and `TetherQS.exe.sig` (signed with the updater key, e.g.
 `tauri signer sign`), then `latest.json` with `platforms["windows-x86_64"] = {signature, url}`.

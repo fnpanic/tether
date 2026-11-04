@@ -61,7 +61,7 @@ export function App() {
       <TitleBar title={s.branding.title} logo={s.branding.logo} onHelp={s.branding.diagnostics ? () => setHelp(!help) : undefined} helpOpen={help} />
       <div className="flex min-h-0 flex-1 flex-col px-6 pb-5">
         {help ? (
-          <Help customApp={s.branding.custom_app} status={s.status} onBack={() => setHelp(false)} />
+          <Help customApp={s.branding.custom_app} status={s.status} lastCheck={s.update.last_check} onBack={() => setHelp(false)} />
         ) : (
           <>
             <UpdateBanner s={s} />
@@ -383,7 +383,7 @@ function UpdateBanner({ s }: { s: State }) {
       </div>
       {u.available && (
         <button className="shrink-0 text-caption text-accent disabled:opacity-40" disabled={u.installing} onClick={() => api.installUpdate()}>
-          {u.installing ? "Updating…" : "Update"}
+          {u.installing ? (u.progress?.[1] ? `Updating… ${Math.floor((100 * u.progress[0]) / u.progress[1])} %` : "Updating…") : "Update"}
         </button>
       )}
     </div>
@@ -418,7 +418,7 @@ function Footer({ s, onError }: { s: State; onError: (m: string) => void }) {
   );
 }
 
-function Help({ customApp, status, onBack }: { customApp: string | null; status: number; onBack: () => void }) {
+function Help({ customApp, status, lastCheck, onBack }: { customApp: string | null; status: number; lastCheck: string | null; onBack: () => void }) {
   const [d, setD] = useState<Diagnostics | null>(null);
   const [err, setErr] = useState("");
   // Per server; missing = checking. The local rows never wait for it.
@@ -441,6 +441,7 @@ function Help({ customApp, status, onBack }: { customApp: string | null; status:
     ? [
         ...(customApp ? ([["Custom app", customApp]] as [string, ReactNode][]) : []),
         ["Version", d.version],
+        ["Updates", <UpdateCheck last={lastCheck} />],
         ["ID", formatId(d.id)],
         ["Connection", status === 1 ? "Ready" : status === 0 ? "Connecting to the server…" : "Offline"],
         ...(d.servers.length ? d.servers : [""]).map((sv, i): [string, ReactNode] => [
@@ -486,6 +487,34 @@ function Help({ customApp, status, onBack }: { customApp: string | null; status:
       </Card>
       <p className="mt-4 text-footnote text-muted">Admin prompts (UAC) are only visible to your technician after you allow admin access.</p>
     </div>
+  );
+}
+
+/** "Check for updates": the last result (also of the automatic check) and a button to check now. */
+function UpdateCheck({ last }: { last: string | null }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const check = () => {
+    setBusy(true);
+    setErr(null);
+    api.checkUpdate().then(
+      () => setBusy(false),
+      (e) => {
+        setErr(`Check failed: ${e}`);
+        setBusy(false);
+      },
+    );
+  };
+  const text = busy ? "Checking…" : (err ?? last ?? "Not checked yet");
+  return (
+    <span className="flex flex-col gap-0.5">
+      <span data-testid="qs-update-check" className={text.startsWith("Check failed") ? "text-danger" : "text-muted"}>
+        {text}
+      </span>
+      <button className="self-start text-accent disabled:opacity-40" disabled={busy} onClick={check}>
+        Check for updates
+      </button>
+    </span>
   );
 }
 

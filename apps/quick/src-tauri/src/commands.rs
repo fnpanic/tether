@@ -222,6 +222,12 @@ fn elevate() -> R<()> {
     crate::relaunch(&exe, true)
 }
 
+/// "Check for updates": the result text, or why the check failed.
+#[tauri::command]
+async fn update_check() -> R<String> {
+    tauri::async_runtime::spawn_blocking(update::check).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn update_install() {
     std::thread::spawn(|| {
@@ -266,7 +272,7 @@ struct Probe {
 }
 
 /// reqwest's message alone is "error sending request for url (…)": add the causes (refused, DNS, TLS, timeout).
-fn with_causes(e: &dyn std::error::Error) -> String {
+pub(crate) fn with_causes(e: &dyn std::error::Error) -> String {
     let mut s = e.to_string();
     let mut src = e.source();
     while let Some(c) = src {
@@ -306,6 +312,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         cm_permission,
         cm_record_consent,
         elevate,
+        update_check,
         update_install,
         diagnostics,
         diagnostics_probe,
