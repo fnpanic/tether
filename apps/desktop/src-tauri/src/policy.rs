@@ -205,8 +205,9 @@ fn apply(bundle: Option<Bundle>) -> bool {
     let mut st = STATE.write().unwrap();
     let changed = st.eff != eff;
     apply_core(&eff, &mut st.applied);
-    crate::netpolicy::apply_direct(eff.get(DIRECT));
+    // Servers first: apply_direct points STUN at every server.
     let servers_changed = apply_servers(&eff);
+    crate::netpolicy::apply_direct(eff.get(DIRECT));
     st.eff = eff;
     st.bundle = bundle;
     drop(st);

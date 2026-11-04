@@ -60,7 +60,7 @@ async function main() {
     // The one-time password changes after each session: read it again.
     if (qs) pw = ((await qs.locator('[data-testid="qs-password"]').getAttribute("data-password")) ?? "").trim();
     if (process.env.WRONG_PW) pw += "x"; // negative test: the direct path must refuse it
-    const env = { ...process.env, TETHER_PROFILE: "direct-tech", WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`, TETHER_E2E_PW: pw };
+    const env = { ...process.env, TETHER_PROFILE: process.env.TECH_PROFILE || "direct-tech", WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`, TETHER_E2E_PW: pw };
     const t0 = Date.now();
     execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", HIDDEN, "-Exe", TECH, "-Args", `--connect ${id} --password-env TETHER_E2E_PW ${process.env.EXTRA_ARGS || ""}`], { env, stdio: "ignore" });
     const vB = await until("technician devtools", () => chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`), 40000, 200);

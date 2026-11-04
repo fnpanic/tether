@@ -131,8 +131,9 @@ pub fn device_uuid() -> String {
 fn set(bundle: Option<&Bundle>) {
     let eff = resolved(bundle, &device_uuid());
     apply_core(&eff);
-    crate::netpolicy::apply_direct(eff.get(DIRECT));
+    // Servers first: apply_direct points STUN at every server.
     let servers_changed = apply_servers(&eff);
+    crate::netpolicy::apply_direct(eff.get(DIRECT));
     *EFFECTIVE.write().unwrap() = Some(eff);
     if servers_changed {
         librustdesk::ui::api::restart_rendezvous();

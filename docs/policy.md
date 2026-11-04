@@ -24,7 +24,7 @@ States per layer: `on` (user may change, `value` is the default), `off` (locked 
 | `connect.reconnect-minutes` | connections | Keep reconnecting after a connection loss (minutes) | `10` | technician, customer | – |
 | `settings.server` | connections | Allow changing the relay server | `N` | technician | – |
 | `servers.list` | connections | Additional relay servers (host names or wss:// URLs, comma-separated) | – | technician, customer | – |
-| `network.direct` | connections | Direct connections (same network) beside the relay (auto, off) | `auto` | technician, customer | – |
+| `network.direct` | connections | Direct connections (LAN, IPv6, NAT hole punching) beside the relay (auto, off) | `auto` | technician, customer | – |
 | `video.quality` | video | Default image quality (best, balanced, low) | `balanced` | technician | `image-quality` |
 | `video.codec` | video | Preferred codec (auto, h264, h265, av1, vp9, vp8) | `auto` | technician | `codec-preference` |
 | `recording.mode` | recording | Session recording (off, on-request, always) | `on-request` | technician | – |
@@ -54,6 +54,8 @@ States per layer: `on` (user may change, `value` is the default), `off` (locked 
 
 ## Direct connections (`network.direct`)
 
-`auto` (default): when a session starts, the viewer also asks the local network for the host (one UDP broadcast lookup on port 21119, answered only by a host with direct connections on, and only with its listener port) and races a direct TCP connection to it (port 21118) against the relay. The first path that completes the end-to-end key exchange wins; the host must prove the key the rendezvous server signed for its ID, and applies the same password / Accept / permissions as on the relay. When no host answers within 300 ms, or on corporate networks where the lookup cannot leave the PC, the session uses the relay exactly as before (no added delay). The session window shows the path: `Direct (LAN)` or `Relay`.
+`auto` (default): when a session starts, the viewer also asks the local network for the host (one UDP broadcast lookup on port 21119, answered only by a host with direct connections on, and only with its listener port) and races a direct TCP connection to it (port 21118) against the relay. The first path that completes the end-to-end key exchange wins; the host must prove the key the rendezvous server signed for its ID, and applies the same password / Accept / permissions as on the relay. When no host answers within 300 ms, or on corporate networks where the lookup cannot leave the PC, the session uses the relay exactly as before (no added delay). The session window shows the path: `Direct (LAN)`, `Direct (IPv6)`, `P2P` or `Relay`.
 
-A host listens only where that raises no firewall prompt: on Windows the installed Tether gets an inbound rule `Tether` (local subnet only) from its installer; TetherQS listens only when an admin created an inbound rule named `Tether QS` for it; on macOS only while the application firewall is off. `off`: never look up, never listen, always relay.
+Across networks (`auto`, no proxy on either side) the viewer also sends a WebRTC offer through the rendezvous WebSocket; ICE tries global IPv6 and NAT hole punching (STUN on UDP 21116 of our own relays, never a public STUN server). A ready relay waits at most 0.4 s for that attempt. With a proxy no offer is made or answered and the relay is used at once. Details: [relay-ha.md](relay-ha.md#ipv6-and-nat-hole-punching-webrtcice).
+
+A host listens only where that raises no firewall prompt: on Windows the installed Tether gets an inbound rule `Tether` (local subnet only) from its installer; TetherQS listens only when an admin created an inbound rule named `Tether QS` for it; on macOS only while the application firewall is off. `off`: never look up, never listen, no WebRTC offer (viewer) or answer (host), always relay.

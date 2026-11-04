@@ -2,10 +2,14 @@
 //! behind corporate proxies and zero-trust filters (e.g. Zscaler) that only allow HTTPS.
 //!
 //! - Rendezvous and relay run over `wss://<relay>/ws/id` and `wss://<relay>/ws/relay` (443).
-//! - No UDP to the internet: no STUN, NAT tests, hole punching or WebRTC/ICE.
-//! - Direct on the LAN (policy `network.direct`, default auto): the viewer asks the LAN for the
-//!   host (UDP broadcast lookup) beside the relay request and races a direct TCP connection
-//!   against the relay; the key exchange is the same on both, the first secured path wins.
+//! - Direct paths (policy `network.direct`, default auto), raced against the relay; the key
+//!   exchange is the same on every path, the first secured one wins:
+//!   - LAN: the viewer asks the LAN for the host (UDP broadcast lookup) beside the relay request
+//!     and tries a direct TCP connection.
+//!   - WebRTC/ICE (IPv6 direct, NAT hole punching): offer/answer/candidates travel over the
+//!     rendezvous WebSocket; STUN is the hbbs UDP port of our own relays. Never with a proxy
+//!     (the core checks per connection, both sides): ICE would leave past it.
+//!   - No legacy RustDesk UDP/IPv6 punch: it needs plain UDP/TCP rendezvous instead of 443.
 //! - Otherwise sessions are relayed (WebSocket mode forces relay); end-to-end encryption between the
 //!   two peers is unchanged, the relay and any TLS-inspecting proxy only see ciphertext.
 //! - The system proxy (env, Windows static/PAC/WPAD, macOS) is detected and used automatically;
@@ -23,9 +27,12 @@ pub fn apply() {
     for (k, v) in enforced(RELAY) {
         o.insert(k, v);
     }
+    // Every role, before policy (apply_direct adds policy servers): never the public STUN defaults.
+    o.insert("ice-servers".to_owned(), stun_servers(&hbb_common::config::own_rendezvous_servers()));
     drop(o);
     let mut l = OVERWRITE_LOCAL_SETTINGS.write().unwrap();
     for k in ["enable-webrtc", "enable-udp-punch", "enable-ipv6-punch"] {
+        // enable-webrtc follows policy network.direct (apply_direct).
         l.insert(k.to_owned(), "N".to_owned());
     }
     drop(l);
@@ -48,6 +55,28 @@ pub fn apply_direct(mode: &str) {
     let mut o = OVERWRITE_SETTINGS.write().unwrap();
     o.insert("tether-direct".to_owned(), if on { "Y" } else { "N" }.to_owned());
     o.insert("direct-server".to_owned(), if listen { "Y" } else { "N" }.to_owned());
+    o.insert("ice-servers".to_owned(), stun_servers(&hbb_common::config::own_rendezvous_servers()));
+    drop(o);
+    let mut l = OVERWRITE_LOCAL_SETTINGS.write().unwrap();
+    l.insert("enable-webrtc".to_owned(), if on { "Y" } else { "N" }.to_owned());
+    // Seconds a ready relay waits for a WebRTC attempt still in flight (core default 2.5 s).
+    l.insert("relay-fallback-delay".to_owned(), RELAY_HOLD_SECS.to_owned());
+}
+
+/// See `apply_direct`: long enough for ICE + DTLS after the relay is ready, short enough that a
+/// network that drops UDP costs little.
+const RELAY_HOLD_SECS: &str = "0.4";
+
+/// STUN on the hbbs UDP port (21116) of every rendezvous server: our own servers only, so no
+/// third party sees who connects (the core's public defaults apply only when this is empty).
+fn stun_servers(servers: &[String]) -> String {
+    servers
+        .iter()
+        .map(|s| tether_trust::policy::server_host(s.trim()))
+        .filter(|h| !h.is_empty())
+        .map(|h| format!("stun:{h}:21116"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// See apps/desktop netpolicy.rs. Checked once per process.
@@ -275,6 +304,12 @@ mod winhttp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stun_on_own_servers_only() {
+        let v = ["a.example", "wss://k.example/ws/id", "1.2.3.4:21116", ""].map(String::from);
+        assert_eq!(stun_servers(&v), "stun:a.example:21116,stun:k.example:21116,stun:1.2.3.4:21116");
+    }
 
     #[test]
     fn enforces_443_only_settings() {

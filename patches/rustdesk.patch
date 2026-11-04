@@ -153,7 +153,7 @@ index 137d648..c6fa75e 100644
                  return s;
              }
 diff --git a/src/client.rs b/src/client.rs
-index 597dc86..b8f0a8b 100644
+index 597dc86..da0fa80 100644
 --- a/src/client.rs
 +++ b/src/client.rs
 @@ -114,6 +114,8 @@ const MAX_DECODE_FAIL_COUNTER: usize = 3;
@@ -328,7 +328,7 @@ index 597dc86..b8f0a8b 100644
  /// Race WebRTC against the other transports, preferring P2P: `select_ok` would always pick the
  /// relay, whose TCP connect beats ICE + DTLS + SCTP by an order of magnitude. An `is_p2p` result
  /// wins outright; a relayed one — from either side, since `webrtc_fut` is a whole punch attempt
-@@ -487,6 +645,49 @@ impl Client {
+@@ -487,6 +645,67 @@ impl Client {
              }
          };
  
@@ -344,23 +344,41 @@ index 597dc86..b8f0a8b 100644
 +            all.insert(0, rendezvous_server);
 +            let all = order_servers(all, &LAST_GOOD_SERVER.lock().unwrap());
 +            log::info!("rendezvous servers: {:?}", all);
++            // Each attempt carries its own WebRTC offer (ICE: IPv6 direct, NAT hole punching);
++            // the attempt that loses closes its peer connection when it is dropped.
++            let webrtc = Self::should_create_webrtc_offerer(&interface);
++            let policy_relay = interface.is_policy_relay();
 +            let attempts = all
 +                .into_iter()
 +                .map(|server| {
-+                    let fut = Self::_start_inner(
-+                        peer.to_owned(),
-+                        key.to_owned(),
-+                        token.to_owned(),
-+                        conn_type,
-+                        interface.clone(),
-+                        (None, None),
-+                        None,
-+                        None,
-+                        None,
-+                        server.clone(),
-+                        Vec::new(),
-+                        true,
-+                    );
++                    let (peer, key, token, interface) =
++                        (peer.to_owned(), key.to_owned(), token.to_owned(), interface.clone());
++                    let server2 = server.clone();
++                    let fut = async move {
++                        let offerer = if webrtc {
++                            WebRTCStream::new("", policy_relay, CONNECT_TIMEOUT)
++                                .await
++                                .map_err(|e| log::warn!("webrtc offerer setup failed: {e}"))
++                                .ok()
++                        } else {
++                            None
++                        };
++                        Self::_start_inner(
++                            peer,
++                            key,
++                            token,
++                            conn_type,
++                            interface,
++                            (None, None),
++                            None,
++                            None,
++                            offerer,
++                            server2,
++                            Vec::new(),
++                            true,
++                        )
++                        .await
++                    };
 +                    async move {
 +                        let r = fut.await;
 +                        match &r {
@@ -378,7 +396,7 @@ index 597dc86..b8f0a8b 100644
          // Same relay gate as the v6 socket below: under any forced relay the v6 punch cannot
          // be used, so probing v6 reachability is wasted work on every such connection.
          if crate::get_ipv6_punch_enabled() && !interface.is_force_relay() {
-@@ -1072,6 +1273,7 @@ impl Client {
+@@ -1072,6 +1291,7 @@ impl Client {
                              }
                          }
                          signed_id_pk = rr.pk().into();
@@ -386,7 +404,29 @@ index 597dc86..b8f0a8b 100644
                          let mut webrtc_bridge_stop = None;
                          let mut webrtc_for_connect = None;
                          if !rr.webrtc_sdp_answer.is_empty() {
-@@ -1184,8 +1386,38 @@ impl Client {
+@@ -1172,6 +1392,21 @@ impl Client {
+                                 connect_futures.push(webrtc_fut);
+                                 select_ok(connect_futures).await.map(|r| r.0)
+                             } else {
++                                // Tether: a host found on the LAN races beside WebRTC.
++                                #[cfg(feature = "tauri")]
++                                let webrtc_fut = match lan_find(&peer) {
++                                    Some(find) => {
++                                        let lan = lan_attempt(
++                                            find,
++                                            peer.clone(),
++                                            key.clone(),
++                                            signed_id_pk.clone(),
++                                            lan_pk.clone(),
++                                        );
++                                        select_ok([webrtc_fut, lan]).map(|r| r.map(|(c, _)| c)).boxed()
++                                    }
++                                    None => webrtc_fut,
++                                };
+                                 // The peer answered WebRTC: prefer P2P. The relay result is held
+                                 // for the preference window so WebRTC can win even though a relay
+                                 // TCP connect completes much faster than ICE + DTLS setup.
+@@ -1184,8 +1419,38 @@ impl Client {
                                  .await
                              }
                          } else {
@@ -427,7 +467,7 @@ index 597dc86..b8f0a8b 100644
                          };
                          if let Some(stop) = webrtc_bridge_stop {
                              let _ = stop.send(());
-@@ -1195,7 +1427,12 @@ impl Client {
+@@ -1195,7 +1460,12 @@ impl Client {
                          let (mut conn, kcp, mut typ, mut direct) = race_result?;
                          feedback = rr.feedback;
                          log::info!("{:?} used to establish {typ} connection", start.elapsed());
@@ -441,7 +481,7 @@ index 597dc86..b8f0a8b 100644
                              &peer,
                              signed_id_pk.clone(),
                              &key,
-@@ -1249,6 +1486,7 @@ impl Client {
+@@ -1249,6 +1519,7 @@ impl Client {
                                  pk
                              }
                              Err(e) => return Err(e),
@@ -449,7 +489,7 @@ index 597dc86..b8f0a8b 100644
                          };
                          // `direct` came from the winning future, which resolved it while the pc was
                          // definitely alive — the race needed it to pick a winner at all.
-@@ -1697,7 +1935,14 @@ impl Client {
+@@ -1697,7 +1968,14 @@ impl Client {
                  return Ok(option_pk);
              }
          };
@@ -465,7 +505,7 @@ index 597dc86..b8f0a8b 100644
              Some(res) => {
                  let bytes = res?;
                  if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
-@@ -2851,6 +3096,8 @@ pub struct LoginConfigHandler {
+@@ -2851,6 +3129,8 @@ pub struct LoginConfigHandler {
      pub version: i64,
      features: Option<Features>,
      pub session_id: u64, // used for local <-> server communication
@@ -474,7 +514,7 @@ index 597dc86..b8f0a8b 100644
      pub supported_encoding: SupportedEncoding,
      restarting_remote_device: bool,
      // Start time of the restart grace window. On Windows the peer may briefly
-@@ -2972,6 +3219,7 @@ impl LoginConfigHandler {
+@@ -2972,6 +3252,7 @@ impl LoginConfigHandler {
              }
          }
          self.session_id = sid;
@@ -482,7 +522,7 @@ index 597dc86..b8f0a8b 100644
          self.supported_encoding = Default::default();
          self.clear_restarting_remote_device();
          // Three scopes: what was decided about this PEER, what this CLIENT is set up as (proxy),
-@@ -3002,6 +3250,12 @@ impl LoginConfigHandler {
+@@ -3002,6 +3283,12 @@ impl LoginConfigHandler {
          self.shared_password = shared_password;
          self.record_state = false;
          self.record_permission = true;
@@ -495,7 +535,7 @@ index 597dc86..b8f0a8b 100644
  
          // `std::env::remove_var("IS_TERMINAL_ADMIN");` is called in `session_add_sync()` - `flutter_ffi.rs`.
          let is_terminal_admin = conn_type == ConnType::TERMINAL
-@@ -3854,6 +4108,7 @@ impl LoginConfigHandler {
+@@ -3854,6 +4141,7 @@ impl LoginConfigHandler {
              my_platform,
              option: self.get_option_message(true).into(),
              session_id: self.session_id,
@@ -503,7 +543,7 @@ index 597dc86..b8f0a8b 100644
              version: crate::VERSION.to_string(),
              os_login,
              hwid,
-@@ -3951,6 +4206,17 @@ impl LoginConfigHandler {
+@@ -3951,6 +4239,17 @@ impl LoginConfigHandler {
          &self.id
      }
  
@@ -521,7 +561,7 @@ index 597dc86..b8f0a8b 100644
      pub fn get_key_terminal_service_id(&self) -> &'static str {
          if self.is_terminal_admin {
              "terminal-admin-service-id"
-@@ -4510,8 +4776,22 @@ pub fn handle_login_error(
+@@ -4510,8 +4809,22 @@ pub fn handle_login_error(
          interface.msgbox("input-password", "Password Required", "", "");
          true
      } else if err == LOGIN_MSG_PASSWORD_WRONG {
@@ -546,7 +586,7 @@ index 597dc86..b8f0a8b 100644
          true
      } else if err == LOGIN_MSG_2FA_WRONG || err == REQUIRE_2FA {
          let enabled = lc.read().unwrap().get_option("trust-this-device") == "Y";
-@@ -5043,6 +5323,19 @@ pub async fn confirm_insecure_connection(
+@@ -5043,6 +5356,19 @@ pub async fn confirm_insecure_connection(
      interface: &impl Interface,
      receiver: &mut UnboundedReceiver<Data>,
  ) -> bool {
@@ -566,7 +606,7 @@ index 597dc86..b8f0a8b 100644
      interface.msgbox(
          "insecure-connection-nocancel-hasclose",
          "Insecure Connection",
-@@ -5562,6 +5855,69 @@ async fn udp_nat_connect(
+@@ -5562,6 +5888,69 @@ async fn udp_nat_connect(
      Ok((res.1, Some(res.0), typ))
  }
  
@@ -911,7 +951,7 @@ index f6e48a1..600a09e 100644
  pub(crate) mod update_hash;
  #[cfg(target_os = "macos")]
 diff --git a/src/rendezvous_mediator.rs b/src/rendezvous_mediator.rs
-index b1e523d..7bbff3f 100644
+index b1e523d..d0a6345 100644
 --- a/src/rendezvous_mediator.rs
 +++ b/src/rendezvous_mediator.rs
 @@ -264,6 +264,18 @@ async fn wait_for_retry(delay: f32, restarted: tokio::sync::futures::Notified<'_
@@ -1112,7 +1152,17 @@ index b1e523d..7bbff3f 100644
      }
  
      async fn handle_intranet(&self, fla: FetchLocalAddr, server: ServerPtr) -> ResultType<()> {
-@@ -1341,7 +1417,7 @@ impl RendezvousMediator {
+@@ -1078,6 +1154,9 @@ impl RendezvousMediator {
+         let webrtc_viable = !ph.webrtc_sdp_offer.is_empty()
+             && !Config::is_proxy()
+             && (!webrtc_relay_only || WebRTCStream::has_turn_server());
++        // Tether: policy network.direct = off keeps this host on the relay.
++        #[cfg(feature = "tauri")]
++        let webrtc_viable = webrtc_viable && crate::client::direct_enabled();
+         let webrtc_sdp_answer = if webrtc_viable {
+             self.spawn_webrtc_answerer(
+                 &ph,
+@@ -1341,7 +1420,7 @@ impl RendezvousMediator {
      }
  }
  
@@ -1121,7 +1171,7 @@ index b1e523d..7bbff3f 100644
      let mut port = Config::get_option("direct-access-port")
          .parse::<i32>()
          .unwrap_or(0);
-@@ -1404,7 +1480,8 @@ async fn direct_server(server: ServerPtr) {
+@@ -1404,7 +1483,8 @@ async fn direct_server(server: ServerPtr) {
                              server,
                              hbb_common::Stream::from(stream, local_addr),
                              addr,
@@ -1131,7 +1181,7 @@ index b1e523d..7bbff3f 100644
                              ConnectionMeta::default(), // Direct connections don't have server-side user context.
                          )
                          .await
-@@ -1737,6 +1814,17 @@ mod tests {
+@@ -1737,6 +1817,17 @@ mod tests {
      };
      use hbb_common::protobuf::Message as _;
  

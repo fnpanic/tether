@@ -99,3 +99,30 @@ ssh -i ~/.ssh/tether_oracle opc@tether-desk.duckdns.org
 sudo systemctl status tether-hbbs tether-hbbr tether-https tether-api tether-ddns.timer
 sudo journalctl -u tether-hbbs -f
 ```
+
+## Update: hbbs with WebRTC signalling and STUN (direct IPv6 / NAT hole punching)
+
+Only `hbbs` changes (bundle `dist/linux-relay-p2p`, `SHA256SUMS` beside it). No firewall, OCI,
+key, `api.env` or Caddy change: the STUN responder uses UDP 21116, which firewalld and the OCI
+security list (`Default Security List for vcn-20261103-1048`, ingress `udp 0.0.0.0/0 21116`)
+already open on both relays. Relayed sessions do not use hbbs and keep running; hosts
+re-register within seconds. One relay at a time, relay 2 first:
+
+```bash
+# from the PC, Git Bash, in C:\install\remote-support
+sha256sum dist/linux-relay-p2p/bin/hbbs   # must match dist/linux-relay-p2p/SHA256SUMS
+for ip in 92.5.231.71 158.101.205.185; do
+  scp -i ~/.ssh/tether_oracle dist/linux-relay-p2p/bin/hbbs opc@$ip:/tmp/hbbs.new
+  ssh -i ~/.ssh/tether_oracle opc@$ip 'set -e
+    sudo cp -p /usr/local/bin/hbbs /usr/local/bin/hbbs.bak-0.5
+    sudo install -m 0755 /tmp/hbbs.new /usr/local/bin/hbbs && rm /tmp/hbbs.new
+    sudo restorecon /usr/local/bin/hbbs
+    sudo systemctl restart tether-hbbs
+    sleep 3; systemctl is-active tether-hbbs; curl -s localhost:21122/readyz'
+  python dist/linux-relay-p2p/stun-check.py $ip   # expect: mapped <this PC's public IP> <port>
+done
+```
+
+Rollback per relay: `sudo install -m 0755 /usr/local/bin/hbbs.bak-0.5 /usr/local/bin/hbbs && sudo systemctl restart tether-hbbs`.
+Clients from 0.5.x keep working with the new hbbs (they send no offer); new clients against the
+old hbbs stay on the relay (see [relay-ha.md](relay-ha.md#ipv6-and-nat-hole-punching-webrtcice)).

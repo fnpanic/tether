@@ -1,7 +1,7 @@
 {
-  "when": "2026-11-04T11:29:03.333Z",
+  "when": "2026-11-04T22:13:25.496Z",
   "vm": "172.30.252.30",
-  "key": "67091db1007747f4bfbd1b792161514b",
+  "key": "6436793ca3fb4d5994849b82d08b031e",
   "results": [
     {
       "name": "QS diagnostics list every server, each checked",
@@ -41,6 +41,25 @@
       "toast": true
     },
     {
+      "name": "chat: technician's message shows on TetherQS (chat opens, toast, attention requested)",
+      "ok": true,
+      "toast": true,
+      "chatTab": "true",
+      "focused": true,
+      "attention": "attention requested (Ok(()))"
+    },
+    {
+      "name": "chat: a later message while Permissions is shown raises an unread badge on TetherQS",
+      "ok": true,
+      "badge": "1"
+    },
+    {
+      "name": "chat: customer's reply reaches the technician (unread badge while the panel is closed)",
+      "ok": true,
+      "badge": "1",
+      "shown": true
+    },
+    {
       "name": "remote actions: Ctrl+Alt+Del disabled with the reason, lock asks and warns (not sent)",
       "ok": true,
       "hint": "Send Ctrl+Alt+Del Needs Tether installed on the remote PC. TetherQS cannot send it.",
@@ -49,13 +68,21 @@
     {
       "name": "file transfer opens without a second accept on TetherQS; one card there",
       "ok": true,
-      "ms": 395,
+      "ms": 588,
       "cards": 1,
       "indicator": true,
       "listed": true
     },
     {
-      "name": "upload a 42.9 MB file to the customer's home folder",
+      "name": "Refresh in the file-transfer window: no password, no new request",
+      "ok": true
+    },
+    {
+      "name": "reloading the file-transfer window (F5): no password, no new request",
+      "ok": true
+    },
+    {
+      "name": "upload a 43.0 MB file to the customer's home folder",
       "ok": true
     },
     {
@@ -64,6 +91,14 @@
     },
     {
       "name": "closing file transfer leaves the session card on TetherQS",
+      "ok": true
+    },
+    {
+      "name": "reconnect after a dropped connection: no password, no Accept",
+      "ok": true
+    },
+    {
+      "name": "reloading the session window (F5): no password, no Accept",
       "ok": true
     },
     {

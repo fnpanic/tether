@@ -18,7 +18,14 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   local subnet) only where that raises no firewall prompt: the Windows installer adds the rule
   `Tether`; TetherQS on Windows only with an admin-created rule `Tether QS`; macOS while the
   application firewall is off (the Mac asks once for Local Network access). Both devices need
-  this version. Direct IPv6 and NAT hole punching need a relay update first (docs/relay-ha.md).
+  this version.
+- **Direct connections across networks (IPv6, NAT hole punching).** With `network.direct = auto`
+  and no proxy, the viewer also sends a WebRTC offer through the relay's WebSocket; ICE connects
+  directly over global IPv6 or by punching through both NATs, badges **Direct (IPv6)** / **P2P**.
+  A ready relay waits at most 0.4 s for it. STUN is answered by our own hbbs on UDP 21116 (no
+  public STUN server, no new port). With a proxy nothing changes: no offer, relay at once.
+  Needs the new hbbs on the relays (forwards the WebRTC offer/answer, `socket_addr_v6`, relays
+  `IceCandidate`, answers STUN); new clients against the old hbbs simply stay on the relay.
 
 ### Fixed
 - **TetherQS did not notice a release published while it was running.** It checked only at start

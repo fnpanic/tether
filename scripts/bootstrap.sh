@@ -35,3 +35,4 @@ apply() { # dir patch
 apply vendor/rustdesk patches/rustdesk.patch
 apply vendor/rustdesk/libs/hbb_common patches/hbb_common.patch
 apply vendor/rustdesk-server patches/rustdesk-server.patch
+apply vendor/rustdesk-server/libs/hbb_common patches/rustdesk-server-hbb_common.patch

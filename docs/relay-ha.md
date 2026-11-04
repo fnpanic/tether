@@ -70,13 +70,13 @@ together.
 ## Direct paths beside the relay
 
 With policy `network.direct = auto` (default, [policy.md](policy.md#direct-connections-networkdirect))
-the viewer races a direct path against the relay flow above. Nothing changes on the relays.
+the viewer races direct paths against the relay flow above.
 
 | Path | Badge | Status | Needs |
 | --- | --- | --- | --- |
 | Same LAN | `Direct (LAN)` | shipped | host with the direct listener (see below); no relay change |
-| IPv6, both global | `Direct (IPv6)` | not yet | hbbs forwarding `socket_addr_v6` (newer rendezvous protocol), host side change |
-| NAT hole punching | `P2P` | not yet | hbbs forwarding WebRTC offer/answer/ICE, STUN server, host side change |
+| IPv6, both global | `Direct (IPv6)` | WebRTC/ICE host candidates | hbbs with WebRTC signalling (below), both ends this version, no proxy |
+| NAT hole punching | `P2P` | WebRTC/ICE server-reflexive candidates | same, plus UDP 21116 to the relays (STUN) |
 | Relay (WSS/443) | `Relay` | unchanged | – |
 
 LAN flow:
@@ -102,25 +102,59 @@ password / Accept / companion-secret and permission checks run on the LAN connec
 relayed one (same `Connection` code; an unencrypted handshake is refused).
 
 
-### IPv6 and NAT hole punching (not enabled yet)
+### IPv6 and NAT hole punching (WebRTC/ICE)
 
-The core already contains both (WebRTC/ICE is the path RustDesk built for WebSocket deployments:
-host candidates = LAN and global IPv6, server-reflexive candidates = NAT hole punching, DTLS
-bound to the signed host identity). They are off in Tether (`enable-webrtc`, `enable-udp-punch`,
-`enable-ipv6-punch` = N) because the production hbbs (rustdesk-server protocol before WebRTC)
-drops what they need: it rebuilds `PunchHole` without `webrtc_sdp_offer` / `socket_addr_v6`,
-and does not know `IceCandidate` (rendezvous field 29). Needed, in order:
+Both use the core's WebRTC transport (the path RustDesk built for WebSocket deployments): ICE
+host candidates cover LAN and global IPv6, server-reflexive candidates cover NAT hole punching,
+and the DTLS channel is bound to the identity the server signed (`IdPk.dtls_fingerprint`, checked
+fail-closed in `secure_connection`). RustDesk's older UDP punch / `socket_addr_v6` punch stays off
+(`enable-udp-punch`, `enable-ipv6-punch` = N): it needs plain TCP/UDP rendezvous instead of the
+WebSocket on 443 and does not run under the forced relay of WebSocket mode.
 
-1. hbbs: update `libs/hbb_common/protos/rendezvous.proto` in vendor/rustdesk-server to the
-   client's version and forward `PunchHoleRequest.{webrtc_sdp_offer,socket_addr_v6}` into
-   `PunchHole`, `RelayResponse/PunchHoleSent.{webrtc_sdp_answer,socket_addr_v6}` back, and
-   `IceCandidate` both ways (by peer id, over the host's WebSocket registration); test with the
-   local relays (WSL) and the relay harness, then deploy to both relays.
-2. A STUN server for server-reflexive candidates: coturn (STUN only, no TURN) on each relay on
-   UDP 3478, or a public STUN server in `ice-servers`.
-3. Clients (both ends, policy `network.direct = auto`, no proxy): `enable-webrtc = Y`,
-   `ice-servers = stun:<relay>:3478`, `relay-fallback-delay` ≈ 0.5 s so a UDP-blocked network
-   without a proxy waits at most that long (with a proxy no offer is made at all).
+Flow (both ends with `network.direct = auto`, no proxy):
+
+1. The viewer builds a WebRTC offer per rendezvous server it asks and sends it in
+   `PunchHoleRequest.webrtc_sdp_offer` over the WebSocket (TLS, so the candidates are never in
+   the clear).
+2. hbbs forwards it in `PunchHole` to the host (over the host's WebSocket registration).
+3. The host answers in `RelayResponse.webrtc_sdp_answer` (and dials the relay as before). hbbs
+   forwards the answer and, because the response carries one, **keeps the viewer's socket** for
+   the trickle.
+4. `IceCandidate` (rendezvous field 29) both ways: from the host on its own WebSocket with
+   `socket_addr` = the viewer's punch socket, from the viewer with `id` = the host. hbbs only
+   routes them (size-capped, 2 KB); the peers drop candidates with a foreign session key.
+5. The viewer races WebRTC (and the LAN attempt) against the relay. A ready relay is held
+   `relay-fallback-delay` = 0.4 s while a direct attempt is still in flight; then the relay wins
+   and WebRTC is closed. The first secured path carries the session; login, Accept and
+   permissions are the same `Connection` code as on the relay.
+
+STUN: hbbs answers STUN binding requests (RFC 5389, XOR-MAPPED-ADDRESS) on its UDP port 21116,
+which both relays already open (firewalld + OCI security list). Clients use
+`ice-servers = stun:<each rendezvous server>:21116` and never the core's public defaults
+(Google/Cloudflare would see who connects to whom), so no extra service, port or cost. There
+is no TURN: when no direct pair forms, the RustDesk relay is the fallback.
+
+With a proxy (detected system proxy or one set by the user) neither side makes or answers an
+offer (ICE would leave past the proxy with the real IP); the session goes to the relay at once,
+as before. Policy `network.direct = off` makes the viewer send no offer and the host decline
+one. Hosts before this version answer offers whenever they have no proxy (upstream behaviour);
+an org that sets `off` sets it for both ends.
+
+Measured 2026-11-04 (local relays: new hbbs/hbbr on the Hyper-V host 172.30.240.1 plus one in WSL, two servers in the client list; Windows PC technician → TetherQS in the VM, VM egress direct, 3 runs each, badge = connection secured, from `--connect`):
+
+| Case | Path | Badge | First frame | Race detail (technician log) |
+| --- | --- | --- | --- | --- |
+| LAN listener off (no `Tether QS` rule), WebRTC | `P2P` | 1.45–1.64 s | 1.67–1.97 s | WebRTC connected 50–264 ms after the host's answer |
+| QS outbound UDP blocked, no proxy | `Relay` | 1.70–1.80 s | 2.14–2.46 s | relay held 408–417 ms (the 0.4 s window), then used |
+| LAN listener on | `Direct (LAN)` | 1.18–1.39 s | 1.53–1.83 s | LAN TCP beats WebRTC on the same subnet |
+
+Same day, production relays (old hbbs), builds with the production keys: corporate VM (technician and TetherQS inside, proxy, egress blocked) `vm-ft-e2e` 19/19, punch type `TCP` (no offer), relay leg 120–148 ms after the answer (old build the same hour: 125–131 ms). VM egress direct, technician on the PC: the offer goes out, the old hbbs drops it, `Relay` 1.56–1.78 s, relay leg 116–140 ms (no hold, since no answer came back).
+
+PC and VM share a subnet, so ICE can pair their host candidates directly (the nominated pair type is not logged); a punch through two real NATs (server-reflexive pair) was not reproducible locally. STUN (hbbs on UDP 21116) answered locally and through the WSL NAT (mapped address 172.17.192.1, the NAT's).
+
+Compatibility: a new client against an old hbbs loses only the offer (the old hbbs rebuilds
+`PunchHole` without it), so the session is relayed as before; an old client against the new
+hbbs sends no offer.
 
 ## Failures
 
@@ -199,7 +233,12 @@ Tether Manage (implemented in 0.4.0; the server setting is a comma-separated rel
   draining, health server, drain on SIGTERM.
 - `vendor/rustdesk-server/src/rendezvous_server.rs`: `<address>|<health URL>` entries, HTTP(S)
   checks, `pick_relay` (least loaded, then rotation), hbbs drain and health.
-- Patch: `patches/rustdesk-server.patch` (regenerate with `scripts/make-patches.sh`).
+- `vendor/rustdesk-server/src/rendezvous_server.rs`: WebRTC/IPv6 fields forwarded in
+  `PunchHole`/`FetchLocalAddr`/`PunchHoleResponse`, `send_to_tcp_keep`, `relay_ice_candidate`;
+  `common.rs`: `stun_binding_response` (unit test `stun_tests`).
+- Patches: `patches/rustdesk-server.patch`, `patches/rustdesk-server-hbb_common.patch` (the
+  rendezvous.proto of the client, without `IdPk`, which message.proto defines; regenerate with
+  `scripts/make-patches.sh`).
 - Builds and tests: `scripts/build-relay.sh`, `scripts/test-relay.sh` (WSL, static musl).
 
 ## Enabling HA on relay 1 (applied for 0.4.0)
