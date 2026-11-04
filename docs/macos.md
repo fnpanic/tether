@@ -132,6 +132,15 @@ What the apps do about it (0.5.4):
 - Without that message (an older Mac app), the technician's window explains the likely cause
   after 8 s without a picture.
 
+## Retina displays
+
+A Mac host streams a Retina display at its logical size (a 3456×2234 MacBook Pro screen as
+1728×1117): a quarter of the pixels, so a key frame is ~4× smaller and the picture stays live
+on slow relay paths (measured 0.3–0.6 Mbit/s on a congested evening). macOS scales the capture;
+the Mac's own resolution does not change. To stream the full pixel size, set the host option
+`tether-full-retina` to `Y`. On congestion a Mac host may lower its bitrate to ~0.3 Mbit/s
+(other hosts keep the ~1 Mbit/s floor).
+
 ## Publish with Tether Manage
 
 1. Copy `dist/macos/` to the PC with Tether Manage (keep the `.dmg` next to the `.app.tar.gz`).

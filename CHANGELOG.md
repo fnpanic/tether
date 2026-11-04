@@ -43,6 +43,16 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   (interrupted too long, or ended by the person there), and the file-transfer and reconnecting
   session windows wait 2.5 s for the host to let them in before showing it (no flash of
   "Password required").
+- **Sessions over a slow relay path reconnected every few seconds (seen with a Retina Mac,
+  also right after switching apps there).** A Retina key frame is ~200–260 KB; at the ~50 KB/s
+  the relay path gave that evening it takes 4–5 s to arrive, and the viewer's 3 s "relay silent"
+  watchdog counted only whole messages, so it dropped the connection mid-frame and the new
+  connection started with another key frame. The watchdog now counts bytes on the WebSocket, so
+  only a path that delivers nothing at all is treated as dead. Viewer-side fix (no host build).
+- **Mac host: the picture lagged on slow paths.** Retina displays are now streamed at their
+  logical size (1728×1117 instead of 3456×2234, ~4× smaller frames); host option
+  `tether-full-retina` = `Y` keeps the full size. Under congestion a Mac host can lower its
+  bitrate to ~0.3 Mbit/s instead of stopping at ~1 Mbit/s. Needs the new Mac build.
 
 ## [0.5.4] — 2026-11-04
 

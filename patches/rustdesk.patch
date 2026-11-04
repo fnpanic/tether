@@ -126,6 +126,32 @@ index 606a4be..de7934c 100644
 +        assert!(!keep_av1_on_low_memory(CodecFormat::VP9));
 +    }
 +}
+diff --git a/libs/scrap/src/quartz/display.rs b/libs/scrap/src/quartz/display.rs
+index 137d648..c6fa75e 100644
+--- a/libs/scrap/src/quartz/display.rs
++++ b/libs/scrap/src/quartz/display.rs
+@@ -2,6 +2,9 @@ use std::mem;
+ 
+ use super::ffi::*;
+ 
++/// Host option: "Y" streams a Retina display at its full pixel size (upstream behaviour).
++pub const FULL_RETINA: &str = "tether-full-retina";
++
+ #[derive(PartialEq, Eq, Debug, Clone, Copy)]
+ #[repr(C)]
+ pub struct Display(u32);
+@@ -73,7 +76,10 @@ impl Display {
+     pub fn scale(self) -> f64 {
+         let s = unsafe { BackingScaleFactor(self.0) as _ };
+         if s > 1. {
+-            let enable_retina = super::ENABLE_RETINA.lock().unwrap().clone();
++            // Tether: stream Retina displays at their logical size (a quarter of the pixels; the
++            // window server scales) unless the host opts in; full size needs ~4x the bandwidth.
++            let enable_retina = super::ENABLE_RETINA.lock().unwrap().clone()
++                && hbb_common::config::Config::get_option(FULL_RETINA) == "Y";
+             if enable_retina {
+                 return s;
+             }
 diff --git a/src/client.rs b/src/client.rs
 index 597dc86..76caf85 100644
 --- a/src/client.rs
@@ -1195,7 +1221,7 @@ index e9ea313..e5770f5 100644
 +    }
 +}
 diff --git a/src/server/video_qos.rs b/src/server/video_qos.rs
-index 96ffa63..d40ba0d 100644
+index 96ffa63..895ace5 100644
 --- a/src/server/video_qos.rs
 +++ b/src/server/video_qos.rs
 @@ -48,7 +48,11 @@ delay:
@@ -1210,7 +1236,24 @@ index 96ffa63..d40ba0d 100644
  pub const MIN_FPS: u32 = 1;
  pub const MAX_FPS: u32 = 120;
  pub const INIT_FPS: u32 = 15;
-@@ -566,6 +570,15 @@ impl VideoQoS {
+@@ -57,7 +61,15 @@ const MIN_AUTO_FPS: u32 = 5;
+ // Bitrate ratio constants for different quality levels
+ const BR_MAX: f32 = 40.0; // 2000 * 2 / 100
+ const BR_MIN: f32 = 0.2;
+-const BR_MIN_HIGH_RESOLUTION: f32 = 0.1; // For high resolution, BR_MIN is still too high, so we set a lower limit
++// For high resolution, BR_MIN is still too high, so we set a lower limit
++#[cfg(not(target_os = "macos"))]
++const BR_MIN_HIGH_RESOLUTION: f32 = 0.1;
++// Tether: a Mac host on a slow relay path (measured 0.3-0.6 Mbit/s) must be able to go below the
++// ~1 Mbit/s floor, or the queue never drains. Other hosts keep upstream's floor.
++#[cfg(target_os = "macos")]
++const BR_MIN_HIGH_RESOLUTION: f32 = 0.03;
++/// Congestion floor (kbit/s) min_ratio aims for at high resolutions.
++const FLOOR_KBPS: f32 = if cfg!(target_os = "macos") { 300.0 } else { 1000.0 };
+ const MAX_BR_MULTIPLE: f32 = 1.0;
+ 
+ const HISTORY_DELAY_LEN: usize = 2;
+@@ -566,6 +578,15 @@ impl VideoQoS {
              reduce_bitrate = bitrate_first
                  && user.delay.needs_bitrate_reduction()
                  && user.delay.replies_after_bitrate_reduction.is_none();
@@ -1226,6 +1269,20 @@ index 96ffa63..d40ba0d 100644
              fps = fps.clamp(MIN_FPS, user_cap);
              // first network delay message
              adjust_ratio = user.delay.fps.is_none();
+@@ -685,11 +706,11 @@ impl VideoQoS {
+             .1
+     }
+ 
+-    // Lowest ratio the latest quality allows: keeps about 1Mbps at high resolutions.
++    // Lowest ratio the latest quality allows: keeps about FLOOR_KBPS at high resolutions.
+     fn min_ratio(&self) -> f32 {
+         let current_bitrate = self.bitrate();
+         let ratio_1mbps = if current_bitrate > 0 {
+-            Some((self.ratio * 1000.0 / current_bitrate as f32).max(BR_MIN_HIGH_RESOLUTION))
++            Some((self.ratio * FLOOR_KBPS / current_bitrate as f32).max(BR_MIN_HIGH_RESOLUTION))
+         } else {
+             None
+         };
 diff --git a/src/server/video_service.rs b/src/server/video_service.rs
 index a13aebb..91ed2de 100644
 --- a/src/server/video_service.rs
