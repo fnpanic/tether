@@ -14,6 +14,8 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 - **TetherQS diagnostics without a network.** The Help page waited for the server check (up to
   30 s, longer while proxy detection hung) before showing anything. Local facts now show at once;
   the server check runs separately with a 5 s limit and **Retry**.
+- **TetherQS on macOS: no "Allow admin access".** That button is Windows UAC elevation; on a Mac
+  it has no function and could raise an admin dialog.
 
 ### Changed
 - `docs/macos.md`: the admin password macOS asks for on first start of an unsigned app

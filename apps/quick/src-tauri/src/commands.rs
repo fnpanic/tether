@@ -70,7 +70,8 @@ fn branding() -> Branding {
         title: e.get("customer.title").to_owned(),
         accent: if valid { accent.to_owned() } else { "#0071e3".into() },
         welcome: e.get("customer.welcome").to_owned(),
-        elevate: e.on("customer.elevate"),
+        // UAC elevation (portable service) exists on Windows only.
+        elevate: cfg!(windows) && e.on("customer.elevate"),
         approve_mode: e.get("security.approve-mode").to_owned(),
         consent_text: e.get("recording.consent-text").to_owned(),
         diagnostics: e.on("diagnostics.page"),
