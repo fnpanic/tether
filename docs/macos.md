@@ -67,7 +67,9 @@ check it for malicious software". Either:
 
 - **Right-click (or Control-click) the app → Open → Open.** Needed once. On macOS 15 and later:
   try to open it once, then **System Settings → Privacy & Security → Open Anyway**.
-- Or remove the quarantine flag in Terminal:
+  macOS then asks for an **administrator password**: that is macOS confirming the change to its
+  security settings, not Tether asking for admin rights. Neither app needs admin rights to run.
+- Or remove the quarantine flag in Terminal (no password, no Settings detour):
   ```bash
   xattr -dr com.apple.quarantine /Applications/Tether.app
   xattr -dr com.apple.quarantine ~/Downloads/TetherQS.app
@@ -114,7 +116,9 @@ Details: [updates.md](updates.md), [management.md](management.md#releases).
 
 ## Not verified without a Mac
 
-These parts were written and reviewed on Windows only; check them on the first Mac build:
+CI (`scripts/smoke-macos.sh`, on GitHub's macOS runner) checks after every build that both apps
+open a window and show no admin prompt. Everything else was written and reviewed on Windows only;
+check it on a real Mac:
 the vcpkg x86_64 cross build on Apple silicon (and arm64 on Intel), the Tauri universal bundle and
 dmg (the dmg step drives Finder via AppleScript and may ask for permission to control Finder),
 ad-hoc signing with the entitlements, the RustDesk core's macOS screen capture and input in

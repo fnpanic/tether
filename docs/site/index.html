@@ -227,7 +227,7 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
 <h3 id="tech-install-mac">macOS</h3>
 <ol class="steps">
   <li>Download <code>Tether_&lt;version&gt;_universal.dmg</code> (Apple silicon and Intel, macOS 11 or newer) and drag Tether to Applications.</li>
-  <li>The current builds are not notarized. On first start, Control-click the app → <strong>Open</strong> → <strong>Open</strong>. On macOS 15 and later, try once, then <strong>System Settings → Privacy &amp; Security → Open Anyway</strong>.</li>
+  <li>The current builds are not notarized. On first start, Control-click the app → <strong>Open</strong> → <strong>Open</strong>. On macOS 15 and later, try once, then <strong>System Settings → Privacy &amp; Security → Open Anyway</strong>; macOS asks for an administrator password for that step (it changes a macOS security setting; Tether itself needs no admin rights). Without the password: <code>xattr -dr com.apple.quarantine /Applications/Tether.app</code> in Terminal.</li>
   <li>To be controlled remotely, allow <strong>Screen Recording</strong> and <strong>Accessibility</strong> in <strong>System Settings → Privacy &amp; Security</strong>, then quit and reopen Tether.</li>
 </ol>
 <div class="note warn"><strong>macOS permissions after updates.</strong> Ad-hoc signed builds get a new signature with every build, and macOS ties Screen Recording and Accessibility to it. After an update, grant them again (remove the old entry with “–” and add the app again if the switch is on but nothing works).</div>
@@ -408,7 +408,7 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <p>The branding is signed by the support company; TetherQS checks the signature and falls back to the standard look if anything is wrong. The link works only until the date the company set, and can be withdrawn at any time. Branded apps are available for Windows.</p>
 
 <h2 id="qs-help">Help and updates</h2>
-<p>The <strong>?</strong> in the title bar opens <strong>Help</strong>: version, ID, server, whether the server is reachable and how fast, the proxy in use, whether admin access is on, and the policy serial. Your technician may ask you to read these out.</p>
+<p>The <strong>?</strong> in the title bar opens <strong>Help</strong>: version, ID, server, whether the server is reachable and how fast, the proxy in use, whether admin access is on, and the policy serial. It also opens without a network: the server check runs on its own (at most 5 s, with <strong>Retry</strong>) and shows the error if the server cannot be reached. Your technician may ask you to read these out.</p>
 <p>TetherQS updates itself when it starts and every few hours. It downloads the new version, checks its signature, swaps the file and restarts with the same ID and password. No admin rights are needed. If an update is required, the <strong>Accept</strong> button stays disabled with “An update is required before your technician can connect.” until you click <strong>Update</strong>.</p>
 
 <!-- ============================ ADMINS ============================ -->

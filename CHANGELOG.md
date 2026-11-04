@@ -4,6 +4,21 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.5.1] — 2026-11-04
+
+### Fixed
+- **macOS: no window.** Tether and TetherQS started with only a Dock/menu-bar icon: the window is
+  created hidden and shown by the page after its first paint, but macOS runs no animation frames
+  in a hidden web view. A timer now shows it as well. CI starts both apps on a Mac after every
+  build and fails without a window or with an admin prompt open (`scripts/smoke-macos.sh`).
+- **TetherQS diagnostics without a network.** The Help page waited for the server check (up to
+  30 s, longer while proxy detection hung) before showing anything. Local facts now show at once;
+  the server check runs separately with a 5 s limit and **Retry**.
+
+### Changed
+- `docs/macos.md`: the admin password macOS asks for on first start of an unsigned app
+  (Privacy & Security → Open Anyway) and how to avoid it.
+
 ## [0.5.0] — 2026-11-04
 
 Branded TetherQS downloads, a much clearer Tether Manage, and HTML documentation.

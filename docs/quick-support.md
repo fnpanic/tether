@@ -24,8 +24,10 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    REC) and a red **Disconnect** button. Permissions can be revoked at any time.
 5. Closing the window ends support: the in-process host server stops with it.
 
-**Help** (title bar `?`, policy `diagnostics.page`) shows version, ID, server, whether the server is
-reachable (and latency), the proxy in use, admin-access state and the policy serial.
+**Help** (title bar `?`, policy `diagnostics.page`) shows version, ID, connection state, server,
+the proxy in use, admin-access state and the policy serial at once, also without a network. Whether
+the server is reachable (and latency) is checked separately, at most 5 s, with **Retry**; a
+broken network shows its error there instead of hiding the page.
 
 ## Process model
 

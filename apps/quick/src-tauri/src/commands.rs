@@ -209,14 +209,12 @@ fn update_install() {
     });
 }
 
+/// Everything known locally: shown at once, also without a network.
 #[derive(Serialize)]
 struct Diagnostics {
     version: &'static str,
     id: String,
     server: String,
-    relay_reachable: bool,
-    relay_ms: Option<u128>,
-    relay_error: Option<String>,
     proxy: String,
     elevated: bool,
     policy_serial: u64,
@@ -224,30 +222,54 @@ struct Diagnostics {
 }
 
 #[tauri::command]
-async fn diagnostics() -> R<Diagnostics> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let base = policy::base_url();
-        let t = Instant::now();
-        let probe = match &base {
-            Some(b) => policy::http().and_then(|c| c.get(format!("{b}/api/policy")).send().map(|_| ()).map_err(|e| e.to_string())),
-            None => Err("no server in this build".into()),
-        };
-        let e = policy::current();
-        Diagnostics {
-            version: update::VERSION,
-            id: api::get_id(),
-            server: base.unwrap_or_default(),
-            relay_reachable: probe.is_ok(),
-            relay_ms: probe.is_ok().then(|| t.elapsed().as_millis()),
-            relay_error: probe.err(),
-            proxy: hbb_common::config::DEFAULT_SETTINGS.read().unwrap().get("proxy-url").cloned().unwrap_or_else(|| "none (direct)".into()),
-            elevated: elevated(),
-            policy_serial: e.serial,
-            policy_group: e.group,
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())
+fn diagnostics() -> Diagnostics {
+    let e = policy::current();
+    Diagnostics {
+        version: update::VERSION,
+        id: api::get_id(),
+        server: policy::base_url().unwrap_or_default(),
+        proxy: hbb_common::config::DEFAULT_SETTINGS.read().unwrap().get("proxy-url").cloned().unwrap_or_else(|| "none (direct)".into()),
+        elevated: elevated(),
+        policy_serial: e.serial,
+        policy_group: e.group,
+    }
+}
+
+#[derive(Serialize)]
+struct Probe {
+    reachable: bool,
+    ms: Option<u128>,
+    error: Option<String>,
+}
+
+/// reqwest's message alone is "error sending request for url (…)": add the causes (refused, DNS, TLS, timeout).
+fn with_causes(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(c) = src {
+        s.push_str(": ");
+        s.push_str(&c.to_string());
+        src = c.source();
+    }
+    s
+}
+
+/// The network check, separate from `diagnostics` so a dead network never hides the local facts.
+#[tauri::command]
+async fn diagnostics_probe() -> Probe {
+    const LIMIT: Duration = Duration::from_secs(5);
+    let t = Instant::now();
+    let job = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let b = policy::base_url().ok_or("no server in this build")?;
+        policy::http()?.get(format!("{b}/api/policy")).timeout(LIMIT).send().map(|_| ()).map_err(|e| with_causes(&e))
+    });
+    // Proxy detection (WPAD/PAC) can hang before the request starts: bound the whole check.
+    let r = match hbb_common::tokio::time::timeout(LIMIT + Duration::from_secs(1), job).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!("no answer within {} s", LIMIT.as_secs())),
+    };
+    Probe { reachable: r.is_ok(), ms: r.is_ok().then(|| t.elapsed().as_millis()), error: r.err() }
 }
 
 pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
@@ -261,5 +283,6 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         elevate,
         update_install,
         diagnostics,
+        diagnostics_probe,
     ]
 }

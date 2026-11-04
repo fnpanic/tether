@@ -1,7 +1,7 @@
 // TetherQS: one 420×560 window. Visual rules: /DESIGN.md.
 import { type ButtonHTMLAttributes, type ReactNode, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, Copy, Eye, EyeOff, FolderSync, HelpCircle, Keyboard, Minus, RefreshCw, ShieldAlert, ShieldCheck, X } from "lucide-react";
-import { api, type Client, type Diagnostics, formatId, inTauri, onCm, type State } from "./ipc";
+import { api, type Client, type Diagnostics, formatId, type Probe, inTauri, onCm, type State } from "./ipc";
 
 type Consent = { conn_id: number; peer_name: string; text: string };
 
@@ -58,7 +58,7 @@ export function App() {
       <TitleBar title={s.branding.title} logo={s.branding.logo} onHelp={s.branding.diagnostics ? () => setHelp(!help) : undefined} helpOpen={help} />
       <div className="flex min-h-0 flex-1 flex-col px-6 pb-5">
         {help ? (
-          <Help customApp={s.branding.custom_app} onBack={() => setHelp(false)} />
+          <Help customApp={s.branding.custom_app} status={s.status} onBack={() => setHelp(false)} />
         ) : (
           <>
             <UpdateBanner s={s} />
@@ -372,23 +372,39 @@ function Footer({ s, onError }: { s: State; onError: (m: string) => void }) {
   );
 }
 
-function Help({ customApp, onBack }: { customApp: string | null; onBack: () => void }) {
+function Help({ customApp, status, onBack }: { customApp: string | null; status: number; onBack: () => void }) {
   const [d, setD] = useState<Diagnostics | null>(null);
+  const [err, setErr] = useState("");
+  // null = checking; the local rows never wait for it.
+  const [p, setP] = useState<Probe | null>(null);
+  const probe = () => {
+    setP(null);
+    api.diagnosticsProbe().then(setP).catch((e) => setP({ reachable: false, ms: null, error: String(e) }));
+  };
   useEffect(() => {
-    api.diagnostics().then(setD).catch(() => {});
+    api.diagnostics().then(setD).catch((e) => setErr(String(e)));
+    probe();
   }, []);
   const rows: [string, ReactNode][] = d
     ? [
         ...(customApp ? ([["Custom app", customApp]] as [string, ReactNode][]) : []),
         ["Version", d.version],
         ["ID", formatId(d.id)],
+        ["Connection", status === 1 ? "Ready" : status === 0 ? "Connecting to the server…" : "Offline"],
         ["Server", d.server || "—"],
         [
           "Server reachable",
-          <span className="inline-flex items-center gap-1.5">
-            <Dot tone={d.relay_reachable ? "ok" : "danger"} />
-            {d.relay_reachable ? `Yes (${d.relay_ms} ms)` : d.relay_error ?? "No"}
-          </span>,
+          p ? (
+            <span className="inline-flex flex-wrap items-center gap-1.5">
+              <Dot tone={p.reachable ? "ok" : "danger"} />
+              {p.reachable ? `Yes (${p.ms} ms)` : p.error ?? "No"}
+              <button className="text-accent" onClick={probe}>
+                Retry
+              </button>
+            </span>
+          ) : (
+            <span className="text-muted">Checking…</span>
+          ),
         ],
         ["Proxy", d.proxy],
         ["Admin access", d.elevated ? "On" : "Off"],
@@ -402,7 +418,7 @@ function Help({ customApp, onBack }: { customApp: string | null; onBack: () => v
       </button>
       <Card className="!p-5">
         <div className="mb-2 text-callout font-semibold">Diagnostics</div>
-        {!d && <div className="text-caption text-muted">Checking…</div>}
+        {!d && <div className="text-caption text-muted">{err || "Loading…"}</div>}
         {rows.map(([k, v]) => (
           <div key={k} className="flex gap-3 border-t border-hairline py-2 text-caption first-of-type:border-t-0">
             <span className="w-32 shrink-0 text-muted">{k}</span>

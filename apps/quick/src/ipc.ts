@@ -48,13 +48,16 @@ export interface Diagnostics {
   version: string;
   id: string;
   server: string;
-  relay_reachable: boolean;
-  relay_ms: number | null;
-  relay_error: string | null;
   proxy: string;
   elevated: boolean;
   policy_serial: number;
   policy_group: string | null;
+}
+
+export interface Probe {
+  reachable: boolean;
+  ms: number | null;
+  error: string | null;
 }
 
 export const api = {
@@ -67,6 +70,7 @@ export const api = {
   elevate: () => invoke("elevate"),
   installUpdate: () => invoke("update_install"),
   diagnostics: () => invoke<Diagnostics>("diagnostics"),
+  diagnosticsProbe: () => invoke<Probe>("diagnostics_probe"),
 };
 
 /** Connection-manager events: add_connection, remove_connection, refused, policy, record_consent_request. */

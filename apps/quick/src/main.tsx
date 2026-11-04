@@ -16,12 +16,16 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 );
 
 // The window starts hidden to avoid a white flash; reveal after the first paint.
+// macOS (WKWebView) runs no animation frames while the window is hidden, so a timer reveals it too.
 if (inTauri) {
-  requestAnimationFrame(() =>
-    requestAnimationFrame(async () => {
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      await getCurrentWindow().show();
-      await getCurrentWindow().setFocus();
-    }),
-  );
+  let shown = false;
+  const reveal = async () => {
+    if (shown) return;
+    shown = true;
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().show();
+    await getCurrentWindow().setFocus();
+  };
+  requestAnimationFrame(() => requestAnimationFrame(reveal));
+  setTimeout(reveal, 150);
 }
