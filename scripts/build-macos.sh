@@ -33,7 +33,7 @@ Release builds compile these into the apps. For the production relay:
 
   export TETHER_SERVER=tether-desk.duckdns.org
   export TETHER_PUB_KEY=fe8A7xTX72RJlJypn8aBxG3NZHHxygCLPQqCWxbeev8=
-  export TETHER_ADMIN_PUB_KEY=y1UGt7w1seY3j4S0rkLX6Xj8XfLDOpFuPa78U30Tcww=
+  export TETHER_ADMIN_PUB_KEY=LdVr9FeDLNbgO6T8PPHddPsicLPr5Hkly1MXqmaLwKI=
   export TETHER_UPDATER_PUB_KEY=dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQzREZBRjA4Q0Y5RDlERDIKUldUU25aM1BDSy9mUTJqSlBadmQxUWRsc1pxUSthOVUvQTk3M3Z3dzZBV0JnVXFxcThQMXBXeFEK
 
 (other relays: server/install.sh output and Tether Manage -> Keys), then run this script again.

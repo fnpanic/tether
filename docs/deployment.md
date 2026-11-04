@@ -58,7 +58,7 @@ A second, independent node with the same stack and the **same key pair**
 | Public IP | `92.5.231.71` (ephemeral, free) |
 | Key | `/var/lib/tether/id_ed25519{,.pub}` copied from relay 1 (`fe8A7xTX…`) |
 | Relay list | `/etc/tether/server.env`: `RELAY_SERVERS=tether-desk2.duckdns.org\|http://127.0.0.1:21121/readyz,tether-desk.duckdns.org\|https://tether-desk.duckdns.org/readyz/relay` |
-| Admin key | `ADMIN_PUB_KEY=y1UGt7w1seY3j4S0rkLX6Xj8XfLDOpFuPa78U30Tcww=` |
+| Admin key | `ADMIN_PUB_KEY=LdVr9FeDLNbgO6T8PPHddPsicLPr5Hkly1MXqmaLwKI=` |
 | Tuning | crashkernel removed, kdump disabled, 2 GB `/swapfile` (as relay 1) |
 
 Cost check at creation (2026-11-03): `vm-standard-e2-1-micro-count` limit 2, 1 used before; the
