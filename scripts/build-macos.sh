@@ -115,16 +115,22 @@ set(VCPKG_OSX_ARCHITECTURES $arch)
 set(VCPKG_OSX_DEPLOYMENT_TARGET $MACOSX_DEPLOYMENT_TARGET)
 EOF
 done
-host=x64-osx
-[ "$(uname -m)" = arm64 ] && host=arm64-osx
-# Same install root for both: the core's build scripts read $VCPKG_ROOT/installed/<triplet>. The
-# manifest lists every library as a host dependency too, so the second run keeps the first's.
+# ffmpeg is a *host* dependency in the core's manifest, so vcpkg only builds it for the host
+# triplet. Build each triplet as its own host in its own install root, then merge into
+# $VCPKG_ROOT/installed/<triplet>, where the core's build scripts look. On Apple silicon the x64
+# host tools (pkgconf, …) run under Rosetta.
+if [ "$(uname -m)" = arm64 ] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+  sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+fi
 for t in arm64-osx x64-osx; do
-  (cd vendor/rustdesk && "$VCPKG_ROOT/vcpkg" install --triplet "$t" --host-triplet "$host" \
-    --overlay-triplets="$triplets" --x-install-root="$VCPKG_ROOT/installed")
+  (cd vendor/rustdesk && "$VCPKG_ROOT/vcpkg" install --triplet "$t" --host-triplet "$t" \
+    --overlay-triplets="$triplets" --x-install-root="$VCPKG_ROOT/installed-$t")
+  mkdir -p "$VCPKG_ROOT/installed"
+  rm -rf "$VCPKG_ROOT/installed/$t"
+  cp -R "$VCPKG_ROOT/installed-$t/$t" "$VCPKG_ROOT/installed/$t"
 done
 for t in arm64-osx x64-osx; do
-  for lib in libvpx libyuv libopus libaom; do
+  for lib in libvpx libyuv libopus libaom libavcodec libavutil; do
     [ -f "$VCPKG_ROOT/installed/$t/lib/$lib.a" ] || die "vcpkg did not produce $t/lib/$lib.a (see $VCPKG_ROOT/buildtrees/*/*.log)"
   done
 done
