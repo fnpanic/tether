@@ -19,6 +19,8 @@ alive when one of them fails. Adds a macOS build and an OS-aware download page.
   - Hosts with 4 GB of RAM or less keep AV1 instead of falling back to VP8, which managed ~3
     fps on screen content.
   - Software encoders use up to 4 cores instead of half of the idle ones.
+  - Same window drag, same optical meter, AnyDesk 9.8.3 for comparison: AnyDesk p95 95 ms,
+    Tether p95 98 ms; worst gap 509 vs 507 ms (on par, see `docs/performance.md`).
   - Measured during a window drag in the VM, egress only through the TLS-inspecting proxy:
     20–23 fps, a new picture at least every 99 ms, latency p95 59–66 ms. Before: 3–4 fps and freezes of 1.6 s or longer. See
     `docs/performance.md`.
@@ -83,8 +85,6 @@ alive when one of them fails. Adds a macOS build and an OS-aware download page.
   builds may need Screen Recording and Accessibility to be granted again after each update.
 - When a whole Kubernetes node freezes silently while a proxy pod runs on it, sessions can
   stall until Kubernetes marks the node NotReady (~40 s). Mitigation in `docs/kubernetes.md`.
-- The window-drag comparison with AnyDesk in the same VM was not measured; earlier
-  measurements are in `docs/benchmarks.md`.
 - Installer: when Tether was closed for an interactive upgrade, it comes back via "Run Tether"
   on the finish page; automatic reopening is guaranteed only for the in-app updater (`/R`).
 

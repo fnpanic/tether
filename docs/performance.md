@@ -102,6 +102,21 @@ The barcode-based "freeze" figure in `drag.json` (446–486 ms) counts frames wh
 is too blurred to decode during motion (81 of ~460 frames) as missing; the canvas draw gaps
 show the picture never stopped. Viewer stats: 0 key-frame requests, 0 dropped frames.
 
-## AnyDesk
+## AnyDesk (black-box, same scenario)
 
-Not measured in the window-drag scenario. The idle LAN comparison is in `docs/benchmarks.md`.
+`node e2e/bench-vm.mjs --only <tether|anydesk> --drag` measures both viewers the same way: the
+optical meter (`tools/bench/glass2glass.py`) reads the VM's clock barcode from the viewer window on
+this PC while `drag.ps1` drags a window in the VM. Same VM, same relay path through the corporate
+proxy; AnyDesk is exempt from TLS inspection (it refuses the corporate CA, as real deployments
+must allow for), so for the fair row Tether was exempt as well. 20 s each, 2026-11-04.
+
+| Viewer (host in the VM) | Latency mean | Latency p95 | Distinct remote frames/s | Longest freeze |
+| --- | --- | --- | --- | --- |
+| AnyDesk 9.8.3 | 62.4 ms | 95 ms | 11.2 | 509 ms |
+| Tether 0.4.0 (inspection exempt, like AnyDesk) | 72.2 ms | 98 ms | 12.6 | 507 ms |
+| Tether 0.4.0 (TLS-inspected by the proxy) | 74.3 ms | 102 ms | 14.7 | 563 ms |
+
+Optical frames/freeze figures are conservative for both (motion blurs the barcode, so some
+pictures don't count; the canvas draw-gap meter above shows Tether's picture never paused more than
+~99 ms). Result: **on par** — same p95 latency and worst gap, Tether delivers slightly more
+pictures, AnyDesk is ~10 ms lower on average. The idle LAN comparison is in `docs/benchmarks.md`.

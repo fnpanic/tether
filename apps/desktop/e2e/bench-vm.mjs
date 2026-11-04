@@ -8,11 +8,30 @@
 //   node e2e/bench-vm.mjs [--seconds 20] [--only anydesk|tether]
 
 import { spawn, execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-const { values: opt } = parseArgs({ options: { seconds: { type: "string", default: "20" }, only: { type: "string" }, id: { type: "string" } } });
+const { values: opt } = parseArgs({
+  options: {
+    seconds: { type: "string", default: "20" },
+    only: { type: "string" },
+    id: { type: "string" },
+    // TetherQS hosts use a one-time password instead of the bench password.
+    pw: { type: "string" },
+    // Measure while the VM drags a window back and forth (C:\vms\perf\drag.ps1 via the broker).
+    drag: { type: "boolean" },
+    tech: { type: "string" },
+  },
+});
+
+/** Start the drag workload in the VM's interactive session (PowerShell Direct through the
+ * elevated broker: no UAC prompt on this PC). Returns at once; the drag runs `seconds` s. */
+function startDrag(seconds) {
+  writeFileSync("C:/vms/perf/cmd.txt", `-File C:\\bench\\perf\\drag.ps1 -Seconds ${seconds}`);
+  writeFileSync("C:/vms/perf/wait.txt", "0");
+  execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\vms\\broker\\run-elevated.ps1", "vm-perf-exec.ps1", "-Script", "interactive.ps1"]);
+}
 const ROOT = resolve(import.meta.dirname, "../../..");
 const PY = join(ROOT, "tools/bench/.venv/Scripts/python.exe");
 const OUT = join(ROOT, "tools/bench/results/vm-comparison.json");
@@ -60,8 +79,12 @@ async function measureViewer(label, match) {
   await until(`${label} remote barcode`, () => place() && meter("--seconds", "2", ...clock).valid_samples > 5, 90000, 1000);
   await sleep(3000);
   console.log(`measuring ${label} …`);
-  const r = meter("--seconds", opt.seconds, "--label", label, "--out", OUT, ...clock);
-  console.log(`  ${label}: mean ${r.latency_ms?.mean} ms, median ${r.latency_ms?.median}, p10 ${r.latency_ms?.p10}, p95 ${r.latency_ms?.p95}, ${r.distinct_remote_frames_per_s} remote fps`);
+  if (opt.drag) {
+    startDrag(Number(opt.seconds) + 8);
+    await sleep(2000); // the drag is running before the measurement starts
+  }
+  const r = meter("--seconds", opt.seconds, "--label", opt.drag ? `${label} · window drag` : label, "--out", OUT, ...clock);
+  console.log(`  ${label}: mean ${r.latency_ms?.mean} ms, median ${r.latency_ms?.median}, p10 ${r.latency_ms?.p10}, p95 ${r.latency_ms?.p95}, ${r.distinct_remote_frames_per_s} remote fps, longest freeze ${r.freeze_ms?.max} ms`);
   return r;
 }
 
@@ -72,7 +95,7 @@ console.log(`VM clock offset: ${OFFSET.toFixed(2)} ms`);
 if (opt.only !== "anydesk") {
   const tid = opt.id ?? await until("VM Tether ID in relay", () => tetherIdOfVm(), 120000, 3000);
   console.log(`VM ${ids.ip}: Tether ${tid}`);
-  const t = spawn(TETHER, ["--connect", tid, password], { env: { ...process.env, TETHER_PROFILE: "vm-viewer" }, stdio: "ignore" });
+  const t = spawn(opt.tech ?? TETHER, ["--connect", tid, opt.pw ?? password], { env: { ...process.env, TETHER_PROFILE: "vm-viewer" }, stdio: "ignore" });
   try {
     await measureViewer("tether · VM host · balanced", ["-Process", "tether", "-Title", "tether-bench"]);
   } finally {
@@ -82,9 +105,13 @@ if (opt.only !== "anydesk") {
 }
 
 if (opt.only !== "tether") {
-  // Password piped on stdin through cmd, as AnyDesk's CLI documents for --with-password.
-  writeFileSync(AD_CMD, `@echo off\r\necho ${password}| "${ANYDESK}" ${ids.anydesk} --with-password\r\n`);
+  // Password on stdin, as AnyDesk's CLI documents for --with-password. From a file, not `echo |`:
+  // AnyDesk reads stdin late, after echo has exited ("Could not read the password from stdin (109)").
+  const AD_PW = String.raw`C:\vms\ad-pw.txt`;
+  writeFileSync(AD_PW, `${password}\r\n`);
+  writeFileSync(AD_CMD, `@echo off\r\n"${ANYDESK}" ${ids.anydesk} --with-password < "${AD_PW}"\r\n`);
   spawn("cmd", ["/c", AD_CMD], { stdio: "ignore", detached: true }).unref();
+  setTimeout(() => { try { rmSync(AD_PW); } catch {} }, 20000);
   // AnyDesk titles the session window with the ID grouped by spaces ("1 605 296 385").
   const spacedId = ids.anydesk.replace(/\B(?=(\d{3})+(?!\d))/g, " ");
   // No synthetic keystrokes here: if AnyDesk shows its authorization prompt, a person answers it.

@@ -169,5 +169,91 @@
     },
     "latency_corrected_ms": null,
     "screen_to_capture_ms": null
+  },
+  {
+    "label": "tether \u00b7 VM host \u00b7 balanced \u00b7 window drag",
+    "seconds": 20.0,
+    "capture_fps": 40.9,
+    "valid_samples": 664,
+    "distinct_remote_frames_per_s": 14.7,
+    "latency_ms": {
+      "n": 664,
+      "median": 73.0,
+      "mean": 74.3,
+      "p10": 56,
+      "p95": 102,
+      "min": 46,
+      "max": 123,
+      "stdev": 15.3
+    },
+    "freeze_ms": {
+      "max": 563,
+      "p99": 519,
+      "over_300ms": 10,
+      "over_100ms": 21
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
+  },
+  {
+    "label": "anydesk \u00b7 VM host \u00b7 default \u00b7 window drag",
+    "seconds": 20.0,
+    "capture_fps": 25.4,
+    "valid_samples": 384,
+    "distinct_remote_frames_per_s": 11.2,
+    "latency_ms": {
+      "n": 384,
+      "median": 60.5,
+      "mean": 62.4,
+      "p10": 39,
+      "p95": 95,
+      "min": 19,
+      "max": 123,
+      "stdev": 19.2
+    },
+    "freeze_ms": {
+      "max": 509,
+      "p99": 486,
+      "over_300ms": 9,
+      "over_100ms": 36
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
+  },
+  {
+    "label": "tether \u00b7 VM host \u00b7 balanced \u00b7 window drag",
+    "seconds": 20.0,
+    "capture_fps": 66.3,
+    "valid_samples": 1200,
+    "distinct_remote_frames_per_s": 12.6,
+    "latency_ms": {
+      "n": 1200,
+      "median": 72.0,
+      "mean": 72.2,
+      "p10": 55,
+      "p95": 98,
+      "min": 41,
+      "max": 191,
+      "stdev": 14.8
+    },
+    "freeze_ms": {
+      "max": 507,
+      "p99": 469,
+      "over_300ms": 10,
+      "over_100ms": 17
+    },
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
+  },
+  {
+    "label": "anydesk \u00b7 VM host \u00b7 default \u00b7 window drag",
+    "seconds": 20.0,
+    "capture_fps": 11.4,
+    "valid_samples": 0,
+    "distinct_remote_frames_per_s": 0.0,
+    "latency_ms": null,
+    "freeze_ms": null,
+    "latency_corrected_ms": null,
+    "screen_to_capture_ms": null
   }
 ]
