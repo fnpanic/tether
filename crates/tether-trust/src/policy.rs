@@ -399,6 +399,14 @@ fn apply(eff: &mut Effective, layer: &Layer) {
 /// Resolve the effective policy for `profile` on `device`. `bundle` must already be validated
 /// (it is, when obtained via [`Bundle::from_json`]); `machine` is the optional GPO/MDM layer.
 pub fn resolve(bundle: Option<&Bundle>, profile: &str, device: &str, machine: Option<&Layer>) -> Effective {
+    resolve_with(bundle, profile, device, None, machine)
+}
+
+/// [`resolve`] with the settings of a custom app (a signed [`crate::custom::CustomProfile`] built
+/// into a TetherQS download). Order, later wins: defaults < profile < custom app < group <
+/// machine: the custom app is the admin's choice for everyone who uses that download, while groups
+/// and GPO/MDM still target individual devices.
+pub fn resolve_with(bundle: Option<&Bundle>, profile: &str, device: &str, custom: Option<&Layer>, machine: Option<&Layer>) -> Effective {
     let mut eff = Effective { profile: profile.to_owned(), sources: vec!["defaults".into()], ..Default::default() };
     for f in FEATURES.iter().filter(|f| f.profiles.contains(&profile)) {
         eff.values.insert(f.id.to_owned(), f.default.to_owned());
@@ -409,6 +417,14 @@ pub fn resolve(bundle: Option<&Bundle>, profile: &str, device: &str, machine: Op
             apply(&mut eff, layer);
             eff.sources.push("profile".into());
         }
+    }
+    if let Some(c) = custom {
+        if check_layer(c, "custom app").is_ok() {
+            apply(&mut eff, c);
+            eff.sources.push("custom-app".into());
+        }
+    }
+    if let Some(b) = bundle {
         if let Some(g) = b.group_of(profile, device) {
             apply(&mut eff, &b.groups[g].overrides);
             eff.group = Some(g.to_owned());

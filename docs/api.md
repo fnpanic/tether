@@ -111,6 +111,25 @@ format plus three optional fields:
 Clients enforce the stricter of manifest and policy. Blocking is done in the backend (session
 start, accepting incoming sessions), not only in the UI.
 
+## Custom apps (branded TetherQS downloads)
+
+A custom app is a signed `tether_trust::custom::CustomProfile` (id, name, accent colour, welcome
+text, PNG logo, a customer-profile settings `Layer`) plus a private download link. Tether Manage
+signs the profile with the admin key and stores it on every relay with the same token, so the link
+works on any relay. The relay never modifies the profile; TetherQS verifies the signature itself.
+
+| Method & path | Body | Result |
+| --- | --- | --- |
+| `PUT /api/admin/custom/<id>` (signed) | `{"profile": <signed CustomProfile document>, "token": "<43 chars base64url>", "expires": <unix>, "channel": "stable"}` (≤ 300 KiB) | `204`. The server verifies the signature against its admin keys, runs `CustomProfile::validate`, requires `profile.id == <id>`, `custom::valid_token(token)` and `expires` in the future (≤ 366 days). Replaces an existing entry with that id (new token = old link stops working). Stored in `custom/<id>.json` (0600). |
+| `GET /api/admin/custom` (signed) | – | `[{id, name, token, expires, channel, created, downloads, last_download}]` |
+| `DELETE /api/admin/custom/<id>` (signed) | – | `204`; the link stops working at once. `404` if unknown. |
+| `GET /q/<token>` (public) | – | The current `TetherQS-<v>.exe` of the entry's channel (from `download/<channel>/customer/windows-x86_64/latest.json`) with `custom::trailer(<signed profile>)` appended, `Content-Disposition: attachment; filename="<Name>-Support.exe"` (name reduced to `[A-Za-z0-9 _.-]`). `404` for unknown, revoked **and** expired tokens (same answer, no oracle). Rate-limited to 30 requests/min per IP. Counts downloads. |
+
+Caddy routes `/q/*` to `tether-api`. Tokens are 256-bit random (`custom::new_token`), compared
+exactly; links are not listed anywhere public. TetherQS self-updates keep the profile: after
+verifying a new plain exe it re-appends its own trailer. Custom apps are Windows-only for now
+(the macOS TetherQS is a `.app` bundle).
+
 ## Limits (1 GB relay VM)
 
 `tether-api` is a single-threaded `tiny_http` service with `MemoryMax=64M`; request bodies are

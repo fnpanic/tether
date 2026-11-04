@@ -6,7 +6,9 @@
 //! - [`reqauth`]: signed admin requests (management app → relay API).
 //! - [`policy`]: policy bundle, feature registry, resolution into effective settings.
 //! - [`version`]: version ordering for update enforcement.
+//! - [`custom`]: signed custom TetherQS apps (trailer appended to the exe, distribution tokens).
 
+pub mod custom;
 pub mod envelope;
 pub mod policy;
 pub mod reqauth;
