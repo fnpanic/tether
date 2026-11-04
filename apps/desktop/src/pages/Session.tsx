@@ -8,6 +8,7 @@ import {
   Maximize,
   MessageSquare,
   Minimize,
+  Minus,
   MonitorCog,
   MonitorSmartphone,
   Pin,
@@ -416,6 +417,19 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       })(),
     );
 
+  // Leave full screen first: a window minimized from full screen does not restore cleanly.
+  const minimize = () =>
+    act(
+      (async () => {
+        const w = (await import("@tauri-apps/api/window")).getCurrentWindow();
+        if (await w.isFullscreen()) {
+          await w.setFullscreen(false);
+          setFullscreen(false);
+        }
+        await w.minimize();
+      })(),
+    );
+
   const switchDisplay = (i: number) => {
     act(invoke("session_switch_display", { key, display: i }));
     pipeRef.current?.setDisplay(i);
@@ -518,6 +532,9 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           <Sep />
           <TB label={fullscreen ? "Exit full screen" : "Full screen"} onClick={toggleFullscreen}>
             {fullscreen ? <Minimize size={17} /> : <Maximize size={17} />}
+          </TB>
+          <TB label="Minimize" onClick={minimize}>
+            <Minus size={17} />
           </TB>
           <TB label={pinned ? "Unpin toolbar" : "Pin toolbar"} onClick={() => setPinned(!pinned)}>
             {pinned ? <PinOff size={17} /> : <Pin size={17} />}
