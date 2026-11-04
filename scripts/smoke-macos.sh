@@ -58,6 +58,13 @@ check() { # app-name binary-name
   else
     echo "FAIL: no window of $bin on screen"; grep -i -F "$bin" "$OUT/$bin.windows.txt"; fail=1
   fi
+  # The app's "Fix" button clears its own stale grant with this, as the user, without admin (0.5.4).
+  local id
+  id=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$work/$app/Contents/Info.plist")
+  for svc in ScreenCapture Accessibility; do
+    if out=$(tccutil reset "$svc" "$id" 2>&1); then echo "ok: tccutil reset $svc $id: $out"; else echo "FAIL: tccutil reset $svc $id: $out"; fail=1; fi
+  done
+  ps -axo pid,comm,args >>"$OUT/$bin.ps.txt"
   if grep -E "SecurityAgent|osascript|authopen|Installer" "$OUT/$bin.ps.txt" | grep -v grep; then
     echo "FAIL: an admin/password prompt is open"; fail=1
   else
