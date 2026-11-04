@@ -27,6 +27,22 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 - **Technician: replies opened the chat panel over the remote screen.** They now show as an unread
   badge on the toolbar's Chat button, and the toolbar stays visible while there are unread
   messages.
+- **The password screen came back within a running session.** The one-time password changes as
+  soon as it has let the technician in, but a reconnect after a network drop (of a session
+  accepted by click, or after more than 30 s), a reloaded session or file-transfer window (F5)
+  and a file transfer opened from Home during a session logged in afresh and asked again for a
+  password the technician no longer had. The host now lets the same technician window back in
+  (same session key and companion secret) while the session runs and for 2 minutes after its
+  connection ended; Disconnect on the host ends that at once. A reloaded window continues its own
+  session, a file-transfer window joins the open session to that computer. Needs the new version
+  on both sides (host: TetherQS / Tether).
+- **"Wrong password" for a password nobody typed.** "Remember password" kept a TetherQS one-time
+  password, which no longer works for the next session. A remembered password the host turns down
+  is now forgotten and the screen asks for the current one, saying why.
+- **The password screen says why** when it appears after the session had already been running
+  (interrupted too long, or ended by the person there), and the file-transfer and reconnecting
+  session windows wait 2.5 s for the host to let them in before showing it (no flash of
+  "Password required").
 
 ## [0.5.4] — 2026-11-04
 

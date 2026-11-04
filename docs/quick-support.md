@@ -33,6 +33,14 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    **Chat** (tab next to Permissions on the card): the technician's first message opens it, later
    ones show an unread badge while Permissions is shown; each one shows a short notice and flashes
    the taskbar button (TetherQS does not take the focus). The customer can reply there.
+   The one-time password changes as soon as it has let someone in, so within one session nothing
+   asks again: the host lets the same technician window back in with the same session key and
+   companion secret after a dropped connection or a reloaded window (whether the session was
+   accepted by click or by password), while the session runs and for up to 2 minutes after its
+   connection ended. **Disconnect** (or any other end by this computer) ends that at once; after
+   it, or after the 2 minutes, the technician needs a new Accept or the new password, and their
+   window says why. A remembered password that the host turns down is forgotten, and the
+   technician is asked for the current one instead of being told it was wrong.
 5. Closing the window ends support: the in-process host server stops with it.
 
 **Help** (title bar `?`, policy `diagnostics.page`) shows version, ID, connection state, every

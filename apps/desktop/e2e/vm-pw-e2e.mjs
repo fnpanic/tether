@@ -44,6 +44,16 @@ try {
   }, 40000, 200);
   const active = await until("Session active", async () => (await qs.locator('[data-testid="qs-status"]').innerText()).includes("Session active"), 10000).catch(() => false);
   record("password login: session starts without Accept, TetherQS shows it", !askedAccept && !!active, { ms: Date.now() - t0, askedAccept, active: !!active });
+  // The one-time password has changed by now (checked at the end); a reconnect must still get back in by itself.
+  const key = v.url().match(/session\/([0-9a-f]{32})/)[1];
+  await v.evaluate((k) => window.__TAURI_INTERNALS__.invoke("session_reconnect", { key: k, forceRelay: false }), key);
+  let asked = null;
+  for (const end = Date.now() + 10000; Date.now() < end && !asked; await sleep(200)) {
+    if (await v.locator("#pw").count().catch(() => 0)) asked = "password screen";
+    else if (/wants to see and control/.test(await text(qs))) asked = "Accept on TetherQS";
+  }
+  const back = await until("session active again", async () => (await qs.locator('[data-testid="qs-status"]').innerText()).includes("Session active") && !/Reconnecting|Connecting…/.test(await text(v)), 20000).catch(() => false);
+  record("reconnect after the one-time password changed: no password, no Accept", !asked && !!back, { asked, back: !!back });
   // The core hands out a new one-time password after a login.
   await qs.getByRole("button", { name: "Disconnect" }).click();
   await until("idle", async () => (await qs.locator('[data-testid="qs-status"]').innerText()).includes("Ready"), 15000);

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowLeft, ArrowUpFromLine, CheckCircle2, File, Folder, FolderPlus, HardDrive, RefreshCw, Trash2, XCircle } from "lucide-react";
 import { formatId, invoke, subscribe, videoChannel } from "../lib/ipc";
 import { Button, IconButton, Logo, TitleBar } from "../components/ui";
+import { passwordWhy, RESUME_GRACE_MS } from "../lib/login";
 
 interface Entry {
   name: string;
@@ -52,7 +53,10 @@ let nextJob = 1;
 export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; peer: string }) {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [password, setPassword] = useState<null | { wrong: boolean }>(null);
+  const [password, setPassword] = useState<null | { wrong: boolean; why: string | null }>(null);
+  // A password typed in this window (only then is a rejection "wrong"), and the delayed screen.
+  const typed = useRef(false);
+  const pwTimer = useRef(0);
   const [pw, setPw] = useState("");
   const [waiting, setWaiting] = useState(false);
   const [remoteSep, setRemoteSep] = useState("/");
@@ -88,6 +92,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
         case "peer_info": {
           // The host lists its home folder by itself right after login (`folder_files`). A
           // password prompt the core showed while the customer could still click Accept is over.
+          clearTimeout(pwTimer.current);
           setPassword(null);
           setConnected(true);
           setHostname(p.hostname);
@@ -113,8 +118,14 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           invoke("fs_override", { key, id: p.id, fileNum: p.file_num, needOverride: true, remember: true, isUpload: p.is_upload }).catch((e) => setError(String(e)));
           break;
         case "msgbox":
-          if (p.type === "input-password") setPassword({ wrong: false });
-          else if (p.type === "re-input-password") setPassword({ wrong: true });
+          if (p.type === "input-password" || p.type === "re-input-password") {
+            const why = passwordWhy(p.text, false) ?? (p.type === "re-input-password" && !typed.current ? "The password of your session does not work here any more (a one-time password changes after each login)." : null);
+            const show = () => setPassword({ wrong: p.type === "re-input-password" && typed.current, why });
+            clearTimeout(pwTimer.current);
+            // Opened from a session: the core asks first, then the host lets it join without a password.
+            if (p.type === "input-password" && !p.text) pwTimer.current = window.setTimeout(show, RESUME_GRACE_MS);
+            else show();
+          }
           else if (p.type.startsWith("wait")) setWaiting(true);
           else if (p.type === "error") setError(p.text);
           break;
@@ -130,6 +141,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
     return () => {
       alive = false;
       sub.off();
+      clearTimeout(pwTimer.current);
       invoke("session_close", { key });
     };
   }, [key, peer, loadLocal, loadRemote]);
@@ -152,6 +164,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           className="m-auto w-[340px]"
           onSubmit={(e) => {
             e.preventDefault();
+            typed.current = true;
             invoke("session_login", { key, password: pw, remember: true }).catch((e) => setError(String(e)));
             setPassword(null);
             setPw("");
@@ -159,6 +172,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
         >
           <div className="text-callout font-semibold">Password required</div>
           <div className={`mt-1 text-caption ${password.wrong ? "text-danger" : "text-muted"}`}>{password.wrong ? "Wrong password, try again" : "Enter the one-time password shown on the remote device"}</div>
+          {password.why && <div className="mt-1 text-footnote">{password.why}</div>}
           <div className="mt-1 text-footnote text-muted">Or ask the person there to click Accept: this window then continues by itself.</div>
           <input type="password" autoFocus value={pw} onChange={(e) => setPw(e.target.value)} className="mt-3 h-10 w-full rounded-xl border border-hairline bg-parchment px-3.5 text-caption outline-none focus-visible:border-focus" />
           <Button type="submit" variant="primary" className="mt-3 w-full" disabled={!pw}>

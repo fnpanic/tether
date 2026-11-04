@@ -26,6 +26,7 @@ import { Button, IconButton, Logo, TitleBar, useToast } from "../components/ui";
 import { FileTransfer } from "./FileTransfer";
 import { mouseMask, MOUSE, wheelSteps, lockModes } from "../lib/input";
 import { classify, onFailure, reconnectMinutes, type Series } from "../lib/reconnect";
+import { passwordWhy, RESUME_GRACE_MS } from "../lib/login";
 
 interface Display {
   x: number;
@@ -54,7 +55,7 @@ interface Quality {
 
 type Phase =
   | { kind: "connecting"; text: string }
-  | { kind: "password"; wrong: boolean }
+  | { kind: "password"; wrong: boolean; why: string | null }
   | { kind: "connected" }
   | { kind: "reconnecting"; attempt: number; text: string }
   | { kind: "error"; title: string; text: string; retry: boolean };
@@ -69,6 +70,19 @@ const QUALITY = [
   { value: "balanced", label: "Balanced", hint: "Quality and speed" },
   { value: "low", label: "Speed", hint: "Lowest latency and bandwidth" },
 ];
+
+const stored = (k: string) => {
+  try {
+    return sessionStorage.getItem(k) === "1";
+  } catch {
+    return false;
+  }
+};
+const store = (k: string) => {
+  try {
+    sessionStorage.setItem(k, "1");
+  } catch {}
+};
 
 /** Human wording for the core's msgbox texts. */
 function friendly(text: string): string {
@@ -129,7 +143,11 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const series = useRef<Series | null>(null);
   const retryTimer = useRef(0);
   const limitMin = useRef(10);
-  const everConnected = useRef(false);
+  // Survives a reload of this window (F5), which continues the same session.
+  const everConnected = useRef(stored(`connected-${key}`));
+  // A password typed in this window (only then can a rejection say "wrong"), and the delayed screen.
+  const typed = useRef(false);
+  const pwTimer = useRef(0);
   // Recording: policy mode and state (mirrored in a ref for the event listener).
   const [recMode, setRecMode] = useState("off");
   const recModeRef = useRef("off");
@@ -174,6 +192,9 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           if (series.current) pipe.resync();
           series.current = null;
           everConnected.current = true;
+          store(`connected-${key}`);
+          typed.current = false;
+          clearTimeout(pwTimer.current);
           setPhase({ kind: "connected" });
           // Policy "always": ask right away; the host user still has to allow it.
           if (recModeRef.current === "always" && recRef.current.state === "idle") startRecording();
@@ -250,6 +271,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       sub.off();
       clearInterval(t);
       clearTimeout(retryTimer.current);
+      clearTimeout(pwTimer.current);
       if (recRef.current.state === "on") invoke("recording_finished").catch(() => {});
       pipe.close();
       invoke("session_close", { key });
@@ -266,11 +288,17 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
     }
     if (type === "connecting" && series.current) return; // keep the reconnect overlay
     if (type === "input-password" || type === "re-input-password") {
-      series.current = null;
-      clearTimeout(retryTimer.current);
+      const show = () => {
+        series.current = null;
+        clearTimeout(retryTimer.current);
+        setPhase({ kind: "password", wrong: type === "re-input-password" && typed.current, why: passwordWhy(text, everConnected.current) });
+      };
+      clearTimeout(pwTimer.current);
+      // Reconnecting a session accepted by click: the host lets this client back in by itself.
+      if (everConnected.current && type === "input-password" && !text) pwTimer.current = window.setTimeout(show, RESUME_GRACE_MS);
+      else show();
+      return;
     }
-    if (type === "input-password") return setPhase({ kind: "password", wrong: false });
-    if (type === "re-input-password") return setPhase({ kind: "password", wrong: true });
     if (type === "connecting") return setPhase({ kind: "connecting", text: friendly(text) || "Connecting…" });
     if (type === "success" || type === "info" || type === "nocancel-info") return;
     if (text.toLowerCase().includes("waiting") || type.includes("wait")) return setPhase({ kind: "connecting", text: "Waiting for the person at the remote computer to click Accept…" });
@@ -466,7 +494,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
         {phase.kind === "reconnecting" ? (
           <ReconnectOverlay attempt={phase.attempt} text={phase.text} />
         ) : phase.kind !== "connected" || !frameSize.w ? (
-          <Overlay phase={phase} name={name} peer={peer} sessionKey={key} hostMissing={hostMissing} />
+          <Overlay phase={phase} name={name} peer={peer} sessionKey={key} hostMissing={hostMissing} onLogin={() => (typed.current = true)} />
         ) : null}
         {rec.state === "on" && connected && <RecPill since={rec.since} />}
         {toast.node}
@@ -742,7 +770,7 @@ function QualityMenu({ value, onChange }: { value: string; onChange: (v: string)
   );
 }
 
-function Overlay({ phase, name, peer, sessionKey: key, hostMissing }: { phase: Phase; name: string; peer: string; sessionKey: string; hostMissing: string[] }) {
+function Overlay({ phase, name, peer, sessionKey: key, hostMissing, onLogin }: { phase: Phase; name: string; peer: string; sessionKey: string; hostMissing: string[]; onLogin: () => void }) {
   const [pw, setPw] = useState("");
   const [remember, setRemember] = useState(true);
   const close = async () => (await import("@tauri-apps/api/window")).getCurrentWindow().close();
@@ -778,6 +806,7 @@ function Overlay({ phase, name, peer, sessionKey: key, hostMissing }: { phase: P
               onSubmit={(e) => {
                 e.preventDefault();
                 if (!pw) return;
+                onLogin();
                 invoke("session_login", { key, password: pw, remember });
                 setPw("");
               }}
@@ -785,6 +814,7 @@ function Overlay({ phase, name, peer, sessionKey: key, hostMissing }: { phase: P
               <label className="text-caption text-white/60" htmlFor="pw">
                 {phase.wrong ? <span className="text-danger">Wrong password, try again</span> : "Enter the one-time password shown on the remote device"}
               </label>
+              {phase.why && <p className="mt-1 text-footnote text-white/70">{phase.why}</p>}
               <p className="mt-1 text-footnote text-white/45">Or ask the person there to click Accept: that lets you in without a password, and this window continues by itself.</p>
               <input
                 id="pw"

@@ -197,6 +197,22 @@ async function main() {
     return { ms: Date.now() - t0, cards, indicator: files, listed: remote.includes("Desktop") };
   });
 
+  // Within one live session nothing asks again: Refresh, a reloaded window.
+  await check("Refresh in the file-transfer window: no password, no new request", async () => {
+    await ft.getByRole("button", { name: "Refresh" }).nth(1).click();
+    await calm("file transfer", ft, qs, () => ft.getByText("Password required").count(), 5000);
+    const x = await text(ft);
+    if (!x.includes("C:\\Users\\customer")) throw new Error(x.slice(0, 300));
+  });
+  await check("reloading the file-transfer window (F5): no password, no new request", async () => {
+    await ft.reload();
+    await calm("file transfer", ft, qs, () => ft.getByText("Password required").count(), 8000);
+    await until("remote folder listed again", async () => {
+      const x = await text(ft);
+      return x.includes("C:\\Users\\customer") && !/Connecting…|Waiting for the person/.test(x);
+    }, 20000);
+  });
+
   // Source file: on this PC, or (technician in the VM) the VM's own copy of the technician app.
   const VM_DIR = "C:\\Users\\Public\\TetherTech";
   const dir = IN_VM ? VM_DIR : join(tmpdir(), `tether-ft-${Date.now()}`);
@@ -244,10 +260,22 @@ async function main() {
     if ((await qs.getByRole("button", { name: "Disconnect" }).count()) !== 1) throw new Error("session card gone");
   });
 
+  await check("reconnect after a dropped connection: no password, no Accept", async () => {
+    await ipc(v, "session_reconnect", { key, forceRelay: false });
+    await calm("session", v, qs, () => v.locator("#pw").count(), 10000);
+    await until("session active again", async () => (await qs.locator('[data-testid="qs-status"]').innerText()).includes("Session active") && !/Reconnecting|Connecting…/.test(await text(v)), 20000);
+  });
+  await check("reloading the session window (F5): no password, no Accept", async () => {
+    await v.reload();
+    await calm("session", v, qs, () => v.locator("#pw").count(), 10000);
+    await until("first frame after the reload", () => v.evaluate(() => { const c = document.querySelector("canvas"); return !!c && !(c.width === 300 && c.height === 150); }), 30000);
+  });
+
   await check("Files switched off on the session card: file transfer needs a new accept (declined)", async () => {
     const sw = qs.getByRole("switch", { name: "Transfer files" });
     if ((await sw.getAttribute("aria-checked")) === "true") await sw.click();
     await sleep(800);
+    await v.mouse.move(400, 20); // the toolbar hides itself after the reload above
     await v.getByRole("button", { name: "Transfer files" }).click();
     await until("a new file transfer request on TetherQS", async () => (await text(qs)).includes("wants to transfer files"), 20000);
     await qs.getByRole("button", { name: "Decline" }).click();
@@ -268,6 +296,17 @@ async function main() {
   writeFileSync(OUT, JSON.stringify({ when: new Date().toISOString(), vm: VM_IP, key, results }, null, 2));
   console.log(`${results.filter((r) => r.ok).length}/${results.length} passed`);
   process.exitCode = ok ? 0 : 1;
+}
+
+/** For `ms`: neither a password screen on the technician's side nor a request on TetherQS. */
+async function calm(what, page, qs, passwordShown, ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await passwordShown().catch(() => 0)) throw new Error(`${what} shows the password screen`);
+    const q = await text(qs).catch(() => "");
+    if (/wants to (see and control|transfer files)/.test(q)) throw new Error(`TetherQS asks again: ${q.slice(0, 200)}`);
+    await sleep(200);
+  }
 }
 
 /** Same as FileTransfer.tsx fmtSize. */

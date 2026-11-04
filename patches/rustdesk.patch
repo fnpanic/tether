@@ -127,10 +127,19 @@ index 606a4be..de7934c 100644
 +    }
 +}
 diff --git a/src/client.rs b/src/client.rs
-index 597dc86..466c1b5 100644
+index 597dc86..76caf85 100644
 --- a/src/client.rs
 +++ b/src/client.rs
-@@ -212,6 +212,78 @@ impl Drop for OffererGuard {
+@@ -114,6 +114,8 @@ const MAX_DECODE_FAIL_COUNTER: usize = 3;
+ 
+ pub const LOGIN_MSG_PASSWORD_EMPTY: &str = "Empty Password";
+ pub const LOGIN_MSG_PASSWORD_WRONG: &str = "Wrong Password";
++/// Tether: msgbox text of an `input-password` after a remembered password was turned down.
++pub const LOGIN_MSG_SAVED_PASSWORD_OUTDATED: &str = "saved-password-outdated";
+ pub const LOGIN_MSG_2FA_WRONG: &str = "Wrong 2FA Code";
+ pub const REQUIRE_2FA: &'static str = "2FA Required";
+ pub const LOGIN_MSG_NO_PASSWORD_ACCESS: &str = "No Password Access";
+@@ -212,6 +214,78 @@ impl Drop for OffererGuard {
      }
  }
  
@@ -209,7 +218,7 @@ index 597dc86..466c1b5 100644
  /// Race WebRTC against the other transports, preferring P2P: `select_ok` would always pick the
  /// relay, whose TCP connect beats ICE + DTLS + SCTP by an order of magnitude. An `is_p2p` result
  /// wins outright; a relayed one — from either side, since `webrtc_fut` is a whole punch attempt
-@@ -487,6 +559,46 @@ impl Client {
+@@ -487,6 +561,46 @@ impl Client {
              }
          };
  
@@ -256,7 +265,7 @@ index 597dc86..466c1b5 100644
          // Same relay gate as the v6 socket below: under any forced relay the v6 punch cannot
          // be used, so probing v6 reachability is wasted work on every such connection.
          if crate::get_ipv6_punch_enabled() && !interface.is_force_relay() {
-@@ -1697,7 +1809,14 @@ impl Client {
+@@ -1697,7 +1811,14 @@ impl Client {
                  return Ok(option_pk);
              }
          };
@@ -272,7 +281,7 @@ index 597dc86..466c1b5 100644
              Some(res) => {
                  let bytes = res?;
                  if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
-@@ -2851,6 +2970,8 @@ pub struct LoginConfigHandler {
+@@ -2851,6 +2972,8 @@ pub struct LoginConfigHandler {
      pub version: i64,
      features: Option<Features>,
      pub session_id: u64, // used for local <-> server communication
@@ -281,7 +290,7 @@ index 597dc86..466c1b5 100644
      pub supported_encoding: SupportedEncoding,
      restarting_remote_device: bool,
      // Start time of the restart grace window. On Windows the peer may briefly
-@@ -2972,6 +3093,7 @@ impl LoginConfigHandler {
+@@ -2972,6 +3095,7 @@ impl LoginConfigHandler {
              }
          }
          self.session_id = sid;
@@ -289,7 +298,7 @@ index 597dc86..466c1b5 100644
          self.supported_encoding = Default::default();
          self.clear_restarting_remote_device();
          // Three scopes: what was decided about this PEER, what this CLIENT is set up as (proxy),
-@@ -3002,6 +3124,12 @@ impl LoginConfigHandler {
+@@ -3002,6 +3126,12 @@ impl LoginConfigHandler {
          self.shared_password = shared_password;
          self.record_state = false;
          self.record_permission = true;
@@ -302,7 +311,7 @@ index 597dc86..466c1b5 100644
  
          // `std::env::remove_var("IS_TERMINAL_ADMIN");` is called in `session_add_sync()` - `flutter_ffi.rs`.
          let is_terminal_admin = conn_type == ConnType::TERMINAL
-@@ -3854,6 +3982,7 @@ impl LoginConfigHandler {
+@@ -3854,6 +3984,7 @@ impl LoginConfigHandler {
              my_platform,
              option: self.get_option_message(true).into(),
              session_id: self.session_id,
@@ -310,7 +319,7 @@ index 597dc86..466c1b5 100644
              version: crate::VERSION.to_string(),
              os_login,
              hwid,
-@@ -3951,6 +4080,17 @@ impl LoginConfigHandler {
+@@ -3951,6 +4082,17 @@ impl LoginConfigHandler {
          &self.id
      }
  
@@ -328,7 +337,32 @@ index 597dc86..466c1b5 100644
      pub fn get_key_terminal_service_id(&self) -> &'static str {
          if self.is_terminal_admin {
              "terminal-admin-service-id"
-@@ -5043,6 +5183,19 @@ pub async fn confirm_insecure_connection(
+@@ -4510,8 +4652,22 @@ pub fn handle_login_error(
+         interface.msgbox("input-password", "Password Required", "", "");
+         true
+     } else if err == LOGIN_MSG_PASSWORD_WRONG {
+-        lc.write().unwrap().password = Default::default();
+-        interface.msgbox("re-input-password", err, "Do you want to enter again?", "");
++        let mut l = lc.write().unwrap();
++        // Tether: a remembered password the user did not type now (a one-time password changes
++        // after each login) is forgotten; the user is asked for the current one, not told theirs
++        // was wrong.
++        let saved = !l.password.is_empty() && l.password == l.config.password;
++        l.password = Default::default();
++        if saved {
++            let mut config = l.load_config();
++            config.password = Default::default();
++            l.save_config(config);
++            drop(l);
++            interface.msgbox("input-password", "Password Required", LOGIN_MSG_SAVED_PASSWORD_OUTDATED, "");
++        } else {
++            drop(l);
++            interface.msgbox("re-input-password", err, "Do you want to enter again?", "");
++        }
+         true
+     } else if err == LOGIN_MSG_2FA_WRONG || err == REQUIRE_2FA {
+         let enabled = lc.read().unwrap().get_option("trust-this-device") == "Y";
+@@ -5043,6 +5199,19 @@ pub async fn confirm_insecure_connection(
      interface: &impl Interface,
      receiver: &mut UnboundedReceiver<Data>,
  ) -> bool {
@@ -348,7 +382,7 @@ index 597dc86..466c1b5 100644
      interface.msgbox(
          "insecure-connection-nocancel-hasclose",
          "Insecure Connection",
-@@ -5562,6 +5715,69 @@ async fn udp_nat_connect(
+@@ -5562,6 +5731,69 @@ async fn udp_nat_connect(
      Ok((res.1, Some(res.0), typ))
  }
  
@@ -864,19 +898,21 @@ index 8e4c56c..d747022 100644
      let licence_key = crate::get_key(true).await;
      msg_out.set_request_relay(RequestRelay {
 diff --git a/src/server/connection.rs b/src/server/connection.rs
-index e9ea313..621cbe8 100644
+index e9ea313..e5770f5 100644
 --- a/src/server/connection.rs
 +++ b/src/server/connection.rs
-@@ -194,6 +194,8 @@ lazy_static::lazy_static! {
+@@ -194,6 +194,10 @@ lazy_static::lazy_static! {
      static ref LOGIN_FAILURES: [Arc::<Mutex<HashMap<String, (i32, i32, i32)>>>; 3] = Default::default();
      static ref SESSIONS: Arc::<Mutex<HashMap<SessionKey, Session>>> = Default::default();
      static ref ALIVE_CONNS: Arc::<Mutex<Vec<i32>>> = Default::default();
 +    // Tether: per remote connection, the client's companion secret and its live file permission.
 +    static ref FT_COMPANIONS: Mutex<HashMap<i32, (Vec<u8>, bool)>> = Default::default();
++    // Tether: accepted remote sessions their client may resume (see `ResumeTicket`).
++    static ref RESUME_TICKETS: Mutex<HashMap<SessionKey, ResumeTicket>> = Default::default();
      pub static ref AUTHED_CONNS: Arc::<Mutex<Vec<AuthedConn>>> = Default::default();
      pub static ref CONTROL_PERMISSIONS_ARRAY: Arc::<Mutex<Vec<(i32, ControlPermissions)>>> = Default::default();
      static ref WAKELOCK_SENDER: Arc::<Mutex<std::sync::mpsc::Sender<(usize, usize)>>> = Arc::new(Mutex::new(start_wakelock_thread()));
-@@ -663,6 +665,11 @@ impl Connection {
+@@ -663,6 +667,11 @@ impl Connection {
              conn_audit_primary_auth: ConnAuditPrimaryAuth::None,
              conn_audit_two_factor: ConnAuditTwoFactor::None,
          };
@@ -888,7 +924,7 @@ index e9ea313..621cbe8 100644
          let addr = hbb_common::try_into_v4(addr);
          if !conn.on_open(addr).await {
              conn.closed = true;
-@@ -847,6 +854,7 @@ impl Connection {
+@@ -847,6 +856,7 @@ impl Connection {
                                  }
                              } else if &name == "file" {
                                  conn.file = enabled;
@@ -896,7 +932,7 @@ index e9ea313..621cbe8 100644
                                  conn.send_permission(Permission::File, enabled).await;
                                  #[cfg(feature = "unix-file-copy-paste")]
                                  if !enabled {
-@@ -864,6 +872,7 @@ impl Connection {
+@@ -864,6 +874,7 @@ impl Connection {
                                  conn.restart = enabled;
                                  conn.send_permission(Permission::Restart, enabled).await;
                              } else if &name == "recording" {
@@ -904,7 +940,17 @@ index e9ea313..621cbe8 100644
                                  conn.recording = enabled;
                                  conn.send_permission(Permission::Recording, enabled).await;
                              } else if &name == "block_input" {
-@@ -2237,9 +2246,49 @@ impl Connection {
+@@ -1936,6 +1947,9 @@ impl Connection {
+             self.tx_from_authed.clone(),
+             self.lr.clone(),
+         ));
++        if auth_conn_type == AuthConnType::Remote {
++            resume_register(self.session_key(), self.inner.id(), &self.lr.companion_secret);
++        }
+         self.session_last_recv_time = SESSIONS
+             .lock()
+             .unwrap()
+@@ -2237,9 +2251,49 @@ impl Connection {
                  self.try_sub_monitor_services();
              }
          }
@@ -954,7 +1000,7 @@ index e9ea313..621cbe8 100644
      fn try_sub_camera_displays(&mut self) {
          if let Some(s) = self.server.upgrade() {
              let mut s = s.write().unwrap();
-@@ -3044,7 +3093,17 @@ impl Connection {
+@@ -3044,7 +3098,17 @@ impl Connection {
                  crate::get_builtin_option(keys::OPTION_ALLOW_LOGON_SCREEN_PASSWORD) == "Y"
                      && is_logon();
  
@@ -963,7 +1009,7 @@ index e9ea313..621cbe8 100644
 +            if self.file_transfer.is_none() {
 +                companion_register(self.inner.id(), &lr.companion_secret, self.file);
 +            }
-+            if self.is_file_transfer_of_authed_session() {
++            if self.is_file_transfer_of_authed_session() || self.is_resume_of_authed_session() {
 +                self.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::Click);
 +                if !self.send_logon_response_and_keep_alive().await {
 +                    return false;
@@ -973,7 +1019,7 @@ index e9ea313..621cbe8 100644
                  || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()
              {
                  #[cfg(not(any(target_os = "android", target_os = "ios")))]
-@@ -4032,10 +4091,19 @@ impl Connection {
+@@ -4032,10 +4096,19 @@ impl Connection {
                          .lock()
                          .unwrap()
                          .user_auto_adjust_fps(self.inner.id(), fps),
@@ -997,7 +1043,26 @@ index e9ea313..621cbe8 100644
                      #[cfg(windows)]
                      Some(misc::Union::SelectedSid(sid)) => {
                          if let Some(current_process_sid) =
-@@ -5813,6 +5881,30 @@ impl Connection {
+@@ -5310,6 +5383,7 @@ impl Connection {
+             return;
+         }
+         self.closed = true;
++        resume_ended(self.inner.id());
+         // If voice A,B -> C, and A,B has voice call
+         // B disconnects, C will reset the voice call input.
+         //
+@@ -5356,6 +5430,10 @@ impl Connection {
+         msg_out.set_misc(misc);
+         self.send(msg_out).await;
+         raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
++        // Ended here on purpose (Disconnect, policy): the client must ask again.
++        if self.file_transfer.is_none() {
++            RESUME_TICKETS.lock().unwrap().remove(&self.session_key());
++        }
+     }
+ 
+     async fn handle_read_job_init_result(
+@@ -5813,6 +5891,44 @@ impl Connection {
          }
      }
  
@@ -1019,16 +1084,30 @@ index e9ea313..621cbe8 100644
 +            .collect();
 +        let companions = FT_COMPANIONS.lock().unwrap();
 +        remotes.iter().any(|id| {
-+            companions.get(id).map_or(false, |(s, file)| {
-+                *file && s.len() == secret.len() && s.iter().zip(secret.iter()).fold(0u8, |d, (a, b)| d | (a ^ b)) == 0
-+            })
++            companions.get(id).map_or(false, |(s, file)| *file && same_secret(s, secret))
 +        })
++    }
++
++    /// A remote connection from the client that was let into this session (same session key and
++    /// companion secret) while that connection runs or shortly after it ended: a reconnect after
++    /// a network drop or a reloaded window, not a new session. The host user ending the session
++    /// (Disconnect) forgets it, see `send_close_reason_no_retry`.
++    fn is_resume_of_authed_session(&self) -> bool {
++        if self.file_transfer.is_some() || self.lr.union.is_some() {
++            return false;
++        }
++        let alive = ALIVE_CONNS.lock().unwrap().clone();
++        RESUME_TICKETS
++            .lock()
++            .unwrap()
++            .get(&self.session_key())
++            .map_or(false, |t| t.admits(&self.lr.companion_secret, alive.contains(&t.conn_id)))
 +    }
 +
      fn is_authed_remote_conn(&self) -> bool {
          if let Some(id) = self.authed_conn_id.as_ref() {
              return id.conn_type() == AuthConnType::Remote;
-@@ -7874,3 +7966,19 @@ mod test {
+@@ -7874,3 +7990,86 @@ mod test {
          assert!(!replaced_by(&conn(3, remote, key(7, "other")), 2, &mine));
      }
  }
@@ -1046,6 +1125,73 @@ index e9ea313..621cbe8 100644
 +fn companion_set_file(conn_id: i32, file: bool) {
 +    if let Some(e) = FT_COMPANIONS.lock().unwrap().get_mut(&conn_id) {
 +        e.1 = file;
++    }
++}
++
++/// Constant-time comparison of two companion secrets.
++fn same_secret(a: &[u8], b: &[u8]) -> bool {
++    a.len() == b.len() && a.iter().zip(b.iter()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
++}
++
++/// Tether: how long after an accepted remote connection ended the same client may come back in
++/// without a second accept or password (a dropped network, a reloaded window). A one-time
++/// password has changed by then, so this is the only way back in that the technician has.
++const RESUME_WINDOW: Duration = Duration::from_secs(120);
++
++/// Tether: an accepted remote session (by click or by password), for `is_resume_of_authed_session`.
++struct ResumeTicket {
++    secret: Vec<u8>,
++    conn_id: i32,
++    /// None while that connection runs.
++    ended: Option<Instant>,
++}
++
++impl ResumeTicket {
++    fn admits(&self, secret: &[u8], conn_alive: bool) -> bool {
++        self.valid(conn_alive) && secret.len() >= 16 && same_secret(&self.secret, secret)
++    }
++    // Never ended but gone: its `on_close` was missed, treat it as expired.
++    fn valid(&self, conn_alive: bool) -> bool {
++        self.ended.map_or(conn_alive, |t| t.elapsed() < RESUME_WINDOW)
++    }
++}
++
++fn resume_register(key: SessionKey, conn_id: i32, secret: &[u8]) {
++    let alive = ALIVE_CONNS.lock().unwrap().clone();
++    let mut m = RESUME_TICKETS.lock().unwrap();
++    m.retain(|_, t| t.valid(alive.contains(&t.conn_id)));
++    if secret.len() >= 16 {
++        m.insert(key, ResumeTicket { secret: secret.to_vec(), conn_id, ended: None });
++    }
++}
++
++fn resume_ended(conn_id: i32) {
++    for t in RESUME_TICKETS.lock().unwrap().values_mut() {
++        if t.conn_id == conn_id && t.ended.is_none() {
++            t.ended = Some(Instant::now());
++        }
++    }
++}
++
++#[cfg(test)]
++mod resume_test {
++    use super::*;
++
++    #[test]
++    fn a_resume_needs_the_secret_and_a_live_or_recent_session() {
++        let s = vec![7u8; 16];
++        let live = ResumeTicket { secret: s.clone(), conn_id: 1, ended: None };
++        assert!(live.admits(&s, true));
++        assert!(!live.admits(&s, false), "gone without on_close: expired");
++        assert!(!live.admits(&[7u8; 15], true), "short secret");
++        let mut other = s.clone();
++        other[15] = 8;
++        assert!(!live.admits(&other, true), "wrong secret");
++        assert!(!live.admits(&[], true), "client without a secret");
++        let recent = ResumeTicket { ended: Some(Instant::now()), ..live };
++        assert!(recent.admits(&s, false));
++        let old = ResumeTicket { ended: Instant::now().checked_sub(RESUME_WINDOW + Duration::from_secs(1)), ..recent };
++        assert!(old.ended.is_some() && !old.admits(&s, false), "window over");
 +    }
 +}
 diff --git a/src/server/video_qos.rs b/src/server/video_qos.rs
@@ -1344,10 +1490,10 @@ index 0000000..eaa6333
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..6644b3f
+index 0000000..d7b9ace
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,400 @@
 +//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
 +//!
 +//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
@@ -1496,7 +1642,21 @@ index 0000000..6644b3f
 +    login_from: Option<&str>,
 +) {
 +    let session = remote::new_session(key, peer_id, password, conn_type, force_relay);
-+    if let Some(from) = login_from.and_then(self::session) {
++    // Without `from`: a reloaded window (same key) continues its own session, and a file transfer
++    // (window reloaded after its pending login was used, or opened from Home) joins a remote
++    // session to this peer. The host then lets it in without asking again.
++    let from = login_from.and_then(self::session).or_else(|| self::session(key)).or_else(|| {
++        // shortcut: the first remote session to this peer; two at once to one peer are rare.
++        (conn_type == "file-transfer")
++            .then(|| {
++                SESSIONS.read().unwrap().values().find(|s| {
++                    let lc = s.lc.read().unwrap();
++                    lc.conn_type == ConnType::DEFAULT_CONN && lc.get_id() == peer_id
++                }).cloned()
++            })
++            .flatten()
++    });
++    if let Some(from) = from {
 +        let from = from.lc.read().unwrap();
 +        if from.get_id() == peer_id {
 +            session.lc.write().unwrap().copy_login_from(&from);
