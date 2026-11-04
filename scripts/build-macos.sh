@@ -5,10 +5,18 @@
 #
 # Optional: OUT (artifact folder, default dist/macos), VCPKG_ROOT (default .tools/vcpkg),
 # TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD) to write .sig files (Tether Manage signs on publish anyway),
-# APPLE_SIGNING_IDENTITY (default "-" = ad-hoc), MACOSX_DEPLOYMENT_TARGET (default 11.0).
+# APPLE_SIGNING_IDENTITY (default "-" = ad-hoc), MACOSX_DEPLOYMENT_TARGET (default 11.0),
+# MAC_ARCH=arm64 (Apple silicon only: half the build time, no Intel slice, no Rosetta/sudo),
+# SKIP_QS=1 (technician app only).
 # Safe to run again: every step skips what is already in place.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [ "${MAC_ARCH:-universal}" = arm64 ]; then
+  TRIPLETS="arm64-osx" RUST_TARGETS="aarch64-apple-darwin" TARGET=aarch64-apple-darwin ARCH_NAME=aarch64
+else
+  TRIPLETS="arm64-osx x64-osx" RUST_TARGETS="aarch64-apple-darwin x86_64-apple-darwin"
+  TARGET=universal-apple-darwin ARCH_NAME=universal
+fi
 ROOT=$PWD
 TOOLS=$ROOT/.tools
 OUT=${OUT:-$ROOT/dist/macos}
@@ -85,7 +93,7 @@ if ! command -v rustup >/dev/null 2>&1; then
   # shellcheck source=/dev/null
   . "$HOME/.cargo/env"
 fi
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
+rustup target add $RUST_TARGETS
 
 step "vcpkg"
 export VCPKG_ROOT=${VCPKG_ROOT:-$TOOLS/vcpkg}
@@ -99,7 +107,7 @@ fi
 step "Pinned sources and patches"
 bash scripts/bootstrap.sh
 
-step "Native libraries for arm64-osx and x64-osx"
+step "Native libraries for $TRIPLETS"
 # The stock osx triplets plus a deployment target, so the static libs run on every macOS the app
 # supports (the stock ones target the build Mac's version).
 triplets=$TOOLS/vcpkg-triplets
@@ -119,17 +127,17 @@ done
 # triplet. Build each triplet as its own host in its own install root, then merge into
 # $VCPKG_ROOT/installed/<triplet>, where the core's build scripts look. On Apple silicon the x64
 # host tools (pkgconf, …) run under Rosetta.
-if [ "$(uname -m)" = arm64 ] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+if [[ $TRIPLETS == *x64-osx* ]] && [ "$(uname -m)" = arm64 ] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
   sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license
 fi
-for t in arm64-osx x64-osx; do
+for t in $TRIPLETS; do
   (cd vendor/rustdesk && "$VCPKG_ROOT/vcpkg" install --triplet "$t" --host-triplet "$t" \
     --overlay-triplets="$triplets" --x-install-root="$VCPKG_ROOT/installed-$t")
   mkdir -p "$VCPKG_ROOT/installed"
   rm -rf "$VCPKG_ROOT/installed/$t"
   cp -R "$VCPKG_ROOT/installed-$t/$t" "$VCPKG_ROOT/installed/$t"
 done
-for t in arm64-osx x64-osx; do
+for t in $TRIPLETS; do
   for lib in libvpx libyuv libopus libaom libavcodec libavutil; do
     [ -f "$VCPKG_ROOT/installed/$t/lib/$lib.a" ] || die "vcpkg did not produce $t/lib/$lib.a (see $VCPKG_ROOT/buildtrees/*/*.log)"
   done
@@ -145,32 +153,34 @@ sign() { # file: optional .sig next to it, the format Tether Manage also writes
   fi
 }
 
-step "Tether technician app (universal .app, .dmg, updater .app.tar.gz)"
+step "Tether technician app ($ARCH_NAME .app, .dmg, updater .app.tar.gz)"
 cd "$ROOT/apps/desktop"
 npm ci
-npx tauri build --target universal-apple-darwin --bundles app,dmg
+npx tauri build --target $TARGET --bundles app,dmg
 V=$(version)
-B="src-tauri/target/universal-apple-darwin/release/bundle"
-cp "$B/dmg/Tether_${V}_universal.dmg" "$OUT/"
+B="src-tauri/target/$TARGET/release/bundle"
+cp "$B/dmg/Tether_${V}_${ARCH_NAME}.dmg" "$OUT/"
 # Tauri's updater format: a gzipped tar with the .app at the top.
-rm -f "$OUT/Tether_${V}_universal.app.tar.gz.sig"
-COPYFILE_DISABLE=1 tar -czf "$OUT/Tether_${V}_universal.app.tar.gz" -C "$B/macos" Tether.app
-sign "$OUT/Tether_${V}_universal.app.tar.gz"
+rm -f "$OUT/Tether_${V}_${ARCH_NAME}.app.tar.gz.sig"
+COPYFILE_DISABLE=1 tar -czf "$OUT/Tether_${V}_${ARCH_NAME}.app.tar.gz" -C "$B/macos" Tether.app
+sign "$OUT/Tether_${V}_${ARCH_NAME}.app.tar.gz"
 
-step "TetherQS (portable universal .app, zipped)"
+if [ -z "${SKIP_QS:-}" ]; then
+step "TetherQS (portable $ARCH_NAME .app, zipped)"
 cd "$ROOT/apps/quick"
 npm ci
 # Windows ships a bare exe (bundling off); macOS needs the .app bundle.
 # Thin LTO like the technician app: fat LTO fails on macOS ("__CLASS_MudaMenuItem: symbol multiply
 # defined", then "failed to load bitcode of module muda"). Windows keeps the Cargo.toml setting.
-CARGO_PROFILE_RELEASE_LTO=thin npx tauri build --target universal-apple-darwin --bundles app --config '{"bundle":{"active":true}}'
+CARGO_PROFILE_RELEASE_LTO=thin npx tauri build --target $TARGET --bundles app --config '{"bundle":{"active":true}}'
 QV=$(version)
-rm -f "$OUT/TetherQS-${QV}-universal.zip" "$OUT/TetherQS-${QV}-universal.zip.sig"
-ditto -c -k --sequesterRsrc --keepParent src-tauri/target/universal-apple-darwin/release/bundle/macos/TetherQS.app "$OUT/TetherQS-${QV}-universal.zip"
-sign "$OUT/TetherQS-${QV}-universal.zip"
+rm -f "$OUT/TetherQS-${QV}-${ARCH_NAME}.zip" "$OUT/TetherQS-${QV}-${ARCH_NAME}.zip.sig"
+ditto -c -k --sequesterRsrc --keepParent src-tauri/target/$TARGET/release/bundle/macos/TetherQS.app "$OUT/TetherQS-${QV}-${ARCH_NAME}.zip"
+sign "$OUT/TetherQS-${QV}-${ARCH_NAME}.zip"
+fi
 
 step "Done. Artifacts:"
-for f in "$OUT"/Tether_"$V"_universal.* "$OUT"/TetherQS-"$QV"-universal.*; do
+for f in "$OUT"/Tether_"$V"_${ARCH_NAME}.* "$OUT"/TetherQS-"${QV:-}"-${ARCH_NAME}.*; do
   if [ -e "$f" ]; then echo "  $f"; fi
 done
 echo
