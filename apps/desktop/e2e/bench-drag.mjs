@@ -61,7 +61,7 @@ async function qsCreds() {
   const p = b.contexts().flatMap((c) => c.pages())[0];
   await until("TetherQS ready", async () => (await p.locator('[data-testid="qs-status"]').innerText()).includes("Ready"), 120000, 2000);
   const id = (await p.locator('[data-testid="qs-id"]').innerText()).replace(/\s/g, "");
-  const password = (await p.locator('[data-testid="qs-password"]').innerText()).trim();
+  const password = ((await p.locator('[data-testid="qs-password"]').getAttribute("data-password")) ?? "").trim();
   await b.close();
   return { id, password };
 }

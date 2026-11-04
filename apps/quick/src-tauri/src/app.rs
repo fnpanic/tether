@@ -25,6 +25,7 @@ pub fn run(args: Vec<String>) {
         .invoke_handler(commands::handler())
         .setup(move |app| {
             sink::install(app.handle().clone());
+            crate::custom::log_status();
             if !cm_process {
                 // `--cm` already started the status sync inside core_main.
                 librustdesk::ui::api::start_status_sync();

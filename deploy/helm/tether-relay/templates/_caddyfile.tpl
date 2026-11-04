@@ -32,6 +32,9 @@
   handle /api/* {
     reverse_proxy {{ $fn }}-api:21120
   }
+  handle /q/* {
+    reverse_proxy {{ $fn }}-api:21120
+  }
   handle /download/* {
     reverse_proxy {{ $fn }}-api:8081
   }

@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tether_trust::{envelope, generate_key, key_to_b64, reqauth, SigningKey};
+use tether_trust::{custom, envelope, generate_key, key_to_b64, reqauth, SigningKey};
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
 
@@ -326,6 +326,132 @@ fn size_limits() {
     assert_eq!(s.req("POST", "/api/heartbeat", &[], &big_hb).status, 413);
     // Server still healthy after refusing bodies it did not read.
     assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").status, 200);
+}
+
+fn custom_body(key: &SigningKey, id: &str, name: &str, token: &str, expires: u64) -> Vec<u8> {
+    let p = custom::CustomProfile { id: id.into(), name: name.into(), accent: "#c8102e".into(), issued_at: 1, ..Default::default() };
+    let doc = envelope::sign(&serde_json::to_vec(&p).unwrap(), key);
+    serde_json::to_vec(&serde_json::json!({"profile": doc, "token": token, "expires": expires, "channel": "stable"})).unwrap()
+}
+
+#[test]
+fn custom_apps() {
+    let (s, k) = admin_server();
+    let tok = custom::new_token();
+    let exp = now() + 3600;
+    let path = "/api/admin/custom/acme-1";
+    let body = custom_body(&k, "acme-1", "ACME \"GmbH\"/../x\r\n", &tok, exp);
+    // Name with quotes/CR is refused by validate(); a plain one is fine.
+    assert_eq!(s.admin(&k, "PUT", path, &body).status, 400);
+    let body = custom_body(&k, "acme-1", "ACME \"GmbH\" / Ä", &tok, exp);
+
+    // Auth and validation.
+    assert_eq!(s.req("PUT", path, &[], &body).status, 401);
+    assert_eq!(s.admin(&generate_key(), "PUT", path, &body).status, 401);
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/custom/other", &body).status, 400, "id mismatch");
+    assert_eq!(s.admin(&k, "PUT", path, &custom_body(&generate_key(), "acme-1", "A", &tok, exp)).status, 400, "untrusted signer");
+    assert_eq!(s.admin(&k, "PUT", path, &custom_body(&k, "acme-1", "A", "short", exp)).status, 400, "token shape");
+    assert_eq!(s.admin(&k, "PUT", path, &custom_body(&k, "acme-1", "A", &tok, now() - 1)).status, 400, "expired");
+    assert_eq!(s.admin(&k, "PUT", path, &custom_body(&k, "acme-1", "A", &tok, now() + 367 * 86_400)).status, 400, "too far");
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/custom/..%2fx", &body).status, 400);
+    assert_eq!(s.admin(&k, "PUT", path, &vec![b' '; (300 << 10) + 1]).status, 413);
+    assert_eq!(s.admin(&k, "PUT", path, &body).status, 204);
+    let f = s.dir.join("custom/acme-1.json");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    // Another app cannot reuse the token.
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/custom/b", &custom_body(&k, "b", "B", &tok, exp)).status, 409);
+
+    // No release yet: 404. Then publish one and download.
+    let q = format!("/q/{tok}");
+    assert_eq!(s.req("GET", &q, &[], b"").status, 404);
+    let exe = vec![0x4du8; 200_000];
+    let rel = "/api/admin/release/stable/customer/windows-x86_64";
+    assert_eq!(s.admin(&k, "PUT", &format!("{rel}/TetherQS-0.4.1.exe"), &exe).status, 204);
+    let latest = br#"{"version":"0.4.1","platforms":{"windows-x86_64":{"signature":"x","url":"https://r/download/stable/customer/windows-x86_64/TetherQS-0.4.1.exe"}}}"#;
+    assert_eq!(s.admin(&k, "PUT", &format!("{rel}/latest.json"), latest).status, 204);
+    let r = s.req("GET", &q, &[], b"");
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("Cache-Control"), Some("no-store"));
+    assert_eq!(r.header("Content-Disposition"), Some("attachment; filename=\"ACME GmbH-Support.exe\""));
+    assert_eq!(r.header("Content-Length").unwrap().parse::<usize>().unwrap(), r.body.len());
+    let (plain, doc) = custom::split(&r.body);
+    assert_eq!(plain, exe);
+    let p = custom::open(doc.unwrap(), &[k.verifying_key()]).unwrap();
+    assert_eq!((p.id.as_str(), p.accent.as_str()), ("acme-1", "#c8102e"));
+
+    let list = s.admin(&k, "GET", "/api/admin/custom", b"").json();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["id"], "acme-1");
+    assert_eq!(list[0]["token"], tok.as_str());
+    assert_eq!(list[0]["expires"], exp);
+    assert_eq!(list[0]["channel"], "stable");
+    assert_eq!(list[0]["downloads"], 1);
+    assert!(list[0]["last_download"].as_u64().is_some());
+    assert!(list[0].get("profile").is_none());
+
+    // Unknown / malformed tokens: 404.
+    assert_eq!(s.req("GET", &format!("/q/{}", custom::new_token()), &[], b"").status, 404);
+    assert_eq!(s.req("GET", "/q/..%2f..%2fpolicy.json", &[], b"").status, 404);
+    assert_eq!(s.req("GET", &format!("/q/{}", &tok[..42]), &[], b"").status, 404);
+
+    // Replacing with a new token: the old link stops working, counters restart.
+    let tok2 = custom::new_token();
+    assert_eq!(s.admin(&k, "PUT", path, &custom_body(&k, "acme-1", "ACME", &tok2, exp)).status, 204);
+    assert_eq!(s.req("GET", &q, &[], b"").status, 404);
+    assert_eq!(s.req("GET", &format!("/q/{tok2}"), &[], b"").status, 200);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/custom", b"").json()[0]["downloads"], 1);
+
+    // Revoke.
+    assert_eq!(s.admin(&k, "DELETE", path, b"").status, 204);
+    assert!(!f.exists());
+    assert_eq!(s.req("GET", &format!("/q/{tok2}"), &[], b"").status, 404);
+    assert_eq!(s.admin(&k, "DELETE", path, b"").status, 404);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/custom", b"").json(), serde_json::json!([]));
+}
+
+#[test]
+fn custom_app_expiry_counters_persist_and_rate_limit() {
+    let k = generate_key();
+    let keys = key_to_b64(&k.verifying_key());
+    let mut s = start(&keys);
+    let tok = custom::new_token();
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/custom/x", &custom_body(&k, "x", "X", &tok, now() + 2)).status, 204);
+    let rel = "/api/admin/release/stable/customer/windows-x86_64";
+    assert_eq!(s.admin(&k, "PUT", &format!("{rel}/TetherQS-1.exe"), b"MZ").status, 204);
+    assert_eq!(s.admin(&k, "PUT", &format!("{rel}/latest.json"), br#"{"platforms":{"windows-x86_64":{"url":"https://r/TetherQS-1.exe"}}}"#).status, 204);
+    let q = format!("/q/{tok}");
+    assert_eq!(s.req("GET", &q, &[], b"").status, 200);
+
+    // Download counters survive a restart.
+    unsafe { libc::kill(s.child.id() as i32, libc::SIGTERM) };
+    s.child.wait().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tether-api"))
+        .args(["--data", s.dir.to_str().unwrap(), "--listen", "127.0.0.1:0"])
+        .env("ADMIN_PUB_KEY", &keys)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    s.addr = line.trim().strip_prefix("listening on ").unwrap().to_owned();
+    s.child = child;
+    assert_eq!(s.admin(&k, "GET", "/api/admin/custom", b"").json()[0]["downloads"], 1);
+
+    // Expired: same 404 as unknown, entry still listed for the admin.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert_eq!(s.req("GET", &q, &[], b"").status, 404);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/custom", b"").json().as_array().unwrap().len(), 1);
+
+    // 30 per minute per IP (unknown tokens count too), other IPs unaffected.
+    let ip = [("X-Forwarded-For", "192.0.2.50")];
+    for i in 0..30 {
+        assert_eq!(s.req("GET", &q, &ip, b"").status, 404, "req {i}");
+    }
+    assert_eq!(s.req("GET", &q, &ip, b"").status, 429);
+    assert_eq!(s.req("GET", &q, &[("X-Forwarded-For", "192.0.2.51")], b"").status, 404);
 }
 
 #[test]

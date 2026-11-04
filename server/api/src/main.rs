@@ -1,7 +1,8 @@
 //! Tether relay API. Wire contract: `docs/api.md`. Flat files under the data dir, no database.
 //!
 //! Layout: `policy.json`, `policy-history/<serial>.json`, `devices.json`, `nonces.json`,
-//! `diag/tickets.json` + `diag/<ticket>.zip`, `download/…` (served by Caddy), `tmp/`.
+//! `diag/tickets.json` + `diag/<ticket>.zip`, `custom/<id>.json` (custom TetherQS apps),
+//! `download/…` (served by Caddy), `tmp/`.
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -15,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tether_trust::{envelope, policy::Bundle, reqauth, VerifyingKey};
+use tether_trust::{custom, envelope, policy::Bundle, reqauth, VerifyingKey};
 use tiny_http::{Header, Request, Response, Server};
 
 const DAY: u64 = 86_400;
@@ -35,6 +36,9 @@ const LIMIT_POLICY: u64 = 256 << 10;
 const LIMIT_PAGE: u64 = 512 << 10;
 const LIMIT_DIAG: u64 = 2 << 20;
 const LIMIT_RELEASE: u64 = 200 << 20;
+const LIMIT_CUSTOM: u64 = 300 << 10;
+const CUSTOM_MAX_DAYS: u64 = 366;
+const Q_IP_PER_MIN: u32 = 30;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -82,6 +86,29 @@ struct TicketRequest {
     ticket: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CustomRequest {
+    profile: serde_json::Value,
+    token: String,
+    expires: u64,
+    channel: String,
+}
+
+/// `custom/<id>.json`. The signed profile is kept as sent; TetherQS verifies it itself.
+#[derive(Serialize, Deserialize, Clone)]
+struct CustomApp {
+    id: String,
+    name: String,
+    token: String,
+    expires: u64,
+    channel: String,
+    created: u64,
+    downloads: u64,
+    last_download: Option<u64>,
+    profile: serde_json::Value,
+}
+
 /// Just the header fields of a stored bundle (history listing, startup).
 #[derive(Deserialize)]
 struct BundleMeta {
@@ -96,6 +123,8 @@ struct App {
     devices: HashMap<String, Device>,
     devices_dirty: bool,
     ip_hits: HashMap<String, (u64, u32)>,
+    q_hits: HashMap<String, (u64, u32)>,
+    custom: Vec<CustomApp>,
     nonces: HashMap<String, u64>,
     tickets: Vec<Ticket>,
     policy_serial: Option<u64>,
@@ -229,6 +258,32 @@ fn release_path(data: &Path, rel: &str) -> Result<PathBuf, Resp> {
     Ok(data.join("download").join(channel).join(path))
 }
 
+/// Count a request from `ip` in the current minute; false when over `limit`.
+fn rate_ok(hits: &mut HashMap<String, (u64, u32)>, ip: String, t: u64, limit: u32) -> bool {
+    let h = hits.entry(ip).or_insert((t, 0));
+    if t >= h.0 + 60 {
+        *h = (t, 0);
+    }
+    h.1 += 1;
+    h.1 <= limit
+}
+
+fn valid_custom_id(s: &str) -> bool {
+    (1..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// `<Name>-Support.exe`, name reduced to `[A-Za-z0-9 _.-]` (safe inside the quoted header value).
+fn download_name(name: &str) -> String {
+    let n: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-')).collect();
+    let n = n.trim_matches(|c| c == ' ' || c == '.');
+    format!("{}-Support.exe", if n.is_empty() { "TetherQS" } else { n })
+}
+
+/// Log-safe token prefix (full tokens are never logged).
+fn token_hint(t: &str) -> &str {
+    &t[..t.len().min(6)]
+}
+
 fn valid_heartbeat(hb: &Heartbeat) -> Result<(), String> {
     let graphic = |s: &str| s.bytes().all(|b| b.is_ascii_graphic());
     if !(8..=64).contains(&hb.uuid.len()) || !hb.uuid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
@@ -271,7 +326,7 @@ impl App {
     fn open(data: PathBuf, keys: Vec<VerifyingKey>) -> io::Result<Self> {
         mkdirs(&data, 0o750)?;
         mkdirs(&data.join("download"), 0o750)?;
-        for d in ["policy-history", "diag", "tmp"] {
+        for d in ["policy-history", "diag", "custom", "tmp"] {
             mkdirs(&data.join(d), 0o700)?;
         }
         for e in fs::read_dir(data.join("tmp"))? {
@@ -279,7 +334,19 @@ impl App {
         }
         let devices: Vec<Device> = load_json(&data.join("devices.json"));
         let policy_serial = fs::read(data.join("policy.json")).ok().and_then(|b| stored_meta(&b)).map(|m| m.serial);
+        let mut custom: Vec<CustomApp> = Vec::new();
+        for e in fs::read_dir(data.join("custom"))?.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "json") {
+                match fs::read(&p).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string())) {
+                    Ok(c) => custom.push(c),
+                    Err(e) => eprintln!("warning: ignoring unreadable {}: {e}", p.display()),
+                }
+            }
+        }
         Ok(App {
+            q_hits: HashMap::new(),
+            custom,
             devices: devices.into_iter().map(|d| (d.uuid.clone(), d)).collect(),
             devices_dirty: false,
             ip_hits: HashMap::new(),
@@ -384,6 +451,7 @@ impl App {
             ("GET", "/api/policy") => self.get_policy(rq),
             ("POST", "/api/heartbeat") => self.heartbeat(rq),
             ("POST", p) if p.starts_with("/api/diag/") => self.diag_upload(rq, &p["/api/diag/".len()..]),
+            ("GET", p) if p.starts_with("/q/") => self.custom_download(rq, &p["/q/".len()..]),
             (m, p) if p.starts_with("/api/admin/") => self.admin(rq, m, &url, &p["/api/admin/".len()..]),
             _ => Err(not_found()),
         }
@@ -406,12 +474,7 @@ impl App {
 
     fn heartbeat(&mut self, rq: &mut Request) -> Result<Resp, Resp> {
         let t = now();
-        let hits = self.ip_hits.entry(client_ip(rq)).or_insert((t, 0));
-        if t >= hits.0 + 60 {
-            *hits = (t, 0);
-        }
-        hits.1 += 1;
-        if hits.1 > HB_IP_PER_MIN {
+        if !rate_ok(&mut self.ip_hits, client_ip(rq), t, HB_IP_PER_MIN) {
             return Err(text(429, "too many requests"));
         }
         let body = read_body(rq, LIMIT_HEARTBEAT)?;
@@ -473,7 +536,9 @@ impl App {
             ("PUT", "policy") => LIMIT_POLICY,
             ("PUT", "download-page") => LIMIT_PAGE,
             ("POST", "diag-ticket") => LIMIT_SMALL,
-            ("GET", "policy-history" | "devices" | "diag" | "releases" | "status") => LIMIT_SMALL,
+            ("PUT", r) if r.starts_with("custom/") => LIMIT_CUSTOM,
+            ("DELETE", r) if r.starts_with("custom/") => LIMIT_SMALL,
+            ("GET", "policy-history" | "devices" | "diag" | "releases" | "status" | "custom") => LIMIT_SMALL,
             ("GET", r) if r.starts_with("diag/") || r.starts_with("policy-history/") => LIMIT_SMALL,
             _ => return Err(not_found()),
         };
@@ -488,6 +553,19 @@ impl App {
                 Ok(empty(204))
             }
             ("POST", "diag-ticket") => self.new_ticket(&body),
+            ("PUT", r) if r.starts_with("custom/") => self.put_custom(&r["custom/".len()..], &body),
+            ("DELETE", r) if r.starts_with("custom/") => self.delete_custom(&r["custom/".len()..]),
+            ("GET", "custom") => {
+                let list: Vec<_> = self
+                    .custom
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({"id": c.id, "name": c.name, "token": c.token, "expires": c.expires, "channel": c.channel,
+                            "created": c.created, "downloads": c.downloads, "last_download": c.last_download})
+                    })
+                    .collect();
+                Ok(json(&list))
+            }
             ("GET", "policy-history") => self.policy_history(),
             ("GET", "devices") => {
                 let mut v: Vec<&Device> = self.devices.values().collect();
@@ -581,6 +659,100 @@ impl App {
         Ok(json(&serde_json::json!({"ticket": ticket, "expires": created + TICKET_OPEN})))
     }
 
+    fn put_custom(&mut self, id: &str, body: &[u8]) -> Result<Resp, Resp> {
+        let req: CustomRequest = serde_json::from_slice(body).map_err(|e| text(400, &e.to_string()))?;
+        let doc = serde_json::to_vec(&req.profile).map_err(internal)?;
+        let p = custom::open(&doc, &self.keys).map_err(|e| text(400, &e))?;
+        if p.id != id || !valid_custom_id(id) {
+            return Err(text(400, "profile id does not match the path"));
+        }
+        if !custom::valid_token(&req.token) {
+            return Err(text(400, "token must be 43 characters base64url"));
+        }
+        let t = now();
+        if req.expires <= t || req.expires > t + CUSTOM_MAX_DAYS * DAY {
+            return Err(text(400, "expires must be in the future, at most 366 days ahead"));
+        }
+        if !valid_channel(&req.channel) {
+            return Err(text(400, "invalid channel"));
+        }
+        if self.custom.iter().any(|c| c.token == req.token && c.id != id) {
+            return Err(text(409, "token is used by another custom app"));
+        }
+        let old = self.custom.iter().position(|c| c.id == id);
+        // The same link (token) keeps its counters; a new token is a new link.
+        let (created, downloads, last_download) = match old.map(|i| &self.custom[i]) {
+            Some(o) if o.token == req.token => (o.created, o.downloads, o.last_download),
+            _ => (t, 0, None),
+        };
+        let entry = CustomApp { id: id.to_owned(), name: p.name, token: req.token, expires: req.expires, channel: req.channel, created, downloads, last_download, profile: req.profile };
+        self.check_space(body.len() as u64)?;
+        self.save(&format!("custom/{id}.json"), &entry).map_err(internal)?;
+        match old {
+            Some(i) => self.custom[i] = entry,
+            None => self.custom.push(entry),
+        }
+        Ok(empty(204))
+    }
+
+    fn delete_custom(&mut self, id: &str) -> Result<Resp, Resp> {
+        let i = self.custom.iter().position(|c| c.id == id && valid_custom_id(id)).ok_or_else(not_found)?;
+        fs::remove_file(self.data.join("custom").join(format!("{id}.json"))).map_err(internal)?;
+        self.custom.remove(i);
+        Ok(empty(204))
+    }
+
+    /// `GET /q/<token>`: the channel's current TetherQS.exe plus the signed profile trailer.
+    /// Unknown, revoked and expired tokens get the same 404.
+    fn custom_download(&mut self, rq: &Request, token: &str) -> Result<Resp, Resp> {
+        let t = now();
+        if !rate_ok(&mut self.q_hits, client_ip(rq), t, Q_IP_PER_MIN) {
+            return Err(text(429, "too many requests"));
+        }
+        if !custom::valid_token(token) {
+            return Err(not_found());
+        }
+        let i = self.custom.iter().position(|c| c.token == token && t < c.expires).ok_or_else(not_found)?;
+        let c = &self.custom[i];
+        let dir = self.data.join("download").join(&c.channel).join("customer/windows-x86_64");
+        let exe = (|| {
+            let m: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("latest.json")).ok()?).ok()?;
+            let file = m["platforms"]["windows-x86_64"]["url"].as_str()?.rsplit('/').next().filter(|f| valid_segment(f))?;
+            let f = File::open(dir.join(file)).ok()?;
+            let len = f.metadata().ok().filter(|m| m.is_file())?.len();
+            Some((f, len))
+        })();
+        let Some((f, len)) = exe else {
+            eprintln!("custom app {} (token {}…): no Windows TetherQS release in channel {}", c.id, token_hint(token), c.channel);
+            return Err(not_found());
+        };
+        let trailer = custom::trailer(&serde_json::to_vec(&c.profile).map_err(internal)?);
+        let size = len as usize + trailer.len();
+        let disposition = format!("attachment; filename=\"{}\"", download_name(&c.name));
+        let body: Box<dyn Read + Send> = Box::new(f.take(len).chain(io::Cursor::new(trailer)));
+        let resp = Response::new(
+            tiny_http::StatusCode(200),
+            vec![
+                hdr("Content-Type", "application/vnd.microsoft.portable-executable"),
+                hdr("Content-Disposition", &disposition),
+                hdr("Cache-Control", "no-store"),
+                hdr("X-Content-Type-Options", "nosniff"),
+            ],
+            body,
+            Some(size),
+            None,
+        )
+        .with_chunked_threshold(usize::MAX); // tiny_http would switch to chunked above 32 KiB
+        let c = &mut self.custom[i];
+        c.downloads += 1;
+        c.last_download = Some(t);
+        let entry = c.clone();
+        if let Err(e) = self.save(&format!("custom/{}.json", entry.id), &entry) {
+            eprintln!("custom app {}: could not save the download count: {e}", entry.id);
+        }
+        Ok(resp)
+    }
+
     fn put_release(&mut self, rq: &mut Request, url: &str, dest: &Path) -> Result<Resp, Resp> {
         if rq.body_length().is_some_and(|n| n as u64 > LIMIT_RELEASE) {
             return Err(too_large());
@@ -644,6 +816,7 @@ impl App {
         self.devices.retain(|_, d| d.last_seen + DEVICE_TTL > t);
         self.devices_dirty |= self.devices.len() != before;
         self.ip_hits.retain(|_, (start, _)| t < *start + 60);
+        self.q_hits.retain(|_, (start, _)| t < *start + 60);
         let n = self.nonces.len();
         self.nonces.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
         if self.nonces.len() != n {

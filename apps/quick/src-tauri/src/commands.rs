@@ -42,6 +42,10 @@ struct Branding {
     consent_text: String,
     diagnostics: bool,
     perms: Vec<Perm>,
+    /// Custom app name (docs/api.md "Custom apps"), None for plain TetherQS.
+    custom_app: Option<String>,
+    /// `data:` URL of the custom app's logo, empty = none.
+    logo: String,
 }
 
 #[derive(Serialize)]
@@ -75,6 +79,8 @@ fn branding() -> Branding {
             .filter(|(_, f, _)| !e.hidden.contains(*f))
             .map(|(name, f, label)| Perm { name, label, allowed: e.on(f), locked: e.is_locked(f) })
             .collect(),
+        custom_app: crate::custom::profile().map(|p| p.name.clone()),
+        logo: crate::custom::logo_url(),
     }
 }
 

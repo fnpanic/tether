@@ -36,6 +36,12 @@
 		reverse_proxy 127.0.0.1:21120
 	}
 
+	# Private custom-app download links (GET /q/<token>, docs/api.md "Custom apps"). No access log
+	# is configured: the tokens are secrets.
+	handle /q/* {
+		reverse_proxy 127.0.0.1:21120
+	}
+
 	# Release downloads and update manifests written by tether-api. Caddy (user tether-https)
 	# reads them through membership in group tether-api; see install.sh.
 	handle /download/* {

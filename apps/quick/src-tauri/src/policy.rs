@@ -10,7 +10,7 @@ use std::{
 use hbb_common::config::{Config, LocalConfig, DEFAULT_SETTINGS, OVERWRITE_SETTINGS};
 use tether_trust::{
     envelope,
-    policy::{parse_servers, resolve, server_host, Bundle, Effective, FLOOR, PROFILE_CUSTOMER, SERVERS_LIST},
+    policy::{parse_servers, resolve_with, server_host, Bundle, Effective, FLOOR, PROFILE_CUSTOMER, SERVERS_LIST},
     VerifyingKey,
 };
 
@@ -27,7 +27,14 @@ pub fn current() -> Effective {
         .read()
         .unwrap()
         .clone()
-        .unwrap_or_else(|| resolve(None, PROFILE_CUSTOMER, "", None))
+        .unwrap_or_else(|| resolved(None, ""))
+}
+
+/// Policy for this module: bundle layers plus the custom app's settings and branding, if any.
+fn resolved(bundle: Option<&Bundle>, device: &str) -> Effective {
+    let mut eff = resolve_with(bundle, PROFILE_CUSTOMER, device, crate::custom::layer(), None);
+    crate::custom::brand(&mut eff);
+    eff
 }
 
 /// The API server that answered last (else the first compiled-in one), or None in builds without
@@ -87,7 +94,7 @@ pub fn http() -> Result<reqwest::blocking::Client, String> {
     b.build().map_err(|e| e.to_string())
 }
 
-fn trusted_keys() -> Vec<VerifyingKey> {
+pub fn trusted_keys() -> Vec<VerifyingKey> {
     ADMIN_KEYS
         .unwrap_or("")
         .split(',')
@@ -122,7 +129,7 @@ pub fn device_uuid() -> String {
 }
 
 fn set(bundle: Option<&Bundle>) {
-    let eff = resolve(bundle, PROFILE_CUSTOMER, &device_uuid(), None);
+    let eff = resolved(bundle, &device_uuid());
     apply_core(&eff);
     let servers_changed = apply_servers(&eff);
     *EFFECTIVE.write().unwrap() = Some(eff);
@@ -234,6 +241,7 @@ pub fn spawn(on_change: impl Fn() + Send + 'static) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tether_trust::policy::resolve;
 
     fn doc(serial: u64, key: &tether_trust::SigningKey, extra: &str) -> Vec<u8> {
         let payload = format!(r#"{{"serial":{serial},"issued_at":0,"profiles":{{"customer":{{{extra}}}}}}}"#);
