@@ -1,0 +1,808 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Tether Architecture</title>
+<style>
+/* Tokens from DESIGN.md. Light first, dark via prefers-color-scheme. */
+:root{
+  --canvas:#ffffff;--parchment:#f5f5f7;--tile:#ffffff;--tile-2:#fafafc;
+  --ink:#1d1d1f;--ink-80:#333333;--muted:#6e6e73;--faint:#7a7a7a;
+  --hairline:rgba(0,0,0,.08);--line:rgba(0,0,0,.22);
+  --accent:#0066cc;--accent-soft:rgba(0,102,204,.10);--focus:#0071e3;
+  --ok:#1f9d55;--warn:#b25000;--danger:#d70015;
+  --font:-apple-system,"SF Pro Text","SF Pro Display","Inter Variable",system-ui,sans-serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --canvas:#000000;--parchment:#1c1c1e;--tile:#272729;--tile-2:#2a2a2c;
+    --ink:#f5f5f7;--ink-80:#cccccc;--muted:#98989d;--faint:#6e6e73;
+    --hairline:rgba(255,255,255,.10);--line:rgba(255,255,255,.28);
+    --accent:#2997ff;--accent-soft:rgba(41,151,255,.16);--focus:#2997ff;
+    --ok:#30d158;--warn:#ffb340;--danger:#ff453a;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{margin:0;background:var(--canvas);color:var(--ink);font:400 17px/1.47 var(--font);letter-spacing:-.022em}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:5px}
+.top{position:sticky;top:0;z-index:10;height:44px;display:flex;align-items:center;gap:16px;padding:0 24px;
+  background:color-mix(in srgb,var(--canvas) 80%,transparent);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--hairline)}
+.brand{font-weight:600;font-size:15px;letter-spacing:-.01em;color:var(--ink);display:flex;align-items:center;gap:8px}
+.brand svg{width:20px;height:20px}
+.top nav{margin-left:auto;display:flex;gap:4px;font-size:14px;letter-spacing:-.016em}
+.top nav a{padding:6px 12px;border-radius:999px;color:var(--ink-80)}
+.top nav a[aria-current]{background:var(--parchment);color:var(--ink);font-weight:600}
+.top nav a:hover{text-decoration:none;background:var(--parchment)}
+.layout{display:grid;grid-template-columns:260px minmax(0,1fr);max-width:1240px;margin:0 auto}
+.toc{position:sticky;top:44px;align-self:start;max-height:calc(100vh - 44px);overflow:auto;padding:32px 16px 48px 24px;font-size:14px;line-height:1.43;letter-spacing:-.016em}
+.toc summary{display:none}
+.toc ol{list-style:none;margin:0;padding:0}
+.toc li a{display:block;padding:5px 12px;border-radius:8px;color:var(--ink-80)}
+.toc li a:hover{background:var(--parchment);text-decoration:none}
+.toc li li a{padding-left:24px;color:var(--muted);font-size:13px}
+.toc .grp{margin-top:16px;padding:0 12px 4px;font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+main{padding:32px 32px 80px;max-width:900px;min-width:0}
+h1{font-size:40px;line-height:1.1;font-weight:600;letter-spacing:-.02em;margin:24px 0 12px}
+h2{font-size:28px;line-height:1.14;font-weight:600;letter-spacing:-.01em;margin:80px 0 16px;padding-top:24px;border-top:1px solid var(--hairline)}
+h3{font-size:21px;line-height:1.19;font-weight:600;letter-spacing:0;margin:48px 0 12px}
+h4{font-size:17px;font-weight:600;margin:32px 0 8px}
+h2,h3,h4{scroll-margin-top:64px}
+p,ul,ol{margin:0 0 16px}
+li{margin:4px 0}
+.lead{font-size:21px;line-height:1.38;color:var(--ink-80);letter-spacing:-.01em;max-width:720px}
+.eyebrow{font-size:14px;font-weight:600;color:var(--muted);margin:0}
+code,kbd{font-family:var(--mono);font-size:.84em;background:var(--parchment);border:1px solid var(--hairline);border-radius:5px;padding:1px 5px;letter-spacing:0;white-space:nowrap}
+@media (max-width:899px){code{white-space:normal;overflow-wrap:anywhere}}
+pre{font-family:var(--mono);font-size:13.5px;line-height:1.5;letter-spacing:0;background:var(--parchment);border:1px solid var(--hairline);border-radius:11px;padding:16px;overflow:auto;margin:0 0 16px}
+pre code{background:none;border:0;padding:0;white-space:pre;font-size:inherit}
+.tw{overflow-x:auto;margin:0 0 24px;border:1px solid var(--hairline);border-radius:11px}
+table{border-collapse:collapse;width:100%;font-size:15px;line-height:1.4;letter-spacing:-.01em}
+th,td{text-align:left;vertical-align:top;padding:10px 14px;border-bottom:1px solid var(--hairline)}
+th{font-size:14px;font-weight:600;color:var(--muted);background:var(--tile-2)}
+tr:last-child td{border-bottom:0}
+td code{white-space:normal;word-break:break-word}
+.note{background:var(--parchment);border-radius:11px;padding:14px 18px;margin:0 0 24px;font-size:15px;line-height:1.47;letter-spacing:-.01em}
+.note strong:first-child{color:var(--ink)}
+.note.warn{border-left:3px solid var(--warn)}
+.note.new{border-left:3px solid var(--accent)}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;margin:24px 0}
+.card{background:var(--tile);border:1px solid var(--hairline);border-radius:18px;padding:24px}
+.card h4{margin:0 0 6px;font-size:17px}
+.card p{margin:0 0 12px;font-size:15px;color:var(--ink-80);line-height:1.4}
+.card a{font-size:15px}
+.steps{counter-reset:s;list-style:none;padding:0}
+.steps>li{counter-increment:s;position:relative;padding-left:40px;margin:0 0 14px}
+.steps>li::before{content:counter(s);position:absolute;left:0;top:1px;width:26px;height:26px;border-radius:999px;background:var(--parchment);border:1px solid var(--hairline);font-size:13px;font-weight:600;display:grid;place-items:center;letter-spacing:0}
+.pill{display:inline-flex;align-items:center;gap:6px;background:var(--parchment);border-radius:999px;padding:2px 10px;font-size:12px;line-height:1.6;letter-spacing:0;white-space:nowrap}
+.dot{width:6px;height:6px;border-radius:999px;background:var(--muted);display:inline-block}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.danger{background:var(--danger)}
+figure{margin:24px 0 32px}
+.fig{overflow-x:auto;background:var(--tile);border:1px solid var(--hairline);border-radius:18px;padding:16px}
+.fig svg{display:block;width:100%;height:auto}
+figcaption{font-size:14px;color:var(--muted);margin-top:8px;letter-spacing:-.016em}
+/* Diagram styling: SVG uses the page tokens so it follows light/dark. */
+.d text{font-family:var(--font);font-size:13px;fill:var(--ink);letter-spacing:-.01em}
+.d .s{font-size:11.5px;fill:var(--muted)}
+.d .h{font-weight:600}
+.d .ta{fill:var(--accent)}
+.d .b{fill:var(--tile);stroke:var(--line);stroke-width:1}
+.d .ba{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.d .g{fill:var(--parchment);stroke:var(--hairline)}
+.d .l{stroke:var(--muted);stroke-width:1.4;fill:none}
+.d .la{stroke:var(--accent);stroke-width:1.6;fill:none}
+.d .dash{stroke-dasharray:5 4}
+.d .mk{fill:var(--muted)}.d .mka{fill:var(--accent)}
+footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);font-size:12px;color:var(--muted);line-height:1.5;letter-spacing:0}
+@media (max-width:899px){
+  .layout{display:block}
+  .toc{position:static;max-height:none;padding:16px 16px 0}
+  .toc summary{display:block;cursor:pointer;font-weight:600;font-size:15px;padding:10px 14px;background:var(--parchment);border-radius:11px;list-style:none}
+  .toc summary::-webkit-details-marker{display:none}
+  .toc[open] summary{margin-bottom:8px}
+  main{padding:16px 16px 64px}
+  h1{font-size:32px}
+  h2{font-size:24px;margin-top:56px}
+  .top{padding:0 16px}
+  .brand span{display:none}
+}
+@media print{.top,.toc{display:none}.layout{display:block}h2{break-before:page}}
+</style>
+<style>
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:16px;margin:24px 0 32px}
+.stat{background:var(--tile);border:1px solid var(--hairline);border-radius:18px;padding:20px 24px}
+.stat b{display:block;font-size:28px;line-height:1.14;font-weight:600;letter-spacing:-.01em}
+.stat span{font-size:14px;color:var(--muted);line-height:1.43;letter-spacing:-.016em}
+.fig.wide svg{min-width:720px}
+.seq text:not([class]){paint-order:stroke;stroke:var(--tile);stroke-width:5px;stroke-linejoin:round}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" class="d">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0 0L10 5L0 10z"/></marker>
+    <marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mka" d="M0 0L10 5L0 10z"/></marker>
+  </defs>
+</svg>
+
+<header class="top">
+  <a class="brand" href="#top"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="1" y="1" width="18" height="18" rx="5" fill="var(--accent)"/><path d="M6 7h8M10 7v7" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>Tether <span>Documentation</span></a>
+  <nav aria-label="Documentation pages">
+    <a href="index.html">User guide</a>
+    <a href="architecture.html" aria-current="page">Architecture</a>
+  </nav>
+</header>
+
+<div class="layout" id="top">
+<details class="toc" open>
+  <summary>Contents</summary>
+  <nav aria-label="Contents">
+    <ol>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#components">Components</a></li>
+      <li><a href="#repo">Repository and build</a></li>
+      <li><a href="#deployment">Deployment</a></li>
+      <li><a href="#network">Network</a>
+        <ol>
+          <li><a href="#net-443">443-only</a></li>
+          <li><a href="#net-racing">Route racing</a></li>
+          <li><a href="#net-proxy">Proxies and TLS inspection</a></li>
+          <li><a href="#net-ports">Relay ports and routes</a></li>
+        </ol>
+      </li>
+      <li><a href="#session">Session flow</a></li>
+      <li><a href="#video">Video pipeline (FluxRT)</a></li>
+      <li><a href="#security">Security model</a>
+        <ol>
+          <li><a href="#sec-keys">Keys</a></li>
+          <li><a href="#sec-crypto">Encryption</a></li>
+          <li><a href="#sec-signed">Signed policies, requests</a></li>
+          <li><a href="#sec-floor">Floor and hardening</a></li>
+          <li><a href="#sec-consent">Recording consent</a></li>
+        </ol>
+      </li>
+      <li><a href="#policy">Policy model</a></li>
+      <li><a href="#updates">Updates</a></li>
+      <li><a href="#ha">High availability</a></li>
+      <li><a href="#k8s">Kubernetes</a></li>
+      <li><a href="#custom">Custom apps</a></li>
+      <li><a href="#diagnostics">Diagnostics</a></li>
+      <li><a href="#api">Relay API</a></li>
+      <li><a href="#performance">Performance</a></li>
+      <li><a href="#limits">Known limits</a></li>
+    </ol>
+  </nav>
+</details>
+
+<main>
+<p class="eyebrow">Tether 0.4 · architecture</p>
+<h1 id="overview">How Tether works</h1>
+<p class="lead">Tether is a self-hosted remote desktop for Windows and macOS with Linux relays. It is built on a lightly patched RustDesk core inside Tauri 2 apps, talks to its relays only over TLS WebSockets on port 443, and keeps every session end-to-end encrypted. Policies, releases and branded customer apps are signed on the administrator's PC, so a compromised relay can neither read sessions nor push settings or code.</p>
+
+<div class="stats">
+  <div class="stat"><b>1 port</b><span>TCP 443 out, port 80 fallback. No UDP, no P2P, no listening ports.</span></div>
+  <div class="stat"><b>3 keys</b><span>Server key (pinned), admin key (policies, API), updater key (releases).</span></div>
+  <div class="stat"><b>~0.9 s</b><span>Picture back after a relay restart (median of 3 production runs).</span></div>
+  <div class="stat"><b>0 / 30</b><span>Sessions dropped during Kubernetes rolling updates of hbbr and hbbs.</span></div>
+  <div class="stat"><b>p95 98 ms</b><span>Window drag on a GPU-less VM; AnyDesk 9.8.3: 95 ms on the same meter.</span></div>
+</div>
+
+<!-- ============================ COMPONENTS ============================ -->
+<h2 id="components">Components</h2>
+<div class="tw"><table>
+<thead><tr><th>Component</th><th>Where</th><th>Role</th></tr></thead>
+<tbody>
+<tr><td><strong>Technician app</strong> “Tether”</td><td><code>apps/desktop</code></td><td>Tauri 2 + React. One binary is both viewer and host (main window, session windows, file transfer, connection manager, optional background service). NSIS installer per machine; macOS universal <code>.dmg</code>.</td></tr>
+<tr><td><strong>TetherQS</strong></td><td><code>apps/quick</code></td><td>Portable customer module, one <code>TetherQS.exe</code> (macOS: portable <code>.app</code>). Same core, minimal UI, incoming sessions only (<code>conn-type=incoming</code>, <code>disable-installation=Y</code>). Host server and connection manager run in one normal-user process; config in <code>%APPDATA%\Tether-QS</code>.</td></tr>
+<tr><td><strong>Tether Manage</strong></td><td><code>apps/manage</code></td><td>Admin app. Holds the admin and updater keys (sealed with a passphrase), signs policies, releases and custom-app profiles, and talks to every relay with signed requests.</td></tr>
+<tr><td><strong>tether-trust</strong></td><td><code>crates/tether-trust</code></td><td>Shared Rust crate: signed envelopes, policy bundle and resolution, admin request signatures, version ordering, custom-app profiles and trailer.</td></tr>
+<tr><td><strong>hbbs</strong></td><td>relay node</td><td>RustDesk rendezvous server, patched so hosts register over WebSocket, with least-loaded relay choice, health endpoints and drain.</td></tr>
+<tr><td><strong>hbbr</strong></td><td>relay node</td><td>Relay: pairs the two halves of a session by uuid and forwards ciphertext. Drains on stop.</td></tr>
+<tr><td><strong>Caddy</strong></td><td>relay node</td><td>TLS front end on 443 (Let's Encrypt, TLS-ALPN-01), port 80 forwarded to it by firewalld. Routes WebSockets, API and static downloads.</td></tr>
+<tr><td><strong>tether-api</strong></td><td><code>server/api</code></td><td>Single-threaded <code>tiny_http</code> service (<code>MemoryMax=64M</code>, about 1 MB RAM). Serves signed policy, heartbeats, diagnostics uploads, releases, the download page and custom-app links from flat files. No database.</td></tr>
+<tr><td><strong>DuckDNS</strong></td><td><code>tether-ddns.timer</code></td><td>Free permanent names that follow the VMs' ephemeral IPs (refresh every 5 min and at boot). Clients are built against names, never IPs.</td></tr>
+<tr><td><strong>Oracle VMs</strong></td><td>OCI Always Free</td><td>Two <code>VM.Standard.E2.1.Micro</code> (1/8 OCPU, 1 GB, Oracle Linux 9, eu-amsterdam-1), one per relay node, same server key pair.</td></tr>
+</tbody></table></div>
+
+<figure>
+  <div class="fig wide">
+  <svg class="d" viewBox="0 0 900 500" role="img" aria-labelledby="c1t">
+    <title id="c1t">Component diagram: technician app, relay node and TetherQS, each with UI, Rust shell and core; Tether Manage talks to the relay API.</title>
+    <path class="la dash" d="M145 58V30H755V58" marker-start="url(#aa)" marker-end="url(#aa)"/>
+    <text class="ta" x="450" y="22" text-anchor="middle">end-to-end encrypted session (X25519 + XSalsa20-Poly1305), carried through hbbr</text>
+    <!-- technician -->
+    <rect class="g" x="10" y="60" width="270" height="290" rx="18"/>
+    <text class="h" x="26" y="86">Technician PC</text><text class="s" x="26" y="104">Windows / macOS · Tether app</text>
+    <rect class="b" x="26" y="118" width="238" height="52" rx="11"/>
+    <text class="h" x="40" y="140">Tether UI · React</text><text class="s" x="40" y="158">Session · Settings · Diagnostics</text>
+    <rect class="b" x="26" y="180" width="238" height="70" rx="11"/>
+    <text class="h" x="40" y="202">Tauri 2 shell · Rust</text><text class="s" x="40" y="220">commands · policy · netpolicy</text><text class="s" x="40" y="237">update · recording · diag · cli</text>
+    <rect class="b" x="26" y="260" width="238" height="70" rx="11"/>
+    <text class="h" x="40" y="282">RustDesk core (patched)</text><text class="s" x="40" y="300">capture · codecs · input</text><text class="s" x="40" y="317">rendezvous client · E2E crypto</text>
+    <!-- relay -->
+    <rect class="g" x="315" y="60" width="270" height="290" rx="18"/>
+    <text class="h" x="331" y="86">Relay node</text><text class="s" x="331" y="104">Linux VM · systemd (or Kubernetes)</text>
+    <rect class="ba" x="331" y="118" width="238" height="52" rx="11"/>
+    <text class="h" x="345" y="140">Caddy :443 (:80 → 443)</text><text class="s" x="345" y="158">/ws/id · /ws/relay · /api · /download</text>
+    <rect class="b" x="331" y="184" width="114" height="62" rx="11"/>
+    <text class="h" x="343" y="206">hbbs</text><text class="s" x="343" y="223">rendezvous</text><text class="s" x="343" y="238">WS :21118</text>
+    <rect class="b" x="455" y="184" width="114" height="62" rx="11"/>
+    <text class="h" x="467" y="206">hbbr</text><text class="s" x="467" y="223">relay</text><text class="s" x="467" y="238">WS :21119</text>
+    <rect class="b" x="331" y="260" width="114" height="62" rx="11"/>
+    <text class="h" x="343" y="282">tether-api</text><text class="s" x="343" y="299">policy, devices</text><text class="s" x="343" y="314">:21120</text>
+    <rect class="b" x="455" y="260" width="114" height="62" rx="11"/>
+    <text class="h" x="467" y="282">/download</text><text class="s" x="467" y="299">releases, page</text><text class="s" x="467" y="314">static files</text>
+    <text class="s" x="331" y="340">health :21121 (hbbr) · :21122 (hbbs)</text>
+    <path class="l" d="M388 170V182" marker-end="url(#ah)"/>
+    <path class="l" d="M512 170V182" marker-end="url(#ah)"/>
+    <path class="l" d="M331 160H322V291H329" marker-end="url(#ah)"/>
+    <path class="l" d="M569 160H578V291H571" marker-end="url(#ah)"/>
+    <!-- customer -->
+    <rect class="g" x="620" y="60" width="270" height="290" rx="18"/>
+    <text class="h" x="636" y="86">Customer PC</text><text class="s" x="636" y="104">TetherQS · no install, no admin</text>
+    <rect class="b" x="636" y="118" width="238" height="52" rx="11"/>
+    <text class="h" x="650" y="140">TetherQS UI · React</text><text class="s" x="650" y="158">ID · password · Accept card</text>
+    <rect class="b" x="636" y="180" width="238" height="70" rx="11"/>
+    <text class="h" x="650" y="202">Tauri 2 shell · Rust</text><text class="s" x="650" y="220">policy · netpolicy · update</text><text class="s" x="650" y="237">custom-app profile · elevate</text>
+    <rect class="b" x="636" y="260" width="238" height="70" rx="11"/>
+    <text class="h" x="650" y="282">RustDesk core (same)</text><text class="s" x="650" y="300">incoming only · in-process</text><text class="s" x="650" y="317">host server + conn. manager</text>
+    <!-- links -->
+    <path class="l" d="M264 215H298V130H329" marker-end="url(#ah)"/>
+    <path class="l" d="M636 215H602V130H571" marker-end="url(#ah)"/>
+    <!-- admin -->
+    <rect class="g" x="315" y="400" width="270" height="88" rx="18"/>
+    <text class="h" x="331" y="422">Admin PC</text>
+    <rect class="b" x="331" y="432" width="238" height="46" rx="11"/>
+    <text class="h" x="345" y="452">Tether Manage</text><text class="s" x="345" y="469">admin key · updater key (sealed)</text>
+    <path class="l" d="M450 400V354" marker-end="url(#ah)"/>
+    <text class="s" x="460" y="382">signed admin API (Tether-Sig)</text>
+  </svg>
+  </div>
+  <figcaption>All three apps share the <code>tether-trust</code> crate. Clients connect out to Caddy over <code>wss://</code> on 443; Caddy fans out to hbbs, hbbr, tether-api and the static download folder. The relay only ever sees ciphertext of the session.</figcaption>
+</figure>
+
+<!-- ============================ REPO ============================ -->
+<h2 id="repo">Repository layout and build</h2>
+<pre><code>apps/desktop/            technician app (src/ = React UI, src-tauri/ = Rust shell, e2e/ = benches and tests)
+apps/quick/              TetherQS (portable, Tauri bundling off on Windows)
+apps/manage/             Tether Manage
+crates/tether-trust/     envelope, policy, reqauth, version, custom (shared types and crypto)
+patches/                 rustdesk.patch, hbb_common.patch, rustdesk-server.patch
+scripts/                 bootstrap.sh, build-macos.sh, build-relay.sh, test-relay.sh, make-patches.sh
+server/                  Dockerfile(.static), docker-compose.yml, systemd units, caddy/Caddyfile, install.sh, api/
+deploy/helm/tether-relay Helm chart; deploy/kind/ = kind test cluster and harness
+tools/bench/             glass-to-glass meter, corporate proxy, network audit; tools/vm/ = VM helpers
+docs/                    specs and runbooks (this site: docs/site/)</code></pre>
+<h3 id="repo-core">Patched RustDesk core</h3>
+<p><code>scripts/bootstrap.sh</code> fetches RustDesk, <code>hbb_common</code> and <code>rustdesk-server</code> into <code>vendor/</code> at pinned tags and applies <code>patches/*.patch</code>. Tether's changes sit behind the <code>tauri</code> cargo feature: the Tauri bridge <code>src/tauri_ui</code> (video passthrough, connection manager events), no insecure fallback, recording consent, 443-only networking and route racing in <code>hbb_common::websocket</code>, codec choice on low-memory hosts, and the <code>fluxrt encode:</code> log line. The relay patch adds WebSocket host registration, health endpoints, drain and least-loaded relay choice. <code>scripts/make-patches.sh</code> regenerates the patches.</p>
+<h3 id="repo-build">Build</h3>
+<div class="tw"><table>
+<thead><tr><th>Target</th><th>How</th></tr></thead>
+<tbody>
+<tr><td>Windows prerequisites</td><td>Rust (MSVC), Node 22+, LLVM (<code>LIBCLANG_PATH</code>), VS Build Tools, vcpkg (<code>VCPKG_ROOT</code>, triplet <code>x64-windows-static</code>)</td></tr>
+<tr><td>Technician app</td><td><code>npx tauri build --bundles nsis</code> → <code>Tether_&lt;v&gt;_x64-setup.exe</code></td></tr>
+<tr><td>TetherQS</td><td><code>cargo build --release --features custom-protocol</code> (or <code>npx tauri build</code>) → <code>TetherQS.exe</code>, the only artifact</td></tr>
+<tr><td>macOS</td><td><code>bash scripts/build-macos.sh</code>: installs Rust targets, NASM 2.16.03, pinned vcpkg under <code>.tools/</code>; builds unsigned universal (ad-hoc signed) <code>Tether_&lt;v&gt;_universal.dmg</code>, <code>.app.tar.gz</code> and <code>TetherQS-&lt;v&gt;-universal.zip</code> into <code>dist/macos/</code>. macOS 11+.</td></tr>
+<tr><td>Relay</td><td><code>scripts/build-relay.sh</code> in WSL: static musl <code>hbbs</code>, <code>hbbr</code>, <code>tether-api</code>; image from <code>server/Dockerfile.static</code> (distroless, about 8 MB)</td></tr>
+</tbody></table></div>
+<p>Release builds refuse to compile without <code>TETHER_SERVER</code> (comma-separated list allowed), <code>TETHER_PUB_KEY</code>, <code>TETHER_ADMIN_PUB_KEY</code> and <code>TETHER_UPDATER_PUB_KEY</code>. For development, <code>npm run dev</code> serves the UI against an in-browser mock backend, and <code>TETHER_PROFILE=b</code> starts a second instance with its own config, so host and viewer can run on one PC.</p>
+
+<!-- ============================ DEPLOYMENT ============================ -->
+<h2 id="deployment">Deployment</h2>
+<figure>
+  <div class="fig wide">
+  <svg class="d" viewBox="0 0 900 520" role="img" aria-labelledby="c2t">
+    <title id="c2t">Deployment: technician PC, admin PC and a customer network behind a TLS-inspecting proxy connect to two independent relay nodes on Oracle Cloud; DuckDNS keeps their names current.</title>
+    <rect class="b" x="20" y="20" width="240" height="80" rx="18"/>
+    <text class="h" x="36" y="46">Technician PC</text><text class="s" x="36" y="66">Tether app (viewer and host)</text><text class="s" x="36" y="84">races requests over both relays</text>
+    <rect class="b" x="330" y="20" width="240" height="80" rx="18"/>
+    <text class="h" x="346" y="46">Admin PC</text><text class="s" x="346" y="66">Tether Manage</text><text class="s" x="346" y="84">publishes to every relay</text>
+    <rect class="g" x="640" y="10" width="250" height="140" rx="18"/>
+    <text class="s" x="656" y="30">Customer network</text>
+    <rect class="b" x="656" y="40" width="218" height="46" rx="11"/>
+    <text class="h" x="670" y="60">TetherQS (host)</text><text class="s" x="670" y="78">registers with every relay</text>
+    <rect class="b" x="656" y="96" width="218" height="42" rx="11"/>
+    <text class="h" x="670" y="114">Proxy · TLS inspection</text><text class="s" x="670" y="130">only 443 allowed out</text>
+    <path class="l" d="M765 86V94" marker-end="url(#ah)"/>
+    <!-- region -->
+    <rect class="g" x="20" y="210" width="740" height="230" rx="18"/>
+    <text class="h" x="36" y="414">Oracle Cloud Always Free · eu-amsterdam-1</text>
+    <text class="s" x="36" y="432">VM.Standard.E2.1.Micro · 1/8 OCPU · 1 GB RAM · Oracle Linux 9 · 2 GB swap</text>
+    <g transform="translate(0 -38)">
+    <rect class="b" x="36" y="264" width="340" height="160" rx="18"/>
+    <text class="h" x="52" y="288">Relay 1 · tether-desk.duckdns.org</text>
+    <rect class="ba" x="52" y="302" width="150" height="36" rx="8"/><text x="127" y="325" text-anchor="middle">Caddy</text>
+    <rect class="b" x="214" y="302" width="150" height="36" rx="8"/><text x="289" y="325" text-anchor="middle">hbbs</text>
+    <rect class="b" x="52" y="348" width="150" height="36" rx="8"/><text x="127" y="371" text-anchor="middle">hbbr</text>
+    <rect class="b" x="214" y="348" width="150" height="36" rx="8"/><text x="289" y="371" text-anchor="middle">tether-api</text>
+    <text class="s" x="52" y="408">server key pair · drain 300 s</text>
+    <rect class="b" x="404" y="264" width="340" height="160" rx="18"/>
+    <text class="h" x="420" y="288">Relay 2 · tether-desk2.duckdns.org</text>
+    <rect class="ba" x="420" y="302" width="150" height="36" rx="8"/><text x="495" y="325" text-anchor="middle">Caddy</text>
+    <rect class="b" x="582" y="302" width="150" height="36" rx="8"/><text x="657" y="325" text-anchor="middle">hbbs</text>
+    <rect class="b" x="420" y="348" width="150" height="36" rx="8"/><text x="495" y="371" text-anchor="middle">hbbr</text>
+    <rect class="b" x="582" y="348" width="150" height="36" rx="8"/><text x="657" y="371" text-anchor="middle">tether-api</text>
+    <text class="s" x="420" y="408">same key pair copied from relay 1</text>
+    <path class="l dash" d="M378 396H402" marker-start="url(#ah)" marker-end="url(#ah)"/>
+    <rect class="b" x="780" y="264" width="110" height="100" rx="18"/>
+    <text class="h" x="794" y="288">DuckDNS</text><text class="s" x="794" y="308">name → IP</text><text class="s" x="794" y="326">every 5 min</text><text class="s" x="794" y="344">and at boot</text>
+    <path class="l dash" d="M762 314H778" marker-end="url(#ah)"/>
+    </g>
+    <!-- flows -->
+    <path class="l" d="M140 100V224" marker-end="url(#ah)"/>
+    <path class="l" d="M210 100L520 224" marker-end="url(#ah)"/>
+    <path class="l dash" d="M420 100L300 224" marker-end="url(#ah)"/>
+    <path class="l dash" d="M480 100L600 224" marker-end="url(#ah)"/>
+    <path class="la" d="M720 138L680 224" marker-end="url(#aa)"/>
+    <path class="la" d="M690 138L340 224" marker-end="url(#aa)"/>
+    <text class="s" x="148" y="170">wss :443 (80)</text>
+    <!-- legend -->
+    <text class="s" x="390" y="460" text-anchor="middle">hbbs on each node checks every hbbr's /readyz every 3 s and hands out the least-loaded one</text>
+    <path class="l" d="M60 494H100"/><text class="s" x="108" y="498">viewer: WebSocket to every hbbs, then one hbbr</text>
+    <path class="la" d="M380 494H420"/><text class="s" x="428" y="498">host: registers with every hbbs via the proxy</text>
+    <path class="l dash" d="M690 494H730"/><text class="s" x="738" y="498">signed admin API</text>
+  </svg>
+  </div>
+  <figcaption>Production: two independent nodes that share no state except the server key pair. Availability comes from the clients, which register with and race across all nodes, and from each hbbs being able to hand out any node's relay.</figcaption>
+</figure>
+<div class="tw"><table>
+<thead><tr><th>Item</th><th>Relay 1</th><th>Relay 2</th></tr></thead>
+<tbody>
+<tr><td>Name</td><td><a href="https://tether-desk.duckdns.org">tether-desk.duckdns.org</a></td><td><a href="https://tether-desk2.duckdns.org">tether-desk2.duckdns.org</a></td></tr>
+<tr><td>Services</td><td colspan="2"><code>tether-hbbs</code>, <code>tether-hbbr</code>, <code>tether-https</code> (Caddy), <code>tether-api</code>, <code>tether-ddns.timer</code>; unprivileged users, systemd sandboxing (<code>ProtectSystem=strict</code>, <code>ProtectHome</code>, <code>NoNewPrivileges</code>, <code>PrivateTmp</code>)</td></tr>
+<tr><td>Data</td><td colspan="2"><code>/var/lib/tether</code> (key pair <code>id_ed25519</code> and peer DB; back it up), <code>/var/lib/tether-api</code> (policy, devices, releases, tickets, custom apps)</td></tr>
+<tr><td>Relay list (<code>RELAY_SERVERS</code>)</td><td><code>tether-desk…|http://127.0.0.1:21121/readyz,tether-desk2…|https://tether-desk2…/readyz/relay</code></td><td>the mirror image</td></tr>
+<tr><td>VM tuning</td><td colspan="2">kdump off and <code>crashkernel</code> removed (it reserved 448 MB of the 1 GB), 2 GB swap file</td></tr>
+</tbody></table></div>
+<p>A complete node is set up by <code>server/install.sh &lt;name&gt;</code> (hbbs, hbbr, Caddy, tether-api, port-80 forward, DuckDNS), or with Docker (<code>server/docker-compose.yml</code>, host networking). Everything runs inside Oracle's Always Free tier; DuckDNS is free with no expiry.</p>
+
+<!-- ============================ NETWORK ============================ -->
+<h2 id="network">Network</h2>
+<h3 id="net-443">443-only</h3>
+<p>Tether uses exactly one outbound connection type: <strong>WebSocket over TLS on TCP 443</strong> to the relay names. The apps force the core options <code>allow-websocket=Y</code>, <code>disable-udp=Y</code> and <code>api-server=https://&lt;relay&gt;</code>; P2P, UDP hole punching, IPv6 punching, WebRTC and LAN discovery are off and NAT/STUN probes are skipped (<code>netpolicy.rs</code>). Every session is relayed. Hosts keep one WebSocket open permanently, with an empty-frame heartbeat every 20 s so proxies do not close it.</p>
+<p>Upstream hbbs accepts host registration only over UDP. The patched hbbs accepts <code>RegisterPeer</code>/<code>RegisterPk</code> over TCP/WebSocket with the same uuid, key, IP-change and rate-limit checks, keeps that connection as the host's signalling path, and gives every proxied client a unique address (forwarded IP plus connection port).</p>
+
+<h3 id="net-racing">Route racing</h3>
+<p>To its own relays, Tether tries up to four routes, Happy-Eyeballs style: <code>wss://relay</code> on 443 and on 80, each through the detected proxy and directly. They start <strong>300 ms apart</strong>; the first completed TLS + WebSocket handshake wins and the rest are dropped. The winner is cached per relay host and tried first next time, for <code>/ws/id</code> and <code>/ws/relay</code>. Because direct routes run alongside proxy routes, a dead proxy setting cannot keep Tether offline. Port 80 is TLS too: firewalld forwards it to Caddy's 443 listener (same certificate, same endpoints). The API, heartbeats and policy use the same racer.</p>
+<div class="tw"><table>
+<thead><tr><th>Scenario (2026-11-03)</th><th>AnyDesk</th><th>Tether</th></tr></thead>
+<tbody>
+<tr><td>Zscaler-style TLS inspection, 443 only</td><td>fails (needs an inspection exemption)</td><td>works, 62.8 ms glass-to-glass, 27.9 fps</td></tr>
+<tr><td>Port 80 only, inspection on</td><td>fails without an exemption</td><td>works, 56–59 ms, 28 fps</td></tr>
+<tr><td>Proxy configured but dead</td><td>not tested</td><td>works (direct route wins)</td></tr>
+<tr><td>Recovery after a 90 s total block</td><td>&gt; 100 s</td><td>2.7 s after reopening (worst case ≤ 18 s)</td></tr>
+</tbody></table></div>
+
+<h3 id="net-proxy">Proxy detection and TLS inspection</h3>
+<p>Proxy order: <code>HTTPS_PROXY</code> / <code>ALL_PROXY</code>, then the system proxy (Windows: WinINet settings, PAC files, WPAD via WinHTTP; macOS: <code>scutil --proxy</code>). Detection repeats every 60 s, so VPN and network changes are picked up. HTTP CONNECT, HTTPS and SOCKS5 proxies are supported.</p>
+<p>The relay certificate is verified by rustls. If a proxy re-signs TLS with a company CA, Tether falls back to the OS TLS stack, which trusts the CA deployed to the machine. There is never an “accept any certificate” fallback. An inspecting proxy can see the relay name, timing and sizes, and the rendezvous signalling (device ID, public key, connect requests). It cannot see the session: in the Zscaler-style test the proxy saw 1,454 relay frames whose byte statistics look like random data (printable-byte ratio 0.37).</p>
+
+<h3 id="net-ports">Relay ports and routes</h3>
+<div class="tw"><table>
+<thead><tr><th>Path / port</th><th>Target</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><code>/ws/id</code></td><td>hbbs WebSocket <code>127.0.0.1:21118</code></td><td>registration and signalling</td></tr>
+<tr><td><code>/ws/relay</code></td><td>hbbr WebSocket <code>127.0.0.1:21119</code></td><td>relayed session bytes</td></tr>
+<tr><td><code>/api/*</code></td><td>tether-api <code>127.0.0.1:21120</code></td><td>policy, heartbeat, diagnostics, admin API</td></tr>
+<tr><td><code>/q/*</code></td><td>tether-api</td><td>custom-app downloads (see <a href="#custom">Custom apps</a>)</td></tr>
+<tr><td><code>/download/*</code></td><td>Caddy <code>file_server</code></td><td><code>latest.json</code> served with <code>Cache-Control: no-cache</code></td></tr>
+<tr><td><code>/</code></td><td><code>download/index.html</code></td><td>download page, else <code>200 Tether relay</code></td></tr>
+<tr><td><code>/readyz/relay</code></td><td>hbbr <code>:21121/readyz</code></td><td>health of this node's relay for other nodes</td></tr>
+<tr><td>TCP 80</td><td>forwarded to 443</td><td>fallback route</td></tr>
+<tr><td>21121 / 21122</td><td>hbbr / hbbs health</td><td>local only, not opened in the firewall</td></tr>
+</tbody></table></div>
+<p>Stock RustDesk clients would also need TCP 21115–21117 and UDP 21116; Tether clients do not.</p>
+
+<!-- ============================ SESSION ============================ -->
+<h2 id="session">Session flow</h2>
+<p>Every session is relayed. The viewer asks every hbbs in parallel, the hbbs that knows the host picks a relay, and both sides meet on that hbbr. Only then do the two devices run the end-to-end handshake, through the relay.</p>
+<figure>
+  <div class="fig wide">
+  <svg class="d seq" viewBox="0 0 900 790" role="img" aria-labelledby="c3t">
+    <title id="c3t">Sequence diagram of a session: registration, relay request, relay pairing, end-to-end key exchange, login and streaming.</title>
+    <rect class="b" x="15" y="16" width="170" height="44" rx="11"/><text class="h" x="100" y="35" text-anchor="middle">Viewer</text><text class="s" x="100" y="52" text-anchor="middle">technician app</text>
+    <rect class="b" x="245" y="16" width="170" height="44" rx="11"/><text class="h" x="330" y="35" text-anchor="middle">hbbs</text><text class="s" x="330" y="52" text-anchor="middle">rendezvous, any node</text>
+    <rect class="b" x="475" y="16" width="170" height="44" rx="11"/><text class="h" x="560" y="35" text-anchor="middle">hbbr</text><text class="s" x="560" y="52" text-anchor="middle">relay chosen by hbbs</text>
+    <rect class="b" x="715" y="16" width="170" height="44" rx="11"/><text class="h" x="800" y="35" text-anchor="middle">Host</text><text class="s" x="800" y="52" text-anchor="middle">TetherQS or Tether</text>
+    <path class="l dash" d="M100 60V780M330 60V780M560 60V780M800 60V780" style="stroke-width:1"/>
+    <!-- 1 -->
+    <rect class="g" x="8" y="70" width="884" height="20" rx="5"/><text class="h" x="450" y="85" text-anchor="middle">1 · Registration (always on, with every hbbs)</text>
+    <path class="l" d="M800 112H332" marker-end="url(#ah)"/><text x="565" y="105" text-anchor="middle">RegisterPeer / RegisterPk over wss://relay/ws/id</text>
+    <path class="l" d="M330 142H798" marker-end="url(#ah)"/><text x="565" y="135" text-anchor="middle">RegisterPkResponse · kept open as signalling path</text>
+    <!-- 2 -->
+    <rect class="g" x="8" y="160" width="884" height="20" rx="5"/><text class="h" x="450" y="175" text-anchor="middle">2 · Relay request (raced across all hbbs; next one after 1 s or on failure)</text>
+    <path class="l" d="M100 204H328" marker-end="url(#ah)"/><text x="215" y="197" text-anchor="middle">PunchHoleRequest (force_relay)</text>
+    <rect class="ba" x="338" y="214" width="210" height="36" rx="8"/><text class="s" x="348" y="229">picks least-loaded healthy hbbr</text><text class="s" x="348" y="244">(/readyz every 3 s, ties rotate)</text>
+    <path class="l" d="M330 276H798" marker-end="url(#ah)"/><text x="565" y="269" text-anchor="middle">PunchHole { relay_server }</text>
+    <path class="l" d="M800 306H562" marker-end="url(#ah)"/><text x="680" y="299" text-anchor="middle">dial /ws/relay (uuid)</text>
+    <path class="l" d="M800 336H332" marker-end="url(#ah)"/><text x="680" y="329" text-anchor="middle">RelayResponse → same hbbs</text>
+    <path class="l" d="M330 366H102" marker-end="url(#ah)"/><text x="215" y="359" text-anchor="middle">RelayResponse + signed host key</text>
+    <path class="l" d="M100 396H558" marker-end="url(#ah)"/><text x="330" y="389" text-anchor="middle">dial /ws/relay (uuid)</text>
+    <rect class="ba" x="480" y="408" width="160" height="36" rx="8"/><text class="s" x="560" y="423" text-anchor="middle">pairs both halves by uuid</text><text class="s" x="560" y="438" text-anchor="middle">forwards bytes only</text>
+    <!-- 3 -->
+    <rect class="g" x="8" y="456" width="884" height="20" rx="5"/><text class="h" x="450" y="471" text-anchor="middle">3 · End-to-end handshake (through hbbr)</text>
+    <path class="la" d="M800 500H102" marker-end="url(#aa)"/><text x="450" y="493" text-anchor="middle">SignedId: host's Ed25519 identity, checked against the key the server signed</text>
+    <path class="la" d="M100 530H798" marker-end="url(#aa)"/><text x="450" y="523" text-anchor="middle">PublicKey: X25519 box key + session key sealed for the host</text>
+    <rect class="ba" x="100" y="542" width="700" height="24" rx="8"/><text class="ta" x="450" y="559" text-anchor="middle">from here on XSalsa20-Poly1305 (secretbox) · no key ⇒ connection refused, never plaintext</text>
+    <!-- 4 -->
+    <rect class="g" x="8" y="584" width="884" height="20" rx="5"/><text class="h" x="450" y="599" text-anchor="middle">4 · Login and session</text>
+    <path class="l" d="M800 626H102" marker-end="url(#ah)"/><text x="450" y="619" text-anchor="middle">Hash { salt, challenge }</text>
+    <path class="l" d="M100 654H798" marker-end="url(#ah)"/><text x="450" y="647" text-anchor="middle">LoginRequest (salted password hash) — or the host user clicks Accept</text>
+    <path class="l" d="M800 682H102" marker-end="url(#ah)"/><text x="450" y="675" text-anchor="middle">LoginResponse + PeerInfo (displays; recording permission off)</text>
+    <path class="la" d="M800 710H102" marker-end="url(#aa)"/><text x="450" y="703" text-anchor="middle">VideoFrame stream (AV1 / H.264 / HEVC …), up to 60 fps</text>
+    <path class="l" d="M100 738H798" marker-end="url(#ah)"/><text x="450" y="731" text-anchor="middle">mouse, keyboard, clipboard, files, key-frame requests</text>
+    <path class="l dash" d="M800 766H102" marker-end="url(#ah)"/><text x="450" y="759" text-anchor="middle">delay test once a second · 3 s of silence ⇒ reconnect</text>
+  </svg>
+  </div>
+  <figcaption>The “TCP punch attempt” in logs is only the label of the <code>PunchHoleRequest</code>; hbbs answers with a relay because the request carries <code>force_relay</code>. A host whose relay leg fails retries its dial 4× at 0.3 s; the viewer gives up on a pairing after 5 s (<code>RELAY_PAIR_TIMEOUT</code>) and asks again.</figcaption>
+</figure>
+
+<h3 id="session-reconnect">Reconnect</h3>
+<div class="tw"><table>
+<thead><tr><th>Step</th><th>Behaviour (0.4)</th></tr></thead>
+<tbody>
+<tr><td>Detect a dead relay</td><td>TCP close, or 3 s without the host's once-a-second delay test (<code>RELAY_SILENCE_LIMIT</code>)</td></tr>
+<tr><td>Retries</td><td>at once, then 0.25, 0.5, 1, 2, 4, 8, 10 s (<code>lib/reconnect.ts</code>) for <code>connect.reconnect-minutes</code> (10)</td></tr>
+<tr><td>“Failed to connect via relay” while it restarts</td><td>treated as transient; the series goes on</td></tr>
+<tr><td>Host answer to a relay request</td><td>WebSocket to hbbs and relay dial at the same time</td></tr>
+<tr><td>Picture</td><td>decoder and canvas kept; the first key frame of the new stream resumes it</td></tr>
+<tr><td>Password</td><td>kept in the session, no prompt</td></tr>
+<tr><td>Host loses its hbbs registration</td><td>at once, then 0.2 … 16 s backoff; WebSocket ping every second, 3 s silence = dead</td></tr>
+<tr><td>Never retried</td><td>wrong password, rejected or closed by the other side, policy and version errors</td></tr>
+</tbody></table></div>
+<p>Measured with <code>apps/desktop/e2e/reconnect-bench.mjs</code>: production <code>systemctl restart tether-hbbr</code> → 0.93, 0.90, 0.90 s from overlay to the first new frame (0.3.0: 2.27 s and 17.8 s, one run gave up). Session's server stopped for good (local): 0.34 s, re-paired through the other server. Both hbbs killed: the running session was never interrupted.</p>
+
+<!-- ============================ VIDEO ============================ -->
+<h2 id="video">Video pipeline (FluxRT)</h2>
+<p>FluxRT is a clean-room low-latency profile on the RustDesk core: written from public descriptions and black-box measurements only, not wire-compatible with any other product.</p>
+<figure>
+  <div class="fig wide">
+  <svg class="d" viewBox="0 0 900 150" role="img" aria-labelledby="c4t">
+    <title id="c4t">Video pipeline from host capture to viewer canvas.</title>
+    <g>
+      <rect class="b" x="10" y="20" width="118" height="74" rx="11"/><text class="h" x="22" y="42">Capture</text><text class="s" x="22" y="60">changed frames</text><text class="s" x="22" y="76">only</text>
+      <rect class="b" x="138" y="20" width="118" height="74" rx="11"/><text class="h" x="150" y="42">Encode</text><text class="s" x="150" y="60">hardware first</text><text class="s" x="150" y="76">AV1 sw if no GPU</text>
+      <rect class="b" x="266" y="20" width="118" height="74" rx="11"/><text class="h" x="278" y="42">Encrypt</text><text class="s" x="278" y="60">secretbox</text><text class="s" x="278" y="76">(end-to-end)</text>
+      <rect class="g" x="394" y="20" width="118" height="74" rx="11"/><text class="h" x="406" y="42">hbbr</text><text class="s" x="406" y="60">ciphertext only</text><text class="s" x="406" y="76">via Caddy, 443</text>
+      <rect class="b" x="522" y="20" width="118" height="74" rx="11"/><text class="h" x="534" y="42">Decrypt</text><text class="s" x="534" y="60">viewer core</text><text class="s" x="534" y="76">no re-encode</text>
+      <rect class="b" x="650" y="20" width="118" height="74" rx="11"/><text class="h" x="662" y="42">Passthrough</text><text class="s" x="662" y="60">per-window</text><text class="s" x="662" y="76">binary channel</text>
+      <rect class="ba" x="778" y="20" width="112" height="74" rx="11"/><text class="h" x="790" y="42">WebCodecs</text><text class="s" x="790" y="60">hw decode</text><text class="s" x="790" y="76">→ canvas</text>
+    </g>
+    <path class="l" d="M128 57H136" marker-end="url(#ah)"/><path class="l" d="M256 57H264" marker-end="url(#ah)"/><path class="l" d="M384 57H392" marker-end="url(#ah)"/><path class="l" d="M512 57H520" marker-end="url(#ah)"/><path class="l" d="M640 57H648" marker-end="url(#ah)"/><path class="l" d="M768 57H776" marker-end="url(#ah)"/>
+    <path class="l" d="M10 112H384"/><text class="s" x="197" y="132" text-anchor="middle">host</text>
+    <path class="l" d="M394 112H512"/><text class="s" x="453" y="132" text-anchor="middle">relay</text>
+    <path class="l" d="M522 112H890"/><text class="s" x="706" y="132" text-anchor="middle">viewer</text>
+  </svg>
+  </div>
+</figure>
+<div class="tw"><table>
+<thead><tr><th>Property</th><th>Mechanism</th></tr></thead>
+<tbody>
+<tr><td>Hardware encode</td><td>H.264 → HEVC → AV1 hardware encoders (NVENC, AMF, QSV, VideoToolbox), zero-copy D3D11 texture → NVENC (<code>vram</code>). Low-latency presets: no B-frames, no lookahead, 1-frame VBV.</td></tr>
+<tr><td>GPU-less hosts</td><td>AV1 (aom) stays the automatic choice on hosts with ≤ 4 GB RAM (upstream fell back to VP8, about 3 fps on screen content); software encoders use up to 4 cores.</td></tr>
+<tr><td>Viewer decode</td><td>Encoded frames go untouched to the webview (<code>tauri_ui::video_passthrough</code>), are decoded by WebCodecs in hardware (<code>optimizeForLatency</code>) and drawn on a desynchronised canvas at the full coded size. One window cannot read another session's frames.</td></tr>
+<tr><td>Key-frame recovery</td><td><code>KeyRecovery</code> in <code>src/lib/video.ts</code>: request a key frame at once and again every second until one arrives; resync only when the decoder is more than 24 frames behind (<code>MAX_DECODE_QUEUE</code>). This replaced a “queue &gt; 3” rule that caused refresh storms.</td></tr>
+<tr><td>Rate control</td><td>60 fps ceiling sent explicitly; QoS LAN fast path; upstream <code>video_qos</code> lowers fps first, then bitrate.</td></tr>
+<tr><td>Local cursor, input</td><td>Remote cursor shape becomes the local CSS cursor; pointer moves coalesced per animation frame, clicks and keys sent at once.</td></tr>
+<tr><td>Idle</td><td>Unchanged frames are not encoded.</td></tr>
+<tr><td>Recording</td><td>Passthrough frames go to <code>TauriHandler::record_passthrough</code>; the viewer requests a key frame when recording starts. WebM/MP4, no re-encoding.</td></tr>
+</tbody></table></div>
+
+<!-- ============================ SECURITY ============================ -->
+<h2 id="security">Security model</h2>
+<p>The relay operator is not trusted with content: the relay forwards ciphertext. Trust is anchored in public keys compiled into the clients; private keys live on the relay (server key) or only on the admin's PC (admin and updater keys).</p>
+<h3 id="sec-keys">Keys</h3>
+<div class="tw"><table>
+<thead><tr><th>Key</th><th>Private half</th><th>Public half</th><th>Protects</th></tr></thead>
+<tbody>
+<tr><td><strong>Server key</strong> (Ed25519)</td><td><code>/var/lib/tether/id_ed25519</code> on every relay node (same pair)</td><td>compiled in: <code>TETHER_PUB_KEY</code></td><td>Rendezvous identity; <code>hbbs -k _</code> / <code>hbbr -k _</code> reject clients without the matching key. Signs device public keys.</td></tr>
+<tr><td><strong>Admin key</strong> (Ed25519)</td><td>Tether Manage, <code>keys.json</code></td><td>compiled in: <code>TETHER_ADMIN_PUB_KEY</code>; relay: <code>ADMIN_PUB_KEY</code></td><td>Policies, custom-app profiles, every admin API request. Several keys may be trusted for rotation.</td></tr>
+<tr><td><strong>Updater key</strong> (minisign)</td><td>Tether Manage, <code>keys.json</code></td><td>compiled in: <code>TETHER_UPDATER_PUB_KEY</code></td><td>Installers, update archives, <code>TetherQS.exe</code></td></tr>
+<tr><td>Device identity (Ed25519)</td><td>each device's config</td><td>registered with hbbs, signed by the server key</td><td>Peer authentication in the E2E handshake</td></tr>
+</tbody></table></div>
+<p>Admin and updater keys are sealed with argon2id (64 MiB, 3 passes) + XChaCha20-Poly1305 under the admin's passphrase (≥ 8 characters, no recovery). Losing them means rebuilding every client, since new keys only work in newly built clients.</p>
+
+<h3 id="sec-crypto">Encryption</h3>
+<div class="tw"><table>
+<thead><tr><th>Layer</th><th>Mechanism</th></tr></thead>
+<tbody>
+<tr><td>Transport</td><td>TLS 1.3 WebSocket on 443 (rustls, OS trust store fallback for inspection, never unverified)</td></tr>
+<tr><td>Peer ↔ peer</td><td>ed25519 identities signed via the rendezvous server; session key from an X25519 box exchange; XSalsa20-Poly1305 (libsodium secretbox)</td></tr>
+<tr><td>No plaintext fallback</td><td>Viewer: refuses instead of asking “continue insecurely” (<code>client.rs::confirm_insecure_connection</code>). Host: aborts when the peer offers no key, sends no key exchange, uses an unsecured transport or its own key pair is missing (<code>server.rs::identity_handshake</code>).</td></tr>
+<tr><td>Secrets at rest</td><td>Permanent password, 2FA secret, remembered peer passwords encrypted with a machine-bound key</td></tr>
+<tr><td>Authentication</td><td>Accept click and/or password; 10-character one-time password; permanent password ≥ 12 characters, ≥ 3 classes; optional TOTP 2FA; failures counted per IP and per IPv6 /64, /56, /48, throttled, then blocked, and the one-time password rotates</td></tr>
+</tbody></table></div>
+
+<h3 id="sec-signed">Signed policies and requests</h3>
+<ul>
+  <li><strong>Envelope:</strong> <code>{"payload": b64, "sig": b64(ed25519), "key": b64(pubkey)}</code>. Clients accept it only if <code>key</code> is one of the compiled-in admin keys and the signature verifies.</li>
+  <li><strong>Rollback protection:</strong> clients store the last accepted serial and reject lower ones; the relay requires a serial higher than its current one (<code>409</code>). A compromised relay can withhold a policy, but cannot alter, forge or roll one back.</li>
+  <li><strong>Admin requests:</strong> header <code>Tether-Sig: v1 ts=… nonce=… sig=…</code> over <code>"tether-admin-v1\n" + METHOD + path(with query) + ts + nonce + hex(sha256(body))</code>. The server allows ±300 s clock skew and rejects a nonce seen in the last 600 s (persisted across restarts).</li>
+  <li><strong>Updates:</strong> minisign signature checked against the compiled-in updater key before anything runs.</li>
+  <li><strong>Custom apps:</strong> the profile is an admin-signed envelope; the relay checks it before storing, and TetherQS checks it again against its own compiled-in keys.</li>
+</ul>
+
+<h3 id="sec-floor">Security floor and hardening</h3>
+<p><code>tether_trust::policy::FLOOR</code> lists core options no policy can set; the apps force them on top of any policy: <code>allow-insecure-tls-fallback</code>, <code>allow-remote-config-modification</code>, <code>enable-check-update</code>, <code>allow-auto-update</code>, <code>direct-server</code>, <code>enable-remote-printer</code>, <code>allow-auto-record-incoming/outgoing</code>, <code>stop-service</code>, <code>allow-websocket</code>, <code>disable-udp</code>, <code>enable-lan-discovery</code>, <code>api-server</code>, <code>enable-webrtc</code>, <code>enable-udp-punch</code>, <code>enable-ipv6-punch</code>, <code>custom-rendezvous-server</code>, <code>relay-server</code>, <code>key</code>.</p>
+<ul>
+  <li>A connected peer can never change this machine's settings; no third-party update checks; no virtual printer; nothing written to disk without an explicit action.</li>
+  <li>Tauri shell: strict CSP (<code>default-src 'self'</code>), no shell/filesystem/HTTP/updater plugins, DevTools not compiled into release builds. Every IPC command validates input: peer IDs <code>[A-Za-z0-9_.@:-]{1,64}</code>, session keys 32 hex characters, options from an allow-list, bounded lengths, connection types as an enum.</li>
+  <li>Locked settings are refused in the backend (<code>locked:&lt;feature&gt;</code> errors), not only greyed out in the UI.</li>
+</ul>
+
+<h3 id="sec-consent">Recording consent</h3>
+<ol>
+  <li>Every incoming connection on a Tether host starts with its <code>recording</code> permission off, regardless of settings; the viewer's recorder is gated off before the first frame (<code>record_state &amp;&amp; record_permission</code>).</li>
+  <li>Record sends <code>Misc.client_record_status = true</code> as a request; no frame is recorded yet.</li>
+  <li>The host's connection manager emits <code>record_consent_request</code> <code>{conn_id, peer_name, text}</code>; the user answers via <code>cm_record_consent {connId, allow}</code>.</li>
+  <li>Allow turns the permission on and the viewer starts recording (REC pill); Deny sends it off again. The host can revoke at any time; a reconnect is a new connection and asks again.</li>
+</ol>
+<p><code>recording.mode=always</code> only automates the request. An unattended host never answers, so it is never recorded. A modified viewer could still capture frames it receives; consent is enforced by Tether's own viewer.</p>
+
+<!-- ============================ POLICY ============================ -->
+<h2 id="policy">Policy model</h2>
+<p>A policy is one signed <code>tether_trust::policy::Bundle</code>: a serial, one layer per profile (<code>technician</code>, <code>customer</code>), named groups with overrides and device assignments by install uuid. 44 features in areas permissions, security, connections, video, recording, updates, policy, diagnostics and customer (full table: <code>docs/policy.md</code>, generated from <code>FEATURES</code>).</p>
+<figure>
+  <div class="fig wide">
+  <svg class="d" viewBox="0 0 900 400" role="img" aria-labelledby="c5t">
+    <title id="c5t">Policy layers from built-in defaults to machine policy, later wins; the result is the effective policy with the security floor applied on top.</title>
+    <path class="la" d="M36 306V24" marker-end="url(#aa)"/>
+    <text class="ta h" x="28" y="165" text-anchor="middle" transform="rotate(-90 28 165)">later wins</text>
+    <rect class="b" x="60" y="20" width="480" height="50" rx="11"/><text class="h" x="76" y="42">Machine policy (GPO / MDM)</text><text class="s" x="76" y="60">HKLM\SOFTWARE\Policies\Tether PolicyJson · macOS Managed Preferences</text>
+    <rect class="b" x="60" y="80" width="480" height="50" rx="11"/><text class="h" x="76" y="102">Group overrides</text><text class="s" x="76" y="120">devices assigned by install uuid · groups target one profile</text>
+    <rect class="ba" x="60" y="140" width="480" height="50" rx="11"/><text class="h" x="76" y="162">Custom app (branded TetherQS download)</text><text class="s" x="76" y="180">signed CustomProfile layer · customer features only</text>
+    <rect class="b" x="60" y="200" width="480" height="50" rx="11"/><text class="h" x="76" y="222">Profile: technician | customer</text><text class="s" x="76" y="240">from the signed Bundle</text>
+    <rect class="b" x="60" y="260" width="480" height="50" rx="11"/><text class="h" x="76" y="282">Built-in defaults</text><text class="s" x="76" y="300">tether_trust::policy::FEATURES</text>
+    <path class="l" d="M540 135H598" marker-end="url(#ah)"/>
+    <rect class="ba" x="600" y="80" width="280" height="110" rx="18"/>
+    <text class="h" x="616" y="104">Effective policy</text><text class="s" x="616" y="124">value + lock per feature</text><text class="s" x="616" y="142">sources: defaults, profile, custom-app,</text><text class="s" x="616" y="158">group:&lt;name&gt;, machine</text><text class="s" x="616" y="176">locked core options → overrides</text>
+    <rect class="b" x="600" y="220" width="280" height="90" rx="18"/>
+    <text class="h" x="616" y="244">Security floor (FLOOR)</text><text class="s" x="616" y="264">TLS verification · E2E · 443-only</text><text class="s" x="616" y="281">no silent recording · relay and key</text><text class="s" x="616" y="298">forced on top, never settable</text>
+    <path class="l" d="M740 220V194" marker-end="url(#ah)"/>
+    <text class="h" x="60" y="346">States per layer</text>
+    <text class="s" x="60" y="368">default: not set here · on: user may change, value is the default · off: locked off · locked: locked to value · hidden: locked off, not shown</text>
+    <text class="s" x="60" y="388">A later layer set to “on” unlocks a feature an earlier layer locked. Invalid layers (machine, custom) are ignored, not partially applied.</text>
+  </svg>
+  </div>
+  <figcaption><code>policy::resolve_with(bundle, profile, device, custom, machine)</code>. The custom app sits between profile and group: it is the admin's choice for everyone using that download, while groups and GPO/MDM still target individual devices.</figcaption>
+</figure>
+<p><strong>Distribution.</strong> Clients poll <code>GET /api/policy</code> every <code>policy.refresh-minutes</code> (15; 1 with <code>policy.fast-apply</code>) with <code>If-None-Match: "&lt;serial&gt;"</code>, verify, reject lower serials, cache the verified document and apply it at the next start before the core runs. Then they send <code>POST /api/heartbeat</code> (uuid, ID, profile, version, OS, serial; ≤ 2048 bytes, rate-limited). The policy API, heartbeats and updates use the first server that answers.</p>
+<p><strong>Publishing from Tether Manage.</strong> Publishing validates the draft (unknown features or values make it unpublishable), shows a review of the change, signs it, and publishes the same signed document to every configured relay with serial = highest serial on any relay or published from this PC + 1. It then reads back each relay's state and reports per relay; a relay that missed it can be published to again, since any node with a lower serial accepts the same document. History keeps the last 50 versions per relay (<code>policy-history/&lt;serial&gt;.json</code>); restore republishes old content under a new serial, and only documents that verify with this PC's admin key are used.</p>
+
+<!-- ============================ UPDATES ============================ -->
+<h2 id="updates">Updates</h2>
+<figure>
+  <div class="fig wide">
+  <svg class="d" viewBox="0 0 900 360" role="img" aria-labelledby="c6t">
+    <title id="c6t">Update flow: build, sign in Tether Manage, upload to every relay, client check, verification, install for the technician app or self-update for TetherQS.</title>
+    <rect class="b" x="10" y="30" width="160" height="70" rx="11"/><text class="h" x="24" y="54">Build</text><text class="s" x="24" y="72">4 release variables</text><text class="s" x="24" y="88">CI · build-macos.sh</text>
+    <rect class="ba" x="200" y="30" width="180" height="70" rx="11"/><text class="h" x="214" y="54">Tether Manage</text><text class="s" x="214" y="72">sign with updater key</text><text class="s" x="214" y="88">(minisign, Tauri format)</text>
+    <rect class="b" x="410" y="30" width="210" height="70" rx="11"/><text class="h" x="424" y="54">Every relay /download/</text><text class="s" x="424" y="72">1 artifact · 2 .sig</text><text class="s" x="424" y="88">3 latest.json (last)</text>
+    <rect class="b" x="650" y="30" width="240" height="70" rx="11"/><text class="h" x="664" y="54">Client checks</text><text class="s" x="664" y="72">5 s after start, every 6 h,</text><text class="s" x="664" y="88">after each policy change</text>
+    <path class="l" d="M170 65H198" marker-end="url(#ah)"/><path class="l" d="M380 65H408" marker-end="url(#ah)"/><path class="l" d="M620 65H648" marker-end="url(#ah)"/>
+    <rect class="ba" x="650" y="150" width="240" height="70" rx="11"/><text class="h" x="664" y="174">Verify and decide</text><text class="s" x="664" y="192">minisign vs TETHER_UPDATER_PUB_KEY</text><text class="s" x="664" y="208">stricter of manifest and policy</text>
+    <path class="l" d="M770 100V148" marker-end="url(#ah)"/>
+    <rect class="b" x="10" y="150" width="370" height="196" rx="18"/>
+    <text class="h" x="26" y="176">Modes</text>
+    <text class="s" x="26" y="200">Optional: card “Install and restart” / “Later”</text>
+    <text class="s" x="26" y="222">Mandatory: sessions blocked until installed</text>
+    <text class="s" x="26" y="244">Minimum version: blocked below it (release or policy)</text>
+    <text class="s" x="26" y="266">Forced: countdown update.restart-seconds (60 s)</text>
+    <text class="s" x="26" y="292">Blocking in the backend via update-state.json:</text>
+    <text class="s" x="26" y="310">outgoing refused (CLI exit 6), incoming closed,</text>
+    <text class="s" x="26" y="328">TetherQS disables Accept</text>
+    <path class="l" d="M648 185H382" marker-end="url(#ah)"/>
+    <rect class="b" x="410" y="270" width="230" height="76" rx="11"/><text class="h" x="424" y="294">Technician app</text><text class="s" x="424" y="312">Tauri updater · NSIS passive</text><text class="s" x="424" y="330">service stop/start · restart</text>
+    <rect class="b" x="660" y="270" width="230" height="76" rx="11"/><text class="h" x="674" y="294">TetherQS (portable)</text><text class="s" x="674" y="312">.new → rename running → .old</text><text class="s" x="674" y="330">restart, same ID + password</text>
+    <path class="l" d="M700 220V245H525V268" marker-end="url(#ah)"/>
+    <path class="l" d="M820 220V268" marker-end="url(#ah)"/>
+  </svg>
+  </div>
+  <figcaption>Upload order guarantees that a manifest never points to a missing file. With several relays, each relay's <code>latest.json</code> points at that relay, so an update never depends on another node.</figcaption>
+</figure>
+<ul>
+  <li><strong>Layout:</strong> <code>download/&lt;channel&gt;/&lt;technician|customer&gt;/&lt;windows-x86_64|darwin-universal&gt;/latest.json</code> plus versioned artifacts (<code>Tether_&lt;v&gt;_x64-setup.exe</code>, <code>TetherQS-&lt;v&gt;.exe</code>, <code>Tether_&lt;v&gt;_universal.app.tar.gz</code> + <code>.dmg</code>, <code>TetherQS-&lt;v&gt;-universal.zip</code>). Each platform has its own manifest; a macOS manifest lists the universal build under <code>darwin-universal</code>, <code>darwin-aarch64</code> and <code>darwin-x86_64</code>.</li>
+  <li><strong>Manifest:</strong> Tauri updater format plus <code>mandatory</code>, <code>minimumVersion</code>, <code>forced</code>. Channel from <code>update.channel</code> (default <code>stable</code>; invalid names fall back to <code>stable</code>). Versions order <code>MAJOR.MINOR.PATCH[-pre]</code> with <code>0.3.1-test &lt; 0.3.1</code>; channel switches never downgrade.</li>
+  <li><strong>Technician app:</strong> the Tauri updater downloads the NSIS installer on 443 through the detected proxy, verifies it and runs it passively; the installer stops the <code>Tether</code> service if installed, overwrites <code>C:\Program Files\Tether</code>, restarts the service, and the app restarts (<code>/R</code>). macOS replaces <code>Tether.app</code> in place.</li>
+  <li><strong>TetherQS:</strong> downloads (HTTPS, ≤ 200 MiB), verifies, writes <code>TetherQS.exe.new</code>, renames the running exe to <code>.old</code> and the new one into place (rollback if the second rename fails), restarts with the same ID and one-time password (hand-over file valid 60 s). Unwritable folder: <code>%LOCALAPPDATA%\Tether-QS\TetherQS.exe</code>. A custom app re-appends its own signed profile after verifying the plain exe. Verified 0.3.0 → 0.3.1 as a standard user through a TLS-inspecting proxy in 47 s.</li>
+</ul>
+
+<!-- ============================ HA ============================ -->
+<h2 id="ha">High availability</h2>
+<p>Any number of independent nodes, each the full stack. No cluster protocol, no shared database; they share only the server key pair.</p>
+<ol>
+  <li><strong>Hosts register with every node</strong> (<code>TETHER_SERVER</code> list plus policy <code>servers.list</code>, up to 8 entries: host names or <code>wss://host/path</code>, verified with the same server key). One independent registration loop per server.</li>
+  <li><strong>Viewers race</strong> their request: the last server that worked first, the next one on failure or after 1 s without an answer. The first hbbs that knows the host wins.</li>
+  <li><strong>Relay choice</strong> (server side): every hbbs has a relay list of <code>&lt;address&gt;[|&lt;health URL&gt;]</code> entries and fetches each health URL every 3 s (2.5 s timeout). hbbr's <code>/readyz</code> answers <code>200 ready sessions=N</code> or <code>503 draining sessions=N</code>. hbbs hands out the <strong>least-loaded healthy relay</strong>; ties rotate. Locality does not matter.</li>
+  <li>The host sends its <code>RelayResponse</code> to the same hbbs, which forwards it to the viewer; both meet on the chosen hbbr.</li>
+</ol>
+<h3 id="ha-drain">Drain</h3>
+<p>On SIGTERM hbbr reports not-ready at once and keeps relaying open sessions. For the first 5 s it still pairs new uuids (an hbbs may hand it out until its next check), then refuses new pairings. It exits when the last session ends or after <code>DRAIN_TIMEOUT</code> (systemd 300 s, Kubernetes 3600 s); a second signal exits at once. hbbs is not-ready for its own <code>DRAIN_TIMEOUT</code> (default 0). Health: hbbr <code>:21121</code>, hbbs <code>:21122</code>, <code>/healthz</code> and <code>/readyz</code>.</p>
+<h3 id="ha-fail">Failures and measured failover</h3>
+<div class="tw"><table>
+<thead><tr><th>Event</th><th>Effect</th><th>Measured</th></tr></thead>
+<tbody>
+<tr><td>Session's hbbr crashes (production, viewer behind the proxy)</td><td>Session re-pairs on another relay</td><td>0.6–0.8 s</td></tr>
+<tr><td>Whole relay node down (production)</td><td>Session continues through the other relay</td><td>0.6–1.6 s</td></tr>
+<tr><td>hbbs or node dies</td><td>Hosts stay registered elsewhere; relayed sessions do not use hbbs and continue</td><td>no interruption</td></tr>
+<tr><td>Dead relay leaves every hbbs's healthy set</td><td>A pick that lands on it before fails fast and the client asks again</td><td>within 3 s + 2.5 s</td></tr>
+<tr><td>Caddy restart</td><td>WebSockets through it are cut; clients reconnect</td><td>kind: 20–40 ms</td></tr>
+<tr><td>DuckDNS / IP change</td><td>Name follows within 5 min; clients use the other node meanwhile</td><td>–</td></tr>
+</tbody></table></div>
+<p><strong>Tether Manage with N nodes:</strong> it writes to every node and the nodes stay independent. A node that missed a write is stale, not wrong. Diagnostics tickets are created on the first node and opened with the same ID on the others; device lists are merged by uuid, newest <code>last_seen</code> wins. <strong>Capacity estimate</strong> (not measured): an E2.1.Micro has up to 480 Mbit/s and a 10 TB/month allowance; at 1–5 Mbit/s per session one node is bandwidth-bound at a few dozen concurrent sessions.</p>
+
+<!-- ============================ K8S ============================ -->
+<h2 id="k8s">Kubernetes</h2>
+<p>Helm chart <code>deploy/helm/tether-relay</code>: the same design with every pod acting as a node. hbbr only pairs two halves that reach the same process, and a host's RelayResponse must reach the hbbs that holds the viewer, so load balancing either would break sessions. Every pod therefore gets a stable URL.</p>
+<figure>
+  <div class="fig wide">
+  <svg class="d" viewBox="0 0 900 470" role="img" aria-labelledby="c7t">
+    <title id="c7t">Kubernetes topology: clients through a load balancer to two Caddy proxies, which map path ordinals to per-pod services for hbbs and hbbr, plus tether-api.</title>
+    <rect class="b" x="10" y="180" width="120" height="60" rx="11"/><text class="h" x="24" y="204">Clients</text><text class="s" x="24" y="222">wss://relay…</text>
+    <rect class="b" x="160" y="180" width="130" height="60" rx="11"/><text class="h" x="174" y="204">LB / ingress</text><text class="s" x="174" y="222">TLS · cert-manager</text>
+    <rect class="g" x="320" y="150" width="150" height="120" rx="18"/><text class="h" x="334" y="172">proxy ×2</text>
+    <rect class="ba" x="334" y="182" width="122" height="34" rx="8"/><text x="395" y="204" text-anchor="middle">Caddy</text>
+    <rect class="ba" x="334" y="224" width="122" height="34" rx="8"/><text x="395" y="246" text-anchor="middle">Caddy</text>
+    <path class="l" d="M130 210H158" marker-end="url(#ah)"/><path class="l" d="M290 210H318" marker-end="url(#ah)"/>
+    <rect class="g" x="500" y="20" width="390" height="430" rx="18"/><text class="h" x="516" y="44">namespace tether</text>
+    <rect class="b" x="516" y="60" width="170" height="46" rx="11"/><text class="h" x="528" y="80">hbbs-0</text><text class="s" x="528" y="97">Service + pod · peer DB PVC</text>
+    <rect class="b" x="516" y="114" width="170" height="46" rx="11"/><text class="h" x="528" y="134">hbbs-1</text><text class="s" x="528" y="151">Service + pod · peer DB PVC</text>
+    <text class="s" x="528" y="180">-r … /readyz every 3 s ↓</text>
+    <rect class="b" x="516" y="190" width="170" height="46" rx="11"/><text class="h" x="528" y="210">hbbr-0</text><text class="s" x="528" y="227">Service · publishNotReady</text>
+    <rect class="b" x="516" y="244" width="170" height="46" rx="11"/><text class="h" x="528" y="264">hbbr-1</text><text class="s" x="528" y="281">Service · publishNotReady</text>
+    <rect class="b" x="516" y="298" width="170" height="46" rx="11"/><text class="h" x="528" y="318">hbbr-n</text><text class="s" x="528" y="335">≥ 2, drain 3600 s</text>
+    <rect class="b" x="516" y="370" width="170" height="60" rx="11"/><text class="h" x="528" y="392">tether-api</text><text class="s" x="528" y="409">+ file server sidecar</text><text class="s" x="528" y="424">PVC 5Gi (optional)</text>
+    <path class="l" d="M470 210L514 83" marker-end="url(#ah)"/><path class="l" d="M470 210L514 137" marker-end="url(#ah)"/><path class="l" d="M470 210L514 213" marker-end="url(#ah)"/><path class="l" d="M470 210L514 267" marker-end="url(#ah)"/><path class="l" d="M470 210L514 321" marker-end="url(#ah)"/><path class="l" d="M470 210L514 400" marker-end="url(#ah)"/>
+    <rect class="b" x="706" y="60" width="170" height="130" rx="11"/>
+    <text class="h" x="718" y="82">Path mapping</text>
+    <text class="s" x="718" y="104">/ws/id/&lt;n&gt; → hbbs-&lt;n&gt;</text>
+    <text class="s" x="718" y="124">/ws/id → hbbs-0</text>
+    <text class="s" x="718" y="144">/ws/relay/&lt;n&gt; → hbbr-&lt;n&gt;</text>
+    <text class="s" x="718" y="164">/api, /download, / → api</text>
+    <text class="s" x="718" y="182">regex: scaling never restarts it</text>
+    <rect class="b" x="706" y="210" width="170" height="134" rx="11"/>
+    <text class="h" x="718" y="232">Every hbbs gets</text>
+    <text class="s" x="718" y="254">&lt;publicUrl&gt;/ws/relay/&lt;i&gt;</text>
+    <text class="s" x="718" y="272">|http://…hbbr-&lt;i&gt;:21121</text>
+    <text class="s" x="718" y="290">/readyz, for every i</text>
+    <text class="s" x="718" y="314">hands out full wss:// URLs</text>
+    <text class="s" x="718" y="332">clients use them as-is</text>
+    <rect class="b" x="706" y="370" width="170" height="60" rx="11"/>
+    <text class="h" x="718" y="392">PDB</text><text class="s" x="718" y="409">maxUnavailable 1</text><text class="s" x="718" y="424">non-root, read-only FS</text>
+  </svg>
+  </div>
+  <figcaption>StatefulSets give stable ordinals; each ordinal has its own Service with <code>publishNotReadyAddresses: true</code>, so a draining pod stays reachable for its open sessions and half-made pairs.</figcaption>
+</figure>
+<ul>
+  <li><strong>Values:</strong> <code>publicUrl</code>, <code>key.existingSecret</code> (the production key pair), <code>hbbs.replicas</code> 2, <code>hbbr.replicas</code> 2, <code>hbbr.drainSeconds</code> 3600 (grace = drain + 30), <code>hbbs.drainSeconds</code> 2, <code>hbbs.extraRelays</code> (e.g. the VMs), <code>proxy.enabled</code> (or your own ingress with 3600 s timeouts), <code>api.enabled</code>, <code>podDisruptionBudget.maxUnavailable</code> 1, requests 50m/32Mi, limits 1 CPU/256Mi.</li>
+  <li><strong>Pods:</strong> UID 65532, read-only root, all capabilities dropped (Caddy keeps <code>NET_BIND_SERVICE</code>), RuntimeDefault seccomp, soft anti-affinity; readiness <code>/readyz</code> every 2 s, liveness <code>/healthz</code>. Image: static musl binaries on distroless (≈ 8 MB).</li>
+  <li><strong>Rollouts:</strong> hbbr one pod at a time, highest ordinal first; the terminating pod is not-ready at once and every hbbs stops handing it out within 3 s; a full rollout takes at most <code>replicas × drainSeconds</code>. hbbs restarts take seconds and do not affect relayed sessions. A proxy rollout cuts WebSockets through the old pods (re-pair ≤ 40 ms), so do it rarely.</li>
+</ul>
+<h3 id="k8s-results">Measured on kind</h3>
+<p>kind v0.33.0 (Kubernetes 1.37), 1 control plane + 2 workers; hbbs ×2, hbbr ×3 (drain 90 s), proxy ×2, api ×1. The harness does what clients do (register with both hbbs, race, re-pair after a drop or 1 s of silence; 1 KiB frames every 20 ms).</p>
+<div class="tw"><table>
+<thead><tr><th>Test</th><th>Sessions</th><th>Reconnects</th><th>Max gap</th></tr></thead>
+<tbody>
+<tr><td>hbbr <code>rollout restart</code> (57 s) during churn</td><td>30</td><td>0</td><td>0</td></tr>
+<tr><td>hbbs <code>rollout restart</code> (7 s) during churn</td><td>30</td><td>0</td><td>0</td></tr>
+<tr><td>proxy rollout, live sessions</td><td>6</td><td>3</td><td>40 ms</td></tr>
+<tr><td>force-delete <code>hbbr-1</code></td><td>6</td><td>2</td><td>39 ms</td></tr>
+<tr><td>delete <code>hbbr-2</code>, grace 15 s</td><td>6</td><td>2</td><td>20 ms</td></tr>
+<tr><td>worker frozen, proxies elsewhere</td><td>6</td><td>5</td><td>1.02 s</td></tr>
+<tr><td>worker frozen with a proxy pod on it</td><td>6</td><td>4</td><td>43.7 s</td></tr>
+</tbody></table></div>
+<p>Relay latency in the cluster: p50 0.3 ms. The last row is the known weak spot: kube-proxy keeps routing to a proxy pod on a silently dead node until it is NotReady (~40 s). Behind a cloud LoadBalancer use <code>externalTrafficPolicy: Local</code> with health checks of a few seconds and keep proxies on different nodes.</p>
+
+<!-- ============================ CUSTOM ============================ -->
+<h2 id="custom">Custom apps</h2>
+<p>A custom app is a branded TetherQS: a signed <code>tether_trust::custom::CustomProfile</code> plus a private, expiring download link.</p>
+<figure>
+  <div class="fig wide">
+  <svg class="d" viewBox="0 0 900 150" role="img" aria-labelledby="c8t">
+    <title id="c8t">Layout of a custom TetherQS file: plain exe, signed profile JSON, 4-byte length and the 8-byte magic TQSPROF1.</title>
+    <rect class="b" x="10" y="30" width="500" height="56" rx="8"/><text class="h" x="26" y="54">TetherQS-&lt;v&gt;.exe (plain)</text><text class="s" x="26" y="72">unchanged bytes, signature verified by the updater</text>
+    <rect class="ba" x="512" y="30" width="236" height="56" rx="8"/><text class="h" x="524" y="54">signed CustomProfile</text><text class="s" x="524" y="72">envelope JSON, ≤ 256 KiB</text>
+    <rect class="b" x="750" y="30" width="62" height="56" rx="8"/><text class="h" x="781" y="54" text-anchor="middle">len</text><text class="s" x="781" y="72" text-anchor="middle">u32 LE</text>
+    <rect class="b" x="814" y="30" width="76" height="56" rx="8"/><text class="h" x="852" y="54" text-anchor="middle">magic</text><text class="s" x="852" y="72" text-anchor="middle">TQSPROF1</text>
+    <path class="l" d="M512 104H890"/><text class="s" x="701" y="124" text-anchor="middle">custom::trailer(), appended by tether-api on GET /q/&lt;token&gt;</text>
+    <text class="s" x="10" y="124">missing, damaged or untrusted trailer ⇒ plain TetherQS</text>
+  </svg>
+  </div>
+</figure>
+<div class="tw"><table>
+<thead><tr><th>Field</th><th>Rule</th></tr></thead>
+<tbody>
+<tr><td><code>id</code></td><td><code>[a-z0-9-]{1,40}</code>, random, the same on every relay</td></tr>
+<tr><td><code>name</code></td><td>1–64 printable characters; window title (overrides <code>customer.title</code>) and file name <code>&lt;Name&gt;-Support.exe</code> (reduced to <code>[A-Za-z0-9 _.-]</code>)</td></tr>
+<tr><td><code>accent</code>, <code>welcome</code></td><td><code>#rrggbb</code>; ≤ 400 characters (override <code>customer.accent-color</code>, <code>customer.welcome</code>)</td></tr>
+<tr><td><code>logo_png</code></td><td>base64 PNG, ≤ 96 KiB decoded</td></tr>
+<tr><td><code>layer</code></td><td>policy layer, customer-profile features only, same value rules as the bundle</td></tr>
+<tr><td><code>issued_at</code></td><td>Unix seconds</td></tr>
+</tbody></table></div>
+<ol>
+  <li>Tether Manage signs the profile with the admin key and calls <code>PUT /api/admin/custom/&lt;id&gt;</code> on every relay with <code>{profile, token, expires, channel}</code> (≤ 300 KiB). Token: 32 random bytes, base64url, 43 characters; expiry in the future and ≤ 366 days.</li>
+  <li>The relay verifies the signature against its admin keys, validates the profile, requires <code>profile.id == &lt;id&gt;</code>, and stores <code>custom/&lt;id&gt;.json</code> (0600). A new token for the same id kills the old link.</li>
+  <li><code>GET /q/&lt;token&gt;</code> (public) returns the channel's current <code>TetherQS-&lt;v&gt;.exe</code> with the trailer appended. Unknown, revoked and expired tokens all get the same <code>404</code> (no oracle); 30 requests/min per IP; downloads are counted.</li>
+  <li>TetherQS reads its own file, verifies the profile against the compiled-in admin keys and applies it as the custom-app <a href="#policy">policy layer</a>. Self-updates verify the new plain exe, then re-append the trailer.</li>
+</ol>
+<p><code>DELETE /api/admin/custom/&lt;id&gt;</code> revokes a link at once. The relay never modifies the profile. Windows-only for now (the macOS TetherQS is a <code>.app</code> bundle).</p>
+
+<!-- ============================ DIAG ============================ -->
+<h2 id="diagnostics">Diagnostics</h2>
+<ul>
+  <li><strong>Diagnostics page</strong> (<code>diag.rs</code>): version, ID, OS, policy serial/group/sources, server, proxy (without credentials), DNS with timing, one row per route (443/80 × proxy/direct, handshake time), last 40 ERROR/WARN lines. “Test connection” runs every route with an 8 s timeout.</li>
+  <li><strong>Bundle</strong>: <code>diagnostics.json</code>, logs changed in the last 24 h (newest 1 MiB each, 12 MiB total), config files with every key containing <code>password</code> or a part equal to <code>key</code>, <code>salt</code>, <code>token</code>, <code>secret</code>, <code>pin</code>, <code>otp</code>, <code>2fa</code>, <code>tfa</code>, <code>trusted</code>, <code>pk</code>, <code>sk</code> redacted. Logs are not redacted.</li>
+  <li><strong>Upload</strong>: <code>POST /api/diag/&lt;ticket&gt;</code>, ticket <code>[A-HJ-NP-Z2-9]{8}</code> opened by an admin, 24 h, one upload, ≤ 2 MiB (else only <code>diagnostics.json</code>), kept 7 days. Verified round trip through a TLS-inspecting proxy: about 7 s.</li>
+  <li><strong>Logs</strong>: <code>%APPDATA%\Tether\log\&lt;role&gt;\</code> (server, cm, connect, service, portable-service), TetherQS <code>%APPDATA%\Tether-QS\log\</code>, macOS <code>~/Library/Logs/Tether/</code>; daily or 16 MiB rotation; verbose logging for one hour from the next process start. The host encoder logs a <code>fluxrt encode:</code> line every 5 s.</li>
+</ul>
+
+<!-- ============================ API ============================ -->
+<h2 id="api">Relay API</h2>
+<div class="tw"><table>
+<thead><tr><th>Endpoint</th><th>Auth</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>GET /api/policy</code></td><td>public</td><td>Signed policy, <code>ETag: "&lt;serial&gt;"</code>, <code>304</code> when unchanged</td></tr>
+<tr><td><code>POST /api/heartbeat</code></td><td>public</td><td>Device report; 1 per uuid per 60 s, 30 per IP per minute; ≤ 10 000 devices, 180 days</td></tr>
+<tr><td><code>POST /api/diag/&lt;ticket&gt;</code></td><td>ticket</td><td>Diagnostics zip ≤ 2 MiB</td></tr>
+<tr><td><code>GET /q/&lt;token&gt;</code></td><td>token</td><td>Custom TetherQS download</td></tr>
+<tr><td><code>PUT /api/admin/policy</code></td><td>signed</td><td>Publish (≤ 256 KiB, serial must increase); history of 50</td></tr>
+<tr><td><code>GET /api/admin/policy-history[/&lt;serial&gt;]</code></td><td>signed</td><td>List / fetch published documents</td></tr>
+<tr><td><code>GET /api/admin/devices</code></td><td>signed</td><td>Device list</td></tr>
+<tr><td><code>POST /api/admin/diag-ticket</code>, <code>GET /api/admin/diag[/&lt;t&gt;]</code></td><td>signed</td><td>Tickets (optional fixed ID for multi-relay)</td></tr>
+<tr><td><code>PUT|DELETE /api/admin/release/&lt;channel&gt;/&lt;path&gt;</code>, <code>GET /api/admin/releases</code></td><td>signed</td><td>Release files ≤ 200 MiB, atomic writes; <code>507</code> below 2 GiB free</td></tr>
+<tr><td><code>PUT /api/admin/download-page</code></td><td>signed</td><td>Download page HTML ≤ 512 KiB</td></tr>
+<tr><td><code>PUT|DELETE /api/admin/custom/&lt;id&gt;</code>, <code>GET /api/admin/custom</code></td><td>signed</td><td>Custom apps</td></tr>
+<tr><td><code>GET /api/admin/status</code></td><td>signed</td><td>Version, free disk, devices, policy serial, uptime</td></tr>
+</tbody></table></div>
+<p>Without <code>ADMIN_PUB_KEY</code> the admin endpoints answer <code>503</code>. Every JSON write is temp file + rename; upload bodies are streamed to disk.</p>
+
+<!-- ============================ PERFORMANCE ============================ -->
+<h2 id="performance">Performance</h2>
+<h3 id="perf-drag">Window drag on a GPU-less VM (0.4.0)</h3>
+<p>Hyper-V VM, 4 vCPU, 8 GB, no GPU, 1920×1080, TetherQS host with software AV1; viewer on a PC with an RTX 3080; both through the production relay.</p>
+<div class="tw"><table>
+<thead><tr><th>Build</th><th>Remote frames/s</th><th>Longest gap between pictures</th><th>Latency p95</th></tr></thead>
+<tbody>
+<tr><td>0.3.0 as reported (refresh storm)</td><td>3–4</td><td>1.6 s or frozen</td><td>1.2 s</td></tr>
+<tr><td>0.4.0</td><td>20 / 23</td><td>90 ms</td><td>88 / 55 ms</td></tr>
+<tr><td>0.4.0, VM egress only via TLS-inspecting proxy</td><td>20.1 / 22.9</td><td>99 / 79 ms</td><td>66 / 59 ms</td></tr>
+</tbody></table></div>
+<h3 id="perf-anydesk">Against AnyDesk (black-box, same VM, same optical meter)</h3>
+<div class="tw"><table>
+<thead><tr><th>Viewer</th><th>Latency mean</th><th>p95</th><th>Frames/s</th><th>Longest freeze</th></tr></thead>
+<tbody>
+<tr><td>AnyDesk 9.8.3</td><td>62.4 ms</td><td>95 ms</td><td>11.2</td><td>509 ms</td></tr>
+<tr><td>Tether 0.4.0 (inspection exempt, like AnyDesk)</td><td>72.2 ms</td><td>98 ms</td><td>12.6</td><td>507 ms</td></tr>
+<tr><td>Tether 0.4.0 (TLS-inspected)</td><td>74.3 ms</td><td>102 ms</td><td>14.7</td><td>563 ms</td></tr>
+</tbody></table></div>
+<p>On par: same p95 and worst gap, slightly more pictures, AnyDesk about 10 ms lower on average. Optical freeze figures are conservative (motion blurs the barcode); the canvas meter shows Tether's picture never paused more than about 99 ms. In the earlier idle/scrolling comparison on the same VM (0.1, P2P over the Hyper-V switch), Tether averaged 37.9 ms vs 52.1 ms glass-to-glass (27 % lower), p95 59 vs 83 ms, 28.1 vs 19.7 fps.</p>
+<h3 id="perf-hw">With a GPU</h3>
+<p>Single PC, RTX 3080, 2560×1440: glass-to-glass mean 24.0 ms (scrolling, Speed) to 30.2 ms (idle, Balanced), 57 fps at full resolution, WebCodecs decode 0.7 ms per frame, HEVC via NVENC zero-copy, about 2.3 Mbit/s for a mostly static desktop. Input: median 12 ms, p95 19 ms over 40 pointer moves. Through a Zscaler-style proxy: 62.8 ms mean, 27.9 fps.</p>
+
+<!-- ============================ LIMITS ============================ -->
+<h2 id="limits">Known limits</h2>
+<ul>
+  <li>The macOS build is written but not compiled or run here; the updater, MDM path and TetherQS are tested on Windows only. Ad-hoc signed builds lose Screen Recording and Accessibility with every update. Unsigned binaries cannot be authenticated by users; Windows and macOS releases must be signed (and notarized) before distribution.</li>
+  <li>Update downloads try only TLS on 443 (proxy or direct), without the port-80 and proxy-to-direct fallbacks.</li>
+  <li>A host that only runs as a background service learns about a required update from the cache the app window writes; it may accept sessions until the app has been opened once.</li>
+  <li>A whole Kubernetes node freezing silently with a proxy pod on it stalls sessions until the node is NotReady (~40 s).</li>
+  <li>Installer: after an interactive upgrade Tether comes back via “Run Tether”; automatic reopening is guaranteed only for the in-app updater (<code>/R</code>).</li>
+  <li>Relay load is sampled every 3 s, so a burst within one interval goes to the same relay.</li>
+  <li>Consent needs an interactive user; a modified viewer could capture the frames it receives. Endpoint compromise is out of scope. The ID ↔ IP registry is metadata visible to the relay operator.</li>
+  <li>TetherQS without admin access cannot see UAC prompts or type into elevated windows. Custom apps are Windows-only.</li>
+</ul>
+
+<footer>Tether 0.4 · Compiled on 2026-11-04 from README, CHANGELOG, SECURITY, DESIGN, docs/*.md, the Helm chart, server/ and crates/tether-trust. Features described per contract and landing in this release: custom apps, masked one-time password in TetherQS, the redesigned publish flow in Tether Manage. User-facing tasks: <a href="index.html">User guide</a>.</footer>
+</main>
+</div>
+<script>
+try{if(matchMedia('(max-width: 899px)').matches)document.querySelector('.toc').open=false}catch(e){}
+</script>
+</body>
+</html>

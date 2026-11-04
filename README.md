@@ -24,6 +24,9 @@ Fast, private, self-hosted remote desktop for Windows and macOS, with a Linux re
   [docs/kubernetes.md](docs/kubernetes.md); performance: [docs/performance.md](docs/performance.md);
   macOS build: [docs/macos.md](docs/macos.md).
 - **Changes:** [CHANGELOG.md](CHANGELOG.md).
+- **HTML documentation:** [docs/site/index.html](docs/site/index.html) (user guide for technicians,
+  customers and admins) and [docs/site/architecture.html](docs/site/architecture.html) (architecture with
+  diagrams). Self-contained files; open them in any browser.
 
 ## Layout
 
