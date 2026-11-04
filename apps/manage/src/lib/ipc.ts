@@ -63,7 +63,50 @@ export interface AppState {
   admin_pub: string | null;
   updater_pub: string | null;
   settings: Record<string, any> & { server: string };
+  /** The relay list parsed from settings.server (first = reads). */
+  servers: string[];
   data_dir: string;
+}
+/** Outcome of one operation on one relay. */
+export interface RelayResult {
+  server: string;
+  ok: boolean;
+  error?: string;
+  detail: any;
+}
+export interface LiveRelay {
+  server: string;
+  reachable: boolean;
+  error: string | null;
+  serial: number | null;
+  issued_at: number | null;
+  /** Signed with this app's admin key. */
+  verified: boolean;
+  note: string | null;
+}
+export interface EffRow {
+  id: string;
+  value: string;
+  locked: boolean;
+  hidden: boolean;
+  source: "default" | "profile";
+}
+/** What the relays serve now (policy_live). */
+export interface Live {
+  relays: LiveRelay[];
+  serial: number | null;
+  issued_at: number | null;
+  effective: Record<string, EffRow[]>;
+  /** Relay hosts the policy's servers.list names that are not in this app's relay list. */
+  unconfigured: string[];
+  bundle: Bundle | null;
+}
+export interface Change {
+  scope: string;
+  label: string | null;
+  from: string | null;
+  to: string | null;
+  text: string;
 }
 
 export const PROFILES = ["technician", "customer"] as const;
@@ -71,9 +114,12 @@ export const PROFILES = ["technician", "customer"] as const;
 export const api = {
   state: () => invoke<AppState>("state"),
   admin: <T = any>(method: string, path: string, body?: unknown) => invoke<T>("admin", { method, path, body }),
-  devices: () => api.admin<Device[]>("GET", "/api/admin/devices"),
+  /** Devices of every relay, merged by uuid. */
+  devices: () => invoke<{ devices: Device[]; failed: string[] }>("devices_all"),
   saveSettings: (settings: Record<string, unknown>) => invoke("settings_set", { settings }),
-  publish: (bundle: Bundle) => invoke<number>("policy_publish", { bundle }),
+  publish: (bundle: Bundle) => invoke<{ serial: number; relays: RelayResult[] }>("policy_publish", { bundle }),
+  live: () => invoke<Live>("policy_live"),
+  relays: () => invoke<RelayResult[]>("relays_check"),
 };
 
 export function emptyBundle(): Bundle {
@@ -87,6 +133,16 @@ export function ago(unix?: number | null): string {
   if (s < 3600) return `${Math.floor(s / 60)} min ago`;
   if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
   return `${Math.floor(s / 86400)} d ago`;
+}
+
+/** Host of a relay address, for compact labels. */
+export const host = (server: string) => server.replace(/^https:\/\//, "").replace(/\/.*$/, "");
+
+/** Unix seconds of the last local midnight ("active today"). */
+export function midnight(): number {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return Math.floor(d.getTime() / 1000);
 }
 
 export function when(unix?: number | null): string {

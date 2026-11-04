@@ -21,7 +21,7 @@ export function Button({
   const s = { sm: "h-8 px-3.5 text-caption", md: "h-9 px-5 text-callout", lg: "h-11 px-[22px] text-callout" }[size];
   return (
     <button
-      className={`inline-flex shrink-0 select-none items-center justify-center gap-2 font-normal disabled:pointer-events-none disabled:opacity-40 ${v[variant]} ${s} ${className}`}
+      className={`inline-flex shrink-0 select-none items-center justify-center gap-2 whitespace-nowrap font-normal disabled:pointer-events-none disabled:opacity-40 ${v[variant]} ${s} ${className}`}
       {...rest}
     />
   );
@@ -46,32 +46,69 @@ export function Toggle({ checked, onChange, label, disabled }: { checked: boolea
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative h-6 w-10 shrink-0 rounded-full disabled:opacity-40 ${checked ? "bg-accent" : "bg-hairline"}`}
+      className={`relative h-6 w-10 shrink-0 rounded-full disabled:opacity-40 ${checked ? "bg-accent" : "bg-faint/45"}`}
     >
       <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all duration-150 ${checked ? "left-[18px]" : "left-0.5"}`} style={{ boxShadow: "0 1px 3px rgba(0,0,0,.25)" }} />
     </button>
   );
 }
 
-export function Segmented<T extends string>({ value, options, onChange, label }: { value: T; options: { value: T; label: string }[]; onChange: (v: T) => void; label?: string }) {
+/** Selected item: filled accent, white text, semibold — readable at a glance in light and dark. */
+export const SELECTED = "bg-accent text-white font-semibold";
+
+export function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+  label,
+  selected = () => SELECTED,
+}: {
+  value: T;
+  options: { value: T; label: string; count?: number }[];
+  onChange: (v: T) => void;
+  label?: string;
+  /** Classes of the selected segment (the policy state control colours "Default" neutrally). */
+  selected?: (v: T) => string;
+}) {
   return (
-    <div className="flex shrink-0 rounded-full bg-parchment p-0.5" role="radiogroup" aria-label={label}>
+    <div className="flex shrink-0 self-start rounded-full border border-hairline bg-parchment p-0.5" role="radiogroup" aria-label={label}>
       {options.map((o) => (
         <button
           key={o.value}
+          type="button"
           role="radio"
           aria-checked={value === o.value}
           onClick={() => onChange(o.value)}
-          className={`rounded-full px-3 py-1 text-caption ${value === o.value ? "border border-hairline bg-tile text-ink" : "border border-transparent text-muted hover:text-ink"}`}
+          className={`rounded-full px-3 py-1 text-caption ${value === o.value ? selected(o.value) : "text-ink-80 hover:bg-tile-2 hover:text-ink"}`}
         >
           {o.label}
+          {o.count != null && <span className={`ml-1.5 text-footnote ${value === o.value ? "opacity-80" : "text-muted"}`}>{o.count}</span>}
         </button>
       ))}
     </div>
   );
 }
 
-const field = "w-full rounded-xl border border-hairline bg-parchment px-3 text-caption text-ink outline-none placeholder:text-faint focus-visible:border-focus";
+type Tone = "ok" | "warn" | "danger" | "accent" | "muted";
+
+/** Short status label. Status colours only as text and outline (DESIGN.md). */
+export function Badge({ tone = "muted", children, title }: { tone?: Tone; children: ReactNode; title?: string }) {
+  const c: Record<Tone, string> = {
+    ok: "border-ok/50 text-ok",
+    warn: "border-warn/60 text-warn",
+    danger: "border-danger/50 text-danger",
+    accent: "border-accent/50 bg-accent/10 text-accent",
+    muted: "border-hairline text-muted",
+  };
+  return (
+    <span title={title} className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-sm border px-1.5 text-footnote font-semibold leading-[18px] ${c[tone]}`}>
+      {children}
+    </span>
+  );
+}
+
+// Focus: the global 2px focus outline, flush with the field.
+const field = "w-full rounded-xl border border-hairline bg-parchment px-3 text-caption text-ink placeholder:text-faint focus-visible:border-focus focus-visible:outline-offset-0";
 
 export function TextField({ className = "", ...rest }: React.InputHTMLAttributes<HTMLInputElement>) {
   return <input className={`h-9 ${field} ${className}`} {...rest} />;

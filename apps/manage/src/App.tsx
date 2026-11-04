@@ -1,13 +1,15 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { Activity, FileCode2, KeyRound, Lock, Monitor, Package, ShieldCheck, Stethoscope } from "lucide-react";
-import { api, emptyBundle, invoke, type AppState, type Bundle } from "./lib/ipc";
-import { useToast } from "./components/ui";
+import { Activity, FileCode2, KeyRound, Lock, Monitor, Package, Palette, ShieldCheck, Stethoscope } from "lucide-react";
+import { api, emptyBundle, invoke, type AppState, type Bundle, type Change, type Live } from "./lib/ipc";
+import { SELECTED, useToast } from "./components/ui";
+import { PolicyBar, PolicyPublish } from "./components/policy-publish";
 import { Gate } from "./pages/Gate";
 import { Home } from "./pages/Home";
 import { Policy } from "./pages/Policy";
 import { Devices } from "./pages/Devices";
 import { Releases } from "./pages/Releases";
 import { DownloadPage } from "./pages/DownloadPage";
+import { CustomApps } from "./pages/CustomApps";
 import { Diagnostics } from "./pages/Diagnostics";
 import { Keys } from "./pages/Keys";
 
@@ -16,9 +18,16 @@ interface Ctx {
   reload: () => Promise<void>;
   draft: Bundle;
   setDraft: (b: Bundle) => void;
-  /** Bundle content differs from the last published one (assignments edited etc.). */
+  /** What the relays serve now; null while loading or when unreachable. */
+  live: Live | null;
+  reloadLive: () => Promise<void>;
+  /** Draft compared with the live policy. */
+  changes: Change[];
   dirty: boolean;
-  markPublished: (b: Bundle) => void;
+  /** Why the draft cannot be published, if it cannot. */
+  invalid: string | null;
+  /** Opens the publish review sheet. */
+  publish: () => void;
   toast: (m: string) => void;
   go: (p: PageId) => void;
 }
@@ -26,37 +35,43 @@ const AppCtx = createContext<Ctx>(null!);
 export const useApp = () => useContext(AppCtx);
 
 const PAGES = [
-  { id: "home", label: "Status", icon: Activity, el: Home },
+  { id: "home", label: "Status and relays", icon: Activity, el: Home },
   { id: "policy", label: "Policy", icon: ShieldCheck, el: Policy },
   { id: "devices", label: "Devices", icon: Monitor, el: Devices },
   { id: "releases", label: "Releases", icon: Package, el: Releases },
   { id: "page", label: "Download page", icon: FileCode2, el: DownloadPage },
+  { id: "custom", label: "Custom apps", icon: Palette, el: CustomApps },
   { id: "diag", label: "Diagnostics", icon: Stethoscope, el: Diagnostics },
-  { id: "keys", label: "Keys and server", icon: KeyRound, el: Keys },
+  { id: "keys", label: "Keys", icon: KeyRound, el: Keys },
 ] as const;
 export type PageId = (typeof PAGES)[number]["id"];
-
-const content = (b: Bundle) => JSON.stringify({ ...b, serial: 0, issued_at: 0 });
 
 export function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [page, setPage] = useState<PageId>("home");
   const [draft, setDraftState] = useState<Bundle>(emptyBundle());
-  const [published, setPublished] = useState("");
+  const [live, setLive] = useState<Live | null>(null);
+  const [changes, setChanges] = useState<Change[]>([]);
+  const [invalid, setInvalid] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState(false);
   const { show, node } = useToast();
 
   const reload = useCallback(async () => setState(await api.state()), []);
   useEffect(() => void reload(), [reload]);
 
+  const reloadLive = useCallback(() => api.live().then(setLive, (e) => show(`Could not read the live policy: ${e.message}`)), []);
+
   useEffect(() => {
     if (!state?.unlocked) return;
-    invoke<Bundle>("policy_draft")
-      .then((b) => {
-        setDraftState(b);
-        setPublished(content(b));
-      })
-      .catch((e) => show(e.message));
-  }, [state?.unlocked]);
+    invoke<Bundle>("policy_draft").then(setDraftState, (e) => show(e.message));
+    reloadLive();
+  }, [state?.unlocked, state?.settings.server]);
+
+  useEffect(() => {
+    if (!state?.unlocked) return;
+    invoke<Change[]>("policy_diff", { from: live?.bundle ?? null, to: draft }).then(setChanges, () => setChanges([]));
+    invoke("policy_check", { bundle: draft }).then(() => setInvalid(null), (e) => setInvalid(e.message));
+  }, [draft, live, state?.unlocked]);
 
   const setDraft = (b: Bundle) => {
     setDraftState(b);
@@ -72,11 +87,12 @@ export function App() {
     reload,
     draft,
     setDraft,
-    dirty: content(draft) !== published,
-    markPublished: (b) => {
-      setDraftState(b);
-      setPublished(content(b));
-    },
+    live,
+    reloadLive,
+    changes,
+    dirty: changes.length > 0,
+    invalid,
+    publish: () => setPublishing(true),
     toast: show,
     go: setPage,
   };
@@ -84,7 +100,7 @@ export function App() {
   return (
     <AppCtx.Provider value={ctx}>
       <div className="flex h-full">
-        <nav className="flex w-56 shrink-0 flex-col gap-0.5 border-r border-hairline bg-parchment p-3">
+        <nav className="flex w-56 shrink-0 flex-col gap-0.5 border-r border-hairline bg-parchment p-3" aria-label="Sections">
           <div className="mb-4 flex items-center gap-2 px-2 pt-2">
             <svg width={22} height={22} viewBox="0 0 1024 1024" aria-hidden>
               <rect x="64" y="64" width="896" height="896" rx="216" fill="var(--accent)" />
@@ -98,16 +114,20 @@ export function App() {
               key={id}
               onClick={() => setPage(id)}
               aria-current={page === id ? "page" : undefined}
-              className={`flex h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-caption ${page === id ? "bg-accent/12 text-ink" : "text-ink-80 hover:bg-tile-2"}`}
+              className={`flex h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-caption ${page === id ? SELECTED : "text-ink-80 hover:bg-tile-2"}`}
             >
-              <Icon size={16} strokeWidth={1.75} className={page === id ? "text-accent" : "text-muted"} />
+              <Icon size={16} strokeWidth={1.75} className={page === id ? "text-white" : "text-muted"} />
               {label}
-              {id === "policy" && ctx.dirty && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-accent" title="Unpublished changes" />}
+              {id === "policy" && ctx.dirty && (
+                <span className={`ml-auto rounded-full px-1.5 text-footnote ${page === id ? "bg-white/25 text-white" : "bg-accent text-white"}`} title="Unpublished changes">
+                  {changes.length}
+                </span>
+              )}
             </button>
           ))}
           <div className="mt-auto px-2.5 pb-1">
-            <p className="truncate text-footnote text-muted" title={state.settings.server}>
-              {state.settings.server.replace(/^https:\/\//, "")}
+            <p className="truncate text-footnote text-muted" title={state.servers.join("\n")}>
+              {state.servers.length} relay{state.servers.length === 1 ? "" : "s"}
             </p>
             <button
               onClick={async () => {
@@ -120,12 +140,16 @@ export function App() {
             </button>
           </div>
         </nav>
-        <main className="min-w-0 flex-1 overflow-auto">
-          <div className="mx-auto max-w-[1180px] px-8 py-8">
-            <Page />
+        <main className="flex min-w-0 flex-1 flex-col">
+          <PolicyBar />
+          <div className="min-h-0 flex-1 overflow-auto">
+            <div className="mx-auto max-w-[1180px] px-8 py-8">
+              <Page />
+            </div>
           </div>
         </main>
       </div>
+      {publishing && <PolicyPublish onClose={() => setPublishing(false)} />}
       {node}
     </AppCtx.Provider>
   );
