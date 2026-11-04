@@ -1,3 +1,15 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 7b7263a..f362b78 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -7436,6 +7436,7 @@ dependencies = [
+  "tracing",
+  "webm",
+  "winapi 0.3.9",
++ "windows 0.61.1",
+  "zbus",
+ ]
+ 
 diff --git a/Cargo.toml b/Cargo.toml
 index 1002586..cad4b96 100644
 --- a/Cargo.toml
@@ -24,7 +36,7 @@ index 5f920bc..02650df 100644
  
  message Terminal {
 diff --git a/libs/scrap/Cargo.toml b/libs/scrap/Cargo.toml
-index 185c38f..20a294f 100644
+index 185c38f..48c5e3d 100644
 --- a/libs/scrap/Cargo.toml
 +++ b/libs/scrap/Cargo.toml
 @@ -22,6 +22,8 @@ wayland = ["gstreamer", "gstreamer-app", "gstreamer-video", "dbus", "tracing", "
@@ -36,6 +48,84 @@ index 185c38f..20a294f 100644
  linux-pkg-config = ["dep:pkg-config"]
  hwcodec = ["dep:hwcodec"]
  vram = ["hwcodec/vram"]
+@@ -40,6 +42,26 @@ version = "0.3"
+ default-features = true
+ features = ["dxgi", "dxgi1_2", "dxgi1_5", "dxgi1_6", "d3d11", "winuser", "winerror", "errhandlingapi", "libloaderapi"]
+ 
++# Windows.Graphics.Capture on GPU-less hosts (src/dxgi/wgc.rs); same version as Tauri's.
++[target.'cfg(windows)'.dependencies.windows]
++version = "0.61"
++features = [
++  "Foundation",
++  "Graphics",
++  "Graphics_Capture",
++  "Graphics_DirectX",
++  "Graphics_DirectX_Direct3D11",
++  "Win32_Foundation",
++  "Win32_Graphics_Direct3D",
++  "Win32_Graphics_Direct3D11",
++  "Win32_Graphics_Dxgi",
++  "Win32_Graphics_Dxgi_Common",
++  "Win32_Graphics_Gdi",
++  "Win32_System_WinRT",
++  "Win32_System_WinRT_Direct3D11",
++  "Win32_System_WinRT_Graphics_Capture",
++]
++
+ [target.'cfg(target_os = "macos")'.dependencies]
+ block = "0.1"
+ 
+diff --git a/libs/scrap/examples/tearprobe.rs b/libs/scrap/examples/tearprobe.rs
+new file mode 100644
+index 0000000..c879fdf
+--- /dev/null
++++ b/libs/scrap/examples/tearprobe.rs
+@@ -0,0 +1,45 @@
++// Check for the half-drawn-window artifact of Desktop Duplication on GPU-less hosts (see
++// src/dxgi/wgc.rs): capture the primary display for <secs> seconds with the capturer Tether uses
++// and count frames with a full-width light band (#F3F3F3-ish rows over the whole width of
++// y 150..1000) while Edge shows an animated page (e.g. its welcome page) maximized.
++//   tearprobe [secs]   -> "frames N band B (P%) frame() avg T ms"; P must be 0.
++use scrap::{Capturer, Display, Frame, TraitCapturer, TraitPixelBuffer};
++use std::io::ErrorKind::WouldBlock;
++use std::time::{Duration, Instant};
++
++fn band_rows(data: &[u8], w: usize, h: usize) -> usize {
++    let stride = data.len() / h;
++    (150..h.min(1000))
++        .filter(|y| {
++            let row = &data[y * stride..];
++            let xs = (8..w.saturating_sub(20)).step_by(4);
++            let n = xs.len();
++            let flat = xs.filter(|x| row[x * 4..x * 4 + 3].iter().all(|&c| (236..=250).contains(&c))).count();
++            flat * 10 >= n * 9
++        })
++        .count()
++}
++
++fn main() {
++    let secs: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(20);
++    let mut c = Capturer::new(Display::all().unwrap().remove(0)).unwrap();
++    let (w, h) = (c.width(), c.height());
++    let t0 = Instant::now();
++    let (mut frames, mut bad, mut cost) = (0, 0, Duration::ZERO);
++    while t0.elapsed() < Duration::from_secs(secs) {
++        let tc = Instant::now();
++        match c.frame(Duration::from_millis(100)) {
++            Ok(Frame::PixelBuffer(f)) => {
++                cost += tc.elapsed();
++                frames += 1;
++                if band_rows(f.data(), w, h) > 0 {
++                    bad += 1;
++                }
++            }
++            Ok(_) => {}
++            Err(e) if e.kind() == WouldBlock => {}
++            Err(e) => panic!("{e}"),
++        }
++    }
++    println!("frames {frames} band {bad} ({:.1}%) frame() avg {:.1} ms", 100.0 * bad as f64 / frames.max(1) as f64, cost.as_secs_f64() * 1000.0 / frames.max(1) as f64);
++}
 diff --git a/libs/scrap/src/common/codec.rs b/libs/scrap/src/common/codec.rs
 index 606a4be..de7934c 100644
 --- a/libs/scrap/src/common/codec.rs
@@ -124,6 +214,245 @@ index 606a4be..de7934c 100644
 +    fn low_memory_keeps_av1_but_not_vp9() {
 +        assert!(keep_av1_on_low_memory(CodecFormat::AV1));
 +        assert!(!keep_av1_on_low_memory(CodecFormat::VP9));
++    }
++}
+diff --git a/libs/scrap/src/dxgi/mod.rs b/libs/scrap/src/dxgi/mod.rs
+index 20c994e..5efcf13 100644
+--- a/libs/scrap/src/dxgi/mod.rs
++++ b/libs/scrap/src/dxgi/mod.rs
+@@ -3,6 +3,7 @@ pub mod gdi;
+ pub use gdi::CapturerGDI;
+ pub mod hdr;
+ pub mod mag;
++mod wgc;
+ 
+ use winapi::{
+     shared::{
+@@ -56,6 +57,7 @@ pub struct Capturer {
+     context: ComPtr<ID3D11DeviceContext>,
+     duplication: ComPtr<IDXGIOutputDuplication>,
+     fastlane: bool,
++    wgc: Option<wgc::Wgc>,
+     surface: ComPtr<IDXGISurface>,
+     texture: ComPtr<ID3D11Texture2D>,
+     width: usize,
+@@ -167,13 +169,35 @@ impl Capturer {
+             }
+         }
+         let rotate = Self::create_rotations(device.0, context.0, &display);
++        let fastlane = desc.DesktopImageInSystemMemory == TRUE
++            && desc.ModeDesc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT;
++        // GPU-less host: Desktop Duplication delivers half-drawn windows there (see wgc.rs).
++        // TETHER_CAPTURE_DXGI=1: keep Desktop Duplication (escape hatch, A/B measurements).
++        let wgc = if fastlane
++            && gdi_capturer.is_none()
++            && display.rotation() == DXGI_MODE_ROTATION_IDENTITY
++            && std::env::var("TETHER_CAPTURE_DXGI").as_deref() != Ok("1")
++        {
++            match wgc::Wgc::new(display.hmonitor() as _, display.width() as usize, display.height() as usize) {
++                Ok(w) => {
++                    hbb_common::log::info!("desktop image in system memory: capturing with Windows.Graphics.Capture");
++                    Some(w)
++                }
++                Err(e) => {
++                    hbb_common::log::warn!("Windows.Graphics.Capture unavailable, keeping Desktop Duplication: {e}");
++                    None
++                }
++            }
++        } else {
++            None
++        };
+ 
+         Ok(Capturer {
+             device,
+             context,
+             duplication: ComPtr(duplication),
+-            fastlane: desc.DesktopImageInSystemMemory == TRUE
+-                && desc.ModeDesc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT,
++            fastlane,
++            wgc,
+             surface: ComPtr(ptr::null_mut()),
+             texture: ComPtr(ptr::null_mut()),
+             width: display.width() as usize,
+@@ -543,6 +567,17 @@ impl Capturer {
+                             return Err(io::Error::new(io::ErrorKind::Other, err.to_string()));
+                         }
+                     }
++                } else if let Some(w) = self.wgc.as_mut() {
++                    match w.frame(std::time::Duration::from_millis(timeout as u64)) {
++                        // Raw parts: a conditional return of the borrow would lock `self.wgc`.
++                        Ok((data, _)) => slice::from_raw_parts(data.as_ptr(), data.len()),
++                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(e),
++                        Err(e) => {
++                            hbb_common::log::warn!("Windows.Graphics.Capture failed, back to Desktop Duplication: {e}");
++                            self.wgc = None;
++                            return Err(io::ErrorKind::WouldBlock.into());
++                        }
++                    }
+                 } else {
+                     self.release_frame()?;
+                     let r = self.load_frame(timeout)?;
+diff --git a/libs/scrap/src/dxgi/wgc.rs b/libs/scrap/src/dxgi/wgc.rs
+new file mode 100644
+index 0000000..ab29c0a
+--- /dev/null
++++ b/libs/scrap/src/dxgi/wgc.rs
+@@ -0,0 +1,157 @@
++//! Windows.Graphics.Capture reader for hosts whose duplicated desktop image lives in system memory
++//! (`DXGI_OUTDUPL_DESC::DesktopImageInSystemMemory`: GPU-less machines such as Hyper-V VMs, WARP /
++//! display-only adapters). There, Desktop Duplication hands out frames in which an application
++//! that is presenting at that moment (Edge redrawing an animated page or a video) is only partly
++//! drawn: full-width bands of the window background in 15-50 % of frames on such pages, with
++//! MapDesktopSurface and with a staging copy alike. The screen itself never shows them (GDI and
++//! the VM framebuffer are clean), and neither does this API, which delivers what DWM composed.
++
++use std::sync::{Arc, Condvar, Mutex};
++use std::time::{Duration, Instant};
++use std::{io, slice};
++
++use windows::core::Interface;
++use windows::Foundation::TypedEventHandler;
++use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession};
++use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
++use windows::Graphics::DirectX::DirectXPixelFormat;
++use windows::Win32::Foundation::HMODULE;
++use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
++use windows::Win32::Graphics::Direct3D11::*;
++use windows::Win32::Graphics::Dxgi::IDXGIDevice;
++use windows::Win32::Graphics::Gdi::HMONITOR;
++use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
++use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
++
++fn err(e: windows::core::Error) -> io::Error {
++    io::Error::new(io::ErrorKind::Other, e.to_string())
++}
++
++pub struct Wgc {
++    device: ID3D11Device,
++    context: ID3D11DeviceContext,
++    pool: Direct3D11CaptureFramePool,
++    session: GraphicsCaptureSession,
++    /// Set by FrameArrived, so `frame` can wait for the next picture like AcquireNextFrame.
++    arrived: Arc<(Mutex<bool>, Condvar)>,
++    staging: Option<ID3D11Texture2D>,
++    mapped: bool,
++    width: usize,
++    height: usize,
++}
++
++impl Wgc {
++    /// Capture `monitor` (`width`×`height`). Fails where the API, a borderless capture or the
++    /// monitor is unavailable; the caller then keeps Desktop Duplication.
++    pub fn new(monitor: *mut std::ffi::c_void, width: usize, height: usize) -> io::Result<Wgc> {
++        unsafe {
++            if !GraphicsCaptureSession::IsSupported().map_err(err)? {
++                return Err(io::Error::new(io::ErrorKind::Unsupported, "graphics capture not supported"));
++            }
++            let mut device = None;
++            let mut context = None;
++            D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)).map_err(err)?;
++            let (device, context): (ID3D11Device, ID3D11DeviceContext) = (device.unwrap(), context.unwrap());
++            let d3d: IDirect3DDevice = CreateDirect3D11DeviceFromDXGIDevice(&device.cast::<IDXGIDevice>().map_err(err)?).map_err(err)?.cast().map_err(err)?;
++            let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(err)?;
++            let item: GraphicsCaptureItem = interop.CreateForMonitor(HMONITOR(monitor)).map_err(err)?;
++            let size = item.Size().map_err(err)?;
++            if size.Width as usize != width || size.Height as usize != height {
++                return Err(io::Error::new(io::ErrorKind::Other, format!("capture item {}x{} != display {width}x{height}", size.Width, size.Height)));
++            }
++            // One buffer, freed as soon as it is copied: DWM composes at most one capture copy per
++            // encoded frame (each costs CPU on WARP), ready when the encoder asks. Measured on the
++            // VM: frame rate and VM CPU as with Desktop Duplication. Two buffers: a copy at every
++            // composition, +20-50 ms latency. Holding the buffer while encoding: half the frame
++            // rate when the screen changes at 20 fps (a composition during the encode is lost).
++            let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&d3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size).map_err(err)?;
++            let session = pool.CreateCaptureSession(&item).map_err(err)?;
++            // The customer must not get a yellow frame around the screen: no capture without this.
++            session.SetIsBorderRequired(false).map_err(err)?;
++            // The cursor goes separately, as with Desktop Duplication.
++            let _ = session.SetIsCursorCaptureEnabled(false);
++            let arrived = Arc::new((Mutex::new(false), Condvar::new()));
++            let a = arrived.clone();
++            pool.FrameArrived(&TypedEventHandler::new(move |_, _| {
++                *a.0.lock().unwrap() = true;
++                a.1.notify_one();
++                Ok(())
++            }))
++            .map_err(err)?;
++            session.StartCapture().map_err(err)?;
++            Ok(Wgc { device, context, pool, session, arrived, staging: None, mapped: false, width, height })
++        }
++    }
++
++    fn unmap(&mut self) {
++        if self.mapped {
++            if let Some(st) = &self.staging {
++                unsafe { self.context.Unmap(st, 0) };
++            }
++            self.mapped = false;
++        }
++    }
++
++    /// The next picture (BGRA, rows of `pitch` bytes), waiting up to `timeout` for one; WouldBlock
++    /// when the screen did not change. Valid until the next call.
++    pub fn frame(&mut self, timeout: Duration) -> io::Result<(&[u8], usize)> {
++        self.unmap();
++        let end = Instant::now() + timeout;
++        let frame = loop {
++            if let Ok(f) = self.pool.TryGetNextFrame() {
++                break f;
++            }
++            let (lock, cv) = &*self.arrived;
++            let mut ready = lock.lock().unwrap();
++            let now = Instant::now();
++            if !*ready {
++                if now >= end {
++                    return Err(io::ErrorKind::WouldBlock.into());
++                }
++                ready = cv.wait_timeout(ready, end - now).unwrap().0;
++            }
++            if !*ready {
++                return Err(io::ErrorKind::WouldBlock.into());
++            }
++            *ready = false;
++        };
++        let size = frame.ContentSize().map_err(err)?;
++        if size.Width as usize != self.width || size.Height as usize != self.height {
++            // Resolution changed: the caller rebuilds the capturer.
++            return Err(io::Error::new(io::ErrorKind::Other, "graphics capture size changed"));
++        }
++        unsafe {
++            let tex: ID3D11Texture2D = frame.Surface().map_err(err)?.cast::<IDirect3DDxgiInterfaceAccess>().map_err(err)?.GetInterface().map_err(err)?;
++            if self.staging.is_none() {
++                let mut desc = D3D11_TEXTURE2D_DESC::default();
++                tex.GetDesc(&mut desc);
++                desc.Usage = D3D11_USAGE_STAGING;
++                desc.BindFlags = 0;
++                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
++                desc.MiscFlags = 0;
++                let mut st = None;
++                self.device.CreateTexture2D(&desc, None, Some(&mut st)).map_err(err)?;
++                self.staging = st;
++            }
++            let st = self.staging.as_ref().unwrap();
++            self.context.CopyResource(st, &tex);
++            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
++            let mapped = self.context.Map(st, 0, D3D11_MAP_READ, 0, Some(&mut m));
++            // Map waited for the copy: give the buffer back for the next composition.
++            drop(tex);
++            let _ = frame.Close();
++            mapped.map_err(err)?;
++            self.mapped = true;
++            let pitch = m.RowPitch as usize;
++            Ok((slice::from_raw_parts(m.pData as *const u8, pitch * self.height), pitch))
++        }
++    }
++}
++
++impl Drop for Wgc {
++    fn drop(&mut self) {
++        self.unmap();
++        let _ = self.session.Close();
++        let _ = self.pool.Close();
 +    }
 +}
 diff --git a/libs/scrap/src/quartz/display.rs b/libs/scrap/src/quartz/display.rs

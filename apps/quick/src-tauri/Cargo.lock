@@ -7997,6 +7997,7 @@ dependencies = [
  "tracing",
  "webm",
  "winapi",
+ "windows 0.61.1",
  "zbus 3.15.2",
 ]
 
@@ -9419,7 +9420,7 @@ dependencies = [
 
 [[package]]
 name = "tether-quick"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "hbb_common",
  "minisign",

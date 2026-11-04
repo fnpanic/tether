@@ -4,7 +4,7 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
-## [Unreleased]
+## [0.5.5] — 2026-11-05
 
 ### Added
 - **Direct connections on the same network.** Two devices on one LAN (e.g. a Windows PC and a Mac
@@ -25,7 +25,8 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   A ready relay waits at most 0.4 s for it. STUN is answered by our own hbbs on UDP 21116 (no
   public STUN server, no new port). With a proxy nothing changes: no offer, relay at once.
   Needs the new hbbs on the relays (forwards the WebRTC offer/answer, `socket_addr_v6`, relays
-  `IceCandidate`, answers STUN); new clients against the old hbbs simply stay on the relay.
+  `IceCandidate`, answers STUN; deployed to both relays 2026-11-05); new clients against an old
+  hbbs simply stay on the relay.
 
 ### Fixed
 - **TetherQS did not notice a release published while it was running.** It checked only at start
@@ -74,6 +75,13 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   logical size (1728×1117 instead of 3456×2234, ~4× smaller frames); host option
   `tether-full-retina` = `Y` keeps the full size. Under congestion a Mac host can lower its
   bitrate to ~0.3 Mbit/s instead of stopping at ~1 Mbit/s. Needs the new Mac build.
+- **Flickering bands across Edge pages and videos on GPU-less hosts (VMs).** On a machine
+  without a GPU (Hyper-V VM, display-only adapter) Windows' Desktop Duplication hands out frames
+  in which a window that is redrawing is only half drawn: white/grey full-width bands across the
+  Edge welcome page or a video, in up to half the frames. TetherQS and Tether now capture such
+  hosts with Windows.Graphics.Capture (what the screen really shows); GPU hosts are unchanged.
+  Same latency, bitrate and VM CPU on the bench VM (docs/performance.md).
+  `TETHER_CAPTURE_DXGI=1` keeps the old capture.
 
 ## [0.5.4] — 2026-11-04
 

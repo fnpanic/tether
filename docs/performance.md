@@ -116,3 +116,63 @@ Optical frames/freeze figures are conservative for both (motion blurs the barcod
 pictures don't count; the canvas draw-gap meter above shows Tether's picture never paused more than
 ~99 ms). Result: **on par** — same p95 latency and worst gap, Tether delivers slightly more
 pictures, AnyDesk is ~10 ms lower on average. The idle LAN comparison is in `docs/benchmarks.md`.
+
+# Bands across Edge pages and videos on GPU-less hosts (capture)
+
+Symptom reported (0.5.4): in a session to the Hyper-V VM, a white/grey horizontal band flickered
+across Edge's animated "Welcome to Edge" page and across videos. In the user's screen recording of
+the viewer, 93 of 164 frames have one.
+
+## Cause: Desktop Duplication hands out half-drawn windows
+
+The bands are flat `#F3F3F3` (Edge's window background), span exactly the Edge window, end at
+fixed 34-row strip boundaries (1080 / 32) and often start mid-row, with the page text still drawn
+over them: a window caught in the middle of its update. Where they come from, step by step (VM
+`tether-bench`, no GPU, `DesktopImageInSystemMemory = TRUE`):
+
+| Test | Frames with a band |
+| --- | --- |
+| Encoded stream recorded in the viewer, decoded with ffmpeg (reference decoder) | 14–36 % |
+| The same streams decoded with WebCodecs on the RTX 3080 (hardware, NV12) vs software | identical, 0 frames differ |
+| Desktop Duplication alone in the VM (`scrap` example `tearprobe`, no encoder, no session) | 13–52 % |
+| … with a staging copy instead of `MapDesktopSurface` | 16 % |
+| … re-read 2–40 ms later while the frame is held | band unchanged (a stable, torn snapshot) |
+| GDI `BitBlt` of the screen, same page, same time | 0 of ~1,500 |
+| Hyper-V console framebuffer (what the VM displays) | 0 of 80 |
+| Windows.Graphics.Capture | 0 of ~2,400 |
+
+So the encoder, the network, the hardware decoder and the canvas are not involved: Desktop
+Duplication itself delivers frames that were never on the screen. GDI is no way out (one `BitBlt`
+of the screen takes ~50 ms on the VM, even for a 16-px column).
+
+## Fix
+
+`vendor/rustdesk/libs/scrap/src/dxgi/wgc.rs`: where the duplicated desktop image is in system
+memory (GPU-less hosts: WARP / display-only adapters, rotation 0), the capturer reads frames with
+**Windows.Graphics.Capture** (borderless, no cursor) instead of Desktop Duplication. GPU hosts are
+unchanged. If the API, a borderless session or a frame fails, it falls back to Desktop Duplication;
+`TETHER_CAPTURE_DXGI=1` forces it. The frame pool has one buffer, given back as soon as the
+frame is copied: DWM then composes at most one capture copy per encoded frame. Two buffers made
+DWM copy at every composition (+20–50 ms latency, more CPU); holding the buffer while encoding
+halved the frame rate when only Edge was animating (a composition during the encode was lost).
+
+## Result (VM, same workload, 2026-11-04)
+
+Host TetherQS (0.5.4 base vs fix) in the VM, technician in the VM (minimized), VP9, Edge welcome
+page animating, VM clock barcode (`tools/bench/probe.ps1`) topmost. Latency = barcode → picture
+drawn in the viewer (same clock). 30 s each, interleaved; VM CPU from the Hyper-V host.
+
+| Build | Latency mean / p95 | Remote frames/s | Longest draw gap | kbit/s | VM CPU |
+| --- | --- | --- | --- | --- | --- |
+| 0.5.4 (Desktop Duplication) | 62.5 / 85, 61.5 / 87 ms | 19.2, 20.9 | 155, 109 ms | 114, 129 | 23.2, 20.7 % |
+| fix (Windows.Graphics.Capture) | 65.9 / 99, 63.3 / 93 ms | 21.2, 21.8 | 136, 78 ms | 119, 117 | 22.6, 22.5 % |
+
+Same frame rate, bitrate and VM CPU; latency +3 ms on average (0.5.4 alone ranged 59–74 ms over
+ten runs of this setup). TetherQS itself uses more CPU (~57 vs ~40 % of a core: the copy
+runs in its process instead of in DWM's), the VM total is the same.
+
+The barcode window (repainted continuously) suppresses the artifact, so the band counts come from
+runs without it (welcome page reloaded in a new Edge window, technician minimized, 30 s, stream
+recorded in the viewer and decoded with ffmpeg): 0.5.4 10.2 % of 618 and 0.6 % of 510 frames with
+a band (the artifact comes and goes with Edge's state), fix 0 of 552 and 0 of 445. In-VM capture alone (`tearprobe`):
+Desktop Duplication 13–52 %, Windows.Graphics.Capture 0 % in every run.
