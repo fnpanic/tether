@@ -5,6 +5,7 @@
 
 mod app;
 mod commands;
+mod custom;
 mod netpolicy;
 mod policy;
 mod security;
@@ -32,6 +33,7 @@ fn main() -> ExitCode {
     {
         *hbb_common::config::ORG.write().unwrap() = ORG.to_owned();
     }
+    custom::load();
     security::apply_policy();
     netpolicy::apply();
     policy::load_cached();

@@ -207,6 +207,16 @@ fn unpack_app(dest: &Path, zip: &[u8]) -> io::Result<()> {
     r
 }
 
+/// The verified plain exe plus this instance's custom-app trailer (unchanged), so a branded
+/// TetherQS stays branded after updating.
+fn write_exe(p: &Path, plain: &[u8], trailer: &[u8]) -> io::Result<()> {
+    use io::Write;
+    let mut f = std::fs::File::create(p)?;
+    f.write_all(plain)?;
+    f.write_all(trailer)?;
+    f.sync_all()
+}
+
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -273,7 +283,7 @@ pub fn install() -> Result<(), String> {
         let staged = if cfg!(target_os = "macos") {
             stage(&u, &bytes, &fallback_dir(), unpack_app)
         } else {
-            stage(&u, &bytes, &fallback_dir(), |p, b| std::fs::write(p, b))
+            stage(&u, &bytes, &fallback_dir(), |p, b| write_exe(p, b, crate::custom::trailer()))
         };
         let target = exe_in(&staged.map_err(replace)?, &exe);
         hbb_common::log::info!("updated to {}, restarting {}", m.version, target.display());
@@ -363,6 +373,27 @@ mod tests {
         let target = stage(&blocked, b"v3", &fb, write).unwrap();
         assert_eq!(target, fb.join("TetherQS.exe"));
         assert_eq!(std::fs::read(&target).unwrap(), b"v3");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn update_keeps_custom_trailer() {
+        let dir = std::env::temp_dir().join(format!("tetherqs-trailer-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("ACME-Support.exe");
+        let trailer = tether_trust::custom::trailer(br#"{"payload":"x","sig":"y","key":"z"}"#);
+        let mut v1 = b"MZ v1".to_vec();
+        v1.extend(&trailer);
+        std::fs::write(&exe, &v1).unwrap();
+        stage(&exe, b"MZ v2", &dir.join("fb"), |p, b| write_exe(p, b, &trailer)).unwrap();
+        let got = std::fs::read(&exe).unwrap();
+        let (plain, doc) = tether_trust::custom::split(&got);
+        assert_eq!(plain, b"MZ v2");
+        assert_eq!(doc, tether_trust::custom::split(&v1).1);
+        // Plain TetherQS stays plain.
+        stage(&exe, b"MZ v3", &dir.join("fb"), |p, b| write_exe(p, b, &[])).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"MZ v3");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

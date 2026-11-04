@@ -35,6 +35,10 @@ export interface State {
     consent_text: string;
     diagnostics: boolean;
     perms: Perm[];
+    /** Custom app name (signed profile in this exe), null for plain TetherQS. */
+    custom_app: string | null;
+    /** data: URL of the custom app's logo, "" = none. */
+    logo: string;
   };
   update: { available: string | null; notes: string; required: boolean; forced_at: number | null; installing: boolean; error: string | null };
   clients: Client[];

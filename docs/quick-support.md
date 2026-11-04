@@ -13,7 +13,8 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
 1. Download `TetherQS.exe` (e.g. from `https://<relay>/download/stable/customer/windows-x86_64/TetherQS.exe`) and start it.
    Windows 10 21H2+ / 11 ship the WebView2 runtime it needs; if it is missing, TetherQS shows a
    message box with the download link instead of a window.
-2. Read the ID and password to the technician (or copy them). The status pill shows
+2. Read the ID and password to the technician (or copy them). The password is masked until the
+   customer clicks the eye (as in the technician app); copy works either way. The status pill shows
    *Connecting*, *Ready*, *Session active* or *Offline*.
 3. When the technician connects, an incoming-request card appears: who is connecting and which
    permissions they get (toggles; locked ones are greyed out by policy). **Accept** or **Decline**.
@@ -62,8 +63,8 @@ running without admin access.
 At start the last verified policy (`%APPDATA%\Tether-QS\policy.json`) is applied before the core
 starts. Then every `policy.refresh-minutes` (1 with `policy.fast-apply`): `GET /api/policy`,
 verify with `tether_trust::envelope::open_json` against the compiled-in `TETHER_ADMIN_PUB_KEY`
-(comma-separated for rotation), `Bundle::from_json`, reject a lower serial, cache, `resolve(…,
-"customer", <install uuid>, None)`. Locked features with a core option become overrides, others
+(comma-separated for rotation), `Bundle::from_json`, reject a lower serial, cache, `resolve_with(…,
+"customer", <install uuid>, <custom app layer>, None)` (see Custom apps). Locked features with a core option become overrides, others
 defaults; `FLOOR` keys are never touched. After each check `POST /api/heartbeat` with profile
 `customer`. Release builds refuse to compile without the key; debug builds without it run on
 defaults and make no policy/heartbeat requests.
@@ -106,6 +107,35 @@ updater format, docs/api.md). If the version is newer:
 
 Publishing: upload `TetherQS.exe` and `TetherQS.exe.sig` (signed with the updater key, e.g.
 `tauri signer sign`), then `latest.json` with `platforms["windows-x86_64"] = {signature, url}`.
+
+## Custom apps (branded downloads)
+
+Tether Manage can create a **custom app**: a name, logo (PNG, at most 96 KiB), accent colour,
+welcome text and customer settings, signed with the admin key (`tether_trust::custom::CustomProfile`)
+and stored on every relay together with a private, expiring download link
+`https://<relay>/q/<token>` (256-bit random token, at most 366 days; wire contract in
+[api.md](api.md#custom-apps-branded-tetherqs-downloads)). The relay streams the channel's current
+`TetherQS-<v>.exe` with the signed profile appended (`<signed JSON><u32 LE length>TQSPROF1`) as
+`<Name>-Support.exe`. Unknown, revoked and expired links all answer `404`; 30 requests per minute
+per IP; the admin sees download counts. The exe itself stays the same signed build: no per-customer
+compilation.
+
+In TetherQS (Windows):
+- At start it reads the tail of its own exe, verifies the profile against the compiled-in
+  `TETHER_ADMIN_PUB_KEY` and validates it. A missing, damaged or untrusted trailer is logged and
+  TetherQS runs as plain TetherQS.
+- Name, accent and welcome replace `customer.title`, `customer.accent-color` and
+  `customer.welcome` (window title and title bar); the logo is shown in the title bar; the Help view
+  lists the custom app name.
+- The settings layer is applied with `policy::resolve_with`: defaults < policy profile < **custom
+  app** < group < machine. Only customer-profile features are allowed in it.
+- Self-update downloads and verifies the plain exe as usual, then writes it with this instance's
+  trailer appended unchanged, so the customer keeps the branded app.
+
+Revoking or letting the link expire stops new downloads only; copies already downloaded keep
+working (the profile has no expiry). Test helper without Tether Manage:
+`cargo run --example custom_app -- <keyfile> <TetherQS.exe> <out.exe>` in `crates/tether-trust`
+(prints the public key for `TETHER_ADMIN_PUB_KEY`, writes a signed test profile).
 
 ## Building
 

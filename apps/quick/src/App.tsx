@@ -1,6 +1,6 @@
 // TetherQS: one 420×560 window. Visual rules: /DESIGN.md.
 import { type ButtonHTMLAttributes, type ReactNode, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Check, Copy, FolderSync, HelpCircle, Keyboard, Minus, RefreshCw, ShieldAlert, ShieldCheck, X } from "lucide-react";
+import { ArrowLeft, Check, Copy, Eye, EyeOff, FolderSync, HelpCircle, Keyboard, Minus, RefreshCw, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { api, type Client, type Diagnostics, formatId, inTauri, onCm, type State } from "./ipc";
 
 type Consent = { conn_id: number; peer_name: string; text: string };
@@ -55,10 +55,10 @@ export function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <TitleBar title={s.branding.title} onHelp={s.branding.diagnostics ? () => setHelp(!help) : undefined} helpOpen={help} />
+      <TitleBar title={s.branding.title} logo={s.branding.logo} onHelp={s.branding.diagnostics ? () => setHelp(!help) : undefined} helpOpen={help} />
       <div className="flex min-h-0 flex-1 flex-col px-6 pb-5">
         {help ? (
-          <Help onBack={() => setHelp(false)} />
+          <Help customApp={s.branding.custom_app} onBack={() => setHelp(false)} />
         ) : (
           <>
             <UpdateBanner s={s} />
@@ -97,12 +97,13 @@ export function App() {
   );
 }
 
-function TitleBar({ title, onHelp, helpOpen }: { title: string; onHelp?: () => void; helpOpen: boolean }) {
+function TitleBar({ title, logo, onHelp, helpOpen }: { title: string; logo: string; onHelp?: () => void; helpOpen: boolean }) {
   const base = "no-drag grid h-8 w-9 place-items-center rounded-md hover:bg-parchment";
   const btn = `${base} text-muted hover:text-ink`;
   return (
     <div data-tauri-drag-region className="drag flex h-11 shrink-0 items-center gap-2 pl-6 pr-2">
-      <span data-tauri-drag-region className="min-w-0 flex-1 truncate text-caption font-semibold">
+      {logo && <img data-tauri-drag-region data-testid="qs-logo" src={logo} alt="" className="h-5 max-w-20 shrink-0 object-contain" draggable={false} />}
+      <span data-tauri-drag-region data-testid="qs-title" className="min-w-0 flex-1 truncate text-caption font-semibold">
         {title}
       </span>
       {onHelp && (
@@ -175,6 +176,9 @@ function CopyButton({ text, label, onCopied }: { text: string; label: string; on
 
 function Idle({ s, onCopied }: { s: State; onCopied: (m: string) => void }) {
   const clickOnly = s.branding.approve_mode === "click";
+  // Hidden by default like the technician app (shoulder-surfing, screen sharing).
+  const [reveal, setReveal] = useState(false);
+  const icon = "grid h-9 w-9 shrink-0 place-items-center rounded-full text-muted hover:bg-parchment hover:text-ink";
   return (
     <>
       <p className="mb-5 mt-2 text-callout text-muted">{s.branding.welcome}</p>
@@ -191,11 +195,19 @@ function Idle({ s, onCopied }: { s: State; onCopied: (m: string) => void }) {
             <div className="my-5 h-px bg-hairline" />
             <div className="text-footnote text-muted">One-time password</div>
             <div className="mt-1 flex items-center gap-1">
-              <span data-testid="qs-password" className="flex-1 select-text font-mono text-headline font-semibold">
-                {s.password || "—"}
+              <span
+                data-testid="qs-password"
+                data-password={s.password}
+                aria-label="One-time password"
+                className={`flex-1 font-mono text-headline font-semibold tabular-nums ${reveal ? "select-text" : "select-none tracking-[0.12em]"}`}
+              >
+                {s.password ? (reveal ? s.password : "•".repeat(s.password.length)) : "—"}
               </span>
+              <button aria-label={reveal ? "Hide password" : "Show password"} title={reveal ? "Hide password" : "Show password"} aria-pressed={reveal} className={icon} onClick={() => setReveal(!reveal)}>
+                {reveal ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
               <CopyButton text={s.password} label="Password" onCopied={onCopied} />
-              <button aria-label="New password" title="New password" className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-muted hover:bg-parchment hover:text-ink" onClick={() => api.refreshPassword()}>
+              <button aria-label="New password" title="New password" className={icon} onClick={() => api.refreshPassword()}>
                 <RefreshCw size={15} />
               </button>
             </div>
@@ -360,13 +372,14 @@ function Footer({ s, onError }: { s: State; onError: (m: string) => void }) {
   );
 }
 
-function Help({ onBack }: { onBack: () => void }) {
+function Help({ customApp, onBack }: { customApp: string | null; onBack: () => void }) {
   const [d, setD] = useState<Diagnostics | null>(null);
   useEffect(() => {
     api.diagnostics().then(setD).catch(() => {});
   }, []);
   const rows: [string, ReactNode][] = d
     ? [
+        ...(customApp ? ([["Custom app", customApp]] as [string, ReactNode][]) : []),
         ["Version", d.version],
         ["ID", formatId(d.id)],
         ["Server", d.server || "—"],

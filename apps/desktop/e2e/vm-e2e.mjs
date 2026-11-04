@@ -49,7 +49,7 @@ async function main() {
   const qs = await until("TetherQS page", () => pages(qsB).find((p) => p.url().includes("index.html") || p.url().startsWith("tauri") || p.url().startsWith("http")), 20000);
   await until("TetherQS ready", async () => (await qs.locator('[data-testid="qs-status"]').innerText()).includes("Ready"), 90000, 1000);
   const id = (await qs.locator('[data-testid="qs-id"]').innerText()).replace(/\s/g, "");
-  const pw = (await qs.locator('[data-testid="qs-password"]').innerText()).trim();
+  const pw = ((await qs.locator('[data-testid="qs-password"]').getAttribute("data-password")) ?? "").trim();
   const st = await ipc(qs, "state");
   record("TetherQS ready behind TLS-inspecting proxy as standard user", true, { id, title: st.branding?.title, elevated: st.elevated, policy_serial: st.policy_serial ?? st.policy?.serial });
 
