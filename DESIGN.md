@@ -107,7 +107,7 @@ and is never applied below 12px.
 | **Card** | `tile`, 1px `hairline`, radius 18, padding 24. No shadow. |
 | **List row** | Height 36, radius 8, caption 14, hover `tile-2`, selected `accent` at 12% with `ink` text. |
 | **Toggle** (extension) | 40×24 track, `accent` when on, `hairline`-toned `parchment` when off, white 20px knob. |
-| **Segmented control** | Pill track in `parchment`, selected segment `tile` with hairline, caption text. |
+| **Segmented control** | Pill track in `parchment`, selected segment filled `accent` with white semibold text (`SELECTED` in `ui.tsx`; the policy state control keeps “Default” neutral), caption text. Selected list rows, nav items and cards use the same accent fill or an accent ring, so a selection reads at a glance. |
 | **Status pill** | `parchment` pill, 6px status dot + footnote text. |
 | **Dialog** | `tile`, radius 18, padding 32, floating shadow, dim backdrop `rgba(0,0,0,.4)`. |
 | **Session toolbar** | Glass pill (radius full), 44 tall, white icons at 72% → 100%, active item `rgba(255,255,255,.14)`. |

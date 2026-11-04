@@ -494,6 +494,12 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
   <li><strong>settings</strong> for everyone who uses this download (customer-module features only, such as approve mode or permissions),</li>
   <li>an <strong>expiry</strong> (at most 366 days) and the update channel.</li>
 </ul>
+<ol>
+  <li>Open <strong>Custom apps</strong> and click <strong>New custom app</strong>.</li>
+  <li>Fill in name, logo, colour, welcome text, settings and expiry, then click <strong>Create &lt;name&gt;</strong>.</li>
+  <li>Copy the <strong>private link</strong> and send it to the customer.</li>
+</ol>
+<p>Per row: <strong>Edit</strong> changes the app (only on the PC that created it: “Created on another PC” otherwise), <strong>New link</strong> replaces the link and <strong>Revoke</strong> deletes it.</p>
 <p>Tether Manage signs this profile with the admin key and stores it on every relay under the same random link, <code>https://&lt;relay&gt;/q/&lt;token&gt;</code>, so the link works on any relay. Each download is the current TetherQS of that channel with the signed profile attached; it keeps its branding through self-updates. The list shows downloads and the last download per app.</p>
 <ul>
   <li><strong>Revoke</strong> deletes the app: its link stops working at once.</li>
