@@ -280,12 +280,10 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <tr><td>Fit to window / Original size</td><td>Scale the remote screen to the window, or show it pixel for pixel</td></tr>
 <tr><td>Image quality</td><td><strong>Sharp text</strong> (best image quality), <strong>Balanced</strong> (quality and speed, default) or <strong>Speed</strong> (lowest latency and bandwidth)</td></tr>
 <tr><td>Statistics</td><td>Overlay with frame rate, codec, latency, bitrate and decoder health (longest gap, key-frame requests, dropped frames)</td></tr>
-<tr><td>Send Ctrl+Alt+Del</td><td>Sends the secure attention sequence to the remote device</td></tr>
-<tr><td>Lock remote screen</td><td>Locks the remote computer</td></tr>
+<tr><td>Remote actions</td><td>A menu with <strong>Send Ctrl+Alt+Del</strong>, <strong>Lock screen…</strong> and <strong>Restart…</strong>. Ctrl+Alt+Del is greyed out with the reason when the remote PC has no Tether service (TetherQS). Lock and restart ask first; without the service the question warns that you will not see the lock screen or be able to sign back in, and that TetherQS does not start again after a restart.</td></tr>
 <tr><td>Chat</td><td>Opens a chat panel with the remote user</td></tr>
-<tr><td>Transfer files</td><td>Opens a file-transfer window that reuses this session's login (no second password)</td></tr>
+<tr><td>Transfer files</td><td>Opens a file-transfer window that belongs to this session: no second password and no second accept for the customer</td></tr>
 <tr><td>Record session</td><td>Asks the remote user for permission and records once they allow it (see <a href="#tech-record">Recording</a>). Hidden if your policy turns recording off.</td></tr>
-<tr><td>Restart remote device</td><td>Asks for confirmation, then restarts the remote computer. The session ends; reconnect once it is back.</td></tr>
 <tr><td>Full screen</td><td>Full screen on and off</td></tr>
 <tr><td>Pin toolbar</td><td>Keeps the toolbar visible</td></tr>
 <tr><td><span class="pill"><span class="dot danger"></span>Disconnect</span></td><td>The red button ends the session</td></tr>
@@ -293,7 +291,7 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <p>Some functions can be disabled by your organisation or by the remote user (control, clipboard, file transfer, audio, restart). The <strong>Send Ctrl+Alt+Del</strong> and UAC prompts on a TetherQS customer PC need <a href="#qs-admin">admin access</a>.</p>
 
 <h2 id="tech-files">File transfer</h2>
-<p>Open it from the toolbar while you are connected, with <strong>Transfer files</strong> on the main window, or with <code>tether --connect &lt;id&gt; --file-transfer</code>. When opened from a running session it reuses that session's login. File transfer is end-to-end encrypted like the screen. In tests a 64 MB file arrived intact (SHA-256 verified) through a proxy that only allowed port 443.</p>
+<p>Open it from the toolbar while you are connected, with <strong>Transfer files</strong> on the main window, or with <code>tether --connect &lt;id&gt; --file-transfer</code>. When opened from a running session it belongs to that session: the customer is not asked again, TetherQS shows “Transferring files” on the session card instead of a second connection, and <strong>Disconnect</strong> there ends both. File transfer is end-to-end encrypted like the screen. In tests a 64 MB file arrived intact (SHA-256 verified) through a proxy that only allowed port 443.</p>
 
 <h2 id="tech-record">Recording with consent</h2>
 <ol class="steps">
@@ -376,7 +374,8 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <p>When your technician connects, a card appears with <strong>who</strong> is connecting (name and ID), whether they want to see and control the screen or transfer files, and <strong>what</strong> they will be allowed to do. Only accept if you know this person.</p>
 <ul>
   <li>Switch individual permissions on or off before you accept: <strong>Control</strong> (mouse and keyboard), <strong>Files</strong> (file transfer), clipboard, audio and restart. Greyed-out switches are fixed by your support company.</li>
-  <li>Click <strong>Accept</strong> to start, or <strong>Decline</strong> to refuse.</li>
+  <li>Click <strong>Accept</strong> to start, or <strong>Decline</strong> to refuse. Accept lets your technician in right away; they do not need the password then. (Telling them the one-time password works too.) A short message confirms it, and the card changes to the session view.</li>
+  <li>While someone asks or is connected, the window sits in the bottom-right corner of your screen, so it is always in the same place and out of the way. Afterwards it moves back to the middle.</li>
   <li>If your organisation uses passwords only, a session with the correct password starts without the card.</li>
 </ul>
 

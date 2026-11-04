@@ -17,17 +17,26 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    customer clicks the eye (as in the technician app); copy works either way. The status pill shows
    *Connecting*, *Ready*, *Session active* or *Offline*.
 3. When the technician connects, an incoming-request card appears: who is connecting and which
-   permissions they get (toggles; locked ones are greyed out by policy). **Accept** or **Decline**.
+   permissions they get (toggles; locked ones are greyed out by policy; audio is off by default).
+   **Accept** or **Decline**. The card says that Accept lets the technician in without a password
+   (in `both` mode typing the one-time password works too); after Accept a message confirms it.
    With `security.approve-mode=password` sessions start without the card; with `click` the
-   password is not shown at all.
-4. During the session the card shows the technician, elapsed time, indicators (Control, Files,
-   REC) and a red **Disconnect** button. Permissions can be revoked at any time.
+   password is not shown at all. For a request or session the window moves to the bottom-right
+   corner of its screen, and back to the centre when the last session ends.
+4. During the session the card shows the technician, elapsed time, indicators (Control,
+   Transferring files, REC) and a red **Disconnect** button. Permissions can be revoked at any
+   time. A file transfer the technician opens from the session is part of it: no second request,
+   no second card. The host admits it because it carries the accepted session's key and its
+   random 128-bit companion secret (sent only inside the encrypted logins), and only while that
+   session's **Transfer files** switch is on; switching Files off or Disconnect ends it. With
+   Files off, a new file transfer is a normal request again.
 5. Closing the window ends support: the in-process host server stops with it.
 
-**Help** (title bar `?`, policy `diagnostics.page`) shows version, ID, connection state, server,
-the proxy in use, admin-access state and the policy serial at once, also without a network. Whether
-the server is reachable (and latency) is checked separately, at most 5 s, with **Retry**; a
-broken network shows its error there instead of hiding the page.
+**Help** (title bar `?`, policy `diagnostics.page`) shows version, ID, connection state, every
+server it registers with (compiled-in and policy `servers.list`), the proxy in use, admin-access
+state and the policy serial at once, also without a network. Whether each server is reachable (and
+latency) is checked separately, at most 5 s each, with **Retry**; a broken network shows its error
+there instead of hiding the page.
 
 ## Process model
 

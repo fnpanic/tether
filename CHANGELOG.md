@@ -4,6 +4,44 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.5.2] — 2026-11-04
+
+### Fixed
+- **macOS host: only the top-left quarter visible, clicks missed.** WebView2 reports half the
+  real visible size for a Retina Mac's stream; the viewer sized the canvas right but drew only
+  that half, scaled up. It now draws the whole picture, so clicks land where they are shown.
+- **File transfer from a session asked the customer again and showed a second connection.** The
+  technician app sends a random 128-bit companion secret with each session login (only inside
+  the encrypted connection; new `LoginRequest.companion_secret`), and the file-transfer window
+  opened from that session presents the same secret and session key. The host lets such a file
+  transfer in without asking only while that accepted session runs and its **Transfer files**
+  permission is on; otherwise the customer is asked as before. TetherQS shows it on the session
+  card ("Transferring files"), not as a second request; switching Files off or Disconnect ends
+  it. The file-transfer window also no longer stays on "Password required" once the customer
+  accepted by click (that is what made file transfer look broken).
+- **Session toolbar hid while a menu was open** (the menu vanished under the pointer). It stays
+  up while the pointer is over the bar or one of its menus.
+- **TetherQS diagnostics showed one server.** Help lists every server it registers with, each
+  with its own reachability check.
+
+### Changed
+- **Connecting is explained on both sides.** TetherQS: who is asking, that Accept lets them in
+  without a password (and that typing the one-time password works too), a confirmation after
+  Accept. The window moves to the bottom-right corner for a request or session and back to the
+  centre afterwards, so it is always in the same place. Technician: the password screen says the
+  customer may click Accept instead; the wait screen says the customer has to click Accept.
+- **Remote actions menu** (session toolbar): Ctrl+Alt+Del, Lock screen and Restart in one menu.
+  Ctrl+Alt+Del is disabled with the reason when the remote side has no service (TetherQS); lock
+  and restart ask first and warn when the remote side cannot show the lock screen (you would not
+  be able to sign back in) or will not start again by itself.
+- **Audio is off by default** (`permission.audio` default `N`; turn it on per policy or per
+  session).
+- **Download page:** one Download button per card, all at the same height; signatures and
+  updater archives are no longer on the page.
+- **Tether Manage, Releases:** files are listed one line per release (installer, signature, disk
+  image, updater archive together), expandable; **Delete release** removes all of a release's
+  files after a warning.
+
 ## [0.5.1] — 2026-11-04
 
 ### Added

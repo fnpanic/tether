@@ -47,7 +47,7 @@ export interface State {
 export interface Diagnostics {
   version: string;
   id: string;
-  server: string;
+  servers: string[];
   proxy: string;
   elevated: boolean;
   policy_serial: number;
@@ -70,7 +70,7 @@ export const api = {
   elevate: () => invoke("elevate"),
   installUpdate: () => invoke("update_install"),
   diagnostics: () => invoke<Diagnostics>("diagnostics"),
-  diagnosticsProbe: () => invoke<Probe>("diagnostics_probe"),
+  diagnosticsProbe: (server: string) => invoke<Probe>("diagnostics_probe", { server }),
 };
 
 /** Connection-manager events: add_connection, remove_connection, refused, policy, record_consent_request. */

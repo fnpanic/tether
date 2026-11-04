@@ -786,8 +786,8 @@ async fn page_render(app: State<'_, App>, title: String, intro: String, technici
                 (_, release::WINDOWS) => "Windows · no installation needed · run it when support asks you to".to_owned(),
                 _ => "Mac · no installation needed · unzip and open it when support asks you to".to_owned(),
             };
-            let (href, more) = page_files(kind, platform, &version, artifact.as_deref());
-            offers.push(release::Offer { label, detail, href, more });
+            let href = page_files(kind, platform, &version, artifact.as_deref());
+            offers.push(release::Offer { label, detail, href });
         }
         sections.push(release::OsSection { id, name, offers });
     }
@@ -798,23 +798,13 @@ async fn page_render(app: State<'_, App>, title: String, intro: String, technici
 }
 
 /// The primary download of a release and the files that belong to it ("More files").
-fn page_files(kind: &str, platform: &str, version: &str, artifact: Option<&str>) -> (Option<String>, Vec<(String, &'static str)>) {
+fn page_files(kind: &str, platform: &str, version: &str, artifact: Option<&str>) -> Option<String> {
     let at = |f: &str| format!("/download/stable/{kind}/{platform}/{f}");
     match artifact {
-        None => (None, vec![]),
-        // Mac technician: the disk image is the download; the updater archive belongs to it.
-        Some(a) if (kind, platform) == ("technician", release::MAC) => {
-            let dmg = release::dmg_name(version);
-            (
-                Some(at(&dmg)),
-                vec![
-                    (at(&format!("{dmg}.sig")), "Signature of the disk image"),
-                    (at(a), "Updater archive (used by automatic updates)"),
-                    (at(&format!("{a}.sig")), "Signature of the updater archive"),
-                ],
-            )
-        }
-        Some(a) => (Some(at(a)), vec![(at(&format!("{a}.sig")), "Signature (checked by automatic updates)")]),
+        None => None,
+        // Mac technician: the disk image is the download (the updater archive is for updates).
+        Some(_) if (kind, platform) == ("technician", release::MAC) => Some(at(&release::dmg_name(version))),
+        Some(a) => Some(at(a)),
     }
 }
 
@@ -1148,13 +1138,11 @@ mod tests {
             release_files("technician", release::MAC, "0.3.1", "Tether_0.3.1_universal.app.tar.gz"),
             ["Tether_0.3.1_universal.app.tar.gz", "Tether_0.3.1_universal.app.tar.gz.sig", "Tether_0.3.1_universal.dmg", "Tether_0.3.1_universal.dmg.sig"]
         );
-        let (href, more) = page_files("technician", release::MAC, "0.3.1", Some("Tether_0.3.1_universal.app.tar.gz"));
+        let href = page_files("technician", release::MAC, "0.3.1", Some("Tether_0.3.1_universal.app.tar.gz"));
         assert_eq!(href.unwrap(), "/download/stable/technician/darwin-universal/Tether_0.3.1_universal.dmg");
-        assert_eq!(more.len(), 3);
-        assert!(more[1].0.ends_with("/Tether_0.3.1_universal.app.tar.gz"));
-        let (href, more) = page_files("customer", release::WINDOWS, "0.3.1", Some("TetherQS-0.3.1.exe"));
-        assert_eq!((href.unwrap().as_str(), more[0].0.as_str()), ("/download/stable/customer/windows-x86_64/TetherQS-0.3.1.exe", "/download/stable/customer/windows-x86_64/TetherQS-0.3.1.exe.sig"));
-        assert_eq!(page_files("customer", release::MAC, "0.3.1", None), (None, vec![]));
+        let href = page_files("customer", release::WINDOWS, "0.3.1", Some("TetherQS-0.3.1.exe"));
+        assert_eq!(href.unwrap(), "/download/stable/customer/windows-x86_64/TetherQS-0.3.1.exe");
+        assert_eq!(page_files("customer", release::MAC, "0.3.1", None), None);
     }
 
     /// Writes the browser mock's download page preview:
@@ -1163,8 +1151,8 @@ mod tests {
     #[ignore]
     fn sample_page() {
         let offer = |label, kind, platform, artifact: Option<&str>, detail: &str| {
-            let (href, more) = page_files(kind, platform, "0.4.0", artifact);
-            release::Offer { label, detail: detail.into(), href, more }
+            let href = page_files(kind, platform, "0.4.0", artifact);
+            release::Offer { label, detail: detail.into(), href }
         };
         let sections = [
             release::OsSection {

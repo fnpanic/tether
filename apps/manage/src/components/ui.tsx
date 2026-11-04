@@ -224,8 +224,8 @@ export function Table({ head, children, empty }: { head: string[]; children: Rea
       <table className="w-full border-collapse text-left text-caption">
         <thead>
           <tr className="border-b border-hairline text-footnote text-muted">
-            {head.map((h) => (
-              <th key={h} className="px-4 py-2.5 font-normal">
+            {head.map((h, i) => (
+              <th key={i} className="px-4 py-2.5 font-normal">
                 {h}
               </th>
             ))}

@@ -160,9 +160,6 @@ pub struct Offer {
     pub detail: String,
     /// `None`: no release for this OS yet.
     pub href: Option<String>,
-    /// Files that belong to the same release (signatures, the updater archive): shown folded under
-    /// "More files" in the same card. `(href, what it is)`.
-    pub more: Vec<(String, &'static str)>,
 }
 
 pub struct OsSection {
@@ -184,23 +181,15 @@ if(mine&&document.getElementById(mine)){d.setAttribute("data-mine",mine);pick(mi
 /// Self-contained page in the DESIGN.md look: no external resources, light and dark. One section
 /// per OS; the inline script shows the visitor's and marks it, the switch shows the other.
 pub fn download_page(title: &str, intro: &str, sections: &[OsSection]) -> String {
-    // One card per app: one primary download, the rest of the release folded away (<details>
-    // needs no script).
+    // One card per app with one download; signatures and updater archives are for the updater
+    // (Tether Manage lists them under Releases), not for visitors.
     let card = |o: &Offer| match &o.href {
-        Some(href) => {
-            let more: String = o
-                .more
-                .iter()
-                .map(|(h, what)| format!("<li><a href=\"{}\">{}</a><span>{}</span></li>", esc(h), esc(h.rsplit('/').next().unwrap_or(h)), esc(what)))
-                .collect();
-            let more = if more.is_empty() { String::new() } else { format!("<details class=\"more\"><summary>More files</summary><ul>{more}</ul></details>") };
-            format!(
-                "<div class=\"card\"><span class=\"label\">{}</span><span class=\"detail\">{}</span><a class=\"cta\" href=\"{}\">Download</a>{more}</div>",
-                esc(o.label),
-                esc(&o.detail),
-                esc(href)
-            )
-        }
+        Some(href) => format!(
+            "<div class=\"card\"><span class=\"label\">{}</span><span class=\"detail\">{}</span><a class=\"cta\" href=\"{}\">Download</a></div>",
+            esc(o.label),
+            esc(&o.detail),
+            esc(href)
+        ),
         None => format!("<div class=\"card off\"><span class=\"label\">{}</span><span class=\"detail\">Not available yet</span></div>", esc(o.label)),
     };
     let switch: String = sections.iter().map(|s| format!("<a href=\"#{0}\" data-os=\"{0}\">{1}</a>", s.id, esc(s.name))).collect();
@@ -237,16 +226,12 @@ p{{font-size:17px;line-height:1.47;letter-spacing:-.022em;color:var(--muted);mar
 .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:24px;margin-top:48px}}
 .card{{display:flex;flex-direction:column;gap:8px;padding:24px;border:1px solid var(--hairline);border-radius:18px;background:var(--tile);color:var(--ink);text-decoration:none}}
 .card.off{{opacity:.6}}
-a:focus-visible,summary:focus-visible{{outline:2px solid var(--focus);outline-offset:2px}}
+a:focus-visible{{outline:2px solid var(--focus);outline-offset:2px}}
 .label{{font-size:21px;line-height:1.19;font-weight:600}}
 .detail{{font-size:14px;line-height:1.43;color:var(--muted)}}
-.cta{{align-self:flex-start;margin-top:16px;background:var(--accent);color:#fff;border-radius:9999px;padding:10px 22px;font-size:15px;text-decoration:none}}
+.detail{{margin-bottom:16px}}
+.cta{{align-self:flex-start;margin-top:auto;background:var(--accent);color:#fff;border-radius:9999px;padding:10px 22px;font-size:15px;text-decoration:none}}
 .cta:hover{{filter:brightness(1.1)}}
-.more{{margin-top:8px;font-size:14px;line-height:1.43;color:var(--muted)}}
-.more summary{{cursor:pointer;color:var(--accent);width:max-content}}
-.more ul{{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}}
-.more li{{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}}
-.more a{{color:var(--accent);font-family:ui-monospace,"SF Mono",Consolas,monospace;font-size:12px;word-break:break-all}}
 .switch{{display:inline-flex;gap:4px;margin-top:32px;padding:4px;border-radius:9999px;background:var(--parchment)}}
 .switch a{{padding:8px 18px;border-radius:9999px;color:var(--ink);text-decoration:none;font-size:15px}}
 .switch a[aria-current=true]{{font-weight:600}}
@@ -330,7 +315,6 @@ mod tests {
         let offer = |label, href: Option<&str>| Offer {
             label,
             detail: "d".into(),
-            more: href.map(|h| vec![(format!("{h}.sig"), "Signature")]).unwrap_or_default(),
             href: href.map(Into::into),
         };
         vec![
@@ -366,28 +350,18 @@ mod tests {
     }
 
     #[test]
-    fn page_groups_a_release_into_one_card() {
+    fn page_one_button_per_card_at_the_same_height() {
         let dmg = "/download/stable/technician/darwin-universal/Tether_0.3.1_universal.dmg";
-        let mut secs = sections(Some(dmg));
-        secs[1].offers[0].more = vec![
-            (format!("{dmg}.sig"), "Signature of the disk image"),
-            ("/download/stable/technician/darwin-universal/Tether_0.3.1_universal.app.tar.gz".into(), "Updater archive"),
-            ("/download/stable/technician/darwin-universal/Tether_0.3.1_universal.app.tar.gz.sig".into(), "Signature of the updater archive"),
-        ];
-        let html = download_page("T", "", &secs);
-        // One card per offer, each with one primary button.
+        let html = download_page("T", "", &sections(Some(dmg)));
         assert_eq!(html.matches("<div class=\"card\">").count(), 3);
         let mac = &html[html.find("id=\"macos\"").unwrap()..];
         let card = &mac[..mac.find("</div>").unwrap()];
-        assert_eq!(card.matches("class=\"cta\"").count(), 1);
+        assert_eq!(card.matches("<a ").count(), 1);
         assert!(card.contains(&format!("class=\"cta\" href=\"{dmg}\"")));
-        // The other three files of that release are folded under "More files", without script.
-        assert!(card.contains("<details class=\"more\"><summary>More files</summary>"));
-        assert_eq!(card.matches("<li>").count(), 3);
-        assert!(card.contains(">Tether_0.3.1_universal.app.tar.gz</a><span>Updater archive</span>"));
-        // An offer without a release has no "More files".
-        let off = &mac[mac.find("card off").unwrap()..];
-        assert!(!off[..off.find("</div>").unwrap()].contains("details"));
+        // No signatures or updater archives for visitors.
+        assert!(!html.contains(".sig") && !html.contains("<details"));
+        // Cards stretch to the row height; the button sits at the bottom of each.
+        assert!(html.contains(".cta{align-self:flex-start;margin-top:auto;"));
     }
 
     #[test]

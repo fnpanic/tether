@@ -254,7 +254,16 @@ export class VideoPipeline {
     // makes displayWidth half the real width, which would draw every frame at half resolution.
     const { w, h } = renderSize(frame);
     this.resize(w, h);
-    this.ctx.drawImage(frame, 0, 0, w, h);
+    // drawImage only reads a frame's visibleRect: widen it when it is wrong (see renderSize).
+    const init = widenTo(frame, w, h);
+    let src = frame;
+    try {
+      if (init) src = new VideoFrame(frame, init);
+    } catch {
+      // An engine that refuses the wider rect: draw what it reports.
+    }
+    this.ctx.drawImage(src, 0, 0, w, h);
+    if (src !== frame) src.close();
     const t0 = this.pending.get(frame.timestamp);
     if (t0 !== undefined) {
       this.decodeSum += performance.now() - t0;
@@ -339,6 +348,17 @@ export class VideoPipeline {
  * would downscale every frame to a quarter of its pixels. Real cropping (alignment padding such
  * as 1920×1088 → 1920×1080) is never an exact 2× ratio, so it keeps using visibleRect.
  */
+/**
+ * A VideoFrame init that makes the whole w×h coded picture visible, or null when the frame's
+ * visibleRect already is that picture. Without it a Retina Mac's stream (visibleRect reported as
+ * half the coded size) showed only its top-left quarter, scaled up to the window.
+ */
+export function widenTo(f: { visibleRect?: { x: number; y: number; width: number; height: number } | null }, w: number, h: number) {
+  const v = f.visibleRect;
+  if (!v || (v.x === 0 && v.y === 0 && v.width === w && v.height === h)) return null;
+  return { visibleRect: { x: 0, y: 0, width: w, height: h }, displayWidth: w, displayHeight: h };
+}
+
 export function renderSize(f: { codedWidth: number; codedHeight: number; visibleRect?: { width: number; height: number } | null }) {
   const v = f.visibleRect;
   if (!v || (v.width * 2 === f.codedWidth && v.height * 2 === f.codedHeight)) {

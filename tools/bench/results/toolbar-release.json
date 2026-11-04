@@ -1,7 +1,7 @@
 {
-  "started": "2026-11-03T21:05:52.810Z",
+  "started": "2026-11-04T11:02:03.936Z",
   "flavor": "release",
-  "viewer": "C:/cargo-target/ux/release/tether.exe",
+  "viewer": "C:\\cargo-target\\tether\\release\\tether.exe",
   "tests": [
     {
       "name": "single instance: second start exits, still one main window",
@@ -13,7 +13,7 @@
       "ok": true,
       "exit": 0,
       "windows": 1,
-      "ms_to_first_frame": 3472
+      "ms_to_first_frame": 1348
     },
     {
       "name": "safety gate: host revoked keyboard/mouse and restart for the session",
@@ -42,12 +42,16 @@
       "ok": true
     },
     {
-      "name": "Send Ctrl+Alt+Del: command accepted (host drops it: keyboard revoked)",
-      "ok": true
+      "name": "Ctrl+Alt+Del: in the actions menu, explains when the remote has no service",
+      "ok": false,
+      "error": "locator.innerText: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('menu').getByRole('button', { name: /^Send Ctrl+Alt+Del/ })\u001b[22m\n",
+      "page": "gamemachine\nRELAY\nBalanced\nSend Ctrl+Alt+Del\nNeeds Tether installed on the remote PC. TetherQS cannot send it.\nLock screen…\nYou will not be able to sign back in\nRestart…\nEnds the session"
     },
     {
-      "name": "Lock remote screen: command accepted (host drops it: keyboard revoked)",
-      "ok": true
+      "name": "lock: confirmation first, command accepted (host drops it: keyboard revoked)",
+      "ok": false,
+      "error": "locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('menu').getByRole('button', { name: /^Lock screen/ })\u001b[22m\n",
+      "page": "gamemachine\nRELAY\nBalanced"
     },
     {
       "name": "restart: in-app confirmation, cancel closes it",
@@ -72,7 +76,7 @@
     {
       "name": "10 MB upload completes, SHA-256 matches, one job_done event, one row",
       "ok": true,
-      "seconds": 12.657
+      "seconds": 4.163
     },
     {
       "name": "no duplicate connections; each window gets only its own events",

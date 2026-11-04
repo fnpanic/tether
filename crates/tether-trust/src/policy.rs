@@ -117,7 +117,7 @@ pub const FEATURES: &[Feature] = &[
     b!("permission.control", "permissions", "Allow mouse and keyboard control", "Steuerung mit Maus und Tastatur erlauben", "Y", Some("enable-keyboard"), BOTH),
     b!("permission.clipboard", "permissions", "Allow clipboard sync", "Zwischenablage synchronisieren", "Y", Some("enable-clipboard"), BOTH),
     b!("permission.file-transfer", "permissions", "Allow file transfer", "Dateiübertragung erlauben", "Y", Some("enable-file-transfer"), BOTH),
-    b!("permission.audio", "permissions", "Share audio", "Ton übertragen", "Y", Some("enable-audio"), BOTH),
+    b!("permission.audio", "permissions", "Share audio", "Ton übertragen", "N", Some("enable-audio"), BOTH),
     b!("permission.restart", "permissions", "Allow remote restart", "Neustart aus der Ferne erlauben", "Y", Some("enable-remote-restart"), BOTH),
     b!("permission.tunnel", "permissions", "Allow TCP tunnels", "TCP-Tunnel erlauben", "N", Some("enable-tunnel"), BOTH),
     b!("permission.block-input", "permissions", "Allow blocking local input", "Lokale Eingabe sperren erlauben", "Y", Some("enable-block-input"), BOTH),

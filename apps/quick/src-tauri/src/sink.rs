@@ -97,7 +97,13 @@ impl UiSink for TauriSink {
             if let Some(w) = self.app.get_webview_window("main") {
                 let _ = w.unminimize();
                 let _ = w.show();
+                dock(&w);
                 let _ = w.set_focus();
+            }
+        }
+        if name == "remove_connection" && remaining == 0 {
+            if let Some(w) = self.app.get_webview_window("main") {
+                let _ = w.center();
             }
         }
         if ended_session && remaining == 0 && policy::current().on("customer.close-after-session") {
@@ -110,4 +116,15 @@ impl UiSink for TauriSink {
             });
         }
     }
+}
+
+/// During a request and session the window always sits in the same place: bottom right of the
+/// screen it is on, out of the way of what the technician works on.
+fn dock(w: &tauri::WebviewWindow) {
+    let (Ok(Some(m)), Ok(size)) = (w.current_monitor(), w.outer_size()) else { return };
+    let a = m.work_area();
+    let margin = (16.0 * m.scale_factor()) as i32;
+    let x = a.position.x + a.size.width as i32 - size.width as i32 - margin;
+    let y = a.position.y + a.size.height as i32 - size.height as i32 - margin;
+    let _ = w.set_position(tauri::PhysicalPosition::new(x.max(a.position.x), y.max(a.position.y)));
 }

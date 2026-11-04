@@ -215,7 +215,8 @@ fn update_install() {
 struct Diagnostics {
     version: &'static str,
     id: String,
-    server: String,
+    /// Every server this app registers with (compiled-in, then policy `servers.list`).
+    servers: Vec<String>,
     proxy: String,
     elevated: bool,
     policy_serial: u64,
@@ -228,7 +229,7 @@ fn diagnostics() -> Diagnostics {
     Diagnostics {
         version: update::VERSION,
         id: api::get_id(),
-        server: policy::base_url().unwrap_or_default(),
+        servers: policy::base_urls(),
         proxy: hbb_common::config::DEFAULT_SETTINGS.read().unwrap().get("proxy-url").cloned().unwrap_or_else(|| "none (direct)".into()),
         elevated: elevated(),
         policy_serial: e.serial,
@@ -257,12 +258,14 @@ fn with_causes(e: &dyn std::error::Error) -> String {
 
 /// The network check, separate from `diagnostics` so a dead network never hides the local facts.
 #[tauri::command]
-async fn diagnostics_probe() -> Probe {
+async fn diagnostics_probe(server: String) -> Probe {
     const LIMIT: Duration = Duration::from_secs(5);
     let t = Instant::now();
     let job = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let b = policy::base_url().ok_or("no server in this build")?;
-        policy::http()?.get(format!("{b}/api/policy")).timeout(LIMIT).send().map(|_| ()).map_err(|e| with_causes(&e))
+        if !policy::base_urls().contains(&server) {
+            return Err("not a server of this app".into());
+        }
+        policy::http()?.get(format!("{server}/api/policy")).timeout(LIMIT).send().map(|_| ()).map_err(|e| with_causes(&e))
     });
     // Proxy detection (WPAD/PAC) can hang before the request starts: bound the whole check.
     let r = match hbb_common::tokio::time::timeout(LIMIT + Duration::from_secs(1), job).await {

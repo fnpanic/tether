@@ -287,8 +287,13 @@ Upload order, so that clients never see a manifest pointing to a missing file:
 
 macOS builds: [macos.md](macos.md).
 
-**Files on the first relay** lists everything under `download/`, with delete (on every relay). The server refuses uploads
-that would leave less than 2 GiB free.
+**Releases on the first relay** lists what is under `download/`, one line per release (channel,
+app, platform, version, number of files, size). Open a line for its files: installer or archive,
+`.sig`, and for the macOS technician app the `.dmg` with its `.sig`. Each folder's `latest.json`
+has its own line. **Delete release** removes all of a release's files on every relay after a
+warning (devices that still get that version from `latest.json` can no longer download it); a
+single file can be deleted from the opened line. The server refuses uploads that would leave
+less than 2 GiB free.
 
 How clients handle these flags: [updates.md](updates.md).
 
@@ -298,9 +303,9 @@ Generates a self-contained page (no external resources, light and dark) and publ
 `https://<relay>/`. Settings: title, introduction (empty line = new paragraph), and which apps to
 offer. The page has a Windows and a macOS section, each with one card per offered app: one
 **Download** button for the file a person needs (Windows installer, macOS disk image, TetherQS),
-and the other files of the same release folded under **More files** (`<details>`, no script
-needed): signatures, and for the macOS technician app the updater archive
-(`.app.tar.gz`) with its signature. A small inline script detects the visitor's OS
+all buttons at the same height. Signatures and updater archives are not on the page (they are for
+the updater; see Releases).
+A small inline script detects the visitor's OS
 (`navigator.userAgentData.platform`, else the user agent), shows that section first and marks it
 "Your computer"; the **Windows / macOS** switch shows the other. Without JavaScript both sections
 are shown and the switch jumps to them. An app without a stable release for an OS shows "Not

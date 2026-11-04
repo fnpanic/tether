@@ -44,7 +44,7 @@ pub fn base_url() -> Option<String> {
 }
 
 /// `https://<host>` of every server (compiled-in, then policy `servers.list`), last good first.
-fn base_urls() -> Vec<String> {
+pub fn base_urls() -> Vec<String> {
     if SERVER.is_none() {
         return Vec::new(); // never the upstream public servers
     }

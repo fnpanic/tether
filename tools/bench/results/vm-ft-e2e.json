@@ -1,0 +1,78 @@
+{
+  "when": "2026-11-04T11:29:03.333Z",
+  "vm": "172.30.252.30",
+  "key": "67091db1007747f4bfbd1b792161514b",
+  "results": [
+    {
+      "name": "QS diagnostics list every server, each checked",
+      "ok": true,
+      "servers": [
+        "https://tether-desk.duckdns.org",
+        "https://tether-desk2.duckdns.org"
+      ],
+      "reachable": [
+        true,
+        true
+      ]
+    },
+    {
+      "name": "request on TetherQS says Accept needs no password; technician told either works",
+      "ok": true,
+      "technician": "490 209 544 490 209 544 Enter the one-time password shown on the remote device Or ask the person there to click Accept: that lets you in without a password, and",
+      "audio_default": "false"
+    },
+    {
+      "name": "audio is off by default",
+      "ok": true
+    },
+    {
+      "name": "window docks bottom right during the request",
+      "ok": true,
+      "x": 1476,
+      "y": 448,
+      "w": 420,
+      "h": 560,
+      "sw": 1920,
+      "sh": 1032
+    },
+    {
+      "name": "after Accept: confirmation on TetherQS, session card, first frame for the technician",
+      "ok": true,
+      "toast": true
+    },
+    {
+      "name": "remote actions: Ctrl+Alt+Del disabled with the reason, lock asks and warns (not sent)",
+      "ok": true,
+      "hint": "Send Ctrl+Alt+Del Needs Tether installed on the remote PC. TetherQS cannot send it.",
+      "button": true
+    },
+    {
+      "name": "file transfer opens without a second accept on TetherQS; one card there",
+      "ok": true,
+      "ms": 395,
+      "cards": 1,
+      "indicator": true,
+      "listed": true
+    },
+    {
+      "name": "upload a 42.9 MB file to the customer's home folder",
+      "ok": true
+    },
+    {
+      "name": "download it back: same size",
+      "ok": true
+    },
+    {
+      "name": "closing file transfer leaves the session card on TetherQS",
+      "ok": true
+    },
+    {
+      "name": "Files switched off on the session card: file transfer needs a new accept (declined)",
+      "ok": true
+    },
+    {
+      "name": "Disconnect on TetherQS ends the session; window centred again",
+      "ok": true
+    }
+  ]
+}

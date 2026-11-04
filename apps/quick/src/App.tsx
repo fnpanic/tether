@@ -49,8 +49,11 @@ export function App() {
 
   if (!s) return <div className="h-full bg-canvas" />;
 
+  // File transfer opened from an accepted session joins that session's card (no second entry).
+  const companionOf = (c: Client) => (c.is_file_transfer ? s.clients.find((m) => m.authorized && !m.is_file_transfer && m.peer_id === c.peer_id) : undefined);
+  const companions = (m: Client) => s.clients.filter((c) => c.authorized && companionOf(c) === m);
   const pending = s.clients.find((c) => !c.authorized);
-  const active = s.clients.filter((c) => c.authorized);
+  const active = s.clients.filter((c) => c.authorized && !companionOf(c));
   for (const c of active) if (!since.current.has(c.id)) since.current.set(c.id, Date.now());
 
   return (
@@ -65,7 +68,7 @@ export function App() {
             {pending ? (
               <Request c={pending} s={s} onError={say} />
             ) : active.length ? (
-              active.map((c) => <InSession key={c.id} c={c} s={s} since={since.current.get(c.id)!} rec={rec.has(c.id)} onError={say} />)
+              active.map((c) => <InSession key={c.id} c={c} files={companions(c)} s={s} since={since.current.get(c.id)!} rec={rec.has(c.id)} onError={say} />)
             ) : (
               <Idle s={s} onCopied={say} />
             )}
@@ -224,7 +227,7 @@ function Avatar({ c }: { c: Client }) {
   return <div className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-accent text-callout font-semibold text-white">{initials}</div>;
 }
 
-function Perms({ c, s, onError }: { c: Client; s: State; onError: (m: string) => void }) {
+function Perms({ c, s, onError, also = [] }: { c: Client; s: State; onError: (m: string) => void; also?: Client[] }) {
   return (
     <div className="mt-3 space-y-0.5">
       {s.branding.perms.map((p) => (
@@ -234,7 +237,11 @@ function Perms({ c, s, onError }: { c: Client; s: State; onError: (m: string) =>
             label={p.label}
             checked={!!c[p.name] && p.allowed}
             disabled={p.locked && !p.allowed}
-            onChange={(v) => api.permission(c.id, p.name, v).catch((e) => onError(String(e)))}
+            onChange={(v) => {
+              [c, ...also].forEach((x) => api.permission(x.id, p.name, v).catch((e) => onError(String(e))));
+              // A running file transfer does not check the switch: Files off ends it.
+              if (p.name === "file" && !v) also.forEach((x) => api.close(x.id));
+            }}
           />
         </div>
       ))}
@@ -254,8 +261,13 @@ function Request({ c, s, onError }: { c: Client; s: State; onError: (m: string) 
       </div>
       <div className="mt-3 flex items-start gap-2 rounded-xl bg-warn/10 px-3 py-2.5 text-caption">
         <ShieldAlert size={16} className="mt-0.5 shrink-0 text-warn" />
-        <span>{c.is_file_transfer ? "wants to transfer files with this computer." : "wants to see and control this screen."} Only accept if you know this person.</span>
+        <span>
+          <b className="font-semibold">{c.name || "Someone"}</b> {c.is_file_transfer ? "wants to transfer files with this computer." : "wants to see and control this screen."} Only accept if you know this person.
+        </span>
       </div>
+      <p className="mt-2 text-footnote text-muted">
+        {s.branding.approve_mode === "click" ? "Accept lets them in right away." : "Accept lets them in right away, no password needed. Typing your one-time password lets them in too."} Below: what they may do.
+      </p>
       <div className="min-h-0 flex-1 overflow-y-auto">
         <Perms c={c} s={s} onError={onError} />
       </div>
@@ -263,7 +275,13 @@ function Request({ c, s, onError }: { c: Client; s: State; onError: (m: string) 
         <Button className="flex-1" onClick={() => api.close(c.id)}>
           Decline
         </Button>
-        <Button variant="primary" className="flex-1" autoFocus disabled={s.blocked} onClick={() => api.authorize(c.id).catch((e) => onError(String(e)))}>
+        <Button variant="primary" className="flex-1" autoFocus disabled={s.blocked} onClick={() =>
+            api.authorize(c.id).then(
+              () => onError(`Accepted: ${c.name || formatId(c.peer_id)} is now connected`),
+              (e) => onError(String(e)),
+            )
+          }
+        >
           Accept
         </Button>
       </div>
@@ -291,7 +309,7 @@ function Indicator({ on, icon, label, tone = "accent" }: { on: boolean; icon?: R
   );
 }
 
-function InSession({ c, s, since, rec, onError }: { c: Client; s: State; since: number; rec: boolean; onError: (m: string) => void }) {
+function InSession({ c, files, s, since, rec, onError }: { c: Client; files: Client[]; s: State; since: number; rec: boolean; onError: (m: string) => void }) {
   const elapsed = useElapsed(since);
   return (
     <Card className="mt-2 flex min-h-0 flex-1 flex-col !p-5">
@@ -304,13 +322,13 @@ function InSession({ c, s, since, rec, onError }: { c: Client; s: State; since: 
       </div>
       <div className="mt-3 flex flex-wrap gap-1.5">
         <Indicator on={!!c.keyboard && !c.is_file_transfer} icon={<Keyboard size={12} />} label="Control" />
-        <Indicator on={!!c.file || c.is_file_transfer} icon={<FolderSync size={12} />} label="Files" />
+        <Indicator on={files.length > 0 || c.is_file_transfer} icon={<FolderSync size={12} />} label="Transferring files" />
         <Indicator on={rec} label="REC" tone="danger" />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <Perms c={c} s={s} onError={onError} />
+        <Perms c={c} s={s} onError={onError} also={files} />
       </div>
-      <Button variant="disconnect" className="mt-3 w-full" onClick={() => api.close(c.id)}>
+      <Button variant="disconnect" className="mt-3 w-full" onClick={() => [c, ...files].forEach((x) => api.close(x.id))}>
         Disconnect
       </Button>
     </Card>
@@ -375,37 +393,49 @@ function Footer({ s, onError }: { s: State; onError: (m: string) => void }) {
 function Help({ customApp, status, onBack }: { customApp: string | null; status: number; onBack: () => void }) {
   const [d, setD] = useState<Diagnostics | null>(null);
   const [err, setErr] = useState("");
-  // null = checking; the local rows never wait for it.
-  const [p, setP] = useState<Probe | null>(null);
-  const probe = () => {
-    setP(null);
-    api.diagnosticsProbe().then(setP).catch((e) => setP({ reachable: false, ms: null, error: String(e) }));
+  // Per server; missing = checking. The local rows never wait for it.
+  const [p, setP] = useState<Record<string, Probe>>({});
+  const probe = (server: string) => {
+    setP(({ [server]: _, ...rest }) => rest);
+    api.diagnosticsProbe(server).then(
+      (r) => setP((x) => ({ ...x, [server]: r })),
+      (e) => setP((x) => ({ ...x, [server]: { reachable: false, ms: null, error: String(e) } })),
+    );
   };
   useEffect(() => {
-    api.diagnostics().then(setD).catch((e) => setErr(String(e)));
-    probe();
+    api.diagnostics().then((d) => {
+      setD(d);
+      d.servers.forEach(probe);
+    }, (e) => setErr(String(e)));
   }, []);
+  const host = (u: string) => u.replace(/^https?:\/\//, "");
   const rows: [string, ReactNode][] = d
     ? [
         ...(customApp ? ([["Custom app", customApp]] as [string, ReactNode][]) : []),
         ["Version", d.version],
         ["ID", formatId(d.id)],
         ["Connection", status === 1 ? "Ready" : status === 0 ? "Connecting to the server…" : "Offline"],
-        ["Server", d.server || "—"],
-        [
-          "Server reachable",
-          p ? (
-            <span className="inline-flex flex-wrap items-center gap-1.5">
-              <Dot tone={p.reachable ? "ok" : "danger"} />
-              {p.reachable ? `Yes (${p.ms} ms)` : p.error ?? "No"}
-              <button className="text-accent" onClick={probe}>
-                Retry
-              </button>
-            </span>
+        ...(d.servers.length ? d.servers : [""]).map((sv, i): [string, ReactNode] => [
+          d.servers.length > 1 ? `Server ${i + 1}` : "Server",
+          !sv ? (
+            "—"
           ) : (
-            <span className="text-muted">Checking…</span>
+            <span className="flex flex-col gap-0.5">
+              <span>{host(sv)}</span>
+              {p[sv] ? (
+                <span className="inline-flex flex-wrap items-center gap-1.5 text-muted">
+                  <Dot tone={p[sv].reachable ? "ok" : "danger"} />
+                  {p[sv].reachable ? `Reachable (${p[sv].ms} ms)` : p[sv].error ?? "Not reachable"}
+                  <button className="text-accent" onClick={() => probe(sv)}>
+                    Retry
+                  </button>
+                </span>
+              ) : (
+                <span className="text-muted">Checking…</span>
+              )}
+            </span>
           ),
-        ],
+        ]),
         ["Proxy", d.proxy],
         ["Admin access", d.elevated ? "On" : "Off"],
         ["Policy", d.policy_serial ? `#${d.policy_serial}${d.policy_group ? ` (${d.policy_group})` : ""}` : "Defaults"],

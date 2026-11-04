@@ -276,17 +276,33 @@ async function main() {
     await until("stats hidden", async () => !(await text(s)).includes("encryption"), 3000, 100);
   });
 
-  for (const label of ["Send Ctrl+Alt+Del", "Lock remote screen"]) {
-    await check(`${label}: command accepted (host drops it: keyboard revoked)`, async () => {
-      await s.getByRole("button", { name: label }).click();
-      await noToast(s);
-      await notBlank(s);
-    });
-  }
+  // Remote actions menu: Ctrl+Alt+Del (disabled with a reason without the service), lock and
+  // restart behind a confirmation that says what the other side can no longer do.
+  const menu = async (item) => {
+    await s.getByRole("button", { name: "Remote actions" }).click();
+    return s.getByRole("menu").getByRole("button", { name: new RegExp(`^${item}`) });
+  };
+  await check("Ctrl+Alt+Del: in the actions menu, explains when the remote has no service", async () => {
+    const b = await menu("Send Ctrl+Alt+Del");
+    const hint = await b.innerText();
+    if ((await b.isDisabled()) !== hint.includes("Needs Tether installed")) throw new Error(`state/hint mismatch: ${hint}`);
+    if (!(await b.isDisabled())) await b.click();
+    else await s.getByRole("button", { name: "Remote actions" }).click();
+    await noToast(s);
+    await notBlank(s);
+  });
+  await check("lock: confirmation first, command accepted (host drops it: keyboard revoked)", async () => {
+    await (await menu("Lock screen")).click();
+    const dlg = s.getByRole("dialog", { name: "Lock the remote screen?" });
+    await dlg.waitFor({ timeout: 3000 });
+    await dlg.getByRole("button", { name: /^Lock/ }).click();
+    await noToast(s);
+    await notBlank(s);
+  });
 
   await check("restart: in-app confirmation, cancel closes it", async () => {
-    await s.getByRole("button", { name: "Restart remote device" }).click();
-    const dlg = s.getByRole("dialog", { name: "Restart remote device" });
+    await (await menu("Restart")).click();
+    const dlg = s.getByRole("dialog", { name: "Restart the remote device?" });
     await dlg.waitFor({ timeout: 3000 });
     await dlg.getByRole("button", { name: "Cancel" }).click();
     await dlg.waitFor({ state: "hidden", timeout: 3000 });
@@ -377,12 +393,13 @@ async function main() {
     await ipc(s, "session_close", { key }); // core session only; the window stays
     await sleep(500);
     await toolbarUp(s).catch(() => {});
-    if (!(await s.getByRole("button", { name: "Lock remote screen" }).isVisible())) return { skipped: "toolbar hidden after close" };
-    await s.getByRole("button", { name: "Lock remote screen" }).click();
+    if (!(await s.getByRole("button", { name: "Remote actions" }).isVisible())) return { skipped: "toolbar hidden after close" };
+    await (await menu("Lock screen")).click();
+    await s.getByRole("dialog", { name: "Lock the remote screen?" }).getByRole("button", { name: /^Lock/ }).click();
     await toastSays(s, "Not connected to the remote device.");
     await sleep(2000);
-    await s.getByRole("button", { name: "Restart remote device" }).click();
-    await s.getByRole("dialog", { name: "Restart remote device" }).getByRole("button", { name: "Restart" }).click();
+    await (await menu("Restart")).click();
+    await s.getByRole("dialog", { name: "Restart the remote device?" }).getByRole("button", { name: /^Restart/ }).click();
     await toastSays(s, "Not connected to the remote device.");
     await notBlank(s);
   });

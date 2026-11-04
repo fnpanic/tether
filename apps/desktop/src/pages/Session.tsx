@@ -5,16 +5,14 @@ import {
   Expand,
   FolderSync,
   Gauge,
-  Keyboard,
-  Lock,
   Maximize,
   MessageSquare,
   Minimize,
+  MonitorCog,
   MonitorSmartphone,
   Pin,
   PinOff,
   Power,
-  RotateCcw,
   Scan,
   Send,
   ShieldCheck,
@@ -41,6 +39,8 @@ interface PeerInfo {
   platform: string;
   displays: Display[];
   current_display: number;
+  /** The remote side runs as a service (SYSTEM): Ctrl+Alt+Del, lock screen and UAC work. */
+  sas_enabled?: boolean;
 }
 
 interface Quality {
@@ -102,6 +102,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const [fingerprint, setFingerprint] = useState("");
   const [showStats, setShowStats] = useState(false);
   const [toolbar, setToolbar] = useState(true);
+  const barRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(false);
   const [chat, setChat] = useState<{ open: boolean; msgs: { me: boolean; text: string }[] }>({ open: false, msgs: [] });
   const [cursor, setCursor] = useState("default");
@@ -129,7 +130,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const toast = useToast();
   /** Every toolbar action either works or says why not. */
   const act = (p: Promise<unknown>) => p.catch((e) => toast.show(String(e)));
-  const [askRestart, setAskRestart] = useState(false);
+  const [ask, setAsk] = useState<"lock" | "restart" | null>(null);
 
   // ---------------------------------------------------------------- connection + events
   useEffect(() => {
@@ -251,7 +252,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
     if (type === "re-input-password") return setPhase({ kind: "password", wrong: true });
     if (type === "connecting") return setPhase({ kind: "connecting", text: friendly(text) || "Connecting…" });
     if (type === "success" || type === "info" || type === "nocancel-info") return;
-    if (text.toLowerCase().includes("waiting") || type.includes("wait")) return setPhase({ kind: "connecting", text: "Waiting for the remote user to accept…" });
+    if (text.toLowerCase().includes("waiting") || type.includes("wait")) return setPhase({ kind: "connecting", text: "Waiting for the person at the remote computer to click Accept…" });
     // Only a session that was working reconnects on its own; a first connect shows the error.
     if (everConnected.current) {
       const step = onFailure(series.current, classify({ type, title, text, retry }), Date.now(), limitMin.current);
@@ -363,13 +364,20 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   // Auto-hide the toolbar unless pinned; reveal at the top edge.
   useEffect(() => {
     if (pinned || phase.kind !== "connected") return setToolbar(true);
-    let t = window.setTimeout(() => setToolbar(false), 2200);
+    const hide = () => {
+      t = 0;
+      setToolbar(false);
+    };
+    let t = window.setTimeout(hide, 2200);
     const m = (e: MouseEvent) => {
-      if (e.clientY < 56) {
+      // Over the bar or one of its open menus it stays up (a menu must not vanish under the
+      // pointer); the countdown starts once the pointer is elsewhere.
+      const over = !!barRef.current?.contains(e.target as Node);
+      if (over || e.clientY < 56) {
         setToolbar(true);
         clearTimeout(t);
-        t = window.setTimeout(() => setToolbar(false), 2200);
-      }
+        t = over ? 0 : window.setTimeout(hide, 2200);
+      } else if (!t) t = window.setTimeout(hide, 2200);
     };
     window.addEventListener("mousemove", m);
     return () => {
@@ -436,7 +444,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           toolbar && connected && frameSize.w ? "translate-y-0 opacity-100" : "pointer-events-none invisible -translate-y-3 opacity-0"
         }`}
       >
-        <div className="drag pointer-events-auto mt-2 flex items-center gap-1 glass rounded-full border border-white/10 p-1 shadow-float" data-tauri-drag-region>
+        <div ref={barRef} className="drag pointer-events-auto mt-2 flex items-center gap-1 glass rounded-full border border-white/10 p-1 shadow-float" data-tauri-drag-region>
           <div className="flex items-center gap-2 pl-2 pr-3" data-tauri-drag-region>
             <span className={`h-2 w-2 rounded-full ${connected ? latencyColor : "bg-warn"}`} />
             <span className="max-w-[180px] truncate text-caption font-normal">{name}</span>
@@ -466,12 +474,6 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
             <Activity size={17} />
           </TB>
           <Sep />
-          <TB label="Send Ctrl+Alt+Del" onClick={() => act(invoke("session_ctrl_alt_del", { key }))}>
-            <Keyboard size={17} />
-          </TB>
-          <TB label="Lock remote screen" onClick={() => act(invoke("session_lock_screen", { key }))}>
-            <Lock size={17} />
-          </TB>
           <TB label="Chat" active={chat.open} onClick={() => setChat((c) => ({ ...c, open: !c.open }))}>
             <MessageSquare size={17} />
           </TB>
@@ -487,9 +489,12 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
               <Video size={17} className={rec.state === "on" ? "text-danger" : rec.state === "pending" ? "animate-pulse" : ""} />
             </TB>
           )}
-          <TB label="Restart remote device" active={askRestart} onClick={() => setAskRestart(!askRestart)}>
-            <RotateCcw size={17} />
-          </TB>
+          <ActionsMenu
+            windows={(info?.platform ?? "").toLowerCase().startsWith("windows")}
+            service={!!info?.sas_enabled}
+            onCad={() => act(invoke("session_ctrl_alt_del", { key }))}
+            onAsk={setAsk}
+          />
           <Sep />
           <TB label={fullscreen ? "Exit full screen" : "Full screen"} onClick={toggleFullscreen}>
             {fullscreen ? <Minimize size={17} /> : <Maximize size={17} />}
@@ -508,26 +513,17 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
         </div>
       </div>
 
-      {askRestart && connected && (
-        <div role="dialog" aria-label="Restart remote device" className="animate-rise absolute left-1/2 top-16 z-30 w-[320px] -translate-x-1/2 rounded-2xl border border-white/10 glass p-4 text-center shadow-float">
-          <div className="text-callout font-semibold">Restart the remote device?</div>
-          <div className="mt-1 text-caption text-white/60">The session ends; reconnect once it is back.</div>
-          <div className="mt-4 flex justify-center gap-2">
-            <Button variant="ghost" size="sm" className="!text-white/70 hover:!bg-white/10" onClick={() => setAskRestart(false)}>
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => {
-                setAskRestart(false);
-                act(invoke("session_restart_remote", { key }));
-              }}
-            >
-              Restart
-            </Button>
-          </div>
-        </div>
+      {ask && connected && (
+        <ConfirmAction
+          what={ask}
+          windows={(info?.platform ?? "").toLowerCase().startsWith("windows")}
+          service={!!info?.sas_enabled}
+          onCancel={() => setAsk(null)}
+          onConfirm={() => {
+            setAsk(null);
+            act(invoke(ask === "lock" ? "session_lock_screen" : "session_restart_remote", { key }));
+          }}
+        />
       )}
 
       {showStats && connected && (
@@ -591,6 +587,73 @@ function Stat({ k, v }: { k: string; v: React.ReactNode }) {
     <div className="flex justify-between gap-6">
       <span className="text-white/45">{k}</span>
       <span>{v}</span>
+    </div>
+  );
+}
+
+/** Ctrl+Alt+Del, lock and restart: disruptive, so grouped, explained and (lock, restart) confirmed. */
+function ActionsMenu({ windows, service, onCad, onAsk }: { windows: boolean; service: boolean; onCad: () => void; onAsk: (a: "lock" | "restart") => void }) {
+  const [open, setOpen] = useState(false);
+  const item = (label: string, hint: string, run: () => void, disabled = false) => (
+    <button
+      key={label}
+      disabled={disabled}
+      onClick={() => {
+        setOpen(false);
+        run();
+      }}
+      className="flex w-full flex-col items-start rounded-lg px-3 py-2 text-left transition hover:bg-white/10 disabled:pointer-events-none disabled:opacity-45"
+    >
+      <span className="text-caption font-normal">{label}</span>
+      <span className="text-footnote text-white/50">{hint}</span>
+    </button>
+  );
+  return (
+    <div className="no-drag relative">
+      <TB label="Remote actions" active={open} onClick={() => setOpen(!open)}>
+        <MonitorCog size={17} />
+      </TB>
+      {open && (
+        <div role="menu" className="animate-fade absolute right-0 top-11 z-30 w-72 overflow-hidden rounded-xl border border-white/10 bg-[#272729] p-1 shadow-float" onMouseLeave={() => setOpen(false)}>
+          {windows &&
+            item(
+              "Send Ctrl+Alt+Del",
+              service ? "Opens the Windows security screen" : "Needs Tether installed on the remote PC. TetherQS cannot send it.",
+              onCad,
+              !service,
+            )}
+          {item("Lock screen…", service ? "Locks the remote computer" : "You will not be able to sign back in", () => onAsk("lock"))}
+          {item("Restart…", "Ends the session", () => onAsk("restart"))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConfirmAction({ what, windows, service, onCancel, onConfirm }: { what: "lock" | "restart"; windows: boolean; service: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const lock = what === "lock";
+  const title = lock ? "Lock the remote screen?" : "Restart the remote device?";
+  const text = lock
+    ? service
+      ? "The remote computer locks. Its user signs back in; you see the lock screen and can type the password if you know it."
+      : windows
+        ? "Tether is not installed as a service on the remote PC (TetherQS): you will not see the lock screen and cannot sign back in. Only the person at the computer can unlock it."
+        : "You may not be able to see the lock screen or sign back in remotely. The person at the computer may have to unlock it."
+    : service
+      ? "The session ends. Tether starts again with the computer; reconnect once it is back."
+      : "The session ends. TetherQS does not start again by itself: the person at the computer has to start it and tell you the new password.";
+  return (
+    <div role="dialog" aria-label={title} className="animate-rise absolute left-1/2 top-16 z-30 w-[360px] -translate-x-1/2 rounded-2xl border border-white/10 glass p-4 text-center shadow-float">
+      <div className="text-callout font-semibold">{title}</div>
+      <div className={`mt-1 text-caption ${service ? "text-white/60" : "text-[#ffb340]"}`}>{text}</div>
+      <div className="mt-4 flex justify-center gap-2">
+        <Button variant="ghost" size="sm" className="!text-white/70 hover:!bg-white/10" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button variant="primary" size="sm" onClick={onConfirm}>
+          {lock ? (service ? "Lock" : "Lock anyway") : service ? "Restart" : "Restart anyway"}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -676,8 +739,9 @@ function Overlay({ phase, name, peer, sessionKey: key }: { phase: Phase; name: s
               }}
             >
               <label className="text-caption text-white/60" htmlFor="pw">
-                {phase.wrong ? <span className="text-danger">Wrong password, try again</span> : "Enter the password shown on the remote device"}
+                {phase.wrong ? <span className="text-danger">Wrong password, try again</span> : "Enter the one-time password shown on the remote device"}
               </label>
+              <p className="mt-1 text-footnote text-white/45">Or ask the person there to click Accept: that lets you in without a password, and this window continues by itself.</p>
               <input
                 id="pw"
                 type="password"

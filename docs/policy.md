@@ -9,7 +9,7 @@ States per layer: `on` (user may change, `value` is the default), `off` (locked 
 | `permission.control` | permissions | Allow mouse and keyboard control | `Y` | technician, customer | `enable-keyboard` |
 | `permission.clipboard` | permissions | Allow clipboard sync | `Y` | technician, customer | `enable-clipboard` |
 | `permission.file-transfer` | permissions | Allow file transfer | `Y` | technician, customer | `enable-file-transfer` |
-| `permission.audio` | permissions | Share audio | `Y` | technician, customer | `enable-audio` |
+| `permission.audio` | permissions | Share audio | `N` | technician, customer | `enable-audio` |
 | `permission.restart` | permissions | Allow remote restart | `Y` | technician, customer | `enable-remote-restart` |
 | `permission.tunnel` | permissions | Allow TCP tunnels | `N` | technician, customer | `enable-tunnel` |
 | `permission.block-input` | permissions | Allow blocking local input | `Y` | technician, customer | `enable-block-input` |

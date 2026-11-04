@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { ask, open } from "@tauri-apps/plugin-dialog";
-import { RefreshCw, Trash2 } from "lucide-react";
+import { ChevronRight, RefreshCw, Trash2 } from "lucide-react";
 import { useApp } from "../App";
 import { api, bytes, host, invoke, when, type RelayResult } from "../lib/ipc";
 import { PublishSheet } from "../components/publish";
+import { groupReleases, type ReleaseGroup } from "../lib/releases";
 import { Badge, Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Table, TextArea, TextField, Toggle } from "../components/ui";
 
 interface Release {
@@ -329,6 +330,17 @@ export function Releases() {
     }
   };
 
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
+  const removeGroup = async (g: ReleaseGroup) => {
+    const what = `${APP[g.dir.split("/")[0] as Kind] ?? g.dir} ${g.version} (${g.channel}, ${g.files.length} files)`;
+    if (!(await ask(`Delete ${what} from every relay? Devices that still get this version from latest.json can no longer download it.`, { title: "Delete release", kind: "warning" }))) return;
+    // Every file is tried; a failure does not leave the rest of the release behind.
+    const failed: string[] = [];
+    for (const f of g.files) await api.admin("DELETE", `/api/admin/release/${f.channel}/${f.path}`).catch((e: any) => failed.push(`${f.path}: ${e.message}`));
+    setListError(failed.length ? `Not deleted: ${failed.join("; ")}` : null);
+    load();
+  };
+
   const remove = async (r: Release) => {
     if (!(await ask(`Delete ${r.channel}/${r.path} from every relay?`, { title: "Delete file", kind: "warning" }))) return;
     try {
@@ -441,7 +453,10 @@ export function Releases() {
       )}
 
       <div className="mb-3 mt-10 flex items-center justify-between">
-        <h2 className="text-headline font-semibold">Files on the first relay</h2>
+        <div>
+          <h2 className="text-headline font-semibold">Releases on the first relay</h2>
+          <p className="mt-1 text-caption text-muted">One line per release; open it for its files (installer, signature, disk image, updater archive).</p>
+        </div>
         <IconButton label="Refresh" onClick={load}>
           <RefreshCw size={16} />
         </IconButton>
@@ -449,22 +464,54 @@ export function Releases() {
       <div className="mb-3">
         <ErrorText error={listError} />
       </div>
-      <Table head={["Channel", "Path", "Size", "Modified", ""]} empty={list && !list.length ? "No releases yet." : false}>
-        {(list ?? [])
-          .sort((a, b) => (a.channel + a.path).localeCompare(b.channel + b.path))
-          .map((r) => (
-            <tr key={r.channel + r.path}>
-              <td>{r.channel}</td>
-              <td className="select-text font-mono text-footnote">{r.path}</td>
-              <td>{bytes(r.size)}</td>
-              <td>{when(r.modified)}</td>
-              <td className="w-12">
-                <IconButton label={`Delete ${r.path}`} onClick={() => remove(r)}>
-                  <Trash2 size={15} />
-                </IconButton>
-              </td>
-            </tr>
-          ))}
+      <Table head={["", "Channel", "App", "Platform", "Version", "Files", "Size", "Modified", ""]} empty={list && !list.length ? "No releases yet." : false}>
+        {groupReleases(list ?? []).map((g) => {
+          const [kind, platform] = g.dir.split("/") as [Kind, Platform];
+          const isOpen = openGroups.has(g.key);
+          const toggle = () => setOpenGroups((o) => (o.has(g.key) ? (o.delete(g.key), new Set(o)) : new Set(o).add(g.key)));
+          return (
+            <Fragment key={g.key}>
+              <tr className="cursor-pointer" onClick={toggle}>
+                <td className="w-8">
+                  <button aria-label={isOpen ? "Hide files" : "Show files"} aria-expanded={isOpen} className="grid h-7 w-7 place-items-center rounded-md text-muted hover:bg-tile-2" onClick={(e) => (e.stopPropagation(), toggle())}>
+                    <ChevronRight size={15} className={`transition-transform ${isOpen ? "rotate-90" : ""}`} />
+                  </button>
+                </td>
+                <td>{g.channel}</td>
+                <td>{APP[kind] ?? kind}</td>
+                <td>{OS[platform] ?? platform}</td>
+                <td className="font-semibold">{g.version ?? <span className="font-normal text-muted">latest.json (what devices get)</span>}</td>
+                <td>{g.files.length}</td>
+                <td>{bytes(g.size)}</td>
+                <td>{when(g.modified)}</td>
+                <td className="w-12">
+                  {g.version && (
+                    <IconButton label={`Delete release ${g.version}`} onClick={(e) => (e.stopPropagation(), removeGroup(g))}>
+                      <Trash2 size={15} />
+                    </IconButton>
+                  )}
+                </td>
+              </tr>
+              {isOpen &&
+                g.files.map((r) => (
+                  <tr key={r.path} className="bg-tile-2/50">
+                    <td />
+                    <td colSpan={4} className="select-text pl-6 font-mono text-footnote">
+                      {r.path.split("/").pop()}
+                    </td>
+                    <td />
+                    <td>{bytes(r.size)}</td>
+                    <td>{when(r.modified)}</td>
+                    <td className="w-12">
+                      <IconButton label={`Delete ${r.path}`} onClick={() => remove(r)}>
+                        <Trash2 size={15} />
+                      </IconButton>
+                    </td>
+                  </tr>
+                ))}
+            </Fragment>
+          );
+        })}
       </Table>
     </>
   );

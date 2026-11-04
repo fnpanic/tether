@@ -442,6 +442,7 @@ docs/                    specs and runbooks (this site: docs/site/)</code></pre>
   </div>
   <figcaption>The “TCP punch attempt” in logs is only the label of the <code>PunchHoleRequest</code>; hbbs answers with a relay because the request carries <code>force_relay</code>. A host whose relay leg fails retries its dial 4× at 0.3 s; the viewer gives up on a pairing after 5 s (<code>RELAY_PAIR_TIMEOUT</code>) and asks again.</figcaption>
 </figure>
+<p><strong>File transfer from a session.</strong> Each login of the technician app carries a random 128-bit <code>companion_secret</code> (inside the encrypted connection only). The file-transfer window opened from a session reuses that session's session key (peer ID, name, 64-bit session ID) and secret. The host admits such a connection without a new accept or password only while an authorized remote connection with the same key and secret is open and its <em>Transfer files</em> permission is on (constant-time compare). The session key alone is not secret (audit posts carry it); without the secret the customer is asked as for any connection.</p>
 
 <h3 id="session-reconnect">Reconnect</h3>
 <div class="tw"><table>

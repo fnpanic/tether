@@ -54,6 +54,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
   const [error, setError] = useState<string | null>(null);
   const [password, setPassword] = useState<null | { wrong: boolean }>(null);
   const [pw, setPw] = useState("");
+  const [waiting, setWaiting] = useState(false);
   const [remoteSep, setRemoteSep] = useState("/");
   const localSep = navigator.userAgent.includes("Windows") ? "\\" : "/";
   const [local, setLocal] = useState<{ path: string; entries: Entry[] }>({ path: "", entries: [] });
@@ -85,7 +86,9 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
       const p = e.payload;
       switch (e.name) {
         case "peer_info": {
-          // The host lists its home folder by itself right after login (`folder_files`).
+          // The host lists its home folder by itself right after login (`folder_files`). A
+          // password prompt the core showed while the customer could still click Accept is over.
+          setPassword(null);
           setConnected(true);
           setHostname(p.hostname);
           const win = (p.platform ?? "").toLowerCase().includes("win");
@@ -112,6 +115,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
         case "msgbox":
           if (p.type === "input-password") setPassword({ wrong: false });
           else if (p.type === "re-input-password") setPassword({ wrong: true });
+          else if (p.type.startsWith("wait")) setWaiting(true);
           else if (p.type === "error") setError(p.text);
           break;
       }
@@ -154,7 +158,8 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           }}
         >
           <div className="text-callout font-semibold">Password required</div>
-          <div className={`mt-1 text-caption ${password.wrong ? "text-danger" : "text-muted"}`}>{password.wrong ? "Wrong password, try again" : "Enter the password shown on the remote device"}</div>
+          <div className={`mt-1 text-caption ${password.wrong ? "text-danger" : "text-muted"}`}>{password.wrong ? "Wrong password, try again" : "Enter the one-time password shown on the remote device"}</div>
+          <div className="mt-1 text-footnote text-muted">Or ask the person there to click Accept: this window then continues by itself.</div>
           <input type="password" autoFocus value={pw} onChange={(e) => setPw(e.target.value)} className="mt-3 h-10 w-full rounded-xl border border-hairline bg-parchment px-3.5 text-caption outline-none focus-visible:border-focus" />
           <Button type="submit" variant="primary" className="mt-3 w-full" disabled={!pw}>
             Connect
@@ -200,6 +205,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           path={remote.path}
           entries={remote.entries}
           loading={!connected}
+          loadingText={waiting ? "Waiting for the person at the remote computer to click Accept…" : "Connecting…"}
           selected={sel?.side === "remote" ? sel.name : null}
           onSelect={(n) => setSel({ side: "remote", name: n })}
           onOpen={(e) => loadRemote(join(remote.path, e.name, remoteSep))}
@@ -252,6 +258,7 @@ interface PaneProps {
   path: string;
   entries: Entry[];
   loading?: boolean;
+  loadingText?: string;
   selected: string | null;
   onSelect: (n: string) => void;
   onOpen: (e: Entry) => void;
@@ -316,7 +323,7 @@ function Pane(p: PaneProps) {
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
         {p.loading ? (
-          <div className="grid h-full place-items-center text-caption text-muted">Connecting…</div>
+          <div className="grid h-full place-items-center px-4 text-center text-caption text-muted">{p.loadingText ?? "Connecting…"}</div>
         ) : p.entries.length === 0 ? (
           <div className="grid h-full place-items-center text-caption text-muted">Empty folder</div>
         ) : (

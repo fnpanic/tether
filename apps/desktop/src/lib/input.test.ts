@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { lockModes, mouseMask, MOUSE, wheelSteps } from "./input";
 import { formatId } from "./ipc";
-import { parsePacket, renderSize } from "./video";
+import { parsePacket, renderSize, widenTo } from "./video";
 
 describe("input encoding", () => {
   it("encodes buttons as type | bits << 3", () => {
@@ -56,5 +56,15 @@ describe("formatting and packets", () => {
   it("draws full frames when the decoder reports a bogus half-size visible rect", () => {
     expect(renderSize({ codedWidth: 2560, codedHeight: 1440, visibleRect: { width: 1280, height: 720 } })).toEqual({ w: 2560, h: 1440 });
     expect(renderSize({ codedWidth: 1920, codedHeight: 1088, visibleRect: { width: 1920, height: 1080 } })).toEqual({ w: 1920, h: 1080 });
+  });
+
+  it("draws the whole coded picture when the visible rect is wrongly half of it (Retina Mac)", () => {
+    const half = { codedWidth: 3024, codedHeight: 1964, visibleRect: { x: 0, y: 0, width: 1512, height: 982 } };
+    const { w, h } = renderSize(half);
+    expect(widenTo(half, w, h)).toEqual({ visibleRect: { x: 0, y: 0, width: 3024, height: 1964 }, displayWidth: 3024, displayHeight: 1964 });
+    // Real cropping (alignment padding) is left alone.
+    const pad = { codedWidth: 1920, codedHeight: 1088, visibleRect: { x: 0, y: 0, width: 1920, height: 1080 } };
+    const r = renderSize(pad);
+    expect(widenTo(pad, r.w, r.h)).toBeNull();
   });
 });
