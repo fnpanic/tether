@@ -12,5 +12,23 @@ fn main() {
             }
         }
     }
+    link_clang_rt();
     tauri_build::build()
+}
+
+/// ffmpeg's VideoToolbox code (via hwcodec) uses `__builtin_available`, i.e.
+/// `___isPlatformVersionAtLeast` from clang's runtime. rustc links with `-nodefaultlibs`, so that
+/// library is not linked by itself on macOS: add Apple clang's `libclang_rt.osx.a` (universal).
+fn link_clang_rt() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    let out = std::process::Command::new("xcrun").args(["clang", "-print-resource-dir"]).output();
+    let dir = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+        _ => panic!("xcrun clang -print-resource-dir failed (Xcode Command Line Tools installed?)"),
+    };
+    let lib = std::path::Path::new(&dir).join("lib/darwin/libclang_rt.osx.a");
+    assert!(lib.exists(), "{} not found", lib.display());
+    println!("cargo:rustc-link-arg={}", lib.display());
 }
