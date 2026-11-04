@@ -1,7 +1,8 @@
 name: desktop
 on:
-  push: { branches: [main] }
-  pull_request:
+  # Docs-only changes don't build (macOS minutes count 10x on the free plan).
+  push: { branches: [main], paths-ignore: ["docs/**", "**.md"] }
+  pull_request: { paths-ignore: ["docs/**", "**.md"] }
   workflow_dispatch:
 
 env:
