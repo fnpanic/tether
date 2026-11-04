@@ -26,13 +26,13 @@ Remote-desktop vendors, including AnyDesk for its DeskRT codec, publicly describ
 | Hardware encode | Prefer H.264 → HEVC → AV1 hardware encoders (NVENC/AMF/QSV/VideoToolbox), VP9 software fallback | `scrap` + `hwcodec` |
 | No B-frames, no lookahead, 1-frame VBV | Low-latency encoder presets (hwcodec defaults) | host encoder config |
 | Zero-copy-ish decode on the viewer | Encoded frames go untouched to the webview, decoded by **WebCodecs** (`optimizeForLatency`) in hardware, drawn on a desynchronised canvas | `tauri_ui::video_passthrough`, `src/lib/video.ts` |
-| Never show stale frames | Viewer drops the decode queue when >3 frames back up and requests a key frame | `VideoPipeline.decode` |
+| Never show stale frames | Viewer drops to the newest frame when the decode queue backs up and re-requests a key frame until one arrives (`KeyRecovery`, limit 24 queued frames) | `lib/video.ts` |
 | Local cursor | Remote cursor shape becomes the local CSS cursor, so pointer motion has zero network latency | `Session.tsx` |
 | Input batching | Pointer moves coalesced to one per animation frame; clicks/keys sent immediately | `Session.tsx` |
 | Idle = no traffic | Unchanged frames are not encoded (RustDesk frame comparison) | `scrap` capturer |
 | Adaptive rate | RustDesk `video_qos` lowers FPS first, then bitrate, based on RTT and decode feedback | `server/video_qos.rs` |
 | Sharp text mode | "Sharp text" quality = highest bitrate ratio; 4:4:4 chroma where both sides support it | `session_quality` |
-| P2P first | UDP hole punching; relay (`hbbr`) only when direct fails | rendezvous |
+| Relay always | Sessions go through the relay (`hbbr`) over WebSocket/443 since 0.2; no UDP hole punching | rendezvous |
 
 ## Targets (pass criteria)
 

@@ -65,8 +65,8 @@ Tether's own viewer. A reconnect is a new connection and asks again.
 
 A session that was working and fails with a transport error (core `msgbox` with `retry = true`,
 e.g. "Reset by the peer", "Timeout", relay drop) reconnects on its own: the last frame stays visible,
-dimmed, with "Reconnecting… (attempt n)". Attempts wait 0.5, 1, 2, 4, 8 s, then every 10 s; from the
-third attempt the connection is forced through the relay. After `connect.reconnect-minutes` the error
+dimmed, with "Reconnecting… (attempt n)". Attempts start at once, then wait 0.25, 0.5, 1, 2, 4, 8 s, then every 10 s
+(`lib/reconnect.ts`); every attempt goes through the relay. After `connect.reconnect-minutes` the error
 screen with a manual Retry is shown. Wrong password, rejected/closed by the other side, policy and
 version errors are never retried; "offline" and "could not be end-to-end encrypted" (a restarted
 peer that has not re-registered its key yet) never start a reconnect but do not stop one already

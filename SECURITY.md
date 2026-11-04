@@ -23,7 +23,7 @@ The relay operator is **not trusted with content**. The relay only forwards ciph
 | Transport to the relay | TLS 1.3 WebSocket on 443 only (Let's Encrypt certificate, verified by rustls, falling back to the OS trust store for corporate TLS inspection; never an unverified fallback). No UDP or direct P2P, so no listening ports. | `apps/desktop/src-tauri/src/netpolicy.rs`, `docs/corporate-networks.md` |
 | Client ↔ rendezvous server | Server identity pinned by a compiled-in ed25519 public key (`TETHER_PUB_KEY`). Release builds refuse to compile without it. | `apps/desktop/src-tauri/build.rs`, `hbb_common::config::RS_PUB_KEY` |
 | Server key enforcement | `hbbs -k _` / `hbbr -k _` reject clients that do not present the matching key | `server/systemd/*.service`, `server/docker-compose.yml` |
-| Peer ↔ peer (end-to-end) | Each device has an ed25519 identity, signed via the rendezvous server. A session key comes from an X25519 box key exchange. Traffic is encrypted with XSalsa20-Poly1305 (libsodium secretbox) on TCP/relay, and DTLS on WebRTC, with the DTLS fingerprint bound to the signed identity. | RustDesk core `client.rs::secure_connection`, `server.rs::identity_handshake` |
+| Peer ↔ peer (end-to-end) | Each device has an ed25519 identity, signed via the rendezvous server. A session key comes from an X25519 box key exchange. Traffic is encrypted with XSalsa20-Poly1305 (libsodium secretbox) on TCP/relay (WebRTC is forced off by the policy floor). | RustDesk core `client.rs::secure_connection`, `server.rs::identity_handshake` |
 | **No plaintext fallback (viewer)** | Upstream asks the user whether to "continue insecurely". Tether refuses the connection outright. | `vendor/rustdesk/src/client.rs::confirm_insecure_connection` (`#[cfg(feature = "tauri")]`) |
 | **No plaintext fallback (host)** | The host aborts the handshake when the peer offers no key, sends no key exchange, uses an unsecured transport (direct IP), or this device's key pair is missing | `vendor/rustdesk/src/server.rs::identity_handshake` |
 | Secrets at rest | Permanent password, 2FA secret and remembered peer passwords are stored encrypted with a machine-bound key (core `encrypt_vec_or_original`) in the per-user config directory. | RustDesk core config |
@@ -87,7 +87,8 @@ Privacy defaults that the user can change:
 
 - `hbbs` and `hbbr` run as an unprivileged `tether` user with systemd sandboxing
   (`ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`, a single writable path).
-- Only TCP 21115–21117 and UDP 21116 need to be open.
+- Only TCP 443 (and 80, forwarded to 443) needs to be open: clients use WebSocket over TLS through
+  Caddy (`docs/corporate-networks.md`). hbbs/hbbr/tether-api listen on localhost behind it.
 - The server stores only its key pair and an ID → public-key/IP registry. It never sees session
   content.
 - Keep `/var/lib/tether/id_ed25519` secret and back it up. Losing it means rebuilding every client.
