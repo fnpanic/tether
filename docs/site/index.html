@@ -476,6 +476,7 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <h2 id="adm-releases">Releases</h2>
 <ol class="steps">
   <li>Build with the four release variables <code>TETHER_SERVER</code>, <code>TETHER_PUB_KEY</code>, <code>TETHER_ADMIN_PUB_KEY</code>, <code>TETHER_UPDATER_PUB_KEY</code> (macOS: <code>bash scripts/build-macos.sh</code> on a Mac).</li>
+  <li><strong>Quickest:</strong> Unlock Tether Manage → <strong>Releases</strong> → <strong>Publish the latest builds</strong> → <strong>Choose…</strong> the <code>dist</code> folder once → <strong>Publish N new builds…</strong>. Every build newer than what the relays publish is signed and published, then the download page is rebuilt. The steps below publish one file, with Mandatory, Minimum version or Forced if needed.</li>
   <li>Unlock Tether Manage → <strong>Releases</strong> → <strong>Choose…</strong> the file. App, platform and version are read from the file name.</li>
   <li>Pick the channel (<code>test</code> first, later <code>stable</code>), write notes and set <strong>Mandatory</strong>, <strong>Minimum version</strong> or <strong>Forced</strong> only if needed.</li>
   <li><strong>Sign and publish.</strong> The file goes up first, then its <code>.sig</code>, then <code>latest.json</code>, so a client never sees a manifest that points to a missing file. Each relay's manifest points at that relay.</li>

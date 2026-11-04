@@ -56,10 +56,30 @@ pub fn version_of(path: &str) -> Option<(&'static str, &'static str, String)> {
     if it.next().is_some() {
         return None;
     }
-    NAMES.iter().filter(|n| (n.0, n.1) == (kind, platform)).find_map(|&(k, p, pre, suf)| {
+    build_of(file).filter(|b| (b.0, b.1) == (kind, platform))
+}
+
+/// Kind, platform and version of a release artifact from its file name (`TetherQS-0.5.1.exe`).
+pub fn build_of(file: &str) -> Option<(&'static str, &'static str, String)> {
+    NAMES.iter().find_map(|&(k, p, pre, suf)| {
         let v = file.strip_prefix(pre)?.strip_suffix(suf)?;
         valid_version(v).then(|| (k, p, v.to_owned()))
     })
+}
+
+/// Highest version per (kind, platform) among local build files: `(kind, platform) -> (version, path)`.
+pub fn latest_builds(paths: impl IntoIterator<Item = std::path::PathBuf>) -> BTreeMap<(&'static str, &'static str), (String, std::path::PathBuf)> {
+    let mut out: BTreeMap<_, (String, std::path::PathBuf)> = BTreeMap::new();
+    for path in paths {
+        let Some((k, p, v)) = path.file_name().and_then(|n| n.to_str()).and_then(build_of) else { continue };
+        match out.get(&(k, p)) {
+            Some((cur, _)) if tether_trust::version::compare(&v, cur) != Some(std::cmp::Ordering::Greater) => {}
+            _ => {
+                out.insert((k, p), (v, path));
+            }
+        }
+    }
+    out
 }
 
 /// Highest artifact version per (channel, kind, platform) over the file listings of every relay
@@ -395,5 +415,18 @@ mod tests {
         assert_eq!(l[&("beta".to_owned(), "technician", WINDOWS)], "0.4.0");
         assert_eq!(l[&("stable".to_owned(), "customer", WINDOWS)], "0.3.2");
         assert_eq!(l.len(), 3);
+    }
+
+    #[test]
+    fn latest_local_builds() {
+        let b = latest_builds(
+            ["w/Tether_0.5.0_x64-setup.exe", "w/Tether_0.5.1_x64-setup.exe", "w/Tether_0.5.1_x64-setup.exe.sig", "q/TetherQS-0.5.1.exe", "m/TetherQS-0.5.1-universal.zip", "m/Tether_0.5.1_universal.dmg", "m/Tether_0.5.1_universal.app.tar.gz", "x/TetherQS.exe"]
+                .map(std::path::PathBuf::from),
+        );
+        assert_eq!(b[&("technician", WINDOWS)], ("0.5.1".into(), "w/Tether_0.5.1_x64-setup.exe".into()));
+        assert_eq!(b[&("customer", WINDOWS)].0, "0.5.1");
+        assert_eq!(b[&("technician", MAC)].1, std::path::PathBuf::from("m/Tether_0.5.1_universal.app.tar.gz"));
+        assert_eq!(b[&("customer", MAC)].0, "0.5.1");
+        assert_eq!(b.len(), 4);
     }
 }

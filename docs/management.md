@@ -244,6 +244,15 @@ The server keeps at most 10 000 devices and drops entries older than 180 days.
 
 ## Releases
 
+**Publish the latest builds** is the usual way to release: **Choose…** the build folder once
+(e.g. `dist`, searched two levels deep, so `dist/windows`, `dist/quick` and `dist/macos` are
+found; the folder is remembered). For each app and platform it shows the newest build in the
+folder and the highest version the relays publish on the channel. **Publish N new builds…**
+signs every newer build, uploads it to every relay (not mandatory, not forced, no minimum
+version) and, on `stable`, then rebuilds the download page with its saved title and text. A
+macOS technician build without its `.dmg` next to it is skipped and marked. Use the form below
+for mandatory, forced or minimum-version releases.
+
 **What devices get** lists every channel × app × platform with:
 
 - **Latest**: the highest version uploaded to any relay (from `GET /api/admin/releases`);

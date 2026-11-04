@@ -121,6 +121,174 @@ function Overview() {
   );
 }
 
+interface Build {
+  kind: Kind;
+  platform: Platform;
+  version: string;
+  file: string;
+  /** Highest version the relays publish on the channel; null = nothing yet. */
+  published: string | null;
+  newer: boolean;
+  problem: string | null;
+}
+
+/**
+ * One click for the usual release: the newest build of each app in the build folder (dist), signed
+ * and published where it is newer than what the relays publish, then the download page rebuilt.
+ */
+function LatestBuilds({ onDone }: { onDone: () => void }) {
+  const { state, reload, toast } = useApp();
+  const s = state.settings;
+  const [folder, setFolder] = useState<string>(s.release_folder ?? "");
+  const [channel, setChannel] = useState("stable");
+  const [builds, setBuilds] = useState<Build[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notes, setNotes] = useState("");
+  const [page, setPage] = useState(true);
+  const [reviewing, setReviewing] = useState(false);
+  const stable = channel.trim() === "stable";
+
+  const scan = (f = folder) => {
+    if (!f) return;
+    setError(null);
+    setBuilds(null);
+    invoke<Build[]>("release_scan", { folder: f, channel: channel.trim() }).then(setBuilds, (e) => setError(e.message));
+  };
+  useEffect(() => scan(), [folder]);
+
+  const choose = async () => {
+    const f = await open({ directory: true, defaultPath: folder || undefined });
+    if (typeof f !== "string") return;
+    setFolder(f);
+    await api.saveSettings({ ...s, release_folder: f });
+    await reload();
+  };
+
+  const todo = (builds ?? []).filter((b) => b.newer && !b.problem);
+
+  /** Every release, then the page; one result row per relay, failed if anything failed there. */
+  const publishAll = async (): Promise<RelayResult[]> => {
+    const per = new Map<string, string[]>(state.servers.map((sv) => [sv, []]));
+    const add = (server: string, err?: string) => {
+      if (!per.has(server)) per.set(server, []);
+      if (err) per.get(server)!.push(err);
+    };
+    for (const b of todo) {
+      const label = `${APP[b.kind]} ${OS[b.platform]} ${b.version}`;
+      try {
+        const r = await invoke<RelayResult[]>("release_publish", {
+          args: { file: b.file, kind: b.kind, platform: b.platform, channel: channel.trim(), version: b.version, notes, mandatory: false, minimum_version: "", forced: false },
+        });
+        r.forEach((x) => add(x.server, x.ok ? undefined : `${label}: ${x.error}`));
+      } catch (e: any) {
+        state.servers.forEach((sv) => add(sv, `${label}: ${e.message}`));
+      }
+    }
+    if (page && stable) {
+      try {
+        const html = await invoke<string>("page_render", {
+          title: s.page_title ?? "Remote support",
+          intro: s.page_intro ?? "Download Tether to get help from our support team.",
+          technician: s.page_technician ?? true,
+          customer: s.page_customer ?? true,
+        });
+        const r = await invoke<RelayResult[]>("page_publish", { html });
+        r.forEach((x) => add(x.server, x.ok ? undefined : `Download page: ${x.error}`));
+      } catch (e: any) {
+        state.servers.forEach((sv) => add(sv, `Download page: ${e.message}`));
+      }
+    }
+    const results = [...per].map(([server, errs]): RelayResult => ({ server, ok: !errs.length, error: errs.join("; ") || undefined, detail: null }));
+    if (results.every((r) => r.ok)) toast(`Published ${[...new Set(todo.map((b) => b.version))].join(", ")}`);
+    return results;
+  };
+
+  return (
+    <section className="mb-10">
+      <h2 className="mb-3 text-headline font-semibold">Publish the latest builds</h2>
+      <Card>
+        <div className="grid grid-cols-[minmax(0,1fr)_160px] gap-x-6 gap-y-4">
+          <Label text="Build folder" hint="Searched two levels deep, e.g. dist with windows, quick and macos inside. Remembered for next time.">
+            <div className="flex gap-2">
+              <TextField readOnly value={folder} placeholder="No folder chosen" />
+              <Button onClick={choose}>Choose…</Button>
+              <IconButton label="Scan again" onClick={() => scan()}>
+                <RefreshCw size={16} />
+              </IconButton>
+            </div>
+          </Label>
+          <Label text="Channel">
+            <TextField value={channel} onChange={(e) => setChannel(e.target.value)} onBlur={() => scan()} />
+          </Label>
+        </div>
+        {folder && (
+          <div className="mt-4">
+            <ErrorText error={error} />
+            {!error && (
+              <Table head={["App", "Platform", "In the folder", "Relays publish", ""]} empty={!builds ? "Scanning…" : !builds.length ? "No Tether builds in this folder." : false}>
+                {builds?.map((b) => (
+                  <tr key={b.kind + b.platform}>
+                    <td>{APP[b.kind]}</td>
+                    <td>{OS[b.platform]}</td>
+                    <td className="font-semibold" title={b.file}>
+                      {b.version}
+                    </td>
+                    <td>{b.published ?? "—"}</td>
+                    <td className="text-right">
+                      {b.problem ? <Badge tone="danger">{b.problem}</Badge> : b.newer ? <Badge tone="warn">Will be published</Badge> : <Badge tone="ok">Up to date</Badge>}
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            )}
+          </div>
+        )}
+        <div className="mt-4 flex items-center justify-end gap-6">
+          {stable && (
+            <div className="flex items-center gap-3 text-caption">
+              Then update the download page
+              <Toggle label="Then update the download page" checked={page} onChange={setPage} />
+            </div>
+          )}
+          <Button variant="primary" size="lg" disabled={!todo.length} onClick={() => setReviewing(true)}>
+            {todo.length ? `Publish ${todo.length} new build${todo.length > 1 ? "s" : ""}…` : "Nothing new to publish"}
+          </Button>
+        </div>
+      </Card>
+      {reviewing && (
+        <PublishSheet
+          title="Publish the latest builds"
+          action="Sign and publish"
+          onClose={() => {
+            setReviewing(false);
+            scan();
+            onDone();
+          }}
+          run={publishAll}
+        >
+          <ul className="flex flex-col gap-1 text-callout">
+            {todo.map((b) => (
+              <li key={b.kind + b.platform}>
+                {APP[b.kind]} for {OS[b.platform]} <span className="font-semibold">{b.version}</span>
+                <span className="text-muted"> (now {b.published ?? "none"})</span>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-3">
+            <Label text="Release notes (optional)">
+              <TextArea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+            </Label>
+          </div>
+          <p className="mt-3 text-caption text-muted">
+            Each build is signed with the update key and uploaded to every relay on channel {channel.trim()}: not mandatory, not forced, no minimum version (use Sign and publish below for those).
+            {page && stable && " Then the download page is rebuilt with its saved title and text."}
+          </p>
+        </PublishSheet>
+      )}
+    </section>
+  );
+}
+
 export function Releases() {
   const { toast } = useApp();
   const [file, setFile] = useState("");
@@ -176,6 +344,7 @@ export function Releases() {
   return (
     <>
       <PageHeader title="Releases" sub="What each relay publishes, and signing new installers with the update key." />
+      <LatestBuilds onDone={() => setRound((r) => r + 1)} />
       <Overview key={round} />
 
       <h2 className="mb-3 text-headline font-semibold">Sign and publish a new release</h2>

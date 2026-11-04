@@ -620,6 +620,53 @@ async fn release_publish(app: State<'_, App>, args: ReleaseArgs) -> R<Vec<RelayR
     Ok(out)
 }
 
+/// Files in `dir` and its subfolders, two levels deep (`dist/windows/...`, `dist/macos/...`).
+fn files_below(dir: &std::path::Path, depth: u8, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if depth > 0 {
+                files_below(&p, depth - 1, out);
+            }
+        } else {
+            out.push(p);
+        }
+    }
+}
+
+/// The newest build of each app and platform in a local folder (e.g. `dist`), with the highest
+/// version the relays publish on `channel` for it. `newer`: worth publishing.
+#[tauri::command]
+async fn release_scan(app: State<'_, App>, folder: String, channel: String) -> R<Vec<Value>> {
+    if !release::valid_channel(&channel) {
+        return Err("Channel: use 1-32 lowercase letters, digits or dashes.".into());
+    }
+    let root = std::path::Path::new(&folder);
+    if !root.is_dir() {
+        return Err(format!("{folder} is not a folder."));
+    }
+    let mut files = Vec::new();
+    files_below(root, 2, &mut files);
+    let mut out = Vec::new();
+    for ((kind, platform), (version, path)) in release::latest_builds(files) {
+        let (dir, _) = release::target(kind, platform, &version)?;
+        let mut published: Option<String> = None;
+        for sv in app.servers() {
+            let Ok(Some(b)) = api::public(&sv, &format!("/download/{channel}/{dir}/latest.json")).await else { continue };
+            let Ok(m) = serde_json::from_slice::<release::Manifest>(&b) else { continue };
+            if published.as_ref().map_or(true, |p| tether_trust::version::compare(&m.version, p) == Some(std::cmp::Ordering::Greater)) {
+                published = Some(m.version);
+            }
+        }
+        let newer = published.as_ref().map_or(true, |p| tether_trust::version::compare(&version, p) == Some(std::cmp::Ordering::Greater));
+        let dmg = release::dmg_name(&version);
+        let problem = ((kind, platform) == ("technician", release::MAC) && !path.with_file_name(&dmg).exists()).then(|| format!("{dmg} is missing next to it"));
+        out.push(json!({ "kind": kind, "platform": platform, "version": version, "file": path.to_string_lossy(), "published": published, "newer": newer, "problem": problem }));
+    }
+    Ok(out)
+}
+
 /// Per channel × app × platform: the highest uploaded version and what each relay's public
 /// `latest.json` publishes now.
 #[tauri::command]
@@ -999,6 +1046,7 @@ fn main() {
             release_publish,
             releases_overview,
             release_sync,
+            release_scan,
             page_render,
             page_publish,
             custom_save,
@@ -1040,6 +1088,22 @@ mod server_list_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_folder_scan_two_levels_deep() {
+        let root = std::env::temp_dir().join(format!("tether-scan-{}", std::process::id()));
+        for (dir, f) in [("windows", "Tether_0.5.1_x64-setup.exe"), ("quick", "TetherQS-0.5.1.exe"), ("a/b", "TetherQS-0.4.0.exe"), ("a/b/c", "TetherQS-9.9.9.exe")] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            fs::write(root.join(dir).join(f), b"x").unwrap();
+        }
+        let mut files = Vec::new();
+        files_below(&root, 2, &mut files);
+        let b = release::latest_builds(files);
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(b[&("technician", release::WINDOWS)].0, "0.5.1");
+        // a/b/c is three levels deep: not searched.
+        assert_eq!(b[&("customer", release::WINDOWS)], ("0.5.1".to_owned(), root.join("quick").join("TetherQS-0.5.1.exe")));
+    }
 
     #[test]
     fn custom_downloads_sum_over_relays_same_token_only() {

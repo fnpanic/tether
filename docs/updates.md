@@ -143,7 +143,11 @@ base64 of the minisign signature file, with the trusted comment
    `dist/macos/` with `Tether_<version>_universal.app.tar.gz` + `.dmg` and
    `TetherQS-<version>-universal.zip` ([macos.md](macos.md)).
 3. Test the build on one machine (install, connect, `tether --version`).
-4. Tether Manage → unlock → **Releases**:
+4. Tether Manage → unlock → **Releases**. Quickest: **Publish the latest builds** → choose the
+   `dist` folder once → **Publish N new builds…** signs and publishes every build newer than
+   what the relays publish, then refreshes the download page (see
+   [management.md](management.md#releases)). One file at a time, or with Mandatory / Minimum
+   version / Forced:
    1. **Choose…** the file. App, platform and version are filled in from the file name
       (`TetherQS.exe` without a version: type it). For the macOS technician app choose the
       `.app.tar.gz`; the `.dmg` next to it is uploaded too.

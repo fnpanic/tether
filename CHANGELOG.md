@@ -6,6 +6,11 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [0.5.1] — 2026-11-04
 
+### Added
+- **Tether Manage 0.5.1: Publish the latest builds.** Releases scans a build folder (e.g. `dist`,
+  remembered), shows the newest build of each app and platform next to what the relays publish,
+  and one click signs and publishes every newer one, then rebuilds the download page.
+
 ### Fixed
 - **macOS: no window.** Tether and TetherQS started with only a Dock/menu-bar icon: the window is
   created hidden and shown by the page after its first paint, but macOS runs no animation frames
