@@ -1,6 +1,6 @@
 // End-to-end: technician app on this PC -> TetherQS in the Hyper-V VM, the customer accepting by
-// click (no password typed). Checks what the customer and the technician see, and file transfer
-// opened from the session (one card, no second accept, upload + download).
+// click (no password typed). Checks what the customer and the technician see, chat both ways, and
+// file transfer opened from the session (one card, no second accept, upload + download).
 //
 //   node e2e/vm-ft-e2e.mjs            technician on this PC (opens windows here)
 //   TECH_IN_VM=1 node e2e/vm-ft-e2e.mjs   technician inside the VM too (nothing opens on this PC;
@@ -102,7 +102,68 @@ async function main() {
     return { toast };
   });
 
-  // 2. Remote actions: TetherQS runs without the service.
+  // 2. Chat both ways. The toolbar auto-hides: the pointer at the top edge reveals it.
+  const techChat = async () => {
+    await v.mouse.move(400, 10);
+    await v.getByRole("button", { name: /^Chat/ }).click();
+  };
+  const techSay = async (t) => {
+    await v.getByPlaceholder("Message").fill(t);
+    await v.getByPlaceholder("Message").press("Enter");
+  };
+  const qsMsg = (t) => qs.locator('[data-testid="qs-chat-msg"]', { hasText: t });
+  await check("chat: technician's message shows on TetherQS (chat opens, toast, attention requested)", async () => {
+    const hello = `Hello from your technician ${Date.now()}`;
+    await techChat();
+    await techSay(hello);
+    await qsMsg(hello).waitFor({ timeout: 10000 });
+    const toast = await until("toast", async () => ((await text(qs)).includes("New message from your technician") ? true : null), 3000, 100);
+    const chatTab = await qs.locator('[data-testid="qs-tab-chat"]').getAttribute("aria-pressed");
+    const focused = await qs.evaluate(() => document.hasFocus());
+    let log = "";
+    if (IN_VM) {
+      log = execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\vms\\broker\\run-elevated.ps1", "vm-qslog4.ps1", "-Pattern", "attention", "-Last", "3", "-Skip", "0"]).toString();
+      if (!/attention requested \(Ok/.test(log)) throw new Error(`QS log: ${log.slice(-400)}`);
+    }
+    // `focused` is informational: TetherQS already took the focus when the request arrived.
+    if (chatTab !== "true") throw new Error(JSON.stringify({ chatTab, focused }));
+    return { toast, chatTab, focused, attention: IN_VM ? log.match(/attention requested \([^)]*\)+/)?.[0] : "not checked (technician on this PC)" };
+  });
+  await check("chat: a later message while Permissions is shown raises an unread badge on TetherQS", async () => {
+    await qs.locator('[data-testid="qs-tab-perm"]').click();
+    const again = `Second message ${Date.now()}`;
+    await techSay(again);
+    const badge = await until("QS unread badge", async () => {
+      const b = qs.locator('[data-testid="qs-chat-unread"]');
+      return (await b.count()) ? b.innerText() : null;
+    }, 10000);
+    await qs.locator('[data-testid="qs-tab-chat"]').click();
+    await qsMsg(again).waitFor({ timeout: 3000 });
+    const gone = (await qs.locator('[data-testid="qs-chat-unread"]').count()) === 0;
+    if (badge.trim() !== "1" || !gone) throw new Error(JSON.stringify({ badge, gone }));
+    return { badge: badge.trim() };
+  });
+  await check("chat: customer's reply reaches the technician (unread badge while the panel is closed)", async () => {
+    await v.getByRole("button", { name: "Close chat" }).click();
+    const reply = `Reply from the customer ${Date.now()}`;
+    await qs.locator('[data-testid="qs-chat-input"]').fill(reply);
+    await qs.locator('[data-testid="qs-chat-input"]').press("Enter");
+    await qsMsg(reply).waitFor({ timeout: 3000 });
+    const badge = await until("technician unread badge", async () => {
+      const b = v.locator('[data-testid="chat-unread"]');
+      return (await b.count()) && (await b.isVisible()) ? b.innerText() : null;
+    }, 10000);
+    await techChat();
+    const shown = await until("reply in the technician's chat panel", async () => ((await text(v)).includes(reply) ? true : null), 5000);
+    const cleared = (await v.locator('[data-testid="chat-unread"]').count()) === 0;
+    await v.getByRole("button", { name: "Close chat" }).click();
+    if (badge.trim() !== "1" || !cleared) throw new Error(JSON.stringify({ badge, cleared }));
+    return { badge: badge.trim(), shown };
+  });
+  // Later checks look for the permission switches on the session card.
+  await qs.locator('[data-testid="qs-tab-perm"]').click().catch(() => {});
+
+  // 3. Remote actions: TetherQS runs without the service.
   await check("remote actions: Ctrl+Alt+Del disabled with the reason, lock asks and warns (not sent)", async () => {
     await v.getByRole("button", { name: "Remote actions" }).click();
     const cad = v.getByRole("menu").getByRole("button", { name: /^Send Ctrl\+Alt\+Del/ });
@@ -117,7 +178,7 @@ async function main() {
     return { hint: hint.replace(/\s+/g, " "), button: (await dlg.count()) === 0 };
   });
 
-  // 3. File transfer from the session: no second request, one card, upload and download.
+  // 4. File transfer from the session: no second request, one card, upload and download.
   await v.getByRole("button", { name: "Transfer files" }).click();
   const ft = await until("file transfer window", () => pages(vB).find((p) => p.url().includes("/session/") && p.url().includes("file-transfer")) ?? pages(vB).find((p) => p !== v && p.url().includes("/session/")), 20000);
   await check("file transfer opens without a second accept on TetherQS; one card there", async () => {

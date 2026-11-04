@@ -16,6 +16,17 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   one with a release wins, so a relay that is down no longer hides the update.
 - **"Updating…" showed no progress** while the 35 MB download ran (a minute or more at the relays'
   speed); the button now shows the percentage. The download is also capped while streaming.
+- **Chat: the customer never saw the technician's messages and could not answer.** The core
+  delivered them, but TetherQS had no chat at all (the messages were dropped in its window), and
+  the installed Tether's connection window only counted them in its Chat tab label. TetherQS now
+  has a **Chat** tab on the session card: the first message opens it, later ones show an unread
+  badge while Permissions is shown, a toast says a message arrived, and the taskbar button flashes
+  (no focus change). The customer can reply. The installed Tether's connection window shows
+  unread messages on its Chat tab and flashes its taskbar button instead of trying to take the
+  focus.
+- **Technician: replies opened the chat panel over the remote screen.** They now show as an unread
+  badge on the toolbar's Chat button, and the toolbar stays visible while there are unread
+  messages.
 
 ## [0.5.4] — 2026-11-04
 

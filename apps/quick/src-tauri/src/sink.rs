@@ -101,6 +101,13 @@ impl UiSink for TauriSink {
                 let _ = w.set_focus();
             }
         }
+        if name == "chat" {
+            // Flash the taskbar button until the customer looks; never take the focus mid-session.
+            if let Some(w) = self.app.get_webview_window("main") {
+                let r = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
+                hbb_common::log::info!("chat message for connection {id:?}: attention requested ({r:?})");
+            }
+        }
         if name == "remove_connection" && remaining == 0 {
             if let Some(w) = self.app.get_webview_window("main") {
                 let _ = w.center();

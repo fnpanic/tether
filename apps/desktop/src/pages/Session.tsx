@@ -105,7 +105,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const [toolbar, setToolbar] = useState(true);
   const barRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(false);
-  const [chat, setChat] = useState<{ open: boolean; msgs: { me: boolean; text: string }[] }>({ open: false, msgs: [] });
+  const [chat, setChat] = useState<{ open: boolean; unread: number; msgs: { me: boolean; text: string }[] }>({ open: false, unread: 0, msgs: [] });
   const [cursor, setCursor] = useState("default");
   const [imageQuality, setImageQuality] = useState("balanced");
   const [fullscreen, setFullscreen] = useState(false);
@@ -225,7 +225,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           setCursor(cursors.current.get(p.id) ?? "default");
           break;
         case "chat":
-          setChat((c) => ({ open: true, msgs: [...c.msgs, { me: false, text: p.text }] }));
+          setChat((c) => ({ ...c, unread: c.open ? 0 : c.unread + 1, msgs: [...c.msgs, { me: false, text: p.text }] }));
           break;
       }
     });
@@ -475,7 +475,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       {/* floating toolbar */}
       <div
         className={`pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center transition duration-200 ${
-          toolbar && connected && frameSize.w ? "translate-y-0 opacity-100" : "pointer-events-none invisible -translate-y-3 opacity-0"
+          (toolbar || chat.unread > 0) && connected && frameSize.w ? "translate-y-0 opacity-100" : "pointer-events-none invisible -translate-y-3 opacity-0"
         }`}
       >
         <div ref={barRef} className="drag pointer-events-auto mt-2 flex items-center gap-1 glass rounded-full border border-white/10 p-1 shadow-float" data-tauri-drag-region>
@@ -508,8 +508,13 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
             <Activity size={17} />
           </TB>
           <Sep />
-          <TB label="Chat" active={chat.open} onClick={() => setChat((c) => ({ ...c, open: !c.open }))}>
+          <TB label={chat.unread ? `Chat (${chat.unread} unread)` : "Chat"} active={chat.open} onClick={() => setChat((c) => ({ ...c, open: !c.open, unread: 0 }))}>
             <MessageSquare size={17} />
+            {chat.unread > 0 && (
+              <span data-testid="chat-unread" className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-danger px-1 text-[10px] font-semibold leading-none text-white">
+                {chat.unread}
+              </span>
+            )}
           </TB>
           <TB label="Transfer files" onClick={() => act(api.openSession(peer, "file-transfer", key))}>
             <FolderSync size={17} />
@@ -612,7 +617,7 @@ function TB({ label, active, children, onClick }: { label: string; active?: bool
       aria-label={label}
       title={label}
       onClick={onClick}
-      className={`no-drag grid h-9 min-w-9 place-items-center rounded-full px-2 transition ${active ? "bg-white/15 text-white" : "text-white/70 hover:bg-white/10 hover:text-white"}`}
+      className={`no-drag relative grid h-9 min-w-9 place-items-center rounded-full px-2 transition ${active ? "bg-white/15 text-white" : "text-white/70 hover:bg-white/10 hover:text-white"}`}
     >
       {children}
     </button>

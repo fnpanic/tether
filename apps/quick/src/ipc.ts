@@ -67,6 +67,7 @@ export const api = {
   refreshPassword: () => invoke("refresh_password"),
   authorize: (id: number) => invoke("cm_authorize", { id }),
   close: (id: number) => invoke("cm_close", { id }),
+  chat: (id: number, text: string) => invoke("cm_chat", { id, text }),
   permission: (id: number, name: string, enabled: boolean) => invoke("cm_permission", { id, name, enabled }),
   recordConsent: (connId: number, allow: boolean) => invoke("cm_record_consent", { connId, allow }),
   elevate: () => invoke("elevate"),

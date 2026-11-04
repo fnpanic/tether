@@ -1,9 +1,10 @@
 // TetherQS: one 420×560 window. Visual rules: /DESIGN.md.
 import { type ButtonHTMLAttributes, type ReactNode, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Check, Copy, Eye, EyeOff, FolderSync, HelpCircle, Keyboard, Minus, RefreshCw, ShieldAlert, ShieldCheck, X } from "lucide-react";
+import { ArrowLeft, Check, Copy, Eye, EyeOff, FolderSync, HelpCircle, Keyboard, Minus, RefreshCw, Send, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { api, type Client, type Diagnostics, formatId, type Probe, inTauri, onCm, type State } from "./ipc";
 
 type Consent = { conn_id: number; peer_name: string; text: string };
+type Msg = { me: boolean; text: string };
 
 async function win() {
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
@@ -16,6 +17,8 @@ export function App() {
   const [consent, setConsent] = useState<Consent | null>(null);
   const [rec, setRec] = useState<Set<number>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
+  const [chat, setChat] = useState<Record<number, Msg[]>>({});
+  const addMsg = (id: number, m: Msg) => setChat((c) => ({ ...c, [id]: [...(c[id] ?? []), m] }));
   const since = useRef(new Map<number, number>());
 
   const refresh = () => api.state().then(setS).catch(() => {});
@@ -30,6 +33,10 @@ export function App() {
     const t = setInterval(refresh, 1000);
     const un = onCm((name, p) => {
       if (name === "record_consent_request") setConsent(p);
+      else if (name === "chat") {
+        addMsg(p.id, { me: false, text: p.text });
+        say("New message from your technician");
+      }
       else if (name === "refused") say(p.reason === "update-required" ? "A connection was refused: update TetherQS first." : "Incoming sessions are turned off by your administrator.");
       refresh();
     });
@@ -69,7 +76,24 @@ export function App() {
             {pending ? (
               <Request c={pending} s={s} onError={say} />
             ) : active.length ? (
-              active.map((c) => <InSession key={c.id} c={c} files={companions(c)} s={s} since={since.current.get(c.id)!} rec={rec.has(c.id)} onError={say} />)
+              active.map((c) => (
+                <InSession
+                  key={c.id}
+                  c={c}
+                  files={companions(c)}
+                  s={s}
+                  since={since.current.get(c.id)!}
+                  rec={rec.has(c.id)}
+                  onError={say}
+                  msgs={chat[c.id] ?? []}
+                  onSend={(text) =>
+                    api.chat(c.id, text).then(
+                      () => addMsg(c.id, { me: true, text }),
+                      (e) => say(String(e)),
+                    )
+                  }
+                />
+              ))
             ) : (
               <Idle s={s} onCopied={say} />
             )}
@@ -310,8 +334,19 @@ function Indicator({ on, icon, label, tone = "accent" }: { on: boolean; icon?: R
   );
 }
 
-function InSession({ c, files, s, since, rec, onError }: { c: Client; files: Client[]; s: State; since: number; rec: boolean; onError: (m: string) => void }) {
+function InSession({ c, files, s, since, rec, onError, msgs, onSend }: { c: Client; files: Client[]; s: State; since: number; rec: boolean; onError: (m: string) => void; msgs: Msg[]; onSend: (t: string) => void }) {
   const elapsed = useElapsed(since);
+  const [view, setView] = useState<"perm" | "chat">("perm");
+  const [seen, setSeen] = useState(0);
+  const incoming = msgs.filter((m) => !m.me).length;
+  // The first message opens the chat; later ones only raise the badge while Permissions is shown.
+  useEffect(() => {
+    if (incoming === 1) setView("chat");
+  }, [incoming]);
+  useEffect(() => {
+    if (view === "chat") setSeen(msgs.length);
+  }, [view, msgs.length]);
+  const unread = msgs.slice(seen).filter((m) => !m.me).length;
   return (
     <Card className="mt-2 flex min-h-0 flex-1 flex-col !p-5">
       <div className="flex items-center gap-3">
@@ -326,13 +361,80 @@ function InSession({ c, files, s, since, rec, onError }: { c: Client; files: Cli
         <Indicator on={files.length > 0 || c.is_file_transfer} icon={<FolderSync size={12} />} label="Transferring files" />
         <Indicator on={rec} label="REC" tone="danger" />
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <Perms c={c} s={s} onError={onError} also={files} />
+      <div className="mt-3 flex gap-1 rounded-full bg-parchment p-1">
+        {(["perm", "chat"] as const).map((v) => (
+          <button
+            key={v}
+            data-testid={`qs-tab-${v}`}
+            aria-pressed={view === v}
+            onClick={() => setView(v)}
+            className={`inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-full text-caption ${view === v ? "bg-tile text-ink shadow-sm" : "text-muted hover:text-ink"}`}
+          >
+            {v === "perm" ? "Permissions" : "Chat"}
+            {v === "chat" && unread > 0 && (
+              <span data-testid="qs-chat-unread" aria-label={`${unread} unread`} className="grid h-4 min-w-4 place-items-center rounded-full bg-danger px-1 text-[10px] font-semibold leading-none text-white">
+                {unread}
+              </span>
+            )}
+          </button>
+        ))}
       </div>
+      {view === "perm" ? (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <Perms c={c} s={s} onError={onError} also={files} />
+        </div>
+      ) : (
+        <Chat msgs={msgs} onSend={onSend} />
+      )}
       <Button variant="disconnect" className="mt-3 w-full" onClick={() => [c, ...files].forEach((x) => api.close(x.id))}>
         Disconnect
       </Button>
     </Card>
+  );
+}
+
+function Chat({ msgs, onSend }: { msgs: Msg[]; onSend: (t: string) => void }) {
+  const [v, setV] = useState("");
+  const end = useRef<HTMLDivElement>(null);
+  // Braces: scrollIntoView may return a Promise, which React would call as cleanup.
+  useEffect(() => {
+    end.current?.scrollIntoView({ block: "end" });
+  }, [msgs.length]);
+  return (
+    <div className="mt-2 flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto py-1">
+        {msgs.length === 0 && <div className="pt-6 text-center text-caption text-muted">Messages from your technician appear here.</div>}
+        {msgs.map((m, i) => (
+          <div key={i} className={`flex ${m.me ? "justify-end" : ""}`}>
+            <div data-testid="qs-chat-msg" data-me={m.me} className={`max-w-[80%] select-text whitespace-pre-wrap break-words rounded-2xl px-3 py-1.5 text-caption ${m.me ? "bg-accent text-white" : "bg-parchment"}`}>
+              {m.text}
+            </div>
+          </div>
+        ))}
+        <div ref={end} />
+      </div>
+      <form
+        className="mt-2 flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (v.trim()) onSend(v.trim());
+          setV("");
+        }}
+      >
+        <input
+          data-testid="qs-chat-input"
+          aria-label="Message to your technician"
+          value={v}
+          onChange={(e) => setV(e.target.value)}
+          placeholder="Reply"
+          maxLength={4096}
+          className="h-9 min-w-0 flex-1 rounded-xl border border-hairline bg-parchment px-3.5 text-caption outline-none focus-visible:border-focus"
+        />
+        <button aria-label="Send" className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-accent text-white">
+          <Send size={15} />
+        </button>
+      </form>
+    </div>
   );
 }
 

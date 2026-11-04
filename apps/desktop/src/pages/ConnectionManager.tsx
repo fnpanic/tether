@@ -65,8 +65,8 @@ export function ConnectionManager() {
         setConsents((cs) => [...cs.filter((c) => c.conn_id !== p.conn_id), p]);
         bringToFront();
       } else if (e.name === "chat") {
+        // Attention (taskbar flash, no focus change) is requested by the backend sink.
         setChat((c) => ({ ...c, [p.id]: [...(c[p.id] ?? []), { me: false, text: p.text }] }));
-        bringToFront();
       }
     });
     (async () => {
@@ -166,9 +166,14 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
   const [perm, setPerm] = useState(c);
   const [text, setText] = useState("");
   const [tab, setTab] = useState<"perm" | "chat">("perm");
+  const [seen, setSeen] = useState(0);
   useEffect(() => {
     setPerm(c);
   }, [c]);
+  useEffect(() => {
+    if (tab === "chat") setSeen(msgs.length);
+  }, [tab, msgs.length]);
+  const unread = msgs.slice(seen).filter((m) => !m.me).length;
   const initials = (c.name || c.peer_id).replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase();
 
   return (
@@ -197,7 +202,7 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
           onChange={setTab}
           options={[
             { value: "perm", label: "Permissions" },
-            { value: "chat", label: `Chat${msgs.length ? ` (${msgs.length})` : ""}` },
+            { value: "chat", label: `Chat${unread ? ` (${unread} new)` : ""}` },
           ]}
         />
       </div>

@@ -179,6 +179,16 @@ fn cm_close(id: i32) {
     cm::close(id);
 }
 
+/// Reply to the technician's chat (shown in their session window's chat panel).
+#[tauri::command]
+fn cm_chat(id: i32, text: String) -> R<()> {
+    if text.len() > 4096 {
+        return Err("Message too long.".into());
+    }
+    cm::send_chat(id, text);
+    Ok(())
+}
+
 #[tauri::command]
 fn cm_permission(id: i32, name: String, enabled: bool) -> R<()> {
     let (_, feature, _) = PERMS.iter().find(|(n, _, _)| *n == name).ok_or("unknown permission")?;
@@ -309,6 +319,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         refresh_password,
         cm_authorize,
         cm_close,
+        cm_chat,
         cm_permission,
         cm_record_consent,
         elevate,

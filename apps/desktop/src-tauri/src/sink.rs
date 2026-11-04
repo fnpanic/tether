@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{
     ipc::{Channel, InvokeResponseBody},
-    AppHandle, Emitter, EventTarget,
+    AppHandle, Emitter, EventTarget, Manager,
 };
 
 #[derive(Serialize, Clone)]
@@ -117,5 +117,11 @@ impl UiSink for TauriSink {
         let _ = self
             .app
             .emit_to(EventTarget::webview_window("cm"), "cm", Evt { name, payload });
+        if name == "chat" {
+            // Flash the taskbar button until the user looks; never take the focus mid-session.
+            if let Some(w) = self.app.get_webview_window("cm") {
+                let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
+            }
+        }
     }
 }

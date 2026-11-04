@@ -30,6 +30,9 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    random 128-bit companion secret (sent only inside the encrypted logins), and only while that
    session's **Transfer files** switch is on; switching Files off or Disconnect ends it. With
    Files off, a new file transfer is a normal request again.
+   **Chat** (tab next to Permissions on the card): the technician's first message opens it, later
+   ones show an unread badge while Permissions is shown; each one shows a short notice and flashes
+   the taskbar button (TetherQS does not take the focus). The customer can reply there.
 5. Closing the window ends support: the in-process host server stops with it.
 
 **Help** (title bar `?`, policy `diagnostics.page`) shows version, ID, connection state, every
