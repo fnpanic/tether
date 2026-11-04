@@ -22,7 +22,9 @@ apply() { # dir patch
   elif git -C "$1" apply --check --ignore-whitespace "$p" 2>/dev/null; then
     # Line-ending differences only (e.g. a CRLF checkout of the patch itself).
     git -C "$1" apply --ignore-whitespace "$p" && echo "applied $2 (ignoring whitespace)"
-  elif git -C "$1" apply --reverse --check "$p" 2>/dev/null; then
+  elif git -C "$1" apply --reverse --check "$p" 2>/dev/null \
+    || git -C "$1" apply --reverse --check --ignore-whitespace "$p" 2>/dev/null; then
+    # The second form: a tree patched on Windows and copied with CRLF line endings.
     echo "already applied $2"
   else
     echo "cannot apply $2 cleanly:" >&2
