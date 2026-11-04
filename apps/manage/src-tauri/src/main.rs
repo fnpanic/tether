@@ -855,11 +855,37 @@ async fn custom_save(app: State<'_, App>, args: CustomArgs) -> R<Value> {
     Ok(json!({ "id": id, "link": format!("{}/q/{token}", app.server()), "relays": results }))
 }
 
-/// The first relay's list merged with the local copies (logo, colours, settings).
+/// Add another relay's download counters into `base` (same id and token; each relay counts the
+/// downloads it served itself).
+fn add_downloads(base: &mut Value, other: &Value) {
+    for row in base.as_array_mut().into_iter().flatten() {
+        let Some(o) = other.as_array().into_iter().flatten().find(|o| o["id"] == row["id"] && o["token"] == row["token"]) else { continue };
+        row["downloads"] = json!(row["downloads"].as_u64().unwrap_or(0) + o["downloads"].as_u64().unwrap_or(0));
+        if o["last_download"].as_u64() > row["last_download"].as_u64() {
+            row["last_download"] = o["last_download"].clone();
+        }
+    }
+}
+
+/// The first relay's list (download counters summed over all relays) merged with the local copies
+/// (logo, colours, settings).
 #[tauri::command]
 async fn custom_list(app: State<'_, App>) -> R<Vec<Value>> {
-    let server = app.call_json("GET", "/api/admin/custom", None).await?;
+    let mut server = app.call_json("GET", "/api/admin/custom", None).await?;
     let first = app.server();
+    let mut lists = Vec::new();
+    for sv in app.servers() {
+        if let Ok(b) = app.call_on(&sv, "GET", "/api/admin/custom", Vec::new(), "application/json").await {
+            lists.push(serde_json::from_slice::<Value>(&b).unwrap_or(Value::Null));
+        }
+    }
+    // `server` is one of `lists` (the first that answered): start from zero, then add every relay.
+    for row in server.as_array_mut().into_iter().flatten() {
+        row["downloads"] = json!(0);
+    }
+    for l in &lists {
+        add_downloads(&mut server, l);
+    }
     let mut local: BTreeMap<String, CustomLocal> = fs::read_dir(app.path("custom"))
         .into_iter()
         .flatten()
@@ -1014,6 +1040,16 @@ mod server_list_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_downloads_sum_over_relays_same_token_only() {
+        let mut base = json!([{"id":"a","token":"t1","downloads":0,"last_download":null}]);
+        add_downloads(&mut base, &json!([{"id":"a","token":"t1","downloads":2,"last_download":5}]));
+        add_downloads(&mut base, &json!([{"id":"a","token":"t1","downloads":1,"last_download":9}]));
+        add_downloads(&mut base, &json!([{"id":"a","token":"old","downloads":7,"last_download":99}]));
+        assert_eq!(base[0]["downloads"], 3);
+        assert_eq!(base[0]["last_download"], 9);
+    }
 
     #[test]
     fn custom_app_body_is_what_the_relay_and_tetherqs_accept() {
