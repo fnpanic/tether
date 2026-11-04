@@ -135,20 +135,33 @@ textarea {
   -webkit-app-region: no-drag;
 }
 
-/* Press feedback and keyboard focus for every interactive element (DESIGN.md › Motion). */
-button,
-[role="switch"] {
-  transition: transform 120ms ease-out, background-color 120ms ease-out, color 120ms ease-out, opacity 120ms ease-out;
-}
-button:active:not(:disabled) {
-  transform: scale(0.95);
-}
-:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
-:focus:not(:focus-visible) {
-  outline: none;
+/* Press feedback and keyboard focus for every interactive element (DESIGN.md › Motion). In the
+   base layer so component utilities (e.g. a flush outline on text fields) can refine them. */
+@layer base {
+  button,
+  [role="switch"] {
+    transition: transform 120ms ease-out, background-color 120ms ease-out, color 120ms ease-out, opacity 120ms ease-out;
+  }
+  button:active:not(:disabled) {
+    transform: scale(0.95);
+  }
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+  /* Native checkboxes and radios in the accent colour, large enough to see their state. */
+  input[type="checkbox"],
+  input[type="radio"] {
+    accent-color: var(--accent);
+    width: 16px;
+    height: 16px;
+  }
+  summary {
+    cursor: default;
+  }
 }
 
 /* Session glass (always dark). */

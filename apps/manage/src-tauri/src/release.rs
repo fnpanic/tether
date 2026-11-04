@@ -30,17 +30,50 @@ pub struct Manifest {
     pub forced: bool,
 }
 
+/// File name pattern of each release: `<prefix><version><suffix>` (kind, platform, prefix, suffix).
+const NAMES: &[(&str, &str, &str, &str)] = &[
+    ("technician", WINDOWS, "Tether_", "_x64-setup.exe"),
+    ("customer", WINDOWS, "TetherQS-", ".exe"),
+    ("technician", MAC, "Tether_", "_universal.app.tar.gz"),
+    ("customer", MAC, "TetherQS-", "-universal.zip"),
+];
+
 /// Remote directory and file name of a release. Versioned names: an upload never replaces the
 /// file the current latest.json points to.
 pub fn target(kind: &str, platform: &str, version: &str) -> Result<(String, String), String> {
-    let name = match (kind, platform) {
-        ("technician", WINDOWS) => format!("Tether_{version}_x64-setup.exe"),
-        ("customer", WINDOWS) => format!("TetherQS-{version}.exe"),
-        ("technician", MAC) => format!("Tether_{version}_universal.app.tar.gz"),
-        ("customer", MAC) => format!("TetherQS-{version}-universal.zip"),
-        _ => return Err(format!("unknown release kind {kind:?} or platform {platform:?}")),
-    };
-    Ok((format!("{kind}/{platform}"), name))
+    let (_, _, pre, suf) = NAMES
+        .iter()
+        .find(|n| (n.0, n.1) == (kind, platform))
+        .ok_or_else(|| format!("unknown release kind {kind:?} or platform {platform:?}"))?;
+    Ok((format!("{kind}/{platform}"), format!("{pre}{version}{suf}")))
+}
+
+/// Version of a release artifact from its path below the channel (`technician/windows-x86_64/
+/// Tether_0.3.1_x64-setup.exe`); `None` for signatures, manifests, disk images and other files.
+pub fn version_of(path: &str) -> Option<(&'static str, &'static str, String)> {
+    let mut it = path.split('/');
+    let (kind, platform, file) = (it.next()?, it.next()?, it.next()?);
+    if it.next().is_some() {
+        return None;
+    }
+    NAMES.iter().filter(|n| (n.0, n.1) == (kind, platform)).find_map(|&(k, p, pre, suf)| {
+        let v = file.strip_prefix(pre)?.strip_suffix(suf)?;
+        valid_version(v).then(|| (k, p, v.to_owned()))
+    })
+}
+
+/// Highest artifact version per (channel, kind, platform) over the file listings of every relay
+/// (`GET /api/admin/releases`: `(channel, path)` pairs). "Latest" means uploaded, not published.
+pub fn latest_versions<'a>(files: impl IntoIterator<Item = (&'a str, &'a str)>) -> BTreeMap<(String, &'static str, &'static str), String> {
+    let mut out: BTreeMap<(String, &'static str, &'static str), String> = BTreeMap::new();
+    for (channel, path) in files {
+        let Some((k, p, v)) = version_of(path) else { continue };
+        let e = out.entry((channel.to_owned(), k, p)).or_insert_with(|| v.clone());
+        if tether_trust::version::compare(&v, e) == Some(std::cmp::Ordering::Greater) {
+            *e = v;
+        }
+    }
+    out
 }
 
 /// The technician app's manual-download disk image, stored next to the updater archive.
@@ -107,6 +140,9 @@ pub struct Offer {
     pub detail: String,
     /// `None`: no release for this OS yet.
     pub href: Option<String>,
+    /// Files that belong to the same release (signatures, the updater archive): shown folded under
+    /// "More files" in the same card. `(href, what it is)`.
+    pub more: Vec<(String, &'static str)>,
 }
 
 pub struct OsSection {
@@ -128,13 +164,23 @@ if(mine&&document.getElementById(mine)){d.setAttribute("data-mine",mine);pick(mi
 /// Self-contained page in the DESIGN.md look: no external resources, light and dark. One section
 /// per OS; the inline script shows the visitor's and marks it, the switch shows the other.
 pub fn download_page(title: &str, intro: &str, sections: &[OsSection]) -> String {
+    // One card per app: one primary download, the rest of the release folded away (<details>
+    // needs no script).
     let card = |o: &Offer| match &o.href {
-        Some(href) => format!(
-            "<a class=\"card\" href=\"{}\"><span class=\"label\">{}</span><span class=\"detail\">{}</span><span class=\"cta\">Download</span></a>",
-            esc(href),
-            esc(o.label),
-            esc(&o.detail)
-        ),
+        Some(href) => {
+            let more: String = o
+                .more
+                .iter()
+                .map(|(h, what)| format!("<li><a href=\"{}\">{}</a><span>{}</span></li>", esc(h), esc(h.rsplit('/').next().unwrap_or(h)), esc(what)))
+                .collect();
+            let more = if more.is_empty() { String::new() } else { format!("<details class=\"more\"><summary>More files</summary><ul>{more}</ul></details>") };
+            format!(
+                "<div class=\"card\"><span class=\"label\">{}</span><span class=\"detail\">{}</span><a class=\"cta\" href=\"{}\">Download</a>{more}</div>",
+                esc(o.label),
+                esc(&o.detail),
+                esc(href)
+            )
+        }
         None => format!("<div class=\"card off\"><span class=\"label\">{}</span><span class=\"detail\">Not available yet</span></div>", esc(o.label)),
     };
     let switch: String = sections.iter().map(|s| format!("<a href=\"#{0}\" data-os=\"{0}\">{1}</a>", s.id, esc(s.name))).collect();
@@ -170,15 +216,20 @@ h1{{font-size:40px;line-height:1.1;letter-spacing:-.02em;font-weight:600;margin:
 p{{font-size:17px;line-height:1.47;letter-spacing:-.022em;color:var(--muted);margin:0 0 12px;max-width:640px}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:24px;margin-top:48px}}
 .card{{display:flex;flex-direction:column;gap:8px;padding:24px;border:1px solid var(--hairline);border-radius:18px;background:var(--tile);color:var(--ink);text-decoration:none}}
-.card:hover{{background:var(--parchment)}}
-.card:focus-visible{{outline:2px solid var(--focus);outline-offset:2px}}
 .card.off{{opacity:.6}}
-.card.off:hover{{background:var(--tile)}}
+a:focus-visible,summary:focus-visible{{outline:2px solid var(--focus);outline-offset:2px}}
 .label{{font-size:21px;line-height:1.19;font-weight:600}}
 .detail{{font-size:14px;line-height:1.43;color:var(--muted)}}
-.cta{{align-self:flex-start;margin-top:16px;background:var(--accent);color:#fff;border-radius:9999px;padding:10px 22px;font-size:15px}}
+.cta{{align-self:flex-start;margin-top:16px;background:var(--accent);color:#fff;border-radius:9999px;padding:10px 22px;font-size:15px;text-decoration:none}}
+.cta:hover{{filter:brightness(1.1)}}
+.more{{margin-top:8px;font-size:14px;line-height:1.43;color:var(--muted)}}
+.more summary{{cursor:pointer;color:var(--accent);width:max-content}}
+.more ul{{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}}
+.more li{{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}}
+.more a{{color:var(--accent);font-family:ui-monospace,"SF Mono",Consolas,monospace;font-size:12px;word-break:break-all}}
 .switch{{display:inline-flex;gap:4px;margin-top:32px;padding:4px;border-radius:9999px;background:var(--parchment)}}
 .switch a{{padding:8px 18px;border-radius:9999px;color:var(--ink);text-decoration:none;font-size:15px}}
+.switch a[aria-current=true]{{font-weight:600}}
 .switch a:focus-visible{{outline:2px solid var(--focus);outline-offset:2px}}
 .os{{margin-top:48px}}
 html[data-os] .os{{display:none}}
@@ -256,7 +307,12 @@ mod tests {
     }
 
     fn sections(mac: Option<&str>) -> Vec<OsSection> {
-        let offer = |label, href: Option<&str>| Offer { label, detail: "d".into(), href: href.map(Into::into) };
+        let offer = |label, href: Option<&str>| Offer {
+            label,
+            detail: "d".into(),
+            more: href.map(|h| vec![(format!("{h}.sig"), "Signature")]).unwrap_or_default(),
+            href: href.map(Into::into),
+        };
         vec![
             OsSection { id: "windows", name: "Windows", offers: vec![offer("Tether", Some("/download/stable/technician/windows-x86_64/a\"b.exe")), offer("QS", Some("/w.exe"))] },
             OsSection { id: "macos", name: "macOS", offers: vec![offer("Tether", mac), offer("QS", None)] },
@@ -287,5 +343,57 @@ mod tests {
         assert!(html.contains("navigator.userAgentData") && html.contains("<script>"));
         // Sections are hidden only once the script picked an OS.
         assert!(html.contains("html[data-os] .os{display:none}") && !html.contains("\n.os{display:none}"));
+    }
+
+    #[test]
+    fn page_groups_a_release_into_one_card() {
+        let dmg = "/download/stable/technician/darwin-universal/Tether_0.3.1_universal.dmg";
+        let mut secs = sections(Some(dmg));
+        secs[1].offers[0].more = vec![
+            (format!("{dmg}.sig"), "Signature of the disk image"),
+            ("/download/stable/technician/darwin-universal/Tether_0.3.1_universal.app.tar.gz".into(), "Updater archive"),
+            ("/download/stable/technician/darwin-universal/Tether_0.3.1_universal.app.tar.gz.sig".into(), "Signature of the updater archive"),
+        ];
+        let html = download_page("T", "", &secs);
+        // One card per offer, each with one primary button.
+        assert_eq!(html.matches("<div class=\"card\">").count(), 3);
+        let mac = &html[html.find("id=\"macos\"").unwrap()..];
+        let card = &mac[..mac.find("</div>").unwrap()];
+        assert_eq!(card.matches("class=\"cta\"").count(), 1);
+        assert!(card.contains(&format!("class=\"cta\" href=\"{dmg}\"")));
+        // The other three files of that release are folded under "More files", without script.
+        assert!(card.contains("<details class=\"more\"><summary>More files</summary>"));
+        assert_eq!(card.matches("<li>").count(), 3);
+        assert!(card.contains(">Tether_0.3.1_universal.app.tar.gz</a><span>Updater archive</span>"));
+        // An offer without a release has no "More files".
+        let off = &mac[mac.find("card off").unwrap()..];
+        assert!(!off[..off.find("</div>").unwrap()].contains("details"));
+    }
+
+    #[test]
+    fn versions_from_listings() {
+        assert_eq!(version_of("technician/windows-x86_64/Tether_0.3.1_x64-setup.exe"), Some(("technician", WINDOWS, "0.3.1".into())));
+        assert_eq!(version_of("customer/darwin-universal/TetherQS-0.4.0-beta-universal.zip"), Some(("customer", MAC, "0.4.0-beta".into())));
+        for none in [
+            "technician/windows-x86_64/Tether_0.3.1_x64-setup.exe.sig",
+            "technician/windows-x86_64/latest.json",
+            "technician/darwin-universal/Tether_0.3.1_universal.dmg",
+            "customer/windows-x86_64/TetherQS-x.exe",
+            "a/b/c/d",
+        ] {
+            assert_eq!(version_of(none), None, "{none}");
+        }
+        let files = [
+            ("stable", "technician/windows-x86_64/Tether_0.3.9_x64-setup.exe"),
+            ("stable", "technician/windows-x86_64/Tether_0.3.10_x64-setup.exe"),
+            ("stable", "technician/windows-x86_64/Tether_0.3.10-test_x64-setup.exe"),
+            ("beta", "technician/windows-x86_64/Tether_0.4.0_x64-setup.exe"),
+            ("stable", "customer/windows-x86_64/TetherQS-0.3.2.exe"),
+        ];
+        let l = latest_versions(files);
+        assert_eq!(l[&("stable".to_owned(), "technician", WINDOWS)], "0.3.10");
+        assert_eq!(l[&("beta".to_owned(), "technician", WINDOWS)], "0.4.0");
+        assert_eq!(l[&("stable".to_owned(), "customer", WINDOWS)], "0.3.2");
+        assert_eq!(l.len(), 3);
     }
 }

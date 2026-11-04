@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { RefreshCw, Trash2 } from "lucide-react";
 import { useApp } from "../App";
-import { api, bytes, invoke, when } from "../lib/ipc";
-import { Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Table, TextArea, TextField, Toggle } from "../components/ui";
+import { api, bytes, host, invoke, when, type RelayResult } from "../lib/ipc";
+import { PublishSheet } from "../components/publish";
+import { Badge, Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Table, TextArea, TextField, Toggle } from "../components/ui";
 
 interface Release {
   channel: string;
@@ -14,6 +15,15 @@ interface Release {
 type Kind = "technician" | "customer";
 type Platform = "windows-x86_64" | "darwin-universal";
 
+interface OverviewRow {
+  channel: string;
+  kind: Kind;
+  platform: Platform;
+  /** Highest version uploaded to any relay. */
+  latest: string;
+  relays: { server: string; published: string | null; has_latest: boolean | null; error: string | null }[];
+}
+
 /** Remote file name; must match release::target in src-tauri/src/release.rs. */
 const fileName = (kind: Kind, platform: Platform, v: string) =>
   platform === "windows-x86_64"
@@ -23,6 +33,93 @@ const fileName = (kind: Kind, platform: Platform, v: string) =>
     : kind === "technician"
       ? `Tether_${v}_universal.app.tar.gz`
       : `TetherQS-${v}-universal.zip`;
+
+const APP: Record<Kind, string> = { technician: "Technician app", customer: "Customer module" };
+const OS: Record<Platform, string> = { "windows-x86_64": "Windows", "darwin-universal": "macOS" };
+
+/** What a relay publishes for one release row, as a badge. */
+function Published({ r, latest }: { r: OverviewRow["relays"][number]; latest: string }) {
+  if (r.published === latest) return <Badge tone="ok">Published · latest</Badge>;
+  if (r.published) return <Badge tone="warn" title={`Devices on this relay get ${r.published}; ${latest} is uploaded${r.has_latest ? " here" : " elsewhere"} but not published here.`}>Older · {r.published}</Badge>;
+  return <Badge tone="danger" title={r.error ?? "No latest.json for this app and platform"}>Missing on {host(r.server)}</Badge>;
+}
+
+function Overview() {
+  const { toast } = useApp();
+  const [data, setData] = useState<{ rows: OverviewRow[]; errors: string[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [sync, setSync] = useState<OverviewRow | null>(null);
+  const load = () => invoke<{ rows: OverviewRow[]; errors: string[] }>("releases_overview").then(setData, (e) => setError(e.message));
+  useEffect(() => void load(), []);
+  const servers = data?.rows[0]?.relays.map((r) => r.server) ?? [];
+
+  return (
+    <section className="mb-10">
+      <div className="mb-3 flex items-end justify-between">
+        <div>
+          <h2 className="text-headline font-semibold">What devices get</h2>
+          <p className="mt-1 text-caption text-muted">Published = the version in each relay's public latest.json. Latest = the highest version uploaded to any relay.</p>
+        </div>
+        <IconButton label="Refresh" onClick={load}>
+          <RefreshCw size={16} />
+        </IconButton>
+      </div>
+      <ErrorText error={error} />
+      {data?.errors.map((e) => <ErrorText key={e} error={e} />)}
+      <Table head={["Channel", "App", "Platform", "Latest", ...servers.map(host), ""]} empty={data && !data.rows.length ? "No releases yet." : false}>
+        {data?.rows.map((row) => {
+          const missing = row.relays.filter((r) => r.published !== row.latest);
+          const source = row.relays.some((r) => r.published === row.latest);
+          return (
+            <tr key={`${row.channel}/${row.kind}/${row.platform}`}>
+              <td>{row.channel}</td>
+              <td>{APP[row.kind]}</td>
+              <td>{OS[row.platform]}</td>
+              <td className="font-semibold">{row.latest}</td>
+              {row.relays.map((r) => (
+                <td key={r.server}>
+                  <Published r={r} latest={row.latest} />
+                </td>
+              ))}
+              <td className="text-right">
+                {missing.length > 0 &&
+                  (source ? (
+                    <Button size="sm" variant="secondary" onClick={() => setSync(row)}>
+                      Publish to missing relays
+                    </Button>
+                  ) : (
+                    <span className="text-footnote text-muted">Not published anywhere: use Sign and publish</span>
+                  ))}
+              </td>
+            </tr>
+          );
+        })}
+      </Table>
+      {sync && (
+        <PublishSheet
+          title={`Publish ${sync.latest} to the missing relays`}
+          action="Copy and publish"
+          onClose={() => {
+            setSync(null);
+            load();
+          }}
+          run={async () => {
+            const r = await invoke<RelayResult[]>("release_sync", { channel: sync.channel, kind: sync.kind, platform: sync.platform, version: sync.latest });
+            toast(`${sync.latest} published on every relay`);
+            return r;
+          }}
+        >
+          <p className="text-callout">
+            {APP[sync.kind]} for {OS[sync.platform]} {sync.latest}, channel {sync.channel}.
+          </p>
+          <p className="mt-2 text-caption text-muted">
+            The files and their signatures are copied from a relay that publishes {sync.latest} (nothing is signed again). Each relay gets its own latest.json pointing at itself, files first, latest.json last. Relays that already publish it are left alone.
+          </p>
+        </PublishSheet>
+      )}
+    </section>
+  );
+}
 
 export function Releases() {
   const { toast } = useApp();
@@ -35,10 +132,10 @@ export function Releases() {
   const [mandatory, setMandatory] = useState(false);
   const [minimumVersion, setMinimumVersion] = useState("");
   const [forced, setForced] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [reviewing, setReviewing] = useState(false);
   const [list, setList] = useState<Release[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
+  const [round, setRound] = useState(0);
 
   const load = () => api.admin<Release[]>("GET", "/api/admin/releases").then(setList, (e) => setListError(e.message));
   useEffect(() => void load(), []);
@@ -64,25 +161,8 @@ export function Releases() {
     }
   };
 
-  const publish = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await invoke<string>("release_publish", {
-        args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced },
-      });
-      toast(`Released ${version} to ${channel}`);
-      setFile("");
-      load();
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const remove = async (r: Release) => {
-    if (!(await ask(`Delete ${r.channel}/${r.path} from the server?`, { title: "Delete file", kind: "warning" }))) return;
+    if (!(await ask(`Delete ${r.channel}/${r.path} from every relay?`, { title: "Delete file", kind: "warning" }))) return;
     try {
       await api.admin("DELETE", `/api/admin/release/${r.channel}/${r.path}`);
       load();
@@ -95,7 +175,10 @@ export function Releases() {
 
   return (
     <>
-      <PageHeader title="Releases" sub="Sign an installer with the update key and publish it to an update channel." />
+      <PageHeader title="Releases" sub="What each relay publishes, and signing new installers with the update key." />
+      <Overview key={round} />
+
+      <h2 className="mb-3 text-headline font-semibold">Sign and publish a new release</h2>
       <Card>
         <div className="grid grid-cols-2 gap-x-6 gap-y-4">
           <Label
@@ -146,18 +229,50 @@ export function Releases() {
             <TextField value={minimumVersion} onChange={(e) => setMinimumVersion(e.target.value)} placeholder="0.3.0" />
           </Label>
         </div>
-        <div className="mt-6 flex items-center gap-4">
-          <div className="flex-1">
-            <ErrorText error={error} />
-          </div>
-          <Button variant="primary" size="lg" disabled={busy || !file || !version.trim()} onClick={publish}>
-            {busy ? "Signing and uploading…" : "Sign and publish"}
+        <div className="mt-6 flex justify-end">
+          <Button variant="primary" size="lg" disabled={!file || !version.trim()} onClick={() => setReviewing(true)}>
+            Review and publish…
           </Button>
         </div>
       </Card>
+      {reviewing && (
+        <PublishSheet
+          title="Sign and publish release"
+          action="Sign and publish"
+          onClose={() => {
+            setReviewing(false);
+            setRound((r) => r + 1);
+            load();
+          }}
+          run={async () => {
+            const r = await invoke<RelayResult[]>("release_publish", {
+              args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced },
+            });
+            toast(`Released ${version} to ${channel}`);
+            setFile("");
+            return r;
+          }}
+        >
+          <dl className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-1.5 text-caption">
+            <dt className="text-muted">Release</dt>
+            <dd className="font-semibold">
+              {APP[kind]} {version.trim()} for {OS[platform]}
+            </dd>
+            <dt className="text-muted">Channel</dt>
+            <dd>{channel.trim()}</dd>
+            <dt className="text-muted">File</dt>
+            <dd className="break-all font-mono text-footnote">{target}</dd>
+            <dt className="text-muted">Flags</dt>
+            <dd>{[mandatory && "mandatory", forced && "forced", minimumVersion.trim() && `minimum ${minimumVersion.trim()}`].filter(Boolean).join(", ") || "none"}</dd>
+          </dl>
+          <p className="mt-3 text-caption text-muted">
+            Signed with the update key, then uploaded to each relay: files first, its own latest.json last. Devices on the {channel.trim()} channel get it at their next update check.
+          </p>
+        </PublishSheet>
+      )}
 
       <div className="mb-3 mt-10 flex items-center justify-between">
-        <h2 className="text-headline font-semibold">Files on the server</h2>
+        <h2 className="text-headline font-semibold">Files on the first relay</h2>
         <IconButton label="Refresh" onClick={load}>
           <RefreshCw size={16} />
         </IconButton>
@@ -171,7 +286,7 @@ export function Releases() {
           .map((r) => (
             <tr key={r.channel + r.path}>
               <td>{r.channel}</td>
-              <td className="font-mono text-footnote select-text">{r.path}</td>
+              <td className="select-text font-mono text-footnote">{r.path}</td>
               <td>{bytes(r.size)}</td>
               <td>{when(r.modified)}</td>
               <td className="w-12">

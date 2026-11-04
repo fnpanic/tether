@@ -1,12 +1,11 @@
 import { useState } from "react";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { useApp } from "../App";
-import { api, invoke } from "../lib/ipc";
+import { invoke } from "../lib/ipc";
 import { Button, Card, CopyField, ErrorText, Label, PageHeader, TextField } from "../components/ui";
 
 export function Keys() {
   const { state, reload, toast } = useApp();
-  const [server, setServer] = useState(state.settings.server);
   const [importPass, setImportPass] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -23,7 +22,7 @@ export function Keys() {
 
   return (
     <>
-      <PageHeader title="Keys and server" sub="Private keys never leave this PC. Only the public halves below are meant to be copied." />
+      <PageHeader title="Keys" sub="Private keys never leave this PC. Only the public halves below are meant to be copied. Relays are set on Status and relays." />
       <div className="flex flex-col gap-6">
         <Card>
           <h2 className="text-headline font-semibold">Admin public key</h2>
@@ -36,18 +35,6 @@ export function Keys() {
             For the build variable <code className="font-mono">TETHER_UPDATER_PUB_KEY</code> (technician app and customer module).
           </p>
           <CopyField label="update public key" value={state.updater_pub ?? ""} />
-        </Card>
-
-        <Card>
-          <h2 className="text-headline font-semibold">Server</h2>
-          <div className="mt-4 flex items-end gap-2">
-            <Label text="Relay addresses" hint="Several relays, comma-separated: every publish goes to all of them; reads use the first that answers.">
-              <TextField value={server} onChange={(e) => setServer(e.target.value)} placeholder="https://tether-desk.duckdns.org, https://tether-desk2.duckdns.org" />
-            </Label>
-            <Button variant="primary" disabled={server === state.settings.server} onClick={() => run(() => api.saveSettings({ ...state.settings, server: server.trim() }), "Server saved")}>
-              Save
-            </Button>
-          </div>
         </Card>
 
         <Card>
