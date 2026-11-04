@@ -19,10 +19,10 @@ cat >"$work/windows.swift" <<'EOF'
 import CoreGraphics
 let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
 for w in list {
-  let owner = w[kCGWindowOwnerName as String] as? String ?? ""
-  let name = w[kCGWindowName as String] as? String ?? ""
-  let layer = w[kCGWindowLayer as String] as? Int ?? -1
-  let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+  let owner = w["kCGWindowOwnerName"] as? String ?? ""
+  let name = w["kCGWindowName"] as? String ?? ""
+  let layer = w["kCGWindowLayer"] as? Int ?? -1
+  let b = w["kCGWindowBounds"] as? [String: Any] ?? [:]
   print("\(owner)\t\(name)\t\(layer)\t\(b["Width"] ?? 0)x\(b["Height"] ?? 0)")
 }
 EOF
