@@ -7,6 +7,14 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ## [0.5.3] — 2026-11-04
 
 ### Fixed
+- **Mac host: still only the top-left part of the screen.** The viewer's Statistics showed
+  `frame 1280×720 (coded 3456×2240)`: WebView2's HEVC decoder reports a visible area of
+  1280×720 for a Retina Mac's 3456×2234 picture (0.5.2 only handled "exactly half"). The viewer
+  now sizes the picture from the host's display size when the coded frame matches it (plus
+  alignment padding), and otherwise draws the whole coded frame when the reported visible area
+  is far smaller. Clicks land where they are shown.
+- **Fit to window did not enlarge a picture smaller than the window** (it stayed small in the
+  middle, also in full screen). Fit now scales up as well as down.
 - **Mac host: "Waiting for the first image…" forever, with no reason given.** An updated
   ad-hoc signed Mac app loses its Screen Recording permission (macOS ties it to the code
   signature; the switch can still look on). The Mac then sends no picture, silently.

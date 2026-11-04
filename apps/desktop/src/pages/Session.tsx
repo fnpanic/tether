@@ -111,6 +111,17 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const cursors = useRef(new Map<string, string>());
   const displayRef = useRef(display);
   displayRef.current = display;
+  // The host's display size sizes the picture when the decoder reports a wrong visible rect.
+  useEffect(() => pipeRef.current?.expect(display.width, display.height), [display]);
+  // Fit: scale the picture to the stage, up as well as down (a small remote screen fills the window).
+  const [stage, setStage] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setStage({ w: e.contentRect.width, h: e.contentRect.height }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const displayIdxRef = useRef(displayIdx);
   displayIdxRef.current = displayIdx;
   // Reconnect: the running series, its timer and the policy limit (event handlers read refs).
@@ -432,7 +443,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           style={{
             cursor,
             ...(fit === "fit"
-              ? { maxWidth: "100%", maxHeight: "100%", width: "auto", height: "auto", objectFit: "contain" }
+              ? fitSize(frameSize, stage)
               : { width: frameSize.w / devicePixelRatio, height: frameSize.h / devicePixelRatio }),
             opacity: connected && frameSize.w ? 1 : phase.kind === "reconnecting" ? 0.35 : 0,
           }}
@@ -598,6 +609,13 @@ function Stat({ k, v }: { k: string; v: React.ReactNode }) {
       <span>{v}</span>
     </div>
   );
+}
+
+/** Largest size of a w×h picture inside the stage, keeping its aspect ratio. */
+export function fitSize(f: { w: number; h: number }, stage: { w: number; h: number }) {
+  if (!f.w || !f.h || !stage.w || !stage.h) return { maxWidth: "100%", maxHeight: "100%" };
+  const s = Math.min(stage.w / f.w, stage.h / f.h);
+  return { width: Math.floor(f.w * s), height: Math.floor(f.h * s) };
 }
 
 /** Ctrl+Alt+Del, lock and restart: disruptive, so grouped, explained and (lock, restart) confirmed. */

@@ -58,6 +58,17 @@ describe("formatting and packets", () => {
     expect(renderSize({ codedWidth: 1920, codedHeight: 1088, visibleRect: { width: 1920, height: 1080 } })).toEqual({ w: 1920, h: 1080 });
   });
 
+  it("Retina Mac: a bogus 1280×720 visible rect in a 3456×2240 frame draws the host's 3456×2234 display", () => {
+    const f = { codedWidth: 3456, codedHeight: 2240, visibleRect: { x: 0, y: 0, width: 1280, height: 720 } };
+    const r = renderSize(f, { w: 3456, h: 2234 });
+    expect(r).toEqual({ w: 3456, h: 2234 });
+    expect(widenTo(f, r.w, r.h)?.visibleRect).toEqual({ x: 0, y: 0, width: 3456, height: 2234 });
+    // Without the display size: the whole coded frame (far larger than the visible rect).
+    expect(renderSize(f)).toEqual({ w: 3456, h: 2240 });
+    // A display size that does not match the frame (switch in progress) is ignored.
+    expect(renderSize({ codedWidth: 1920, codedHeight: 1088, visibleRect: { width: 1920, height: 1080 } }, { w: 3456, h: 2234 })).toEqual({ w: 1920, h: 1080 });
+  });
+
   it("draws the whole coded picture when the visible rect is wrongly half of it (Retina Mac)", () => {
     const half = { codedWidth: 3024, codedHeight: 1964, visibleRect: { x: 0, y: 0, width: 1512, height: 982 } };
     const { w, h } = renderSize(half);

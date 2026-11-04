@@ -149,6 +149,7 @@ export class VideoPipeline {
   private decodeSum = 0;
   private lastStats = performance.now();
   private w = 0;
+  private expected: { w: number; h: number } | null = null;
   private h = 0;
   stats: VideoStats = { fps: 0, inFps: 0, coded: "", decodeMs: 0, width: 0, height: 0, codec: "", maxGapMs: 0, keyRequests: 0, dropped: 0 };
   private packets = 0;
@@ -252,7 +253,7 @@ export class VideoPipeline {
     this.stats.coded = `${frame.codedWidth}×${frame.codedHeight}`;
     // Use the visible picture size, not displayWidth: some HEVC streams carry aspect metadata that
     // makes displayWidth half the real width, which would draw every frame at half resolution.
-    const { w, h } = renderSize(frame);
+    const { w, h } = renderSize(frame, this.expected);
     this.resize(w, h);
     // drawImage only reads a frame's visibleRect: widen it when it is wrong (see renderSize).
     const init = widenTo(frame, w, h);
@@ -329,6 +330,11 @@ export class VideoPipeline {
     this.pending.clear();
   }
 
+  /** The host's size of the shown display (peer_info), used to size frames (see renderSize). */
+  expect(w: number, h: number) {
+    this.expected = { w, h };
+  }
+
   /** Switch the shown display; the next key frame repaints. */
   setDisplay(d: number) {
     this.display = d;
@@ -343,15 +349,9 @@ export class VideoPipeline {
 }
 
 /**
- * Size to draw a decoded frame at. WebView2's hardware HEVC path reports visibleRect/displayWidth
- * as exactly half the coded size while the picture actually fills the coded frame; trusting it
- * would downscale every frame to a quarter of its pixels. Real cropping (alignment padding such
- * as 1920×1088 → 1920×1080) is never an exact 2× ratio, so it keeps using visibleRect.
- */
-/**
- * A VideoFrame init that makes the whole w×h coded picture visible, or null when the frame's
- * visibleRect already is that picture. Without it a Retina Mac's stream (visibleRect reported as
- * half the coded size) showed only its top-left quarter, scaled up to the window.
+ * A VideoFrame init that makes the whole w×h top-left picture visible, or null when the frame's
+ * visibleRect already is that picture. drawImage only reads visibleRect, so a wrong one showed a
+ * Retina Mac's screen as its top-left corner, scaled up to the window.
  */
 export function widenTo(f: { visibleRect?: { x: number; y: number; width: number; height: number } | null }, w: number, h: number) {
   const v = f.visibleRect;
@@ -359,10 +359,25 @@ export function widenTo(f: { visibleRect?: { x: number; y: number; width: number
   return { visibleRect: { x: 0, y: 0, width: w, height: h }, displayWidth: w, displayHeight: h };
 }
 
-export function renderSize(f: { codedWidth: number; codedHeight: number; visibleRect?: { width: number; height: number } | null }) {
+/** Alignment padding a coded frame may carry beyond the picture (macroblocks, CTUs). */
+const PAD = 64;
+
+/**
+ * Size to draw a decoded frame at. WebView2's hardware HEVC path can report a visibleRect that is
+ * not the picture: exactly half the coded size, or a fixed 1280×720 for a Retina Mac's 3456×2234
+ * stream (coded 3456×2240). The host's display size (`expected`, from peer_info) is the truth when
+ * the coded frame is that size plus alignment padding. Without it: an exact 2× ratio or a visible
+ * rect far smaller than the coded frame means the coded frame is the picture; small differences
+ * are real cropping (1920×1088 → 1920×1080).
+ */
+export function renderSize(f: { codedWidth: number; codedHeight: number; visibleRect?: { width: number; height: number } | null }, expected?: { w: number; h: number } | null) {
+  const { codedWidth: cw, codedHeight: ch } = f;
+  if (expected && expected.w > 0 && expected.h > 0 && cw >= expected.w && ch >= expected.h && cw - expected.w < PAD && ch - expected.h < PAD) {
+    return { w: expected.w, h: expected.h };
+  }
   const v = f.visibleRect;
-  if (!v || (v.width * 2 === f.codedWidth && v.height * 2 === f.codedHeight)) {
-    return { w: f.codedWidth, h: f.codedHeight };
+  if (!v || (v.width * 2 === cw && v.height * 2 === ch) || cw - v.width >= PAD || ch - v.height >= PAD) {
+    return { w: cw, h: ch };
   }
   return { w: v.width, h: v.height };
 }
