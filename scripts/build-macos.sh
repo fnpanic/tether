@@ -161,7 +161,9 @@ step "TetherQS (portable universal .app, zipped)"
 cd "$ROOT/apps/quick"
 npm ci
 # Windows ships a bare exe (bundling off); macOS needs the .app bundle.
-npx tauri build --target universal-apple-darwin --bundles app --config '{"bundle":{"active":true}}'
+# Thin LTO like the technician app: fat LTO fails on macOS ("__CLASS_MudaMenuItem: symbol multiply
+# defined", then "failed to load bitcode of module muda"). Windows keeps the Cargo.toml setting.
+CARGO_PROFILE_RELEASE_LTO=thin npx tauri build --target universal-apple-darwin --bundles app --config '{"bundle":{"active":true}}'
 QV=$(version)
 rm -f "$OUT/TetherQS-${QV}-universal.zip" "$OUT/TetherQS-${QV}-universal.zip.sig"
 ditto -c -k --sequesterRsrc --keepParent src-tauri/target/universal-apple-darwin/release/bundle/macos/TetherQS.app "$OUT/TetherQS-${QV}-universal.zip"
