@@ -10,7 +10,7 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
 
 ## How customers use it
 
-1. Download `TetherQS.exe` (e.g. from `https://<relay>/download/stable/customer/windows-x86_64/TetherQS.exe`) and start it.
+1. Download `TetherQS.exe` (from the download page `https://<relay>/`; releases are versioned, `…/download/stable/customer/windows-x86_64/TetherQS-<version>.exe`) and start it.
    Windows 10 21H2+ / 11 ship the WebView2 runtime it needs; if it is missing, TetherQS shows a
    message box with the download link instead of a window.
 2. Read the ID and password to the technician (or copy them). The password is masked until the

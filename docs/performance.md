@@ -82,10 +82,6 @@ Run it with:
 Unchanged on purpose: the 60 fps ceiling (the encoder loop paces itself by capture + encode time;
 AV1 here runs at ~19 fps); upstream's delay-based QoS.
 
-## Results
-
-TBD
-
 ## Result (0.4.0, 2026-11-04)
 
 Same VM and corporate proxy, technician 0.4.0 viewer and TetherQS 0.4.0 host (AV1, 4 encoder

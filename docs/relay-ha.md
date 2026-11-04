@@ -110,7 +110,7 @@ Server half (implemented):
   (`server/api/tests/api.rs`).
 - `GET /readyz/relay` per node (Caddy). Manage can show node health from it.
 
-Changes needed in Tether Manage (not implemented here):
+Tether Manage (implemented in 0.4.0; the server setting is a comma-separated relay list):
 1. Setting: a relay list instead of one URL (default `tether-desk.duckdns.org`,
    `tether-desk2.duckdns.org`).
 2. Policy: `PUT /api/admin/policy` to every node. Show the per-node result and
@@ -147,9 +147,9 @@ Changes needed in Tether Manage (not implemented here):
 - Patch: `patches/rustdesk-server.patch` (regenerate with `scripts/make-patches.sh`).
 - Builds and tests: `scripts/build-relay.sh`, `scripts/test-relay.sh` (WSL, static musl).
 
-## Enabling HA on relay 1 (not applied yet)
+## Enabling HA on relay 1 (applied for 0.4.0)
 
-Relay 1 still runs the 0.3.0 bundle. To join it to relay 2:
+Relay 1 and relay 2 both run the 0.4.0 bundle. How relay 1 was joined to relay 2:
 
 ```bash
 # bundle from a checkout of this branch (LF line endings, see .gitattributes), with the new binaries
