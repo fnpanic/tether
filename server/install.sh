@@ -104,6 +104,11 @@ systemctl daemon-reload
 systemctl enable tether-hbbr tether-hbbs tether-api tether-https
 systemctl restart tether-hbbr tether-hbbs tether-api tether-https
 [ -f /etc/tether/duckdns.env ] && systemctl enable --now tether-ddns.timer
+# dnf's metadata refresh needs ~700 MB: on a 1 GB VM (Oracle Always Free micro) it runs the box
+# out of memory and stalls SSH and HTTPS for minutes. Updates still work with a manual `dnf upgrade`.
+if [ "$(awk '/MemTotal/ {print $2}' /proc/meminfo)" -lt 1500000 ]; then
+  systemctl disable --now dnf-makecache.timer 2>/dev/null || true
+fi
 
 # hbbs creates the key pair on first start.
 for _ in $(seq 1 40); do [ -s /var/lib/tether/id_ed25519.pub ] && break; sleep 0.5; done

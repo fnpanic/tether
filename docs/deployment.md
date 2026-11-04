@@ -45,6 +45,10 @@ No other paid resources were created.
    - kdump disabled and the `crashkernel` reservation removed (it reserved 448 MB, which starved
      the VM until it froze);
    - a 2 GB swap file added as a safety net.
+   - `dnf-makecache.timer` disabled (`install.sh` does this on VMs under 1.5 GB): its metadata refresh
+     needs ~700 MB and stalled relay 1 for several minutes on 2026-11-04 (OOM killer, SSH and HTTPS
+     timing out; clients moved to relay 2). On an existing relay:
+     `sudo systemctl disable --now dnf-makecache.timer`.
 
 ## Relay 2 (high availability)
 
