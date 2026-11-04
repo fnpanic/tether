@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_id: { description: "desktop run whose tether-macos-universal artifact to test", required: true }
+permissions: { contents: read, actions: read }
 jobs:
   smoke:
     runs-on: macos-14
