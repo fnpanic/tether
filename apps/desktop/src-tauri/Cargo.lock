@@ -9619,7 +9619,7 @@ dependencies = [
 
 [[package]]
 name = "tether"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "base",
  "hbb_common",
