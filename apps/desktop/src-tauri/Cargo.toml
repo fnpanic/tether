@@ -29,6 +29,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 url = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
 # VRAM (D3D11) zero-copy encoding exists on Windows only (hwcodec's ffmpeg_vram is D3D11 code).

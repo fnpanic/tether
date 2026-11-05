@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import qrcode from "qrcode-generator";
-import { Activity, Info, KeyRound, Lock, Monitor, Moon, Network, Palette, Shield, Sun, X } from "lucide-react";
+import { Activity, Info, KeyRound, Lock, Monitor, Moon, Network, Palette, Shield, Sun, Video, X } from "lucide-react";
 import { api, type Status } from "../lib/ipc";
 import { errorText, isHidden, isLocked, isOn, usePolicy } from "../lib/policy";
 import { Diagnostics } from "./Diagnostics";
@@ -8,12 +8,14 @@ import { updateApi, type UpdateStatus } from "../components/UpdateCard";
 import { getThemePref, setThemePref, type ThemePref } from "../lib/theme";
 import { Button, IconButton, Segmented, TextField, Toggle } from "../components/ui";
 import { passwordStrength } from "../lib/security";
+import { recordingsApi, retentionText, uploadText, type RecordingsState } from "../lib/recordings";
 
-type Section = "security" | "access" | "appearance" | "network" | "diagnostics" | "about";
+type Section = "security" | "access" | "recording" | "appearance" | "network" | "diagnostics" | "about";
 
 const NAV: { id: Section; label: string; icon: typeof Shield }[] = [
   { id: "security", label: "Security", icon: Shield },
   { id: "access", label: "Unattended access", icon: KeyRound },
+  { id: "recording", label: "Recording", icon: Video },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "network", label: "Network", icon: Network },
   { id: "diagnostics", label: "Diagnostics", icon: Activity },
@@ -349,6 +351,69 @@ function NetworkSection() {
   );
 }
 
+const MODE: Record<string, string> = {
+  off: "Off. Your organisation does not allow recording sessions.",
+  "on-request": "When you click the camera button in a session's toolbar.",
+  always: "Every session, from the start.",
+};
+
+function RecordingSection() {
+  const eff = usePolicy();
+  const [st, setSt] = useState<RecordingsState | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const load = () => recordingsApi.list().then(setSt).catch((e) => setErr(errorText(e)));
+  useEffect(() => {
+    load();
+  }, []);
+  const act = (p: Promise<unknown>) => p.then(load).catch((e) => setErr(errorText(e)));
+  const v = (k: string) => eff?.values[k] ?? "";
+  return (
+    <>
+      <div className="rounded-2xl bg-parchment p-4 text-caption leading-relaxed text-muted">
+        Recordings are standard video files (WebM or MP4) saved on this computer; any video player opens them. The other person is always asked
+        first and sees that the session is recorded. Your recordings are listed on the main window.
+      </div>
+      <div className="border-b border-hairline py-4">
+        <div className="flex items-center gap-6">
+          <div className="min-w-0 flex-1">
+            <div className="text-callout">Recording folder</div>
+            <div data-testid="recording-folder" className="mt-1 break-all font-mono text-caption text-ink-80">
+              {st?.folder ?? "…"}
+            </div>
+            {st?.locked ? <Managed /> : st?.custom && <div className="mt-0.5 text-footnote text-muted">Chosen by you</div>}
+          </div>
+          <div className="flex shrink-0 gap-2">
+            {st && !st.locked && st.custom && (
+              <Button size="sm" variant="ghost" onClick={() => act(recordingsApi.resetFolder())}>
+                Use default
+              </Button>
+            )}
+            {st && !st.locked && (
+              <Button size="sm" onClick={() => act(recordingsApi.pickFolder())}>
+                Change…
+              </Button>
+            )}
+            <Button size="sm" onClick={() => act(recordingsApi.openFolder())}>
+              Open folder
+            </Button>
+          </div>
+        </div>
+        {err && <div className="mt-2 text-footnote text-danger">{err}</div>}
+      </div>
+      <Row title="Record" desc={MODE[v("recording.mode")] ?? v("recording.mode")} feature="recording.mode">
+        {null}
+      </Row>
+      <Row title="Upload" desc={uploadText(v("recording.upload"), v("recording.upload-target"), v("recording.keep-local") !== "N")} feature="recording.upload">
+        {null}
+      </Row>
+      <Row title="Keep recordings" desc={retentionText(v("recording.max-days"))} feature="recording.max-days">
+        {null}
+      </Row>
+      <p className="mt-3 text-footnote text-muted">Recording mode, upload and retention are set by your organisation's policy.</p>
+    </>
+  );
+}
+
 function About({ status }: { status: Status | null }) {
   const eff = usePolicy();
   const [up, setUp] = useState<UpdateStatus | string | null>(null);
@@ -424,6 +489,7 @@ export function Settings({ onClose, status }: { onClose: () => void; status: Sta
           <div className="min-h-0 flex-1 overflow-y-auto px-7 pb-7">
             {sec === "security" && <Security />}
             {sec === "access" && <Access status={status} />}
+            {sec === "recording" && <RecordingSection />}
             {sec === "appearance" && <Appearance />}
             {sec === "network" && <NetworkSection />}
             {sec === "diagnostics" && <Diagnostics />}

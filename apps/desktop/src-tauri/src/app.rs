@@ -62,6 +62,7 @@ pub fn run(args: Vec<String>) {
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(commands::handler())
         .setup(move |app| {
             sink::install(app.handle().clone());

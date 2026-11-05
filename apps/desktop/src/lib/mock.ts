@@ -60,6 +60,16 @@ export const mock = {
         setTimeout(() => emit("session", "connection_type", { secured: true, direct: true, stream_type: "" }), 650);
         setTimeout(() => emit("session", "quality", { fps: { 0: 60 }, delay: 14, target_bitrate: 3800, codec: "H264", speed: "4.2MB/s" }), 900);
         return undefined as T;
+      case "recordings_list":
+        return {
+          folder: "C:\\Users\\demo\\Videos\\Tether",
+          custom: false,
+          locked: false,
+          items: [
+            { name: "2026-11-05_14-03-22_Design-Studio_184392571.webm", peer_id: "184392571", peer_name: "Design-Studio", started_ms: 1793973802000, duration_s: 725, size: 48_234_112, pending: false },
+            { name: "2026-11-04_09-12-40_402118736.mp4", peer_id: "402118736", peer_name: "", started_ms: 1793869960000, duration_s: 94, size: 6_120_448, pending: true },
+          ],
+        } as T;
       case "cm_clients":
         return [{ id: 1, peer_id: "184392571", name: "maria@Design-Studio", authorized: false, keyboard: true, clipboard: true, audio: true, file: true, restart: true, recording: false, block_input: false, is_file_transfer: false }] as T;
       case "fs_home_dir":

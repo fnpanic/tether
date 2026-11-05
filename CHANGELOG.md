@@ -4,6 +4,21 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Added
+- **Recordings are easy to find.** When a recording stops, a "Recording saved" card shows the file
+  name with **Open** and **Show in folder**, and the upload status when recordings are uploaded.
+  The main window lists all recordings (date, device, ID, length, size) with Play, Show in folder
+  and Delete, the folder in use and **Open folder**.
+- **Settings → Recording:** the recording folder with a folder picker (unless policy locks
+  `recording.folder`), and the recording mode, upload target and retention set by policy.
+
+### Changed
+- Recording files are named `<date>_<time>_<device name>_<ID>.webm|mp4` instead of
+  `outgoing_<ID>_<time>_display0_<codec>`. Older files are still listed, uploaded and pruned.
+- TetherQS shows "Recording allowed" instead of "REC" once the user allowed recording.
+
 ## [0.5.7] — 2026-11-05
 
 Re-release of 0.5.6 with the correct update-signing key; the code is the same as 0.5.6. The 0.5.6

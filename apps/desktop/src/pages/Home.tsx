@@ -5,6 +5,7 @@ import { Button, IconButton, Logo, PlatformIcon, StatusDot, TitleBar, useToast }
 import { Settings } from "./Settings";
 import { UpdateCard } from "../components/UpdateCard";
 import { errorText } from "../lib/policy";
+import { RecordingsSection } from "./Recordings";
 
 function useStatus() {
   const [s, setS] = useState<Status | null>(null);
@@ -276,6 +277,7 @@ export function Home() {
               ))}
             </div>
           )}
+          <RecordingsSection onToast={toast.show} />
         </div>
       </main>
       {settings && <Settings onClose={() => setSettings(false)} status={s} />}

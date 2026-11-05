@@ -24,6 +24,7 @@ import {
 import { api, formatId, invoke, subscribe, videoChannel } from "../lib/ipc";
 import { probeCodecs, VideoPipeline, type VideoStats } from "../lib/video";
 import { Button, IconButton, Logo, TitleBar, useToast } from "../components/ui";
+import { RecordingSaved } from "../components/RecordingSaved";
 import { FileTransfer } from "./FileTransfer";
 import { mouseMask, MOUSE, wheelSteps, lockModes } from "../lib/input";
 import { classify, onFailure, reconnectMinutes, type Series } from "../lib/reconnect";
@@ -501,6 +502,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
         ) : null}
         {rec.state === "on" && connected && <RecPill since={rec.since} />}
         {toast.node}
+        <RecordingSaved />
       </div>
 
       {/* floating toolbar */}

@@ -359,7 +359,8 @@ function InSession({ c, files, s, since, rec, onError, msgs, onSend }: { c: Clie
       <div className="mt-3 flex flex-wrap gap-1.5">
         <Indicator on={!!c.keyboard && !c.is_file_transfer} icon={<Keyboard size={12} />} label="Control" />
         <Indicator on={files.length > 0 || c.is_file_transfer} icon={<FolderSync size={12} />} label="Transferring files" />
-        <Indicator on={rec} label="REC" tone="danger" />
+        {/* Set once the user allowed it; the technician may record from then on. */}
+        <Indicator on={rec} label="Recording allowed" tone="danger" />
       </div>
       <div className="mt-3 flex gap-1 rounded-full bg-parchment p-1">
         {(["perm", "chat"] as const).map((v) => (

@@ -193,7 +193,7 @@ async function main() {
     await keyEv("Enter", false);
     await sleep(2000);
     const still = await dlg.isVisible();
-    const rec = await qs.getByText("REC", { exact: true }).isVisible().catch(() => false);
+    const rec = await qs.getByText("Recording allowed", { exact: true }).isVisible().catch(() => false);
     // Answer it locally (the person at the computer can).
     if (still) await dlg.getByRole("button", { name: "Don't allow" }).click();
     if (!still || rec) throw new Error(JSON.stringify({ dialogStillOpen: still, rec }));

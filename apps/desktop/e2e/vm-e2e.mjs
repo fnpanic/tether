@@ -100,7 +100,15 @@ async function main() {
     await until("REC indicator", async () => (await text(v)).includes("REC"), 20000);
     await sleep(8000);
     await toolbar("Stop recording");
-    await sleep(3000);
+    // The "Recording saved" card (after the recorder closed and renamed the file).
+    const card = await until("Recording saved card", () => v.locator('[data-testid="recording-saved"]').innerText({ timeout: 500 }).catch(() => ""), 20000).catch(() => "");
+    const listed = await ipc(v, "recordings_list").catch((e) => ({ error: String(e) }));
+    const name = (card.match(/\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\S+\.(webm|mp4)/) ?? [""])[0];
+    record("recording saved card with Open / Show in folder, file in the list", !!name && /Open/.test(card) && /Show in folder/.test(card) && !!listed.items?.some((r) => r.name === name && r.peer_id === id), {
+      card: card.replace(/\n+/g, " | "),
+      folder: listed.folder,
+      listed: listed.items?.slice(0, 3).map((r) => `${r.name} ${r.duration_s}s ${r.size}B`),
+    });
     const files = (existsSync(REC_DIR) ? readdirSync(REC_DIR) : []).filter((f) => !before.has(f));
     const file = files.map((f) => join(REC_DIR, f)).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
     let dur = 0;

@@ -559,6 +559,11 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         session_policy_get,
         session_record,
         recording_finished,
+        recordings_list,
+        recordings_open,
+        recordings_delete,
+        recordings_pick_folder,
+        recordings_reset_folder,
         cm_record_consent_init,
         cm_record_consent,
         // --- end reconnect/recording ---
@@ -596,6 +601,60 @@ fn recording_finished() {
         std::thread::sleep(std::time::Duration::from_secs(3));
         recording::after_session();
     });
+}
+
+#[derive(Serialize)]
+struct RecordingsState {
+    folder: String,
+    /// The folder was picked in Settings (else policy or default).
+    custom: bool,
+    /// Policy fixes the folder: no picker.
+    locked: bool,
+    items: Vec<recording::Recording>,
+}
+
+/// The recordings folder and its recordings, newest first.
+#[tauri::command]
+async fn recordings_list() -> R<RecordingsState> {
+    blocking(|| RecordingsState {
+        folder: recording::folder().to_string_lossy().into_owned(),
+        custom: recording::user_folder().is_some(),
+        locked: recording::folder_locked(),
+        items: recording::list_current(),
+    })
+    .await
+}
+
+/// `name` None opens the folder; else plays the recording, or selects it (`reveal`) in the file manager.
+#[tauri::command]
+fn recordings_open(name: Option<String>, reveal: Option<bool>) -> R<()> {
+    recording::open(name.as_deref(), reveal.unwrap_or(false))
+}
+
+#[tauri::command]
+async fn recordings_delete(name: String) -> R<()> {
+    blocking(move || recording::delete(&name)).await?
+}
+
+/// Folder picker; the chosen folder is used from the next recording on. None = cancelled.
+#[tauri::command]
+async fn recordings_pick_folder(app: AppHandle) -> R<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    if recording::folder_locked() {
+        return Err("locked:recording.folder: Your organisation manages the recording folder.".to_owned());
+    }
+    let start = recording::folder();
+    let picked = blocking(move || app.dialog().file().set_title("Recording folder").set_directory(start).blocking_pick_folder()).await?;
+    let Some(p) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
+    let s = p.to_string_lossy().into_owned();
+    recording::set_user_folder(&s)?;
+    Ok(Some(s))
+}
+
+/// Back to the folder from policy (or the default).
+#[tauri::command]
+fn recordings_reset_folder() -> R<()> {
+    recording::set_user_folder("")
 }
 
 /// Host side: load the consent question from policy (call once when the CM window opens).
