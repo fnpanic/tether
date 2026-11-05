@@ -4,7 +4,7 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
-## [Unreleased]
+## [0.5.8] — 2026-11-05
 
 ### Added
 - **Recordings are easy to find.** When a recording stops, a "Recording saved" card shows the file

@@ -9420,7 +9420,7 @@ dependencies = [
 
 [[package]]
 name = "tether-quick"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "hbb_common",
  "minisign",
