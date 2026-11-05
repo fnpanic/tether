@@ -4,6 +4,12 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.5.10] — 2026-11-05
+
+### Fixed
+- Host window: a second session (e.g. a file transfer next to the screen session) no longer
+  brings the minimized window back on macOS. The published 0.5.9 builds were made before this fix.
+
 ## [0.5.9] — 2026-11-05
 
 ### Added

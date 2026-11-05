@@ -1,6 +1,6 @@
 [package]
 name = "tether"
-version = "0.5.9"
+version = "0.5.10"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Tether remote desktop"
