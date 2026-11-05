@@ -14,6 +14,10 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 - **Chat messages are always seen:** each message from the technician restores the host window,
   switches to the Chat tab, scrolls to the message and flashes the taskbar button (no focus
   change).
+- **macOS: one Tether icon in the Dock.** The connection window on a controlled Mac no longer adds
+  a second Tether icon while the main Tether runs; a click on the Tether Dock icon brings it back
+  (also from minimized) and opens the main window if no window is shown. Details:
+  [docs/macos.md](docs/macos.md#windows-and-the-dock).
 
 ### Fixed
 - Tether's connection window kept showing Accept/Decline after the user accepted an incoming

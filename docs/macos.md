@@ -132,6 +132,29 @@ What the apps do about it (0.5.4):
 - Without that message (an older Mac app), the technician's window explains the likely cause
   after 8 s without a picture.
 
+## Windows and the Dock
+
+Tether shows **one** icon in the Dock. Session windows (screen, file transfer, camera, terminal),
+also those opened from `tether://` links, open in the main process, so they share its icon and
+are listed in its Window menu.
+
+The connection window on the controlled Mac (who is connected, chat, disconnect) runs in its own
+process (`--cm`, started by the local server when someone connects). From 0.5.9 that process has
+no Dock icon and no menu bar of its own when the main Tether runs (activation policy
+*Accessory*): its window floats on top, and **a click on the Tether Dock icon brings it back**,
+also when it was minimized (the main process signals it through
+`$TMPDIR/<identifier>-cm.sock`; the main window opens as well if no Tether window is shown).
+It does not appear in Cmd-Tab.
+
+Exceptions, which keep their own Dock icon as before:
+
+- The connection window when the main Tether does not run (its server was started some other
+  way) or when the socket cannot be created: then it is the only way to reach the window.
+- `tether --connect <id>` from Terminal opens its session in a separate process (Windows hands it
+  to the running Tether; macOS does not yet).
+
+TetherQS runs its connection manager in its single process: one icon.
+
 ## Retina displays
 
 A Mac host streams a Retina display at its logical size (a 3456×2234 MacBook Pro screen as
