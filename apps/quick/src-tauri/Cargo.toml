@@ -55,3 +55,7 @@ strip = true
 debug = 1
 
 [workspace]
+
+# Tether: our copy of the fork's SCTP (crates/webrtc-sctp, RACK loss detection, 40 ms RTO floor).
+[patch."https://github.com/rustdesk-org/webrtc"]
+webrtc-sctp = { path = "../../../crates/webrtc-sctp" }

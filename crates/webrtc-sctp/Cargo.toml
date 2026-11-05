@@ -1,0 +1,67 @@
+# Tether: rustdesk-org/webrtc sctp at rev 49c89bd8 (MIT/Apache-2.0) with RACK-style loss
+# detection and a 40 ms RTO floor when sending without a congestion window; see docs/stun-turn.md.
+[package]
+name = "webrtc-sctp"
+version = "0.12.0"
+authors = ["Rain Liu <yliu@webrtc.rs>"]
+edition = "2021"
+description = "A pure Rust implementation of SCTP"
+license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/webrtc-sctp"
+homepage = "https://webrtc.rs"
+repository = "https://github.com/webrtc-rs/webrtc/tree/master/sctp"
+
+[dependencies]
+# Tether: webrtc-util from the same fork rev via [patch], not a sibling path.
+util = { version = "0.11.0", package = "webrtc-util", default-features = false, features = ["conn"] }
+
+arc-swap = "1"
+tokio = { version = "1.32.0", features = [
+    "fs",
+    "io-util",
+    "io-std",
+    "macros",
+    "net",
+    "parking_lot",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+bytes = "1"
+rand = "0.8"
+crc = "3.2.1"
+async-trait = "0.1"
+log = "0.4"
+thiserror = "1"
+portable-atomic = "1.6"
+kcp-sys = { git = "https://github.com/rustdesk-org/kcp-sys", rev = "023a0065398968989f2ddfcf5cc72bb886d02675", optional = true }
+
+[features]
+# KCP as the comparison transport in examples/lossprobe.rs
+kcp = ["dep:kcp-sys"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+lazy_static = "1"
+env_logger = "0.11.3"
+chrono = "0.4.28"
+clap = "3"
+
+[[example]]
+name = "lossprobe"
+path = "examples/lossprobe.rs"
+bench = false
+
+[[example]]
+name = "ping"
+path = "examples/ping.rs"
+bench = false
+
+[[example]]
+name = "pong"
+path = "examples/pong.rs"
+bench = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

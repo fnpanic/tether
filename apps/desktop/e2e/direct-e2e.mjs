@@ -4,7 +4,7 @@
 //   node e2e/direct-e2e.mjs vm  [runs]          TetherQS in the Hyper-V VM (ID/password over CDP)
 //   node e2e/direct-e2e.mjs <id> [runs]         any host; password from env HOST_PW or file HOST_PW_FILE
 // Env: EXTRA_ARGS (e.g. --view-only), TECH_EXE (C:\cargo-target\direct\release\tether.exe), VM_IP (172.30.252.30), QS_CDP (9334),
-//      EXPECT ("Direct (LAN)" / "Relay": fail when the badge differs).
+//      EXPECT ("Direct (LAN)" / "Relay (UDP)" / "Relay": fail when the badge differs).
 // Prints one line per run: path badge, ms from start to the badge (connection secured) and to
 // the first frame. Kills only processes started from TECH_EXE.
 import { execFileSync } from "node:child_process";
@@ -71,7 +71,7 @@ async function main() {
         if (await accept.isVisible().catch(() => false)) await accept.click();
       }
       const t = await v.evaluate(() => document.body.textContent);
-      return ["Direct (LAN)", "Direct (IPv6)", "P2P", "Relay"].find((l) => t.includes(l));
+      return ["Direct (LAN)", "Direct (IPv6)", "P2P", "Relay (UDP)", "Relay"].find((l) => t.includes(l));
     }, 40000, 50);
     const tRoute = Date.now() - t0;
     await until("first frame", () => v.evaluate(() => { const c = document.querySelector("canvas"); return !!c && !(c.width === 300 && c.height === 150); }), 40000, 100);

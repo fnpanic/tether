@@ -77,6 +77,7 @@ the viewer races direct paths against the relay flow above.
 | Same LAN | `Direct (LAN)` | shipped | host with the direct listener (see below); no relay change |
 | IPv6, both global | `Direct (IPv6)` | WebRTC/ICE host candidates | hbbs with WebRTC signalling (below), both ends this version, no proxy |
 | NAT hole punching | `P2P` | WebRTC/ICE server-reflexive candidates | same, plus UDP 21116 to the relays (STUN) |
+| UDP relay (TURN on hbbs UDP 21116) | `Relay (UDP)` | WebRTC/ICE relay candidate of the host | new hbbs, both ends this version, no proxy ([stun-turn.md](stun-turn.md)) |
 | Relay (WSS/443) | `Relay` | unchanged | – |
 
 LAN flow:
@@ -131,8 +132,12 @@ Flow (both ends with `network.direct = auto`, no proxy):
 STUN: hbbs answers STUN binding requests (RFC 5389, XOR-MAPPED-ADDRESS) on its UDP port 21116,
 which both relays already open (firewalld + OCI security list). Clients use
 `ice-servers = stun:<each rendezvous server>:21116` and never the core's public defaults
-(Google/Cloudflare would see who connects to whom), so no extra service, port or cost. There
-is no TURN: when no direct pair forms, the RustDesk relay is the fallback.
+(Google/Cloudflare would see who connects to whom), so no extra service, port or cost.
+
+TURN: hbbs also runs a TURN server on the same UDP port 21116 and hands the host a 5-minute
+credential with each offer, so when no direct pair forms the session can still run over UDP
+through the relay (badge `Relay (UDP)`) instead of the WebSocket relay, which suffers under packet
+loss. Design, limits, measurements and deployment: [stun-turn.md](stun-turn.md).
 
 With a proxy (detected system proxy or one set by the user) neither side makes or answers an
 offer (ICE would leave past the proxy with the real IP); the session goes to the relay at once,

@@ -1,3 +1,270 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index f018be6..d79c4d3 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -508,7 +508,7 @@ dependencies = [
+  "cfg-if",
+  "crossbeam-utils",
+  "lazy_static",
+- "memoffset",
++ "memoffset 0.6.5",
+  "scopeguard",
+ ]
+ 
+@@ -1095,16 +1095,21 @@ dependencies = [
+  "ping",
+  "regex",
+  "reqwest",
++ "ring 0.17.14",
+  "rust-ini",
+  "serde",
+  "serde_derive",
+  "serde_json",
++ "socket2 0.5.8",
+  "sodiumoxide",
+  "sqlx",
++ "tokio",
+  "tokio-tungstenite",
+  "tower-http",
+  "tungstenite",
++ "turn",
+  "uuid",
++ "webrtc-util",
+  "whoami",
+ ]
+ 
+@@ -1527,7 +1532,7 @@ version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "4863ee94f19ed315bf3bc00299338d857d4b5bc856af375cc97d237382ad3856"
+ dependencies = [
+- "nix",
++ "nix 0.23.1",
+  "winapi",
+ ]
+ 
+@@ -1562,6 +1567,15 @@ version = "0.5.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "73cbba799671b762df5a175adf59ce145165747bb891505c43d09aefbbf38beb"
+ 
++[[package]]
++name = "md-5"
++version = "0.10.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "66b48670c893079d3c2ed79114e3644b7004df1c361a4e0ad52e2e6940d07c3d"
++dependencies = [
++ "digest",
++]
++
+ [[package]]
+ name = "memchr"
+ version = "2.7.4"
+@@ -1577,6 +1591,15 @@ dependencies = [
+  "autocfg",
+ ]
+ 
++[[package]]
++name = "memoffset"
++version = "0.7.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5de893c32cde5f383baa4c04c5d6dbdd735cfd4a794b0debdb2bb1b421da5ff4"
++dependencies = [
++ "autocfg",
++]
++
+ [[package]]
+ name = "mime"
+ version = "0.3.16"
+@@ -1681,7 +1704,20 @@ dependencies = [
+  "cc",
+  "cfg-if",
+  "libc",
+- "memoffset",
++ "memoffset 0.6.5",
++]
++
++[[package]]
++name = "nix"
++version = "0.26.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "598beaf3cc6fdd9a5dfb1630c2800c7acd31df7aaf0f565796fba2b53ca1af1b"
++dependencies = [
++ "bitflags 1.3.2",
++ "cfg-if",
++ "libc",
++ "memoffset 0.7.1",
++ "pin-utils",
+ ]
+ 
+ [[package]]
+@@ -1974,6 +2010,12 @@ version = "0.3.25"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1df8c4ec4b0627e53bdf214615ad287367e482558cf84b109250b37464dc03ae"
+ 
++[[package]]
++name = "portable-atomic"
++version = "1.15.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
++
+ [[package]]
+ name = "ppv-lite86"
+ version = "0.2.16"
+@@ -2255,16 +2297,16 @@ dependencies = [
+ 
+ [[package]]
+ name = "ring"
+-version = "0.17.3"
++version = "0.17.14"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9babe80d5c16becf6594aa32ad2be8fe08498e7ae60b77de8df700e67f191d7e"
++checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
+ dependencies = [
+  "cc",
++ "cfg-if",
+  "getrandom",
+  "libc",
+- "spin 0.9.3",
+  "untrusted 0.9.0",
+- "windows-sys 0.48.0",
++ "windows-sys 0.52.0",
+ ]
+ 
+ [[package]]
+@@ -2308,7 +2350,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3f56a14d1f48b391359b22f731fd4bd7e43c97f3c50eee276f3aa09c94784d3e"
+ dependencies = [
+  "log",
+- "ring 0.17.3",
++ "ring 0.17.14",
+  "rustls-webpki 0.101.7",
+  "sct",
+ ]
+@@ -2321,7 +2363,7 @@ checksum = "8f287924602bf649d949c63dc8ac8b235fa5387d394020705b80c4eb597ce5b8"
+ dependencies = [
+  "log",
+  "once_cell",
+- "ring 0.17.3",
++ "ring 0.17.14",
+  "rustls-pki-types",
+  "rustls-webpki 0.102.8",
+  "subtle",
+@@ -2410,7 +2452,7 @@ version = "0.101.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "8b6275d1ee7a1cd780b64aca7726599a1dbc893b1e64144529e55c3c2f745765"
+ dependencies = [
+- "ring 0.17.3",
++ "ring 0.17.14",
+  "untrusted 0.9.0",
+ ]
+ 
+@@ -2420,7 +2462,7 @@ version = "0.102.8"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
+ dependencies = [
+- "ring 0.17.3",
++ "ring 0.17.14",
+  "rustls-pki-types",
+  "untrusted 0.9.0",
+ ]
+@@ -2794,6 +2836,25 @@ version = "0.8.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "8ea5119cdb4c55b55d432abb513a0429384878c15dde60cc77b1c99de1a95a6a"
+ 
++[[package]]
++name = "stun"
++version = "0.8.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7dbc2bab375524093c143dc362a03fb6a1fb79e938391cdb21665688f88a088a"
++dependencies = [
++ "base64 0.22.1",
++ "crc",
++ "lazy_static",
++ "md-5",
++ "rand",
++ "ring 0.17.14",
++ "subtle",
++ "thiserror",
++ "tokio",
++ "url",
++ "webrtc-util",
++]
++
+ [[package]]
+ name = "subtle"
+ version = "2.6.1"
+@@ -3253,6 +3314,27 @@ dependencies = [
+  "utf-8",
+ ]
+ 
++[[package]]
++name = "turn"
++version = "0.10.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3f5aea1116456e1da71c45586b87c72e3b43164fbf435eb93ff6aa475416a9a4"
++dependencies = [
++ "async-trait",
++ "base64 0.22.1",
++ "futures",
++ "log",
++ "md-5",
++ "portable-atomic",
++ "rand",
++ "ring 0.17.14",
++ "stun",
++ "thiserror",
++ "tokio",
++ "tokio-util",
++ "webrtc-util",
++]
++
+ [[package]]
+ name = "typenum"
+ version = "1.15.0"
+@@ -3518,6 +3600,27 @@ dependencies = [
+  "rustls-pki-types",
+ ]
+ 
++[[package]]
++name = "webrtc-util"
++version = "0.11.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "64bfb10dbe6d762f80169ae07cf252bafa1f764b9594d140008a0231c0cdce58"
++dependencies = [
++ "async-trait",
++ "bitflags 1.3.2",
++ "bytes",
++ "ipnet",
++ "lazy_static",
++ "libc",
++ "log",
++ "nix 0.26.4",
++ "portable-atomic",
++ "rand",
++ "thiserror",
++ "tokio",
++ "winapi",
++]
++
+ [[package]]
+ name = "which"
+ version = "4.2.5"
+diff --git a/Cargo.toml b/Cargo.toml
+index e5162ee..848529c 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -52,6 +52,12 @@ local-ip-address = "0.5.1"
+ dns-lookup = "1.0.8"
+ ping = "0.4.0"
+ flate2 = "1.0"
++# Tether: TURN server in hbbs (src/turn.rs); webrtc-rs, MIT/Apache-2.0.
++turn = "0.10"
++webrtc-util = { version = "0.11", default-features = false, features = ["conn"] }
++ring = "0.17"
++tokio = { version = "1", features = ["full"] }
++socket2 = "0.5"
+ 
+ [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+ # https://github.com/rustdesk/rustdesk-server-pro/issues/189, using native-tls for better tls support
 diff --git a/src/bin/relay-harness.rs b/src/bin/relay-harness.rs
 new file mode 100644
 index 0000000..19ab20f
@@ -567,6 +834,18 @@ index 9c76f41..b6369b1 100644
 +        assert!(stun_binding_response(&req, "1.2.3.4:5".parse().unwrap()).is_none());
 +    }
 +}
+diff --git a/src/lib.rs b/src/lib.rs
+index 8da29a2..7f2735b 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,6 +1,7 @@
+ mod rendezvous_server;
+ pub use rendezvous_server::*;
+ pub mod common;
++pub mod turn;
+ mod database;
+ mod peer;
+ mod version;
 diff --git a/src/relay_server.rs b/src/relay_server.rs
 index 0ec190a..8044718 100644
 --- a/src/relay_server.rs
@@ -628,7 +907,7 @@ index 0ec190a..8044718 100644
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..91aab6a 100644
+index dff45eb..744f0c1 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,12 @@ use std::{
@@ -645,7 +924,7 @@ index dff45eb..91aab6a 100644
  type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
  type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
  enum Sink {
-@@ -57,7 +59,11 @@ enum Sink {
+@@ -57,18 +59,29 @@ enum Sink {
  type Sender = mpsc::UnboundedSender<Data>;
  type Receiver = mpsc::UnboundedReceiver<Data>;
  static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
@@ -657,7 +936,12 @@ index dff45eb..91aab6a 100644
  const CHECK_RELAY_TIMEOUT: u64 = 3_000;
  static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
  
-@@ -69,6 +75,12 @@ struct PunchReqEntry { tm: Instant, from_ip: String, to_ip: String, to_id: Strin
+ // Store punch hole requests
+ use once_cell::sync::Lazy;
+ use tokio::sync::Mutex as TokioMutex; // differentiate if needed
++
+ #[derive(Clone)]
+ struct PunchReqEntry { tm: Instant, from_ip: String, to_ip: String, to_id: String }
  static PUNCH_REQS: Lazy<TokioMutex<Vec<PunchReqEntry>>> = Lazy::new(|| TokioMutex::new(Vec::new()));
  const PUNCH_REQ_DEDUPE_SEC: u64 = 60;
  
@@ -670,7 +954,7 @@ index dff45eb..91aab6a 100644
  #[derive(Clone)]
  struct Inner {
      serial: i32,
-@@ -84,7 +96,7 @@ pub struct RendezvousServer {
+@@ -84,7 +97,7 @@ pub struct RendezvousServer {
      tcp_punch: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
      pm: PeerMap,
      tx: Sender,
@@ -679,7 +963,21 @@ index dff45eb..91aab6a 100644
      relay_servers0: Arc<RelayServers>,
      rendezvous_servers: Arc<Vec<String>>,
      inner: Arc<Inner>,
-@@ -221,7 +233,10 @@ impl RendezvousServer {
+@@ -110,6 +123,13 @@ impl RendezvousServer {
+         log::info!("Listening on tcp :{}, extra port for NAT test", nat_port);
+         log::info!("Listening on websocket :{}", ws_port);
+         let mut socket = create_udp_listener(port, rmem).await?;
++        // Tether: TURN on the same UDP port (crate::turn), on when RELAY_HOST is set and TURN != 0.
++        if let Some(cfg) = crate::turn::TurnConfig::from_env(port as u16) {
++            match crate::turn::Turn::start(cfg).await {
++                Ok(t) => crate::turn::Turn::install(t),
++                Err(e) => log::error!("TURN failed to start: {e}"),
++            }
++        }
+         let (tx, mut rx) = mpsc::unbounded_channel::<Data>();
+         let software_url = get_arg("software-url");
+         let version = hbb_common::get_version_from_url(&software_url);
+@@ -221,7 +241,10 @@ impl RendezvousServer {
                  }
              }
          };
@@ -691,7 +989,17 @@ index dff45eb..91aab6a 100644
          tokio::select!(
              res = main_task => res,
              res = listen_signal => res,
-@@ -251,7 +266,13 @@ impl RendezvousServer {
+@@ -237,6 +260,9 @@ impl RendezvousServer {
+         socket: &mut FramedSocket,
+         key: &str,
+     ) -> LoopFailure {
++        if let (Some(t), FramedSocket::Direct(f)) = (crate::turn::get(), &*socket) {
++            t.set_socket(f.get_ref());
++        }
+         let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
+         loop {
+             tokio::select! {
+@@ -251,7 +277,13 @@ impl RendezvousServer {
                  }
                  Some(data) = rx.recv() => {
                      match data {
@@ -706,10 +1014,14 @@ index dff45eb..91aab6a 100644
                          Data::RelayServers0(rs) => { self.parse_relay_servers(&rs); }
                          Data::RelayServers(rs) => { self.relay_servers = Arc::new(rs); }
                      }
-@@ -321,6 +342,12 @@ impl RendezvousServer {
+@@ -321,6 +353,16 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> ResultType<()> {
++        // Tether: TURN datagrams (requests, ChannelData, peers of an allocation) first.
++        if crate::turn::get().map_or(false, |t| t.dispatch(bytes, addr)) {
++            return Ok(());
++        }
 +        if let Some(res) = stun_binding_response(bytes, addr) {
 +            if let FramedSocket::Direct(f) = socket {
 +                allow_err!(f.send((Bytes::from(res), addr)).await);
@@ -719,7 +1031,7 @@ index dff45eb..91aab6a 100644
          if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
              match msg_in.union {
                  Some(rendezvous_message::Union::RegisterPeer(rp)) => {
-@@ -340,89 +367,9 @@ impl RendezvousServer {
+@@ -340,89 +382,9 @@ impl RendezvousServer {
                      }
                  }
                  Some(rendezvous_message::Union::RegisterPk(rk)) => {
@@ -732,7 +1044,9 @@ index dff45eb..91aab6a 100644
 -                        return send_rk_res(socket, addr, UUID_MISMATCH).await;
 -                    } else if !self.check_ip_blocker(&ip, &id).await {
 -                        return send_rk_res(socket, addr, TOO_FREQUENT).await;
--                    }
++                    if let Some(msg_out) = self.register_pk(rk, addr).await {
++                        socket.send(&msg_out, addr).await?
+                     }
 -                    let peer = self.pm.get_or(&id).await;
 -                    let (changed, ip_changed) = {
 -                        let peer = peer.read().await;
@@ -799,9 +1113,7 @@ index dff45eb..91aab6a 100644
 -                    }
 -                    if changed {
 -                        self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
-+                    if let Some(msg_out) = self.register_pk(rk, addr).await {
-+                        socket.send(&msg_out, addr).await?
-                     }
+-                    }
 -                    let mut msg_out = RendezvousMessage::new();
 -                    msg_out.set_register_pk_response(RegisterPkResponse {
 -                        result: register_pk_response::Result::OK.into(),
@@ -811,7 +1123,7 @@ index dff45eb..91aab6a 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // UDP PunchHoleRequest is intentionally unsupported.
-@@ -479,9 +426,29 @@ impl RendezvousServer {
+@@ -479,9 +441,29 @@ impl RendezvousServer {
          addr: SocketAddr,
          key: &str,
          ws: bool,
@@ -841,7 +1153,7 @@ index dff45eb..91aab6a 100644
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // there maybe several attempt, so sink can be none
                      if let Some(sink) = sink.take() {
-@@ -521,8 +488,18 @@ impl RendezvousServer {
+@@ -521,8 +503,18 @@ impl RendezvousServer {
                              rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
                          }
                      }
@@ -861,7 +1173,7 @@ index dff45eb..91aab6a 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
                      allow_err!(self.handle_hole_sent(phs, addr, None).await);
-@@ -545,14 +522,19 @@ impl RendezvousServer {
+@@ -545,14 +537,19 @@ impl RendezvousServer {
                      msg_out.set_test_nat_response(res);
                      Self::send_to_sink(sink, msg_out).await;
                  }
@@ -889,7 +1201,7 @@ index dff45eb..91aab6a 100644
                  }
                  _ => {}
              }
-@@ -567,6 +549,12 @@ impl RendezvousServer {
+@@ -567,6 +564,12 @@ impl RendezvousServer {
          socket_addr: SocketAddr,
          socket: &mut FramedSocket,
      ) -> ResultType<()> {
@@ -902,7 +1214,7 @@ index dff45eb..91aab6a 100644
          let (request_pk, ip_change) = if let Some(old) = self.pm.get_in_memory(&id).await {
              let mut old = old.write().await;
              let ip = socket_addr.ip();
-@@ -601,7 +589,107 @@ impl RendezvousServer {
+@@ -601,7 +604,107 @@ impl RendezvousServer {
              request_pk,
              ..Default::default()
          });
@@ -1011,7 +1323,7 @@ index dff45eb..91aab6a 100644
      }
  
      #[inline]
-@@ -620,17 +708,25 @@ impl RendezvousServer {
+@@ -620,17 +723,25 @@ impl RendezvousServer {
              &addr
          );
          let mut msg_out = RendezvousMessage::new();
@@ -1038,7 +1350,7 @@ index dff45eb..91aab6a 100644
              socket.send(&msg_out, addr_a).await?;
          } else {
              self.send_to_tcp(msg_out, addr_a).await;
-@@ -658,6 +754,7 @@ impl RendezvousServer {
+@@ -658,6 +769,7 @@ impl RendezvousServer {
              socket_addr: la.local_addr.clone(),
              pk: self.get_pk(&la.version, la.id).await,
              relay_server: la.relay_server,
@@ -1046,7 +1358,7 @@ index dff45eb..91aab6a 100644
              ..Default::default()
          };
          p.set_is_local(true);
-@@ -754,6 +851,7 @@ impl RendezvousServer {
+@@ -754,6 +866,7 @@ impl RendezvousServer {
                  msg_out.set_fetch_local_addr(FetchLocalAddr {
                      socket_addr,
                      relay_server,
@@ -1054,10 +1366,15 @@ index dff45eb..91aab6a 100644
                      ..Default::default()
                  });
              } else {
-@@ -763,10 +861,17 @@ impl RendezvousServer {
+@@ -763,10 +876,23 @@ impl RendezvousServer {
                      peer_addr,
                      addr
                  );
++                // Tether: a short-lived credential for this node's TURN (crate::turn) with each offer.
++                let turn_server = match crate::turn::get() {
++                    Some(t) if !ph.webrtc_sdp_offer.is_empty() => t.url(&id),
++                    _ => String::new(),
++                };
 +                // Tether: carry the direct-path fields of the newer protocol (WebRTC offer, IPv6
 +                // address, UDP punch port); the host decides what it can use.
                  msg_out.set_punch_hole(PunchHole {
@@ -1068,11 +1385,12 @@ index dff45eb..91aab6a 100644
 +                    force_relay: ph.force_relay,
 +                    upnp_port: ph.upnp_port,
 +                    socket_addr_v6: ph.socket_addr_v6,
++                    turn_server,
 +                    webrtc_sdp_offer: ph.webrtc_sdp_offer,
                      ..Default::default()
                  });
              }
-@@ -821,19 +926,57 @@ impl RendezvousServer {
+@@ -821,19 +947,57 @@ impl RendezvousServer {
      #[inline]
      async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) {
          if let Some(sink) = sink.as_mut() {
@@ -1138,7 +1456,7 @@ index dff45eb..91aab6a 100644
      #[inline]
      async fn send_to_tcp_sync(
          &mut self,
-@@ -911,19 +1054,25 @@ impl RendezvousServer {
+@@ -911,19 +1075,25 @@ impl RendezvousServer {
      }
  
      fn parse_relay_servers(&mut self, relay_servers: &str) {
@@ -1173,7 +1491,7 @@ index dff45eb..91aab6a 100644
      }
  
      async fn check_cmd(&self, cmd: &str) -> String {
-@@ -948,8 +1097,8 @@ impl RendezvousServer {
+@@ -948,8 +1118,8 @@ impl RendezvousServer {
                  if let Some(rs) = fds.next() {
                      self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                  } else {
@@ -1184,7 +1502,7 @@ index dff45eb..91aab6a 100644
                      }
                  }
              }
-@@ -1148,20 +1297,27 @@ impl RendezvousServer {
+@@ -1148,20 +1318,27 @@ impl RendezvousServer {
          key: &str,
          ws: bool,
      ) -> ResultType<()> {
@@ -1215,7 +1533,7 @@ index dff45eb..91aab6a 100644
                      }
                  }
                  Ok(response)
-@@ -1169,22 +1325,71 @@ impl RendezvousServer {
+@@ -1169,22 +1346,71 @@ impl RendezvousServer {
              let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
              let (a, mut b) = ws_stream.split();
              sink = Some(Sink::Ws(a));
@@ -1294,7 +1612,7 @@ index dff45eb..91aab6a 100644
          if sink.is_none() {
              self.tcp_punch.lock().await.remove(&try_into_v4(addr));
          }
-@@ -1268,18 +1473,43 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
+@@ -1268,18 +1494,43 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
      let mut futs = Vec::new();
      let rs = Arc::new(Mutex::new(Vec::new()));
      for x in rs0.iter() {
@@ -1344,7 +1662,7 @@ index dff45eb..91aab6a 100644
              }
          }));
      }
-@@ -1330,17 +1560,13 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+@@ -1330,17 +1581,13 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
  }
  
  #[inline]
@@ -1364,7 +1682,7 @@ index dff45eb..91aab6a 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1587,73 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1608,73 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
@@ -1436,5 +1754,779 @@ index dff45eb..91aab6a 100644
 +        assert_eq!(norm_ip("91.41.2.18"), "91.41.2.18");
 +        assert_eq!(norm_ip("2001:db8::1"), "2001:db8::1");
 +        assert_eq!(norm_ip("not-an-ip"), "not-an-ip");
++    }
++}
+diff --git a/src/turn.rs b/src/turn.rs
+new file mode 100644
+index 0000000..7957cfe
+--- /dev/null
++++ b/src/turn.rs
+@@ -0,0 +1,768 @@
++//! Tether: a TURN server (RFC 5766, UDP) inside hbbs, on hbbs's own UDP port (21116), so a
++//! WebRTC session that cannot form a direct pair is relayed over UDP instead of hbbr's
++//! TCP/WebSocket leg. The core's WebRTC data channel (KCP-style SCTP, see
++//! vendor/rustdesk/Cargo.toml) recovers a loss within about an RTT, where TCP holds every later
++//! byte back (head-of-line blocking) and shrinks its window.
++//!
++//! Single port: every allocation's relayed address is `<public IP>:21116`, the port the relays
++//! already open. hbbs hands each datagram to `Turn::dispatch` first: TURN requests and the
++//! ChannelData of known TURN clients go to the TURN server, datagrams from a peer an allocation
++//! has sent to go to that allocation, everything else (rendezvous, STUN binding) stays with hbbs.
++//! Peers are told apart by their address, which is what a relayed address normally does by port.
++//!
++//! Credentials follow the TURN REST API (draft-uberti-behave-turn-rest): username
++//! `<unix expiry>:<tag>`, password `base64(HMAC-SHA1(secret, username))`. The secret is random per
++//! hbbs process and never leaves it: hbbs issues a credential for itself in `PunchHole.turn_server`
++//! (over the host's TLS WebSocket) for each WebRTC offer. Clients carry no TURN secret.
++//!
++//! Abuse limits (a TURN server sends wherever it is told): no relaying to or from private,
++//! loopback, link-local, CGNAT, multicast or reserved addresses, IPv4-mapped/embedded forms of
++//! those, or the relay's own public address; at most `TURN_MAX_ALLOCATIONS` allocations and
++//! `MAX_PEERS` peers per allocation; a per-allocation bandwidth cap; a credential opens new
++//! allocations only for `CREDENTIAL_TTL`.
++
++use async_trait::async_trait;
++use hbb_common::log;
++use tokio::{net::UdpSocket, sync::mpsc};
++use std::collections::HashMap;
++use std::net::{IpAddr, Ipv4Addr, SocketAddr};
++use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
++use std::sync::{Arc, Mutex};
++use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
++use turn::auth::{generate_auth_key, AuthHandler};
++use turn::relay::RelayAddressGenerator;
++use turn::server::config::{ConnConfig, ServerConfig};
++use turn::server::Server;
++use webrtc_util::Conn;
++
++/// How long a credential handed out by hbbs opens new allocations.
++pub const CREDENTIAL_TTL: u64 = 300;
++/// After expiry the allocation made with a credential may keep refreshing (same client address
++/// only) this long, so a session outlives its credential.
++const SESSION_MAX: u64 = 12 * 3600;
++/// Peers one allocation may send to (a session needs the other side's few candidates).
++const MAX_PEERS: usize = 16;
++const QUEUE: usize = 512;
++/// Unauthenticated TURN requests (the first Allocate of each session) per second, all clients.
++const UNAUTH_PER_SEC: usize = 50;
++pub const REALM: &str = "tether";
++
++pub fn now_secs() -> u64 {
++    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
++}
++
++fn password(secret: &str, username: &str) -> String {
++    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, secret.as_bytes());
++    base64::encode(ring::hmac::sign(&key, username.as_bytes()).as_ref())
++}
++
++/// A fresh credential pair. Compatible with coturn's `use-auth-secret`.
++pub fn credential(secret: &str, tag: &str, now: u64) -> (String, String) {
++    let username = format!("{}:{}", now + CREDENTIAL_TTL, tag);
++    let pass = password(secret, &username);
++    (username, pass)
++}
++
++fn pct(s: &str) -> String {
++    s.bytes()
++        .map(|b| match b {
++            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
++            _ => format!("%{:02X}", b),
++        })
++        .collect()
++}
++
++/// `turn://user:pass@host:port`, the form the core's `get_ice_server_from_url` takes.
++pub fn turn_url(host: &str, port: u16, secret: &str, tag: &str) -> String {
++    let (u, p) = credential(secret, tag, now_secs());
++    format!("turn://{}:{}@{}:{}", pct(&u), pct(&p), host, port)
++}
++
++/// Addresses a public TURN relay must never send to or accept from.
++pub fn forbidden_peer(ip: IpAddr) -> bool {
++    match ip {
++        IpAddr::V4(v4) => forbidden_v4(v4),
++        IpAddr::V6(v6) => {
++            if let Some(v4) = v6.to_ipv4_mapped() {
++                return forbidden_v4(v4);
++            }
++            let s = v6.segments();
++            v6.is_loopback()
++                || v6.is_unspecified()
++                || v6.is_multicast()
++                || s[0] & 0xfe00 == 0xfc00 // unique local
++                || s[0] & 0xffc0 == 0xfe80 // link local
++                || s[0] == 0x2001 && s[1] == 0x0db8 // documentation
++                || s[0..6] == [0, 0, 0, 0, 0, 0] // IPv4-compatible (deprecated)
++                || s[0] == 0x0064 && s[1] == 0xff9b // NAT64 well-known prefix, embeds any IPv4
++                || s[0] == 0x2002 // 6to4, embeds any IPv4
++        }
++    }
++}
++
++fn forbidden_v4(ip: Ipv4Addr) -> bool {
++    let o = ip.octets();
++    ip.is_private()
++        || ip.is_loopback()
++        || ip.is_link_local()
++        || ip.is_broadcast()
++        || ip.is_multicast()
++        || ip.is_unspecified()
++        || ip.is_documentation()
++        || o[0] == 0
++        || o[0] >= 240
++        || o[0] == 100 && o[1] & 0xc0 == 64 // 100.64.0.0/10 CGNAT
++        || o[0] == 192 && o[1] == 0 && o[2] == 0 // 192.0.0.0/24
++        || o[0] == 198 && o[1] & 0xfe == 18 // 198.18.0.0/15 benchmarking
++}
++
++fn v4(addr: SocketAddr) -> SocketAddr {
++    match addr {
++        SocketAddr::V6(a) => match a.ip().to_ipv4_mapped() {
++            Some(ip) => SocketAddr::new(IpAddr::V4(ip), a.port()),
++            None => addr,
++        },
++        _ => addr,
++    }
++}
++
++/// STUN method of a STUN-framed datagram (magic cookie present), `None` for anything else.
++fn stun_method(b: &[u8]) -> Option<u16> {
++    if b.len() < 20 || b[0] & 0xc0 != 0 || b[4..8] != [0x21, 0x12, 0xA4, 0x42] {
++        return None;
++    }
++    let t = u16::from_be_bytes([b[0], b[1]]);
++    Some(((t & 0x3e00) >> 2) | ((t & 0x00e0) >> 1) | (t & 0x000f))
++}
++
++/// Whether a STUN message carries MESSAGE-INTEGRITY, i.e. is an authenticated request.
++fn has_integrity(b: &[u8]) -> bool {
++    let mut i = 20;
++    while i + 4 <= b.len() {
++        let t = u16::from_be_bytes([b[i], b[i + 1]]);
++        if t == 0x0008 {
++            return true;
++        }
++        i += 4 + ((u16::from_be_bytes([b[i + 2], b[i + 3]]) as usize + 3) & !3);
++    }
++    false
++}
++
++fn is_channel_data(b: &[u8]) -> bool {
++    b.len() >= 4 && (0x40..=0x4f).contains(&b[0]) && {
++        let n = u16::from_be_bytes([b[2], b[3]]) as usize;
++        n + 4 <= b.len() && b.len() <= (n + 4 + 3) & !3
++    }
++}
++
++/// Validates TURN REST credentials. A credential opens allocations until it expires; after that
++/// only the client address that used it first may go on refreshing, up to `SESSION_MAX`.
++pub struct RestAuth {
++    secret: String,
++    first_use: Mutex<HashMap<String, SocketAddr>>,
++}
++
++impl RestAuth {
++    pub fn new(secret: String) -> Self {
++        Self { secret, first_use: Default::default() }
++    }
++
++    pub fn check(&self, username: &str, src: SocketAddr, now: u64) -> Result<String, String> {
++        let expiry: u64 = username
++            .split(':')
++            .next()
++            .and_then(|e| e.parse().ok())
++            .ok_or("malformed username")?;
++        let mut first = self.first_use.lock().unwrap();
++        if expiry >= now {
++            if expiry > now + CREDENTIAL_TTL + 60 {
++                return Err("credential lifetime too long".into());
++            }
++            // shortcut: recorded before MESSAGE-INTEGRITY is verified, so someone who saw the
++            // username (not the password) could claim it first; the host allocates within ms.
++            first.entry(username.to_owned()).or_insert(src);
++            if first.len() > 100_000 {
++                first.retain(|u, _| {
++                    u.split(':').next().and_then(|e| e.parse::<u64>().ok()).map_or(false, |e| e + SESSION_MAX >= now)
++                });
++            }
++        } else if expiry + SESSION_MAX < now || first.get(username) != Some(&src) {
++            return Err(format!("expired credential {username}"));
++        }
++        Ok(password(&self.secret, username))
++    }
++}
++
++impl AuthHandler for RestAuth {
++    fn auth_handle(&self, username: &str, realm: &str, src: SocketAddr) -> Result<Vec<u8>, turn::Error> {
++        match self.check(username, src, now_secs()) {
++            Ok(pass) => Ok(generate_auth_key(username, realm, &pass)),
++            Err(e) => {
++                log::debug!("TURN auth from {src} refused: {e}");
++                Err(turn::Error::Other(e))
++            }
++        }
++    }
++}
++
++/// Byte budget per second, refilled continuously. Over budget the datagram is dropped (UDP).
++struct Bucket {
++    rate: f64,
++    tokens: f64,
++    at: Instant,
++}
++
++impl Bucket {
++    fn new(rate: usize) -> Mutex<Self> {
++        Mutex::new(Self { rate: rate as f64, tokens: rate as f64 / 4., at: Instant::now() })
++    }
++    fn take(&mut self, n: usize) -> bool {
++        let now = Instant::now();
++        self.tokens = (self.tokens + now.duration_since(self.at).as_secs_f64() * self.rate).min(self.rate / 4.);
++        self.at = now;
++        if self.tokens < n as f64 {
++            return false;
++        }
++        self.tokens -= n as f64;
++        true
++    }
++}
++
++type Tx = mpsc::Sender<(Vec<u8>, SocketAddr)>;
++type Rx = tokio::sync::Mutex<mpsc::Receiver<(Vec<u8>, SocketAddr)>>;
++
++pub struct TurnConfig {
++    /// Name clients reach this hbbs at (RELAY_HOST), used in the handed-out URL.
++    pub host: String,
++    pub port: u16,
++    /// Fixed relay address; otherwise `host` is resolved every minute (DuckDNS follows the VM).
++    pub public_ip: Option<Ipv4Addr>,
++    pub max_allocations: usize,
++    /// Per allocation, bytes per second in each direction.
++    pub bandwidth: usize,
++    /// Lab only: relay to private addresses and to the relay's own address (local and VM tests).
++    pub allow_private: bool,
++}
++
++impl TurnConfig {
++    /// From hbbs's environment: on when `RELAY_HOST` is set, unless `TURN=0`.
++    pub fn from_env(port: u16) -> Option<Self> {
++        let var = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
++        if var("TURN").as_deref() == Some("0") {
++            return None;
++        }
++        Some(Self {
++            host: var("RELAY_HOST")?,
++            port,
++            public_ip: var("TURN_PUBLIC_IP").and_then(|v| v.parse().ok()),
++            max_allocations: var("TURN_MAX_ALLOCATIONS").and_then(|v| v.parse().ok()).unwrap_or(64),
++            bandwidth: var("TURN_BANDWIDTH_MBPS")
++                .and_then(|v| v.parse::<f64>().ok())
++                .map_or(4 << 20, |m| (m * 1024. * 1024. / 8.) as usize),
++            allow_private: var("TURN_ALLOW_PRIVATE_PEERS").as_deref() == Some("1"),
++        })
++    }
++}
++
++pub struct Turn {
++    cfg: TurnConfig,
++    secret: String,
++    public_ip: AtomicU32,
++    /// A duplicate of hbbs's UDP socket, for sending from the TURN tasks.
++    sock: Mutex<Option<Arc<UdpSocket>>>,
++    control: Tx,
++    clients: Mutex<HashMap<SocketAddr, Instant>>,
++    /// Peer address -> (allocation id, its queue).
++    peers: Mutex<HashMap<SocketAddr, (u64, Tx)>>,
++    live: AtomicUsize,
++    next_id: AtomicU64,
++    server: Mutex<Option<Server>>,
++    /// Unauthenticated TURN requests per second (see `dispatch`).
++    unauth: Mutex<Bucket>,
++}
++
++static TURN: once_cell::sync::OnceCell<Arc<Turn>> = once_cell::sync::OnceCell::new();
++
++/// The running TURN server, if hbbs started one.
++pub fn get() -> Option<&'static Arc<Turn>> {
++    TURN.get()
++}
++
++impl Turn {
++    /// Builds and starts the server; `set_socket` must follow before anything is relayed.
++    pub async fn start(cfg: TurnConfig) -> Result<Arc<Self>, turn::Error> {
++        let secret = hex(&sodiumoxide::randombytes::randombytes(32));
++        let (control, rx) = mpsc::channel(QUEUE);
++        let t = Arc::new(Self {
++            public_ip: AtomicU32::new(cfg.public_ip.map_or(0, u32::from)),
++            cfg,
++            secret: secret.clone(),
++            sock: Default::default(),
++            control,
++            clients: Default::default(),
++            peers: Default::default(),
++            live: AtomicUsize::new(0),
++            next_id: AtomicU64::new(1),
++            server: Default::default(),
++            unauth: Bucket::new(UNAUTH_PER_SEC),
++        });
++        let server = Server::new(ServerConfig {
++            conn_configs: vec![ConnConfig {
++                conn: Arc::new(ControlConn { turn: t.clone(), rx: tokio::sync::Mutex::new(rx) }),
++                relay_addr_generator: Box::new(Relays(t.clone())),
++            }],
++            realm: REALM.to_owned(),
++            auth_handler: Arc::new(RestAuth::new(secret)),
++            channel_bind_timeout: Duration::from_secs(600),
++            alloc_close_notify: None,
++        })
++        .await?;
++        *t.server.lock().unwrap() = Some(server);
++        if t.cfg.public_ip.is_none() {
++            let w = Arc::downgrade(&t);
++            tokio::spawn(async move {
++                while let Some(t) = w.upgrade() {
++                    match tokio::net::lookup_host((t.cfg.host.as_str(), 0)).await {
++                        Ok(mut a) => {
++                            if let Some(IpAddr::V4(ip)) = a.find(|a| a.is_ipv4()).map(|a| a.ip()) {
++                                if t.public_ip.swap(ip.into(), Ordering::SeqCst) != u32::from(ip) {
++                                    log::info!("TURN relay address {ip}");
++                                }
++                            }
++                        }
++                        Err(e) => log::warn!("TURN: cannot resolve {}: {e}", t.cfg.host),
++                    }
++                    drop(t);
++                    tokio::time::sleep(Duration::from_secs(60)).await;
++                }
++            });
++        }
++        log::info!(
++            "TURN on udp :{} for {} (max {} allocations, {} Mbit/s each){}",
++            t.cfg.port,
++            t.cfg.host,
++            t.cfg.max_allocations,
++            t.cfg.bandwidth * 8 / 1024 / 1024,
++            if t.cfg.allow_private { ", private peers allowed: lab only" } else { "" }
++        );
++        Ok(t)
++    }
++
++    /// Registers the process-wide instance used by `get`.
++    pub fn install(t: Arc<Self>) {
++        TURN.set(t).ok();
++    }
++
++    pub async fn close(&self) {
++        let server = self.server.lock().unwrap().take();
++        if let Some(s) = server {
++            s.close().await.ok();
++        }
++    }
++
++    /// hbbs's UDP socket (again after hbbs re-created it).
++    pub fn set_socket(&self, sock: &UdpSocket) {
++        let dup = socket2::SockRef::from(sock).try_clone().and_then(|s| {
++            let s: std::net::UdpSocket = s.into();
++            s.set_nonblocking(true)?;
++            UdpSocket::from_std(s)
++        });
++        match dup {
++            Ok(s) => *self.sock.lock().unwrap() = Some(Arc::new(s)),
++            Err(e) => log::error!("TURN: cannot share the UDP socket: {e}"),
++        }
++    }
++
++    fn public_ip(&self) -> Option<Ipv4Addr> {
++        Some(Ipv4Addr::from(self.public_ip.load(Ordering::SeqCst))).filter(|ip| !ip.is_unspecified())
++    }
++
++    /// A `turn://` URL with a fresh credential, or empty while the relay address is unknown.
++    pub fn url(&self, tag: &str) -> String {
++        if self.public_ip().is_none() || self.sock.lock().unwrap().is_none() {
++            return String::new();
++        }
++        let tag: String = tag.chars().filter(|c| c.is_ascii_alphanumeric()).take(32).collect();
++        turn_url(&self.cfg.host, self.cfg.port, &self.secret, &tag)
++    }
++
++    fn allowed(&self, peer: SocketAddr) -> bool {
++        let ip = v4(peer).ip();
++        // Lab mode (all on one machine) also allows the relay's own address.
++        self.cfg.allow_private || (Some(ip) != self.public_ip().map(IpAddr::V4) && !forbidden_peer(ip))
++    }
++
++    /// Takes the datagram if it is TURN's; `false` leaves it to hbbs.
++    pub fn dispatch(&self, b: &[u8], from: SocketAddr) -> bool {
++        let from = v4(from);
++        let to_control = match stun_method(b) {
++            // The TURN crate keeps every nonce it hands out for an hour; unauthenticated requests
++            // (each gets one) are capped so a flood cannot grow that map without bound.
++            Some(3) | Some(4) | Some(8) | Some(9) if !has_integrity(b) && !self.unauth.lock().unwrap().take(1) => {
++                return true;
++            }
++            Some(3) | Some(4) | Some(6) | Some(8) | Some(9) => {
++                let mut c = self.clients.lock().unwrap();
++                if c.len() > 10_000 {
++                    c.retain(|_, at| at.elapsed() < Duration::from_secs(900));
++                }
++                if c.len() < 10_000 {
++                    c.insert(from, Instant::now());
++                }
++                true
++            }
++            _ => is_channel_data(b) && self.clients.lock().unwrap().contains_key(&from),
++        };
++        if to_control {
++            if self.control.try_send((b.to_vec(), from)).is_err() {
++                log::debug!("TURN control queue full, dropped");
++            }
++            return true;
++        }
++        let peers = self.peers.lock().unwrap();
++        let tx = peers.get(&from).map(|p| &p.1).or_else(|| {
++            // A peer behind a NAT that maps per destination answers from a port the allocation
++            // has not sent to yet; take it when exactly one allocation knows that address.
++            let mut same_ip = peers.iter().filter(|(a, _)| a.ip() == from.ip());
++            let first = same_ip.next()?;
++            if same_ip.all(|(_, p)| p.0 == (first.1).0) {
++                Some(&(first.1).1)
++            } else {
++                None
++            }
++        });
++        match tx {
++            Some(tx) => {
++                tx.try_send((b.to_vec(), from)).ok();
++                true
++            }
++            None => false,
++        }
++    }
++
++    async fn send_to(&self, b: &[u8], to: SocketAddr) -> std::io::Result<usize> {
++        let sock = self.sock.lock().unwrap().clone();
++        let Some(sock) = sock else { return Ok(b.len()) };
++        let to = match (sock.local_addr()?, to) {
++            (SocketAddr::V6(_), SocketAddr::V4(a)) => SocketAddr::new(IpAddr::V6(a.ip().to_ipv6_mapped()), a.port()),
++            _ => to,
++        };
++        sock.send_to(b, to).await
++    }
++}
++
++fn hex(b: &[u8]) -> String {
++    b.iter().map(|x| format!("{x:02x}")).collect()
++}
++
++fn unsupported<T>() -> webrtc_util::Result<T> {
++    Err(webrtc_util::Error::Other("not supported".into()))
++}
++
++/// The TURN server's listener: what `dispatch` routed to it, answers out of hbbs's socket.
++struct ControlConn {
++    turn: Arc<Turn>,
++    rx: Rx,
++}
++
++#[async_trait]
++impl Conn for ControlConn {
++    async fn connect(&self, _: SocketAddr) -> webrtc_util::Result<()> {
++        unsupported()
++    }
++    async fn recv(&self, _: &mut [u8]) -> webrtc_util::Result<usize> {
++        unsupported()
++    }
++    async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
++        match self.rx.lock().await.recv().await {
++            Some((b, from)) => {
++                let n = b.len().min(buf.len());
++                buf[..n].copy_from_slice(&b[..n]);
++                Ok((n, from))
++            }
++            None => Err(webrtc_util::Error::Other("closed".into())),
++        }
++    }
++    async fn send(&self, _: &[u8]) -> webrtc_util::Result<usize> {
++        unsupported()
++    }
++    async fn send_to(&self, b: &[u8], to: SocketAddr) -> webrtc_util::Result<usize> {
++        Ok(self.turn.send_to(b, to).await?)
++    }
++    fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
++        Ok(SocketAddr::new(IpAddr::V4(self.turn.public_ip().unwrap_or(Ipv4Addr::UNSPECIFIED)), self.turn.cfg.port))
++    }
++    fn remote_addr(&self) -> Option<SocketAddr> {
++        None
++    }
++    async fn close(&self) -> webrtc_util::Result<()> {
++        Ok(())
++    }
++    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
++        self
++    }
++}
++
++/// One allocation's relayed side: sends out of hbbs's socket, receives what `dispatch` routes
++/// to it, with the peer filter, peer cap and bandwidth cap applied.
++struct RelayConn {
++    id: u64,
++    turn: Arc<Turn>,
++    tx: Tx,
++    rx: Rx,
++    send: Mutex<Bucket>,
++    recv: Mutex<Bucket>,
++    closed: AtomicBool,
++}
++
++impl RelayConn {
++    fn release(&self) {
++        if !self.closed.swap(true, Ordering::SeqCst) {
++            self.turn.live.fetch_sub(1, Ordering::SeqCst);
++            self.turn.peers.lock().unwrap().retain(|_, p| p.0 != self.id);
++        }
++    }
++}
++
++impl Drop for RelayConn {
++    fn drop(&mut self) {
++        self.release();
++    }
++}
++
++#[async_trait]
++impl Conn for RelayConn {
++    async fn connect(&self, _: SocketAddr) -> webrtc_util::Result<()> {
++        unsupported()
++    }
++    async fn recv(&self, _: &mut [u8]) -> webrtc_util::Result<usize> {
++        unsupported()
++    }
++    async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
++        loop {
++            let Some((b, from)) = self.rx.lock().await.recv().await else {
++                return Err(webrtc_util::Error::Other("closed".into()));
++            };
++            if self.turn.allowed(from) && self.recv.lock().unwrap().take(b.len()) {
++                let n = b.len().min(buf.len());
++                buf[..n].copy_from_slice(&b[..n]);
++                return Ok((n, from));
++            }
++        }
++    }
++    async fn send(&self, _: &[u8]) -> webrtc_util::Result<usize> {
++        unsupported()
++    }
++    async fn send_to(&self, b: &[u8], to: SocketAddr) -> webrtc_util::Result<usize> {
++        let to = v4(to);
++        if self.closed.load(Ordering::SeqCst) || !self.turn.allowed(to) {
++            return Ok(b.len()); // dropped like any lost datagram
++        }
++        {
++            let mut peers = self.turn.peers.lock().unwrap();
++            if !peers.contains_key(&to) {
++                if peers.values().filter(|p| p.0 == self.id).count() >= MAX_PEERS {
++                    return Ok(b.len());
++                }
++                peers.insert(to, (self.id, self.tx.clone()));
++            }
++        }
++        if !self.send.lock().unwrap().take(b.len()) {
++            return Ok(b.len());
++        }
++        Ok(self.turn.send_to(b, to).await?)
++    }
++    fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
++        Ok(SocketAddr::new(IpAddr::V4(self.turn.public_ip().unwrap_or(Ipv4Addr::UNSPECIFIED)), self.turn.cfg.port))
++    }
++    fn remote_addr(&self) -> Option<SocketAddr> {
++        None
++    }
++    async fn close(&self) -> webrtc_util::Result<()> {
++        self.release();
++        Ok(())
++    }
++    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
++        self
++    }
++}
++
++struct Relays(Arc<Turn>);
++
++#[async_trait]
++impl RelayAddressGenerator for Relays {
++    fn validate(&self) -> Result<(), turn::Error> {
++        Ok(())
++    }
++
++    async fn allocate_conn(
++        &self,
++        use_ipv4: bool,
++        _requested_port: u16,
++    ) -> Result<(Arc<dyn Conn + Send + Sync>, SocketAddr), turn::Error> {
++        let t = &self.0;
++        let Some(ip) = t.public_ip().filter(|_| use_ipv4) else {
++            return Err(turn::Error::Other("IPv4 relays only".into()));
++        };
++        if t.live.fetch_add(1, Ordering::SeqCst) >= t.cfg.max_allocations {
++            t.live.fetch_sub(1, Ordering::SeqCst);
++            log::warn!("TURN allocation refused: {} allocations open", t.cfg.max_allocations);
++            return Err(turn::Error::Other("allocation limit".into()));
++        }
++        let (tx, rx) = mpsc::channel(QUEUE);
++        let conn = RelayConn {
++            id: t.next_id.fetch_add(1, Ordering::SeqCst),
++            turn: t.clone(),
++            tx,
++            rx: tokio::sync::Mutex::new(rx),
++            send: Bucket::new(t.cfg.bandwidth),
++            recv: Bucket::new(t.cfg.bandwidth),
++            closed: Default::default(),
++        };
++        Ok((Arc::new(conn), SocketAddr::new(IpAddr::V4(ip), t.cfg.port)))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn peers_filtered() {
++        for a in [
++            "10.0.0.5", "172.16.1.1", "192.168.1.1", "127.0.0.1", "169.254.169.254", "100.64.0.1",
++            "0.0.0.0", "255.255.255.255", "224.0.0.1", "240.0.0.1", "::1", "fe80::1", "fd00::1",
++            "::ffff:10.0.0.1", "::ffff:127.0.0.1", "::ffff:169.254.169.254", "64:ff9b::a00:1", "2002:a00:1::",
++            "::a00:1", "198.18.0.1",
++        ] {
++            assert!(forbidden_peer(a.parse().unwrap()), "{a}");
++        }
++        for a in ["8.8.8.8", "92.5.231.71", "2a01:4f8::1", "::ffff:8.8.8.8", "100.128.0.1"] {
++            assert!(!forbidden_peer(a.parse().unwrap()), "{a}");
++        }
++    }
++
++    #[test]
++    fn rest_credentials() {
++        let auth = RestAuth::new("0123456789abcdef".into());
++        let a: SocketAddr = "203.0.113.7:4000".parse().unwrap();
++        let b: SocketAddr = "203.0.113.8:4000".parse().unwrap();
++        let (u, p) = credential("0123456789abcdef", "s1", 1000);
++        assert_eq!(auth.check(&u, a, 1000).unwrap(), p);
++        assert_ne!(credential("fedcba9876543210", "s1", 1000).1, p);
++        // after expiry: the first client keeps refreshing, nobody else gets in
++        assert!(auth.check(&u, a, 1000 + CREDENTIAL_TTL + 10).is_ok());
++        assert!(auth.check(&u, b, 1000 + CREDENTIAL_TTL + 10).is_err());
++        assert!(auth.check(&u, a, 1000 + CREDENTIAL_TTL + SESSION_MAX + 1).is_err());
++        // a second socket inside the validity window is accepted (same session)
++        assert!(auth.check(&u, b, 1001).is_ok());
++        assert!(auth.check("nonsense", a, 1000).is_err());
++        assert!(auth.check(&format!("{}:x", 1000 + 86400), a, 1000).is_err());
++    }
++
++    #[test]
++    fn url_and_framing() {
++        let url = turn_url("tether-desk.duckdns.org", 21116, "0123456789abcdef", "123456789");
++        let userinfo = &url["turn://".len()..url.rfind('@').unwrap()];
++        assert!(url.ends_with("@tether-desk.duckdns.org:21116"), "{url}");
++        assert_eq!(userinfo.matches(':').count(), 1, "{url}");
++        assert!(!userinfo.contains(['+', '/', '=']), "{url}");
++        // Allocate request header; a rendezvous protobuf whose first byte looks like ChannelData.
++        let mut alloc = vec![0x00, 0x03, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42];
++        alloc.extend([0u8; 12]);
++        assert_eq!(stun_method(&alloc), Some(3));
++        assert_eq!(stun_method(&[0x0a, 0x02, 0x08, 0x01]), None);
++        assert!(is_channel_data(&[0x40, 0x00, 0x00, 0x02, 1, 2, 0, 0]));
++        assert!(!is_channel_data(&[0x42, 0x10, 0x0a, 0x0e, 1, 2]));
++        assert!(!has_integrity(&alloc));
++        let mut signed = alloc.clone();
++        signed.extend([0x00, 0x19, 0x00, 0x04, 17, 0, 0, 0, 0x00, 0x08, 0x00, 0x14]);
++        signed.extend([0u8; 20]);
++        assert!(has_integrity(&signed));
++    }
++
++    async fn roundtrip(allow_private: bool) -> bool {
++        let hbbs = UdpSocket::bind("127.0.0.1:0").await.unwrap();
++        let port = hbbs.local_addr().unwrap().port();
++        let t = Turn::start(TurnConfig {
++            host: "127.0.0.1".into(),
++            port,
++            public_ip: Some(Ipv4Addr::LOCALHOST),
++            max_allocations: 2,
++            bandwidth: 1 << 20,
++            allow_private,
++        })
++        .await
++        .unwrap();
++        t.set_socket(&hbbs);
++        // hbbs's loop: TURN first, the rest would be rendezvous.
++        let t2 = t.clone();
++        let hbbs_loop = tokio::spawn(async move {
++            let mut buf = vec![0u8; 2048];
++            loop {
++                let (n, from) = hbbs.recv_from(&mut buf).await.unwrap();
++                t2.dispatch(&buf[..n], from);
++            }
++        });
++        let url = t.url("t");
++        let userinfo = url["turn://".len()..].rsplit_once('@').unwrap().0;
++        let (user, pass) = userinfo.split_once(':').unwrap();
++        let (user, pass) = (percent_decode(user), percent_decode(pass));
++        let client = turn::client::Client::new(turn::client::ClientConfig {
++            stun_serv_addr: format!("127.0.0.1:{port}"),
++            turn_serv_addr: format!("127.0.0.1:{port}"),
++            username: user,
++            password: pass,
++            realm: REALM.to_owned(),
++            software: String::new(),
++            rto_in_ms: 0,
++            conn: Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
++            vnet: None,
++        })
++        .await
++        .unwrap();
++        client.listen().await.unwrap();
++        let relay = client.allocate().await.unwrap();
++        assert_eq!(relay.local_addr().unwrap().port(), port);
++        assert_eq!(t.live.load(Ordering::SeqCst), 1);
++        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
++        relay.send_to(b"hi", peer.local_addr().unwrap()).await.unwrap();
++        let mut buf = [0u8; 64];
++        let got = tokio::time::timeout(Duration::from_millis(500), peer.recv_from(&mut buf)).await;
++        let ok = matches!(got, Ok(Ok((2, from))) if from.port() == port);
++        if ok {
++            for _ in 0..3 {
++                peer.send_to(b"back", ("127.0.0.1", port)).await.unwrap();
++            }
++            let (n, _) = tokio::time::timeout(Duration::from_secs(1), relay.recv_from(&mut buf)).await.unwrap().unwrap();
++            assert_eq!(&buf[..n], b"back");
++        }
++        relay.close().await.unwrap();
++        client.close().await.unwrap();
++        t.close().await;
++        hbbs_loop.abort();
++        ok
++    }
++
++    fn percent_decode(s: &str) -> String {
++        let b = s.as_bytes();
++        let mut out = Vec::new();
++        let mut i = 0;
++        while i < b.len() {
++            if b[i] == b'%' {
++                out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).unwrap());
++                i += 3;
++            } else {
++                out.push(b[i]);
++                i += 1;
++            }
++        }
++        String::from_utf8(out).unwrap()
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn relays_on_the_shared_port_only_where_allowed() {
++        assert!(roundtrip(true).await, "lab mode relays to 127.0.0.1");
++        assert!(!roundtrip(false).await, "a loopback peer must be refused");
 +    }
 +}

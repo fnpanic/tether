@@ -1,5 +1,5 @@
 diff --git a/protos/rendezvous.proto b/protos/rendezvous.proto
-index b9b8ed7..94d233c 100644
+index b9b8ed7..39fa188 100644
 --- a/protos/rendezvous.proto
 +++ b/protos/rendezvous.proto
 @@ -12,6 +12,7 @@ enum ConnType {
@@ -10,7 +10,7 @@ index b9b8ed7..94d233c 100644
  }
  
  message RegisterPeerResponse { bool request_pk = 2; }
-@@ -23,12 +24,52 @@ message PunchHoleRequest {
+@@ -23,12 +24,54 @@ message PunchHoleRequest {
    ConnType conn_type = 4;
    string token = 5;
    string version = 6;
@@ -61,10 +61,12 @@ index b9b8ed7..94d233c 100644
 +  ControlPermissions control_permissions = 8;
 +  ControlledContext controlled_context = 9;
 +  string webrtc_sdp_offer = 10;
++  // Tether: turn://user:pass@host:port with a short-lived credential from hbbs (TURN REST API).
++  string turn_server = 1001;
  }
  
  message TestNatRequest {
-@@ -53,6 +94,9 @@ message PunchHoleSent {
+@@ -53,6 +96,9 @@ message PunchHoleSent {
    string relay_server = 3;
    NatType nat_type = 4;
    string version = 5;
@@ -74,7 +76,7 @@ index b9b8ed7..94d233c 100644
  }
  
  message RegisterPk {
-@@ -60,6 +104,7 @@ message RegisterPk {
+@@ -60,6 +106,7 @@ message RegisterPk {
    bytes uuid = 2;
    bytes pk = 3;
    string old_id = 4;
@@ -82,7 +84,7 @@ index b9b8ed7..94d233c 100644
  }
  
  message RegisterPkResponse {
-@@ -71,6 +116,7 @@ message RegisterPkResponse {
+@@ -71,6 +118,7 @@ message RegisterPkResponse {
      INVALID_ID_FORMAT = 5;
      NOT_SUPPORT = 6;
      SERVER_ERROR = 7;
@@ -90,7 +92,7 @@ index b9b8ed7..94d233c 100644
    }
    Result result = 1;
    int32 keep_alive = 2;
-@@ -93,6 +139,10 @@ message PunchHoleResponse {
+@@ -93,6 +141,10 @@ message PunchHoleResponse {
    }
    string other_failure = 7;
    int32 feedback = 8;
@@ -101,7 +103,7 @@ index b9b8ed7..94d233c 100644
  }
  
  message ConfigUpdate {
-@@ -109,6 +159,9 @@ message RequestRelay {
+@@ -109,6 +161,9 @@ message RequestRelay {
    string licence_key = 6;
    ConnType conn_type = 7;
    string token = 8;
@@ -111,7 +113,7 @@ index b9b8ed7..94d233c 100644
  }
  
  message RelayResponse {
-@@ -122,6 +175,9 @@ message RelayResponse {
+@@ -122,6 +177,9 @@ message RelayResponse {
    string refuse_reason = 6;
    string version = 7;
    int32 feedback = 9;
@@ -121,7 +123,7 @@ index b9b8ed7..94d233c 100644
  }
  
  message SoftwareUpdate { string url = 1; }
-@@ -130,9 +186,12 @@ message SoftwareUpdate { string url = 1; }
+@@ -130,9 +188,12 @@ message SoftwareUpdate { string url = 1; }
  // even some router has below connection error if we connect itself,
  //  { kind: Other, error: "could not resolve to any address" },
  // so we request local address to connect.
@@ -136,7 +138,7 @@ index b9b8ed7..94d233c 100644
  }
  
  message LocalAddr {
-@@ -141,6 +200,7 @@ message LocalAddr {
+@@ -141,6 +202,7 @@ message LocalAddr {
    string relay_server = 3;
    string id = 4;
    string version = 5;
@@ -144,7 +146,7 @@ index b9b8ed7..94d233c 100644
  }
  
  message PeerDiscovery {
-@@ -164,12 +224,51 @@ message OnlineResponse {
+@@ -164,12 +226,51 @@ message OnlineResponse {
  
  message KeyExchange {
    repeated bytes keys = 1; 
@@ -196,7 +198,7 @@ index b9b8ed7..94d233c 100644
  message RendezvousMessage {
    oneof union {
      RegisterPeer register_peer = 6;
-@@ -193,5 +292,8 @@ message RendezvousMessage {
+@@ -193,5 +294,8 @@ message RendezvousMessage {
      OnlineResponse online_response = 24;
      KeyExchange key_exchange = 25;
      HealthCheck hc = 26;

@@ -102,7 +102,7 @@ sudo journalctl -u tether-hbbs -f
 
 ## Update: hbbs with WebRTC signalling and STUN (direct IPv6 / NAT hole punching)
 
-Only `hbbs` changes (bundle `dist/linux-relay-p2p`, `SHA256SUMS` beside it). No firewall, OCI,
+Only `hbbs` changes (bundle `dist/linux-relay`, checksums in `dist/SHA256SUMS`; since 2026-11-05 it also contains the TURN server, see [stun-turn.md](stun-turn.md)). No firewall, OCI,
 key, `api.env` or Caddy change: the STUN responder uses UDP 21116, which firewalld and the OCI
 security list (`Default Security List for vcn-20261103-1048`, ingress `udp 0.0.0.0/0 21116`)
 already open on both relays. Relayed sessions do not use hbbs and keep running; hosts
@@ -110,16 +110,16 @@ re-register within seconds. One relay at a time, relay 2 first:
 
 ```bash
 # from the PC, Git Bash, in C:\install\remote-support
-sha256sum dist/linux-relay-p2p/bin/hbbs   # must match dist/linux-relay-p2p/SHA256SUMS
+grep linux-relay/bin/hbbs dist/SHA256SUMS; sha256sum dist/linux-relay/bin/hbbs   # must match
 for ip in 92.5.231.71 158.101.205.185; do
-  scp -i ~/.ssh/tether_oracle dist/linux-relay-p2p/bin/hbbs opc@$ip:/tmp/hbbs.new
+  scp -i ~/.ssh/tether_oracle dist/linux-relay/bin/hbbs opc@$ip:/tmp/hbbs.new
   ssh -i ~/.ssh/tether_oracle opc@$ip 'set -e
     sudo cp -p /usr/local/bin/hbbs /usr/local/bin/hbbs.bak-0.5
     sudo install -m 0755 /tmp/hbbs.new /usr/local/bin/hbbs && rm /tmp/hbbs.new
     sudo restorecon /usr/local/bin/hbbs
     sudo systemctl restart tether-hbbs
     sleep 3; systemctl is-active tether-hbbs; curl -s localhost:21122/readyz'
-  python dist/linux-relay-p2p/stun-check.py $ip   # expect: mapped <this PC's public IP> <port>
+  python tools/turn-bench/turn-check.py $ip   # STUN ok + TURN Allocate -> 401
 done
 ```
 

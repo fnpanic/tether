@@ -1,0 +1,32 @@
+[package]
+name = "turn-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Lab benchmark: the core's WebRTC transport through hbbs's TURN (src/turn.rs of the server, included
+# by path) against a TCP relay like hbbr, under netem loss/delay. See docs/stun-turn.md.
+[dependencies]
+hbb_common = { path = "../../vendor/rustdesk/libs/hbb_common", features = ["webrtc"] }
+turn = "0.10"
+webrtc-util = { version = "0.11", default-features = false, features = ["conn"] }
+ring = "0.17"
+socket2 = "0.5"
+async-trait = "0.1"
+once_cell = "1"
+base64 = "0.13"
+sodiumoxide = "0.2"
+tokio = { version = "1", features = ["full"] }
+libc = "0.2"
+
+[patch.crates-io]
+webrtc = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
+webrtc-util = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
+webrtc-sctp = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
+turn = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
+
+[workspace]
+
+# The same SCTP as the apps (crates/webrtc-sctp).
+[patch."https://github.com/rustdesk-org/webrtc"]
+webrtc-sctp = { path = "../../crates/webrtc-sctp" }

@@ -1,3 +1,28 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 9c4424a..b5ff4d5 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -97,3 +97,7 @@ x11 = "2.21"
+ webrtc = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
+ webrtc-util = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
+ webrtc-sctp = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
++
++# Tether: our copy of the fork's SCTP (crates/webrtc-sctp, RACK loss detection, 40 ms RTO floor).
++[patch."https://github.com/rustdesk-org/webrtc"]
++webrtc-sctp = { path = "../../../../crates/webrtc-sctp" }
+diff --git a/protos/rendezvous.proto b/protos/rendezvous.proto
+index 54ec24b..9655e3a 100644
+--- a/protos/rendezvous.proto
++++ b/protos/rendezvous.proto
+@@ -81,6 +81,8 @@ message PunchHole {
+   ControlPermissions control_permissions = 8;
+   ControlledContext controlled_context = 9;
+   string webrtc_sdp_offer = 10;
++  // Tether: turn://user:pass@host:port with a short-lived credential from hbbs (TURN REST API).
++  string turn_server = 1001;
+ }
+ 
+ message TestNatRequest {
 diff --git a/src/config.rs b/src/config.rs
 index 9ee5cac..6264678 100644
 --- a/src/config.rs
@@ -87,6 +112,171 @@ index 126d08a..258b776 100644
              #[allow(unreachable_patterns)]
              _ => None,
          }
+diff --git a/src/webrtc.rs b/src/webrtc.rs
+index f33f914..d2ae02e 100644
+--- a/src/webrtc.rs
++++ b/src/webrtc.rs
+@@ -47,6 +47,8 @@ use tokio::time::{timeout, timeout_at, Instant};
+ use url::Url;
+ 
+ use crate::config;
++
++static REMOTE_RELAY_AT: StdMutex<Option<std::time::Instant>> = StdMutex::new(None);
+ use crate::protobuf::Message;
+ use crate::rx_probe::RxProbe;
+ use crate::sodiumoxide::crypto::secretbox::Key;
+@@ -511,6 +513,18 @@ impl WebRTCStream {
+         ))
+     }
+ 
++    /// See `new_with_turn`; the controlling side's relay-pair acceptance wait.
++    const RELAY_ACCEPTANCE_MIN_WAIT_MS: u64 = 250;
++
++    /// A per-session TURN entry; anything but a credentialed `turn:` URL is ignored, so the
++    /// rendezvous server cannot point this peer at an arbitrary STUN host.
++    fn session_turn_server(url: &str) -> Option<RTCIceServer> {
++        if !url.starts_with("turn://") {
++            return None;
++        }
++        Self::get_ice_server_from_url(url)
++    }
++
+     /// The default UDP STUN servers as bare `host:port`, for application-level address probes.
+     pub fn default_stun_servers() -> Vec<String> {
+         DEFAULT_ICE_SERVERS
+@@ -573,12 +587,24 @@ impl WebRTCStream {
+         remote_endpoint: &str,
+         force_relay: bool,
+         ms_timeout: u64,
++    ) -> ResultType<Self> {
++        Self::new_with_turn(remote_endpoint, force_relay, ms_timeout, "").await
++    }
++
++    /// Tether: `turn` is a per-session `turn://user:pass@host:port` from the rendezvous server
++    /// (`PunchHole.turn_server`), used beside the configured ICE servers; empty for none.
++    pub async fn new_with_turn(
++        remote_endpoint: &str,
++        force_relay: bool,
++        ms_timeout: u64,
++        turn: &str,
+     ) -> ResultType<Self> {
+         let Some(rt) = WEBRTC_RT.as_ref() else {
+             return Err(anyhow::anyhow!("WebRTC I/O runtime unavailable"));
+         };
+         let remote_endpoint = remote_endpoint.to_owned();
+-        rt.spawn(Self::new_inner(remote_endpoint, force_relay, ms_timeout))
++        let turn = Self::session_turn_server(turn);
++        rt.spawn(Self::new_inner(remote_endpoint, force_relay, ms_timeout, turn))
+             .await
+             .map_err(|err| anyhow::anyhow!("WebRTC setup task failed: {}", err))??
+             .into_inner()
+@@ -589,6 +615,7 @@ impl WebRTCStream {
+         remote_endpoint: String,
+         force_relay: bool,
+         ms_timeout: u64,
++        turn: Option<RTCIceServer>,
+     ) -> ResultType<NewStreamHandoff> {
+         // The endpoint contains a Base64-encoded SDP with host addresses and live ICE
+         // credentials. Log only its size so debug logs cannot disclose that information.
+@@ -639,6 +666,14 @@ impl WebRTCStream {
+         if !remote_endpoint.is_empty() {
+             s.set_ice_max_binding_requests(Some(Self::ICE_MAX_BINDING_REQUESTS));
+         }
++        // Tether: the offerer (controlling) nominates. A relay pair is otherwise held back 2 s
++        // from the start of the checks, far past the 0.4 s the relay leg waits for WebRTC, so a
++        // TURN pair could never win; direct pairs still win when they form within this time.
++        if remote_endpoint.is_empty() {
++            s.set_relay_acceptance_min_wait(Some(std::time::Duration::from_millis(
++                Self::RELAY_ACCEPTANCE_MIN_WAIT_MS,
++            )));
++        }
+         // fe80::/10 can only be bound together with a scope id, which `IpAddr` cannot carry, so
+         // gathering one never yields a candidate - only a failed bind and a warning per address.
+         // Spelled out because `is_unicast_link_local` is not stable on our MSRV.
+@@ -651,13 +686,17 @@ impl WebRTCStream {
+         // `allow-kcp-congestion-control`, for the reason given at `get_kcp_cc_enabled`. Set per
+         // connection so the option takes effect on the next session, not the next start.
+         webrtc::sctp::association::set_no_congestion_control(!Self::get_cc_enabled());
++        // Tether (crates/webrtc-sctp): with no congestion window, one later chunk acked marks a
++        // chunk lost (RACK), and the RTO floor is 40 ms instead of 100 ms; see docs/stun-turn.md.
++        webrtc::sctp::association::set_rack_loss_detection(true);
++        webrtc::sctp::association::set_no_congestion_control_rto_min(40);
+ 
+         // Create the API object
+         let api = APIBuilder::new().with_setting_engine(s).build();
+ 
+         // Prepare the configuration, get ICE servers from config
+         let config = RTCConfiguration {
+-            ice_servers: Self::get_ice_servers(),
++            ice_servers: Self::get_ice_servers().into_iter().chain(turn).collect(),
+             ice_transport_policy: if force_relay {
+                 RTCIceTransportPolicy::Relay
+             } else {
+@@ -1113,10 +1152,25 @@ impl WebRTCStream {
+             return Ok(());
+         }
+         let candidate = serde_json::from_str::<RTCIceCandidateInit>(candidate_json)?;
++        let relay = candidate.candidate.contains(" typ relay");
+         self.pc.add_ice_candidate(candidate).await?;
++        if relay {
++            *REMOTE_RELAY_AT.lock().unwrap() = Some(std::time::Instant::now());
++        }
+         Ok(())
+     }
+ 
++    /// Tether: whether a peer offered a TURN (relay) candidate in the last `ms`; the connect race
++    /// then gives WebRTC over TURN more time than a direct attempt gets.
++    // shortcut: process-wide, so two sessions starting together share it; per-session state
++    // would have to be threaded through the race.
++    pub fn remote_relay_candidate_within(ms: u64) -> bool {
++        REMOTE_RELAY_AT
++            .lock()
++            .unwrap()
++            .map_or(false, |at| at.elapsed() < Duration::from_millis(ms))
++    }
++
+     #[inline]
+     pub fn session_key(&self) -> &str {
+         &self.session_key
+@@ -1552,6 +1606,20 @@ mod tests {
+         WebRTCStream::new("", false, 10000).await.unwrap()
+     }
+ 
++    #[test]
++    fn test_session_turn_server() {
++        // The form hbbs's crate::turn hands out: TURN REST username and base64 password, encoded.
++        let t = WebRTCStream::session_turn_server("turn://1730000300%3A123456:ab%2Bc%2F%3D@tether-desk.duckdns.org:21116")
++            .expect("credentialed session TURN");
++        assert_eq!(t.urls, vec!["turn:tether-desk.duckdns.org:21116".to_owned()]);
++        assert_eq!(t.username, "1730000300:123456");
++        assert_eq!(t.credential, "ab+c/=");
++        // Only credentialed turn:// is taken from the rendezvous server.
++        assert!(WebRTCStream::session_turn_server("").is_none());
++        assert!(WebRTCStream::session_turn_server("stun:evil.example:3478").is_none());
++        assert!(WebRTCStream::session_turn_server("turn://evil.example:3478").is_none());
++    }
++
+     #[test]
+     fn test_webrtc_ice_url() {
+         let turn = WebRTCStream::get_ice_server_from_url("turn://123:321@example.com:3478")
+@@ -2539,7 +2607,7 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
+         let builder = WEBRTC_RT
+             .as_ref()
+             .expect("WebRTC I/O runtime")
+-            .spawn(WebRTCStream::new_inner(String::new(), false, 20000))
++            .spawn(WebRTCStream::new_inner(String::new(), false, 20000, None))
+             .await
+             .expect("setup task")
+             .expect("offerer builds");
+@@ -2579,7 +2647,7 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
+         let builder = WEBRTC_RT
+             .as_ref()
+             .expect("WebRTC I/O runtime")
+-            .spawn(WebRTCStream::new_inner(String::new(), false, 20000))
++            .spawn(WebRTCStream::new_inner(String::new(), false, 20000, None))
+             .await
+             .expect("setup task")
+             .expect("offerer builds");
 diff --git a/src/websocket.rs b/src/websocket.rs
 index 3a98a84..87bfdd5 100644
 --- a/src/websocket.rs

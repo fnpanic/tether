@@ -11119,7 +11119,6 @@ dependencies = [
 [[package]]
 name = "webrtc-sctp"
 version = "0.12.0"
-source = "git+https://github.com/rustdesk-org/webrtc?rev=49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63#49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -12842,3 +12841,8 @@ dependencies = [
  "syn 3.0.9",
  "winnow 1.0.4",
 ]
+
+[[patch.unused]]
+name = "webrtc-sctp"
+version = "0.12.0"
+source = "git+https://github.com/rustdesk-org/webrtc?rev=49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63#49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63"

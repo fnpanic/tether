@@ -27,6 +27,18 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   Needs the new hbbs on the relays (forwards the WebRTC offer/answer, `socket_addr_v6`, relays
   `IceCandidate`, answers STUN; deployed to both relays 2026-11-05); new clients against an old
   hbbs simply stay on the relay.
+- **UDP relay (TURN) when no direct path forms.** hbbs now also runs a TURN server on its UDP
+  port 21116 (no new port: one shared port, `docs/stun-turn.md`). With each WebRTC offer the host
+  gets a 5-minute TURN credential from hbbs (TURN REST format; the secret is random per hbbs
+  process, nothing is stored in clients) and offers a relay candidate. Such a session beats the
+  WebSocket relay in the race (a ready relay waits up to 0.8 s more for it) and shows
+  **Relay (UDP)**. Measured with 1-5 % loss per hop: frame latency p95 62-128 ms instead of
+  95-1219 ms over TCP. No relaying to private, loopback, link-local, CGNAT or the relay's own
+  addresses; allocation, peer, bandwidth and unauthenticated-request caps. With a proxy nothing
+  changes. Needs the new hbbs (deployed to both relays 2026-11-05) and this version on both ends.
+- **Faster loss recovery on WebRTC sessions** (P2P and UDP relay): the data channel's SCTP marks a
+  chunk lost as soon as one later chunk is acknowledged (RACK, was three) and its retransmission
+  timeout floor is 40 ms (was 100 ms); our copy of the fork's SCTP is `crates/webrtc-sctp`.
 
 ### Fixed
 - **TetherQS did not notice a release published while it was running.** It checked only at start
