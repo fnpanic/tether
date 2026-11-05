@@ -397,10 +397,33 @@ pub fn open_session(app: &AppHandle, peer: &str, conn: &str) -> tauri::Result<St
     open_session_with(app, &c)
 }
 
+/// Open session windows: key, peer, connection type.
+static WINDOWS: std::sync::Mutex<Vec<(String, String, String)>> = std::sync::Mutex::new(Vec::new());
+
 /// `view_only`/`relay` are passed to the session page as `&view_only=1&relay=1`.
+/// One window per peer and connection type: a second request for it (a double-clicked Recent card,
+/// Enter pressed twice, a link opened twice) brings that window to the front instead of starting a
+/// second session, which left one window on "Connecting…" in front of the working one.
 pub fn open_session_with(app: &AppHandle, c: &cli::Connect) -> tauri::Result<String> {
     let (peer, conn) = (&c.peer, &c.conn);
-    let key = uuid::Uuid::new_v4().simple().to_string();
+    let key = {
+        let mut open = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((key, _, _)) = open.iter().find(|(_, p, c)| p == peer && c == conn) {
+            // No window yet: the first request is still building it.
+            if let Some(w) = app.get_webview_window(&sink::session_label(key)) {
+                hbb_common::log::info!("session to {peer} ({conn}) already open: focusing it");
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+            return Ok(key.clone());
+        }
+        let key = uuid::Uuid::new_v4().simple().to_string();
+        // Listed before the window exists, so two requests at once cannot both miss it. Not held
+        // while building: that waits for the main thread, whose Destroyed handler takes this lock.
+        open.push((key.clone(), peer.clone(), conn.clone()));
+        key
+    };
+    let forget = |k: &str| WINDOWS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(x, _, _)| x != k);
     let label = sink::session_label(&key);
     let mut route = format!("/session/{key}?peer={peer}&conn={conn}");
     if c.view_only {
@@ -409,15 +432,23 @@ pub fn open_session_with(app: &AppHandle, c: &cli::Connect) -> tauri::Result<Str
     if c.relay {
         route.push_str("&relay=1");
     }
-    let w = base(app, &label, &route)?
-        .fullscreen(c.fullscreen)
-        .inner_size(1280.0, 800.0)
-        .min_inner_size(640.0, 400.0)
-        .center()
-        .build()?;
+    let w = match base(app, &label, &route).and_then(|b| {
+        b.fullscreen(c.fullscreen)
+            .inner_size(1280.0, 800.0)
+            .min_inner_size(640.0, 400.0)
+            .center()
+            .build()
+    }) {
+        Ok(w) => w,
+        Err(e) => {
+            forget(&key);
+            return Err(e);
+        }
+    };
     let k = key.clone();
     w.on_window_event(move |e| {
         if let WindowEvent::Destroyed = e {
+            forget(&k);
             if let Some(s) = sink::get() {
                 s.detach_video(&k);
             }

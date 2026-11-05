@@ -4,6 +4,16 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Fixed
+- **One connect could open two session windows to the same device** (Windows technician app,
+  since the main window and `--connect`/`tether://` open sessions in the running Tether): a
+  double-clicked Recent card, Enter pressed twice or a link opened twice each started its own
+  session, and a window stuck on "Connecting…" could stay in front of the working one. A request
+  for a device that already has a session window of that type (remote control or file transfer)
+  now brings that window to the front. Regression check: `apps/desktop/e2e/connect-once-e2e.mjs`.
+
 ## [0.5.13] — 2026-11-05
 
 macOS only (Tether and TetherQS); Windows stays on 0.5.12 (no Windows change).
