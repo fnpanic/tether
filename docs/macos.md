@@ -155,6 +155,12 @@ Exceptions, which keep their own Dock icon as before:
 
 TetherQS runs its connection manager in its single process: one icon.
 
+When a session starts, the connection window minimizes (to the right side of the Dock, never
+hidden); a chat message from the technician, a new request or a click on the Tether Dock icon
+brings it back. Verified 2026-11-05 on an Apple Silicon Mac with 0.5.9: one Tether icon with a
+screen and a file transfer session, the window stays minimized when the second session starts,
+a chat message restores it on the Chat tab, a Dock click restores it.
+
 ## Retina displays
 
 A Mac host streams a Retina display at its logical size (a 3456×2234 MacBook Pro screen as
