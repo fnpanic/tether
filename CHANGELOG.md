@@ -15,6 +15,11 @@ macOS only (Tether and TetherQS); Windows stays on 0.5.12 (no Windows change).
   the keyboard" and dropped every key from the technician (with the notice "The Tether window on
   the remote computer can only be used by the person at that computer."). Keys are now dropped
   only while the active Tether also has a window on screen.
+- **Mouse and keyboard stopped reaching a Mac shortly after a session started.** macOS injects
+  remote input on Tether's main thread; with every Tether window minimized (0.5.12) App Nap
+  throttled that thread, so the first clicks worked and then nothing arrived. Tether now opts out
+  of App Nap (`NSProcessInfo beginActivity`, user-initiated, latency-critical; idle system sleep
+  stays allowed).
 
 ## [0.5.12] — 2026-11-05
 

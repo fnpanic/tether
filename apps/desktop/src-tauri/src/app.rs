@@ -87,6 +87,8 @@ pub fn run(args: Vec<String>) {
             let _ = APP.set(app.handle().clone());
             match &mode {
                 Mode::Main => {
+                    #[cfg(target_os = "macos")]
+                    librustdesk::platform::macos::disable_app_nap();
                     librustdesk::ui::api::start_status_sync();
                     main_window(app.handle())?;
                     tray(app.handle())?;

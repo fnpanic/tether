@@ -1396,6 +1396,28 @@ index f6e48a1..600a09e 100644
  pub(crate) mod update_metadata;
  pub(crate) mod update_hash;
  #[cfg(target_os = "macos")]
+diff --git a/src/platform/macos.rs b/src/platform/macos.rs
+index d321d12..0e01ef2 100644
+--- a/src/platform/macos.rs
++++ b/src/platform/macos.rs
+@@ -2215,3 +2215,17 @@ mod update_tests {
+         std::fs::remove_dir_all(test_dir).unwrap();
+     }
+ }
++
++/// Tether: remote input is injected on the main queue. With every Tether window minimized for a
++/// session, App Nap throttles that queue and the technician's mouse and keys stop arriving.
++pub fn disable_app_nap() {
++    unsafe {
++        let info: id = msg_send![class!(NSProcessInfo), processInfo];
++        let reason = NSString::alloc(nil).init_str("Remote control");
++        // NSActivityUserInitiatedAllowingIdleSystemSleep | NSActivityLatencyCritical
++        let options: u64 = 0x00EF_FFFF | 0xFF_0000_0000;
++        let token: id = msg_send![info, beginActivityWithOptions: options reason: reason];
++        // Held for the life of the process; the activity ends when the token is released.
++        let _: id = msg_send![token, retain];
++    }
++}
 diff --git a/src/rendezvous_mediator.rs b/src/rendezvous_mediator.rs
 index b1e523d..9c5fe9a 100644
 --- a/src/rendezvous_mediator.rs
