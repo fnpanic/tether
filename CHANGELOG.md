@@ -4,6 +4,21 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Changed
+- **The host window gets out of the way during a session** (TetherQS and Tether's connection
+  window on the computer being supported): when a session starts it minimizes to the taskbar
+  (Dock on macOS), never to the tray, so it can always be reopened; restored by hand it stays
+  open. A new incoming request or a recording request restores it and brings it to the front.
+- **Chat messages are always seen:** each message from the technician restores the host window,
+  switches to the Chat tab, scrolls to the message and flashes the taskbar button (no focus
+  change).
+
+### Fixed
+- Tether's connection window kept showing Accept/Decline after the user accepted an incoming
+  session; it now shows the active session.
+
 ## [0.5.8] — 2026-11-05
 
 Windows only (Tether and TetherQS); macOS stays on 0.5.7 until the next release.

@@ -103,8 +103,10 @@ impl UiSink for TauriSink {
 
     fn cm_event(&self, name: &str, payload: Value) {
         let id = payload.get("id").cloned();
-        {
+        let action = {
             let mut c = self.cm_clients.lock().unwrap();
+            let was_authorized = c.iter().any(|x| x.get("id") == id.as_ref() && x["authorized"] == true);
+            let action = window_action(name, was_authorized, &payload);
             match name {
                 "add_connection" => {
                     c.retain(|x| x.get("id") != id.as_ref());
@@ -113,15 +115,92 @@ impl UiSink for TauriSink {
                 "remove_connection" => c.retain(|x| x.get("id") != id.as_ref()),
                 _ => {}
             }
-        }
+            action
+        };
         let _ = self
             .app
             .emit_to(EventTarget::webview_window("cm"), "cm", Evt { name, payload });
-        if name == "chat" {
-            // Flash the taskbar button until the user looks; never take the focus mid-session.
-            if let Some(w) = self.app.get_webview_window("cm") {
+        if let Some(w) = self.app.get_webview_window("cm") {
+            apply(&w, action);
+        }
+    }
+}
+
+impl TauriSink {
+    /// The core does not re-announce a client after `authorize`: mirror it, so the window shows
+    /// the session and minimizes like for a client that logged in with the password.
+    pub fn cm_authorized(&self, id: i32) {
+        let client = {
+            let c = self.cm_clients.lock().unwrap();
+            c.iter().find(|x| x["id"] == id).cloned()
+        };
+        if let Some(mut client) = client {
+            client["authorized"] = Value::Bool(true);
+            self.cm_event("add_connection", client);
+        }
+    }
+}
+
+/// What the host window does on a CM event. Same rules as TetherQS (`apps/quick/src-tauri/src/sink.rs`).
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum WindowAction {
+    None,
+    /// A session just started: out of the way, but on the taskbar (not hidden, not in the tray).
+    Minimize,
+    /// Something needs an answer (new request, recording consent): restore and focus.
+    Prompt,
+    /// A chat message: restore and flash the taskbar, never take the focus mid-session.
+    Notify,
+}
+
+pub fn window_action(name: &str, was_authorized: bool, payload: &Value) -> WindowAction {
+    match name {
+        // Once per session: a re-announce of an authorized client (privacy-mode rollback) does nothing.
+        "add_connection" if payload["authorized"] == true => {
+            if was_authorized { WindowAction::None } else { WindowAction::Minimize }
+        }
+        "add_connection" | "record_consent_request" => WindowAction::Prompt,
+        "chat" => WindowAction::Notify,
+        _ => WindowAction::None,
+    }
+}
+
+fn apply(w: &tauri::WebviewWindow, action: WindowAction) {
+    match action {
+        WindowAction::None => {}
+        WindowAction::Minimize => {
+            let _ = w.show();
+            let _ = w.minimize();
+        }
+        WindowAction::Prompt | WindowAction::Notify => {
+            // Only when minimized: restoring a visible window would activate it.
+            if w.is_minimized().unwrap_or(false) {
+                let _ = w.unminimize();
+            }
+            let _ = w.show();
+            if action == WindowAction::Prompt {
+                let _ = w.set_focus();
+            } else {
                 let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn window_follows_the_session() {
+        let pending = json!({ "id": 1, "authorized": false });
+        let active = json!({ "id": 1, "authorized": true });
+        assert_eq!(window_action("add_connection", false, &pending), WindowAction::Prompt);
+        assert_eq!(window_action("add_connection", false, &active), WindowAction::Minimize);
+        assert_eq!(window_action("add_connection", true, &active), WindowAction::None);
+        assert_eq!(window_action("record_consent_request", true, &json!({ "conn_id": 1 })), WindowAction::Prompt);
+        assert_eq!(window_action("chat", true, &json!({ "id": 1, "text": "hi" })), WindowAction::Notify);
+        assert_eq!(window_action("remove_connection", true, &json!({ "id": 1 })), WindowAction::None);
     }
 }

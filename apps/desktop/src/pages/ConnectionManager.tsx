@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Clipboard, FolderSync, Keyboard, MessageSquare, Mic, RotateCcw, Send, ShieldAlert, Video } from "lucide-react";
 import { formatId, invoke, subscribe } from "../lib/ipc";
 import { Button, Logo, Modal, Segmented, TitleBar, Toggle } from "../components/ui";
@@ -57,16 +57,15 @@ export function ConnectionManager() {
         if (!since.has(p.id)) since.set(p.id, Date.now());
         setClients((cs) => [...cs.filter((c) => c.id !== p.id), p]);
         setActive(p.id);
-        bringToFront();
       } else if (e.name === "remove_connection") {
         setClients((cs) => cs.filter((c) => c.id !== p.id));
         setConsents((cs) => cs.filter((c) => c.conn_id !== p.id));
       } else if (e.name === "record_consent_request") {
         setConsents((cs) => [...cs.filter((c) => c.conn_id !== p.conn_id), p]);
-        bringToFront();
       } else if (e.name === "chat") {
-        // Attention (taskbar flash, no focus change) is requested by the backend sink.
+        // The backend sink restores the window and flashes the taskbar (no focus change).
         setChat((c) => ({ ...c, [p.id]: [...(c[p.id] ?? []), { me: false, text: p.text }] }));
+        setActive(p.id);
       }
     });
     (async () => {
@@ -150,26 +149,25 @@ function RecordConsent({ r, onAnswer }: { r: ConsentRequest; onAnswer: (allow: b
   );
 }
 
-async function bringToFront() {
-  try {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    const w = getCurrentWindow();
-    await w.show();
-    await w.setFocus();
-  } catch {
-    /* not in tauri */
-  }
-}
-
 function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs: { me: boolean; text: string }[]; onMsg: (m: { me: boolean; text: string }) => void }) {
   const elapsed = useElapsed(since);
   const [perm, setPerm] = useState(c);
   const [text, setText] = useState("");
   const [tab, setTab] = useState<"perm" | "chat">("perm");
   const [seen, setSeen] = useState(0);
+  const end = useRef<HTMLDivElement>(null);
+  const incoming = msgs.filter((m) => !m.me).length;
   useEffect(() => {
     setPerm(c);
   }, [c]);
+  // Each message from the technician opens the chat (the backend restores the window).
+  useEffect(() => {
+    if (incoming) setTab("chat");
+  }, [incoming]);
+  // Braces: scrollIntoView may return a Promise, which React would call as cleanup.
+  useEffect(() => {
+    end.current?.scrollIntoView({ block: "end" });
+  }, [tab, msgs.length]);
   useEffect(() => {
     if (tab === "chat") setSeen(msgs.length);
   }, [tab, msgs.length]);
@@ -239,6 +237,7 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
                   <div className={`max-w-[80%] rounded-2xl px-3 py-1.5 text-caption ${m.me ? "bg-accent text-white" : "bg-parchment"}`}>{m.text}</div>
                 </div>
               ))}
+              <div ref={end} />
             </div>
             <form
               className="mt-2 flex gap-2"

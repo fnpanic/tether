@@ -23,6 +23,11 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    With `security.approve-mode=password` sessions start without the card; with `click` the
    password is not shown at all. For a request or session the window moves to the bottom-right
    corner of its screen, and back to the centre when the last session ends.
+   When a session starts (after Accept, or right away when the technician used the password) the
+   window minimizes to the taskbar (Dock on macOS) once: it is never hidden or moved to a tray, so
+   the customer can always click it back. If they restore it, it stays open. A new request or a
+   recording request restores it and brings it to the front. Tether's own host window (the
+   connection manager of a Tether that is being connected to) behaves the same.
 4. During the session the card shows the technician, elapsed time, indicators (Control,
    Transferring files, REC) and a red **Disconnect** button. Permissions can be revoked at any
    time. A file transfer the technician opens from the session is part of it: no second request,
@@ -30,9 +35,9 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    random 128-bit companion secret (sent only inside the encrypted logins), and only while that
    session's **Transfer files** switch is on; switching Files off or Disconnect ends it. With
    Files off, a new file transfer is a normal request again.
-   **Chat** (tab next to Permissions on the card): the technician's first message opens it, later
-   ones show an unread badge while Permissions is shown; each one shows a short notice and flashes
-   the taskbar button (TetherQS does not take the focus). The customer can reply there.
+   **Chat** (tab next to Permissions on the card): each message from the technician restores the
+   window if it is minimized, switches to the Chat tab, shows a short notice and flashes the
+   taskbar button (TetherQS does not take the focus). The customer can reply there.
    The one-time password changes as soon as it has let someone in, so within one session nothing
    asks again: the host lets the same technician window back in with the same session key and
    companion secret after a dropped connection or a reloaded window (whether the session was

@@ -23,6 +23,8 @@ if (inTauri) {
     if (shown) return;
     shown = true;
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    // Already minimized by a session that started before the first paint.
+    if (await getCurrentWindow().isMinimized()) return;
     await getCurrentWindow().show();
     await getCurrentWindow().setFocus();
   };
