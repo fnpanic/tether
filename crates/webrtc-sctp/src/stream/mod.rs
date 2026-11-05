@@ -181,10 +181,6 @@ impl Stream {
     /// Returns `(0, PayloadProtocolIdentifier::Unknown)` if the reading half of this stream is shutdown or it (the stream) was reset.
     pub async fn read_sctp(&self, p: &mut [u8]) -> Result<(usize, PayloadProtocolIdentifier)> {
         loop {
-            if self.read_shutdown.load(Ordering::SeqCst) {
-                return Ok((0, PayloadProtocolIdentifier::Unknown));
-            }
-
             let result = {
                 let mut reassembly_queue = self.reassembly_queue.lock().await;
                 reassembly_queue.read(p)
@@ -192,6 +188,10 @@ impl Stream {
 
             match result {
                 Ok(_) | Err(Error::ErrShortBuffer { .. }) => return result,
+                // Tether: deliver what arrived before the reset/close, like TCP before its FIN.
+                Err(_) if self.read_shutdown.load(Ordering::SeqCst) => {
+                    return Ok((0, PayloadProtocolIdentifier::Unknown));
+                }
                 Err(_) => {
                     // wait for the next chunk to become available
                     self.read_notifier.notified().await;

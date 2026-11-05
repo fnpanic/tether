@@ -287,9 +287,14 @@ async function main() {
   await check("Disconnect on TetherQS ends the session; window centred again", async () => {
     await qs.getByRole("button", { name: "Disconnect" }).click();
     await until("idle", async () => (await qs.locator('[data-testid="qs-status"]').innerText()).includes("Ready"), 15000);
-    await sleep(500);
-    const r = await qs.evaluate(() => ({ x: screenX, w: outerWidth, sw: screen.availWidth }));
-    if (Math.abs(r.x + r.w / 2 - r.sw / 2) > 60) throw new Error(JSON.stringify(r));
+    // Twice: a technician that lost the close reason reconnects a few seconds later and re-docks the window.
+    for (const wait of [500, 8000]) {
+      await sleep(wait);
+      const r = await qs.evaluate(() => ({ x: screenX, w: outerWidth, sw: screen.availWidth }));
+      if (Math.abs(r.x + r.w / 2 - r.sw / 2) > 60) throw new Error(`after ${wait} ms: ${JSON.stringify(r)}`);
+      const st = await qs.locator('[data-testid="qs-status"]').innerText();
+      if (!st.includes("Ready")) throw new Error(`after ${wait} ms: ${st}`);
+    }
   });
 
   const ok = results.every((r) => r.ok);

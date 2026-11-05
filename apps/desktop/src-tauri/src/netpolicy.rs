@@ -7,8 +7,9 @@
 //!   - LAN: the viewer asks the LAN for the host (UDP broadcast lookup) beside the relay request
 //!     and tries a direct TCP connection.
 //!   - WebRTC/ICE (IPv6 direct, NAT hole punching): offer/answer/candidates travel over the
-//!     rendezvous WebSocket; STUN is the hbbs UDP port of our own relays. Never with a proxy
-//!     (the core checks per connection, both sides): ICE would leave past it.
+//!     rendezvous WebSocket; STUN is the hbbs UDP port of our own relays. With a proxy ICE runs
+//!     LAN-only (core `WebRTCStream::lan_only`: no STUN/TURN, private addresses only), so it
+//!     never passes the proxy towards the internet; each side checks per connection.
 //!   - No legacy RustDesk UDP/IPv6 punch: it needs plain UDP/TCP rendezvous instead of 443.
 //! - Otherwise sessions are relayed (WebSocket mode forces relay); end-to-end encryption between the
 //!   two peers is unchanged, the relay and any TLS-inspecting proxy only see ciphertext.

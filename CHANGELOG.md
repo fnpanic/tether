@@ -19,6 +19,26 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   and installation folder on the host.
 - macOS host: same filter, compile-unverified until the next Mac build.
 
+### Changed
+- **Direct (LAN) on the same network, also behind a proxy and for TetherQS without admin
+  rights.** A WebRTC session whose selected ICE pair runs between two private addresses
+  (RFC 1918, link-local, IPv6 ULA) is now labelled **Direct (LAN)** instead of P2P; the viewer
+  log names the pair (`WebRTC selected pair: ...`). Behind a proxy WebRTC is no longer switched
+  off but runs LAN-only: no STUN/TURN server, only private host addresses, remote candidates on
+  public addresses dropped, so nothing bypasses the proxy towards the internet and two PCs on one
+  LAN still connect directly (both sides need this version; `network.direct = off` still turns it
+  off). TetherQS without the `Tether QS` firewall rule gets its LAN path this way too: its own
+  outbound ICE checks open the stateful firewall. The LAN lookup now also sends each adapter's
+  subnet broadcast (Hyper-V / VPN adapters) and skips loopback.
+
+### Fixed
+- **Disconnect over WebRTC (P2P / Direct (LAN)) keeps the technician disconnected.** Clicking
+  Disconnect in TetherQS ended a WebRTC session with "Reset by the peer" on the technician side,
+  which then reconnected (and TetherQS docked its window again); the relay path was fine. The host
+  closed the peer connection while the close reason was still queued in SCTP, so it never arrived.
+  Closing now waits (at most 2 s) until the peer has acknowledged everything sent, and the
+  receiving side hands over data that arrived before a stream reset instead of dropping it.
+
 ## [0.5.5] — 2026-11-05
 
 ### Added

@@ -73,7 +73,7 @@ index 9ee5cac..6264678 100644
  
      pub fn reset_online() {
 diff --git a/src/stream.rs b/src/stream.rs
-index 126d08a..258b776 100644
+index 126d08a..cc10310 100644
 --- a/src/stream.rs
 +++ b/src/stream.rs
 @@ -14,6 +14,17 @@ pub enum Stream {
@@ -112,8 +112,26 @@ index 126d08a..258b776 100644
              #[allow(unreachable_patterns)]
              _ => None,
          }
+@@ -212,6 +225,17 @@ impl Stream {
+         }
+     }
+ 
++    /// Tether: whether an established WebRTC transport stays inside the LAN (logs the pair).
++    #[inline]
++    pub async fn webrtc_lan(&self) -> Option<bool> {
++        match self {
++            #[cfg(feature = "webrtc")]
++            Stream::WebRTC(s) => s.is_lan().await,
++            #[allow(unreachable_patterns)]
++            _ => None,
++        }
++    }
++
+     /// DTLS certificate fingerprint for a WebRTC stream (`local`=true for this endpoint's own
+     /// cert, false for the peer's), used to bind the channel to the signed peer identity.
+     /// Returns None for non-WebRTC transports, which authenticate via the secretbox key exchange.
 diff --git a/src/webrtc.rs b/src/webrtc.rs
-index f33f914..d2ae02e 100644
+index f33f914..d1e167f 100644
 --- a/src/webrtc.rs
 +++ b/src/webrtc.rs
 @@ -47,6 +47,8 @@ use tokio::time::{timeout, timeout_at, Instant};
@@ -125,7 +143,77 @@ index f33f914..d2ae02e 100644
  use crate::protobuf::Message;
  use crate::rx_probe::RxProbe;
  use crate::sodiumoxide::crypto::secretbox::Key;
-@@ -511,6 +513,18 @@ impl WebRTCStream {
+@@ -141,6 +143,7 @@ struct RecvState {
+ // well under the limit so header+payload never reaches the exact-65536 boundary that the
+ // receiver's reassembly would truncate with data loss.
+ const MAX_FRAGMENT_PAYLOAD: usize = 60000;
++const CLOSE_FLUSH_TIMEOUT_MS: u64 = 2000;
+ /// Receive scratch size: must be >= 1 (fragment header) + `MAX_FRAGMENT_PAYLOAD` and fit the
+ /// negotiated SCTP max message size.
+ const RECV_BUF_SIZE: usize = 64 * 1024;
+@@ -491,11 +494,56 @@ impl WebRTCStream {
+         // with no host and TURN entries with no credentials, i.e. exactly the ones that would
+         // answer `true` here while being unusable — which is worse than answering `false`, since
+         // the caller skips its "don't build a guaranteed-dead Relay-only pc" guard on our word.
+-        Self::get_ice_servers().iter().any(|s| {
+-            s.urls
+-                .iter()
+-                .any(|u| u.starts_with("turn:") || u.starts_with("turns:"))
+-        })
++        !Self::lan_only()
++            && Self::get_ice_servers().iter().any(|s| {
++                s.urls
++                    .iter()
++                    .any(|u| u.starts_with("turn:") || u.starts_with("turns:"))
++            })
++    }
++
++    /// Tether: behind a proxy (corporate rule: internet traffic only through it) ICE stays on the
++    /// LAN: no STUN/TURN servers, host candidates on private addresses only, and remote candidates
++    /// on public addresses are dropped, so no ICE packet is ever addressed to the internet. The
++    /// signalling still goes through the proxy (WSS). See docs/corporate-networks.md.
++    pub fn lan_only() -> bool {
++        config::Config::is_proxy()
++    }
++
++    /// Private (RFC 1918), link-local and IPv6 ULA addresses: what never routes over the internet.
++    /// Not CGNAT 100.64/10: that is the carrier's (or a VPN overlay's) network, not this LAN.
++    pub fn is_lan_ip(ip: IpAddr) -> bool {
++        match ip {
++            IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
++            IpAddr::V6(v6) => {
++                let s = v6.segments()[0];
++                s & 0xfe00 == 0xfc00 || s & 0xffc0 == 0xfe80
++            }
++        }
++    }
++
++    /// The address of a candidate line
++    /// (`candidate:<foundation> <component> <proto> <prio> <address> <port> typ ...`).
++    fn candidate_ip(candidate: &str) -> Option<IpAddr> {
++        candidate.split_whitespace().nth(4)?.parse().ok()
++    }
++
++    /// Whether a selected pair (`RTCIceCandidatePair` `Display`: `(local) udp host a:p <-> (remote)
++    /// udp prflx b:q`) stays inside the LAN: no TURN side and both addresses private. Peer
++    /// reflexive counts: on a LAN the peer's check often arrives before its trickled host candidate.
++    fn pair_is_lan(pair: &str) -> bool {
++        let relay = RTCIceCandidateType::Relay.to_string();
++        let mut sides = 0;
++        for side in pair.split(" <-> ") {
++            let mut t = side.split_whitespace().skip(2);
++            let (Some(typ), Some(addr)) = (t.next(), t.next()) else { return false };
++            let ip = addr.rsplit_once(':').and_then(|(ip, _)| ip.parse().ok());
++            if typ == relay || !ip.map_or(false, Self::is_lan_ip) {
++                return false;
++            }
++            sides += 1;
++        }
++        sides == 2
+     }
+ 
+     #[inline]
+@@ -511,6 +559,18 @@ impl WebRTCStream {
          ))
      }
  
@@ -144,7 +232,7 @@ index f33f914..d2ae02e 100644
      /// The default UDP STUN servers as bare `host:port`, for application-level address probes.
      pub fn default_stun_servers() -> Vec<String> {
          DEFAULT_ICE_SERVERS
-@@ -573,12 +587,24 @@ impl WebRTCStream {
+@@ -573,12 +633,24 @@ impl WebRTCStream {
          remote_endpoint: &str,
          force_relay: bool,
          ms_timeout: u64,
@@ -170,7 +258,7 @@ index f33f914..d2ae02e 100644
              .await
              .map_err(|err| anyhow::anyhow!("WebRTC setup task failed: {}", err))??
              .into_inner()
-@@ -589,6 +615,7 @@ impl WebRTCStream {
+@@ -589,6 +661,7 @@ impl WebRTCStream {
          remote_endpoint: String,
          force_relay: bool,
          ms_timeout: u64,
@@ -178,7 +266,7 @@ index f33f914..d2ae02e 100644
      ) -> ResultType<NewStreamHandoff> {
          // The endpoint contains a Base64-encoded SDP with host addresses and live ICE
          // credentials. Log only its size so debug logs cannot disclose that information.
-@@ -639,6 +666,14 @@ impl WebRTCStream {
+@@ -639,25 +712,46 @@ impl WebRTCStream {
          if !remote_endpoint.is_empty() {
              s.set_ice_max_binding_requests(Some(Self::ICE_MAX_BINDING_REQUESTS));
          }
@@ -193,7 +281,19 @@ index f33f914..d2ae02e 100644
          // fe80::/10 can only be bound together with a scope id, which `IpAddr` cannot carry, so
          // gathering one never yields a candidate - only a failed bind and a warning per address.
          // Spelled out because `is_unicast_link_local` is not stable on our MSRV.
-@@ -651,13 +686,17 @@ impl WebRTCStream {
+-        s.set_ip_filter(Box::new(|ip: IpAddr| match ip {
+-            IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 != 0xfe80,
+-            IpAddr::V4(_) => true,
++        let lan_only = Self::lan_only();
++        if lan_only && force_relay {
++            return Err(anyhow::anyhow!("WebRTC: relay-only ICE is not possible behind a proxy"));
++        }
++        s.set_ip_filter(Box::new(move |ip: IpAddr| match ip {
++            IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80 => false,
++            _ => !lan_only || Self::is_lan_ip(ip),
+         }));
+ 
+         // KCP's nc=1 profile by default, with the same opt-in to a congestion window as
          // `allow-kcp-congestion-control`, for the reason given at `get_kcp_cc_enabled`. Set per
          // connection so the option takes effect on the next session, not the next start.
          webrtc::sctp::association::set_no_congestion_control(!Self::get_cc_enabled());
@@ -208,14 +308,40 @@ index f33f914..d2ae02e 100644
          // Prepare the configuration, get ICE servers from config
          let config = RTCConfiguration {
 -            ice_servers: Self::get_ice_servers(),
-+            ice_servers: Self::get_ice_servers().into_iter().chain(turn).collect(),
++            ice_servers: if lan_only {
++                log::info!("WebRTC LAN-only (proxy configured): host candidates, no STUN/TURN");
++                Vec::new()
++            } else {
++                Self::get_ice_servers().into_iter().chain(turn).collect()
++            },
              ice_transport_policy: if force_relay {
                  RTCIceTransportPolicy::Relay
              } else {
-@@ -1113,10 +1152,25 @@ impl WebRTCStream {
+@@ -1102,6 +1196,16 @@ impl WebRTCStream {
+         Some(remote.split_whitespace().nth(3)?.matches(':').count() > 1)
+     }
+ 
++    /// Tether: whether the nominated pair stays inside the LAN (`pair_is_lan`); logs the pair,
++    /// the one place that says which path a session really took. `None` before one is selected.
++    pub async fn is_lan(&self) -> Option<bool> {
++        let dtls = self.pc.sctp().transport();
++        let pair = dtls.ice_transport().get_selected_candidate_pair().await?.to_string();
++        let lan = Self::pair_is_lan(&pair);
++        log::info!("WebRTC selected pair: {pair} (lan: {lan})");
++        Some(lan)
++    }
++
+     #[inline]
+     pub fn take_local_ice_rx(&self) -> Option<mpsc::UnboundedReceiver<String>> {
+         self.local_ice_rx.lock().ok().and_then(|mut rx| rx.take())
+@@ -1113,10 +1217,29 @@ impl WebRTCStream {
              return Ok(());
          }
          let candidate = serde_json::from_str::<RTCIceCandidateInit>(candidate_json)?;
++        if Self::lan_only() && !Self::candidate_ip(&candidate.candidate).map_or(false, Self::is_lan_ip) {
++            log::debug!("WebRTC LAN-only: dropped a remote candidate outside the LAN");
++            return Ok(());
++        }
 +        let relay = candidate.candidate.contains(" typ relay");
          self.pc.add_ice_candidate(candidate).await?;
 +        if relay {
@@ -238,10 +364,67 @@ index f33f914..d2ae02e 100644
      #[inline]
      pub fn session_key(&self) -> &str {
          &self.session_key
-@@ -1552,6 +1606,20 @@ mod tests {
+@@ -1155,7 +1278,9 @@ impl WebRTCStream {
+             return;
+         };
+         let pc = self.pc.clone();
++        let dc = self.stream.clone();
+         rt.spawn(async move {
++            Self::flush_before_close(&pc, &dc).await;
+             if let Err(err) = pc.close().await {
+                 log::debug!("WebRTC close failed: {}", err);
+             }
+@@ -1163,6 +1288,20 @@ impl WebRTCStream {
+         });
+     }
+ 
++    /// `write` returns once SCTP has queued the data, and `pc.close()` drops whatever the peer has
++    /// not acknowledged yet - typically the close reason sent just before a session ends, which
++    /// leaves the peer reading "Reset by the peer" and reconnecting. Bounded: a dead peer never acks.
++    async fn flush_before_close(pc: &RTCPeerConnection, dc: &Mutex<Arc<RTCDataChannel>>) {
++        let dc = dc.lock().await.clone();
++        let deadline = Instant::now() + Duration::from_millis(CLOSE_FLUSH_TIMEOUT_MS);
++        while pc.connection_state() == RTCPeerConnectionState::Connected
++            && dc.buffered_amount().await > 0
++            && Instant::now() < deadline
++        {
++            tokio::time::sleep(Duration::from_millis(10)).await;
++        }
++    }
++
+     #[inline]
+     pub fn close_detached(&self) {
+         self.close_detached_with(());
+@@ -1552,6 +1691,46 @@ mod tests {
          WebRTCStream::new("", false, 10000).await.unwrap()
      }
  
++    #[test]
++    fn tether_pair_classification() {
++        let lan = WebRTCStream::pair_is_lan;
++        assert!(lan("(local) udp host 172.30.240.1:50000 <-> (remote) udp host 172.30.252.30:61000"));
++        assert!(lan("(local) udp host 192.168.178.30:5000 <-> (remote) udp prflx 10.0.0.7:6000"));
++        assert!(lan("(local) udp host fd12::5:5000 <-> (remote) udp host fd12::7:6000"));
++        // Public on either side, TURN, CGNAT, or garbage: not the LAN.
++        assert!(!lan("(local) udp srflx 85.1.2.3:5000 <-> (remote) udp host 192.168.1.2:6000"));
++        assert!(!lan("(local) udp host 192.168.1.2:5000 <-> (remote) udp srflx 2a01:4f8::1:6000"));
++        assert!(!lan("(local) udp relay 10.0.0.1:5000 <-> (remote) udp host 10.0.0.2:6000"));
++        assert!(!lan("(local) udp host 100.64.0.1:5000 <-> (remote) udp host 100.64.0.2:6000"));
++        assert!(!lan("(local) udp host 10.0.0.1:5000"));
++        assert!(!lan(""));
++        let ip = |c: &str| WebRTCStream::candidate_ip(c);
++        assert_eq!(
++            ip("candidate:1 1 udp 2130706431 192.168.1.5 5000 typ host").map(WebRTCStream::is_lan_ip),
++            Some(true)
++        );
++        assert_eq!(
++            ip("candidate:2 1 udp 1694498815 85.1.2.3 5000 typ srflx raddr 0.0.0.0 rport 0")
++                .map(WebRTCStream::is_lan_ip),
++            Some(false)
++        );
++        assert_eq!(ip("candidate:3 1 udp 1 abc.local 5000 typ host"), None);
++    }
++
 +    #[test]
 +    fn test_session_turn_server() {
 +        // The form hbbs's crate::turn hands out: TURN REST username and base64 password, encoded.
@@ -259,7 +442,7 @@ index f33f914..d2ae02e 100644
      #[test]
      fn test_webrtc_ice_url() {
          let turn = WebRTCStream::get_ice_server_from_url("turn://123:321@example.com:3478")
-@@ -2539,7 +2607,7 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
+@@ -2539,7 +2718,7 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
          let builder = WEBRTC_RT
              .as_ref()
              .expect("WebRTC I/O runtime")
@@ -268,7 +451,7 @@ index f33f914..d2ae02e 100644
              .await
              .expect("setup task")
              .expect("offerer builds");
-@@ -2579,7 +2647,7 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
+@@ -2579,7 +2758,7 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
          let builder = WEBRTC_RT
              .as_ref()
              .expect("WebRTC I/O runtime")
@@ -277,6 +460,31 @@ index f33f914..d2ae02e 100644
              .await
              .expect("setup task")
              .expect("offerer builds");
+@@ -2726,6 +2905,24 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
+         answerer.close().await;
+     }
+ 
++    // The host's Disconnect: send the close reason, then drop the stream. The last message must
++    // reach the peer before the EOF, or it reads "Reset by the peer" and reconnects.
++    #[tokio::test(flavor = "multi_thread")]
++    async fn test_last_message_survives_drop() {
++        let (mut offerer, mut answerer) = connect_loopback().await;
++        let big = vec![7u8; 600_000]; // many fragments, more than the SCTP window
++        answerer.send_raw(big.clone()).await.unwrap();
++        answerer.send_raw(b"close reason".to_vec()).await.unwrap();
++        drop(crate::Stream::WebRTC(answerer));
++        for want in [&big[..], b"close reason"] {
++            match timeout(Duration::from_secs(10), offerer.next()).await {
++                Ok(Some(Ok(b))) => assert_eq!(&b[..], want),
++                other => panic!("message lost before EOF: {:?}", other.map(|o| o.map(|r| r.map(|b| b.len())))),
++            }
++        }
++        offerer.close().await;
++    }
++
+     // The peer-initiated end: `next()` hits EOF and fires its own `close_detached` before the
+     // session's final close (here via `Stream`'s Drop) is issued. Both land on the serialized
+     // closer thread, so the first runs to completion and the second is a benign no-op — the pc
 diff --git a/src/websocket.rs b/src/websocket.rs
 index 3a98a84..87bfdd5 100644
 --- a/src/websocket.rs

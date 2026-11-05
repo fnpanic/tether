@@ -490,7 +490,7 @@ index 137d648..c6fa75e 100644
                  return s;
              }
 diff --git a/src/client.rs b/src/client.rs
-index 597dc86..a246efd 100644
+index 597dc86..84cd39f 100644
 --- a/src/client.rs
 +++ b/src/client.rs
 @@ -114,6 +114,8 @@ const MAX_DECODE_FAIL_COUNTER: usize = 3;
@@ -766,7 +766,30 @@ index 597dc86..a246efd 100644
          // Same relay gate as the v6 socket below: under any forced relay the v6 punch cannot
          // be used, so probing v6 reachability is wasted work on every such connection.
          if crate::get_ipv6_punch_enabled() && !interface.is_force_relay() {
-@@ -1072,6 +1304,7 @@ impl Client {
+@@ -603,17 +835,15 @@ impl Client {
+ 
+     /// Whether to build a WebRTC offerer for this connection.
+     ///
+-    /// A SOCKS proxy rules it out: ICE binds its own UDP sockets and speaks STUN directly, past
+-    /// the proxy and with the real IP. Relay-by-policy without TURN rules it out too, since
+-    /// Relay-only ICE can then gather nothing. WebSocket does not: it tunnels only the signaling
+-    /// and relay legs, so the offer keeps full ICE and direct is exactly what it is there for.
++    /// Tether: a proxy no longer rules it out: ICE then runs LAN-only (`WebRTCStream::lan_only`:
++    /// no STUN/TURN, private addresses only), so nothing passes the proxy. Relay-by-policy without
++    /// TURN rules it out, since Relay-only ICE can then gather nothing (behind a proxy never TURN).
++    /// WebSocket does not: it tunnels only the signaling and relay legs, so the offer keeps full
++    /// ICE and direct is exactly what it is there for.
+     fn should_create_webrtc_offerer(interface: &impl Interface) -> bool {
+         if !crate::get_webrtc_enabled() {
+             return false;
+         }
+-        if Config::is_proxy() {
+-            return false;
+-        }
+         if interface.is_policy_relay() && !WebRTCStream::has_turn_server() {
+             return false;
+         }
+@@ -1072,6 +1302,7 @@ impl Client {
                              }
                          }
                          signed_id_pk = rr.pk().into();
@@ -774,7 +797,7 @@ index 597dc86..a246efd 100644
                          let mut webrtc_bridge_stop = None;
                          let mut webrtc_for_connect = None;
                          if !rr.webrtc_sdp_answer.is_empty() {
-@@ -1172,20 +1405,69 @@ impl Client {
+@@ -1172,20 +1403,69 @@ impl Client {
                                  connect_futures.push(webrtc_fut);
                                  select_ok(connect_futures).await.map(|r| r.0)
                              } else {
@@ -847,7 +870,7 @@ index 597dc86..a246efd 100644
                          };
                          if let Some(stop) = webrtc_bridge_stop {
                              let _ = stop.send(());
-@@ -1195,7 +1477,12 @@ impl Client {
+@@ -1195,7 +1475,12 @@ impl Client {
                          let (mut conn, kcp, mut typ, mut direct) = race_result?;
                          feedback = rr.feedback;
                          log::info!("{:?} used to establish {typ} connection", start.elapsed());
@@ -861,7 +884,7 @@ index 597dc86..a246efd 100644
                              &peer,
                              signed_id_pk.clone(),
                              &key,
-@@ -1249,6 +1536,7 @@ impl Client {
+@@ -1249,6 +1534,7 @@ impl Client {
                                  pk
                              }
                              Err(e) => return Err(e),
@@ -869,7 +892,7 @@ index 597dc86..a246efd 100644
                          };
                          // `direct` came from the winning future, which resolved it while the pc was
                          // definitely alive — the race needed it to pick a winner at all.
-@@ -1697,7 +1985,14 @@ impl Client {
+@@ -1697,7 +1983,14 @@ impl Client {
                  return Ok(option_pk);
              }
          };
@@ -885,7 +908,7 @@ index 597dc86..a246efd 100644
              Some(res) => {
                  let bytes = res?;
                  if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
-@@ -2851,6 +3146,8 @@ pub struct LoginConfigHandler {
+@@ -2851,6 +3144,8 @@ pub struct LoginConfigHandler {
      pub version: i64,
      features: Option<Features>,
      pub session_id: u64, // used for local <-> server communication
@@ -894,7 +917,7 @@ index 597dc86..a246efd 100644
      pub supported_encoding: SupportedEncoding,
      restarting_remote_device: bool,
      // Start time of the restart grace window. On Windows the peer may briefly
-@@ -2972,6 +3269,7 @@ impl LoginConfigHandler {
+@@ -2972,6 +3267,7 @@ impl LoginConfigHandler {
              }
          }
          self.session_id = sid;
@@ -902,6 +925,19 @@ index 597dc86..a246efd 100644
          self.supported_encoding = Default::default();
          self.clear_restarting_remote_device();
          // Three scopes: what was decided about this PEER, what this CLIENT is set up as (proxy),
+@@ -2980,8 +3276,10 @@ impl LoginConfigHandler {
+         self.peer_relay =
+             config::option2bool("force-always-relay", &self.get_option("force-always-relay"))
+                 || force_relay;
+-        self.policy_relay = self.peer_relay || Config::is_proxy();
+-        self.force_relay = self.policy_relay || use_ws();
++        // Tether: a proxy forces the classic punch paths onto the relay but not ICE, which then
++        // runs LAN-only (`WebRTCStream::lan_only`); the LAN race stays on too.
++        self.policy_relay = self.peer_relay;
++        self.force_relay = self.policy_relay || use_ws() || Config::is_proxy();
+         if let Some((real_id, server, key)) = &self.other_server {
+             let other_server_key = self.get_option("other-server-key");
+             if !other_server_key.is_empty() && key.is_empty() {
 @@ -3002,6 +3300,12 @@ impl LoginConfigHandler {
          self.shared_password = shared_password;
          self.record_state = false;
@@ -1057,7 +1093,7 @@ index 597dc86..a246efd 100644
  mod webrtc_race_tests {
      use super::race_transports_prefer_webrtc;
 diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
-index 1b197a8..54b5e4c 100644
+index 1b197a8..79dc7d5 100644
 --- a/src/client/io_loop.rs
 +++ b/src/client/io_loop.rs
 @@ -14,6 +14,9 @@ use crate::{
@@ -1070,7 +1106,19 @@ index 1b197a8..54b5e4c 100644
  const KCP_CLOSE_REASON_FLUSH_DELAY: Duration = Duration::from_millis(30);
  // Deadline for the parting close-reason send once the peer is presumed gone; KCP waits for send
  // capacity with no deadline of its own.
-@@ -288,6 +291,9 @@ impl<T: InvokeUiSession> Remote<T> {
+@@ -230,7 +233,10 @@ impl<T: InvokeUiSession> Remote<T> {
+                 // Only WebRTC needs refining: its label names the transport that won the race,
+                 // not the family ICE ended up nominating, and it is the one path where the two
+                 // can disagree with the address the rendezvous observed.
+-                let stream_type = if peer.webrtc_remote_ipv6().await.unwrap_or(false) {
++                // Tether: a pair between two private addresses is the LAN, whatever won the race.
++                let stream_type = if peer.webrtc_lan().await.unwrap_or(false) {
++                    "WebRTC/LAN"
++                } else if peer.webrtc_remote_ipv6().await.unwrap_or(false) {
+                     "WebRTC/IPv6"
+                 } else {
+                     stream_type
+@@ -288,6 +294,9 @@ impl<T: InvokeUiSession> Remote<T> {
                  let mut last_recv_time = Instant::now();
                  let mut webrtc_suspect_since: Option<Instant> = None;
                  let mut last_rx_progress = peer.rx_progress();
@@ -1080,7 +1128,7 @@ index 1b197a8..54b5e4c 100644
                  let mut peer_gone = false;
  
                  loop {
-@@ -360,6 +366,27 @@ impl<T: InvokeUiSession> Remote<T> {
+@@ -360,6 +369,27 @@ impl<T: InvokeUiSession> Remote<T> {
                              // given one, so they are inert here.
                              let progressed = rx_progress != last_rx_progress;
                              last_rx_progress = rx_progress;
@@ -1108,7 +1156,7 @@ index 1b197a8..54b5e4c 100644
                              if peer.webrtc_disconnected() && !progressed {
                                  webrtc_suspect_since.get_or_insert_with(Instant::now);
                              } else {
-@@ -1315,6 +1342,20 @@ impl<T: InvokeUiSession> Remote<T> {
+@@ -1315,6 +1345,20 @@ impl<T: InvokeUiSession> Remote<T> {
                  }
              }
              Data::RecordScreen(start) => {
@@ -1129,7 +1177,7 @@ index 1b197a8..54b5e4c 100644
                  self.handler.lc.write().unwrap().record_state = start;
                  self.update_record_state();
              }
-@@ -1706,6 +1747,10 @@ impl<T: InvokeUiSession> Remote<T> {
+@@ -1706,6 +1750,10 @@ impl<T: InvokeUiSession> Remote<T> {
                      }
                      self.video_format = CodecFormat::from(&vf);
  
@@ -1205,7 +1253,7 @@ index aac220b..2b67671 100644
          Config::get_option("api-server"),
          Config::get_option("custom-rendezvous-server"),
 diff --git a/src/lan.rs b/src/lan.rs
-index 2a648aa..4619d27 100644
+index 2a648aa..a5c5eb2 100644
 --- a/src/lan.rs
 +++ b/src/lan.rs
 @@ -25,6 +25,12 @@ type Message = RendezvousMessage;
@@ -1243,7 +1291,7 @@ index 2a648aa..4619d27 100644
                          if p.cmd == "ping"
                              && config::option2bool(
                                  "enable-lan-discovery",
-@@ -104,6 +125,67 @@ pub fn send_wol(id: String) {
+@@ -104,6 +125,85 @@ pub fn send_wol(id: String) {
      }
  }
  
@@ -1270,9 +1318,27 @@ index 2a648aa..4619d27 100644
 +    });
 +    let out = msg.write_to_bytes().ok()?;
 +    let to = SocketAddr::from(([255, 255, 255, 255], get_broadcast_port()));
++    // Also each subnet's directed broadcast, from the socket bound on that subnet: Windows may send
++    // 255.255.255.255 out of one adapter only, which misses Hyper-V/VPN adapters (vEthernet).
++    let directed: Vec<(Ipv4Addr, Ipv4Addr)> = default_net::get_interfaces()
++        .iter()
++        .flat_map(|i| i.ipv4.clone())
++        .filter(|n| !n.addr.is_loopback() && n.prefix_len > 0 && n.prefix_len < 31)
++        .map(|n| (n.addr, Ipv4Addr::from(u32::from(n.addr) | !u32::from(n.netmask))))
++        .collect();
 +    let send = || {
 +        for s in &sockets {
++            let local = match s.local_addr() {
++                Ok(SocketAddr::V4(a)) => *a.ip(),
++                _ => Ipv4Addr::UNSPECIFIED,
++            };
++            if local.is_loopback() {
++                continue;
++            }
 +            s.send_to(&out, to).ok();
++            for (_, b) in directed.iter().filter(|(ip, _)| *ip == local) {
++                s.send_to(&out, SocketAddr::from((*b, get_broadcast_port()))).ok();
++            }
 +        }
 +    };
 +    for s in &sockets {
@@ -1331,7 +1397,7 @@ index f6e48a1..600a09e 100644
  pub(crate) mod update_hash;
  #[cfg(target_os = "macos")]
 diff --git a/src/rendezvous_mediator.rs b/src/rendezvous_mediator.rs
-index b1e523d..90dc33a 100644
+index b1e523d..18ec23e 100644
 --- a/src/rendezvous_mediator.rs
 +++ b/src/rendezvous_mediator.rs
 @@ -264,6 +264,18 @@ async fn wait_for_retry(delay: f32, restarted: tokio::sync::futures::Notified<'_
@@ -1542,19 +1608,27 @@ index b1e523d..90dc33a 100644
          let answer = stream.local_endpoint().to_owned();
          let session_key = stream.session_key().to_owned();
          let return_route = ph.socket_addr.clone();
-@@ -1077,7 +1154,10 @@ impl RendezvousMediator {
-         // A proxy still rules it out — ICE would bypass it and leak the real IP.
+@@ -1074,10 +1151,16 @@ impl RendezvousMediator {
+         // No enable-webrtc check here: it is LocalConfig, which the UI process writes and never
+         // syncs over IPC, so this (server) process would read the private-server default of "N"
+         // and refuse to answer in exactly the self-hosted deployments the transport is for.
+-        // A proxy still rules it out — ICE would bypass it and leak the real IP.
++        // Tether: a proxy does not rule it out — ICE then runs LAN-only (`WebRTCStream::lan_only`,
++        // no STUN/TURN, private addresses only), which never passes the proxy; Relay-only ICE
++        // cannot work that way, so it is refused.
++        let lan_only = WebRTCStream::lan_only();
          let webrtc_viable = !ph.webrtc_sdp_offer.is_empty()
-             && !Config::is_proxy()
+-            && !Config::is_proxy()
 -            && (!webrtc_relay_only || WebRTCStream::has_turn_server());
-+            && (!webrtc_relay_only || WebRTCStream::has_turn_server() || !ph.turn_server.is_empty());
++            && (!webrtc_relay_only
++                || (!lan_only && (WebRTCStream::has_turn_server() || !ph.turn_server.is_empty())));
 +        // Tether: policy network.direct = off keeps this host on the relay.
 +        #[cfg(feature = "tauri")]
 +        let webrtc_viable = webrtc_viable && crate::client::direct_enabled();
          let webrtc_sdp_answer = if webrtc_viable {
              self.spawn_webrtc_answerer(
                  &ph,
-@@ -1341,7 +1421,7 @@ impl RendezvousMediator {
+@@ -1341,7 +1424,7 @@ impl RendezvousMediator {
      }
  }
  
@@ -1563,7 +1637,7 @@ index b1e523d..90dc33a 100644
      let mut port = Config::get_option("direct-access-port")
          .parse::<i32>()
          .unwrap_or(0);
-@@ -1404,7 +1484,8 @@ async fn direct_server(server: ServerPtr) {
+@@ -1404,7 +1487,8 @@ async fn direct_server(server: ServerPtr) {
                              server,
                              hbb_common::Stream::from(stream, local_addr),
                              addr,
@@ -1573,7 +1647,7 @@ index b1e523d..90dc33a 100644
                              ConnectionMeta::default(), // Direct connections don't have server-side user context.
                          )
                          .await
-@@ -1737,6 +1818,17 @@ mod tests {
+@@ -1737,6 +1821,17 @@ mod tests {
      };
      use hbb_common::protobuf::Message as _;
  
