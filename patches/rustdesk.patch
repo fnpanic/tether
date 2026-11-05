@@ -2198,10 +2198,10 @@ index 5a392bb..88e3e5b 100644
      super::uinput::prepare_layout(evt);
 diff --git a/src/server/own_ui_guard.rs b/src/server/own_ui_guard.rs
 new file mode 100644
-index 0000000..437016f
+index 0000000..a8fcbb1
 --- /dev/null
 +++ b/src/server/own_ui_guard.rs
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,731 @@
 +//! Tether: input from a remote session never reaches Tether's own windows on this computer (the
 +//! incoming-connection window, TetherQS, the main window, Tether Manage). Only the person at the
 +//! computer can use them, so a technician cannot grant themselves permissions, approve consent
@@ -2715,7 +2715,49 @@ index 0000000..437016f
 +                return 0;
 +            }
 +            let pid: i32 = msg_send![app, processIdentifier];
-+            pid.max(0) as u32
++            let pid = pid.max(0) as u32;
++            // Tether stays the active app after it minimizes its windows for a session; keys then
++            // reach no Tether window and must pass.
++            if pid != 0 && !has_window_on_screen(pid) {
++                return 0;
++            }
++            pid
++        }
++    }
++
++    /// An on-screen window of `pid` that takes keys: normal or floating level, not the menu-bar
++    /// status item (level 25) or other system levels, visible and not a 1x1 helper.
++    fn has_window_on_screen(pid: u32) -> bool {
++        unsafe {
++            let list = CGWindowListCopyWindowInfo(
++                kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
++                kCGNullWindowID,
++            );
++            if list.is_null() {
++                return true;
++            }
++            let keys: [id; 2] = ["Width", "Height"].map(|k| NSString::alloc(nil).init_str(k));
++            let mut found = false;
++            for i in 0..CFArrayGetCount(list) {
++                let w: id = CFArrayGetValueAtIndex(list, i) as _;
++                if num(w, kCGWindowOwnerPID as id).unwrap_or(0.) as u32 != pid {
++                    continue;
++                }
++                let layer = num(w, kCGWindowLayer as id).unwrap_or(0.);
++                if !(0. ..20.).contains(&layer) || num(w, kCGWindowAlpha as id).unwrap_or(1.) <= 0. {
++                    continue;
++                }
++                let b: id = msg_send![w, objectForKey: kCGWindowBounds as id];
++                if b != nil && num(b, keys[0]).unwrap_or(0.) > 1. && num(b, keys[1]).unwrap_or(0.) > 1. {
++                    found = true;
++                    break;
++                }
++            }
++            for k in keys {
++                let _: () = msg_send![k, release];
++            }
++            core_foundation::base::CFRelease(list as _);
++            found
 +        }
 +    }
 +

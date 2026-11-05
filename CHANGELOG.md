@@ -4,6 +4,18 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.5.13] — 2026-11-05
+
+macOS only (Tether and TetherQS); Windows stays on 0.5.12 (no Windows change).
+
+### Fixed
+- **A Mac could not be controlled by keyboard after a session started.** Since 0.5.12 the host
+  minimizes its Tether windows when a session starts, but Tether stays the active app. The
+  protection of Tether's own windows treated "Tether is the active app" as "a Tether window has
+  the keyboard" and dropped every key from the technician (with the notice "The Tether window on
+  the remote computer can only be used by the person at that computer."). Keys are now dropped
+  only while the active Tether also has a window on screen.
+
 ## [0.5.12] — 2026-11-05
 
 ### Fixed
