@@ -6,6 +6,13 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Changed
+- **Main window:** the recordings list moved out of the main window into **Recordings**, opened
+  with the new camera button next to Settings in the title bar (Settings-style dialog, same
+  features: Play, Show in folder, Delete, Open folder, folder path, live updates). The main
+  window no longer scrolls: This device and Remote device always sit side by side and only the
+  Recent list scrolls.
+
 ### Fixed
 - Session window: minimized from full screen (toolbar Full screen, then Minimize), it comes back in
   full screen when restored from the taskbar or Dock instead of as a normal window. A maximized

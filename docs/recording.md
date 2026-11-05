@@ -2,9 +2,10 @@
 
 ## Where are my recordings?
 
-- **On the main window, under "Recordings"** (below Recent): every recording with date, device name and
-  ID, length and size. Each row has **Play** (opens in your default video player), **Show in folder**
-  and **Delete**. **Open folder** opens the folder itself.
+- **The camera button in the main window's title bar** (next to Settings) opens **Recordings**: every
+  recording with date, device name and ID, length and size, and the folder in use. Each row has **Play** (opens in your default video player), **Show in folder**
+  and **Delete**. **Open folder** opens the folder itself. The list updates when a recording is saved.
+  With recording turned off by policy, the button only shows while there are recordings left.
 - **When a recording stops**, every open Tether window shows a card "Recording saved" with the file name,
   **Open** and **Show in folder**. With an upload configured it also shows "Uploading to …", then
   "Uploaded" or "Upload failed" (Tether retries at the next session or start).
