@@ -27,7 +27,12 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    window minimizes to the taskbar (Dock on macOS) once: it is never hidden or moved to a tray, so
    the customer can always click it back. If they restore it, it stays open. A new request or a
    recording request restores it and brings it to the front. Tether's own host window (the
-   connection manager of a Tether that is being connected to) behaves the same.
+   connection manager of a Tether that is being connected to) behaves the same, and its main
+   window minimizes with it. On Windows the Tether connection window has its own taskbar button
+   (own AppUserModelID `<identifier>.cm`), so a click on it restores or minimizes it like
+   TetherQS's single window; the main window keeps its own button and stays minimized. (Up to
+   0.5.11 both windows shared one grouped button, whose click only showed thumbnails.) On macOS
+   see [macos.md](macos.md#windows-and-the-dock).
 4. During the session the card shows the technician, elapsed time, indicators (Control,
    Transferring files, REC) and a red **Disconnect** button. Permissions can be revoked at any
    time. A file transfer the technician opens from the session is part of it: no second request,

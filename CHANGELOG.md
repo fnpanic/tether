@@ -4,6 +4,17 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Fixed
+- **Host windows during a session:** when someone connects, the main window now minimizes
+  together with the connection window. On Windows the connection window has its own taskbar
+  button, so a click on it restores and minimizes it (before, both windows shared one grouped
+  button whose click only showed thumbnails, so neither could be minimized from the taskbar). On
+  macOS a click on the Dock icon during a session toggles only the connection window (minimize
+  when shown, restore when minimized, any number of times) instead of only ever restoring it.
+  Chat, a new request and a recording request still bring the connection window back.
+
 ## [0.5.11] — 2026-11-05
 
 ### Changed

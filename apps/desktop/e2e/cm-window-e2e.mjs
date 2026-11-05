@@ -1,5 +1,7 @@
 // Host connection window (--cm) during a session: minimized to the taskbar once the session
-// starts, restored with the Chat tab open when the technician writes, restored for a new request.
+// starts (with the main window), minimizable again any number of times (title-bar button and
+// taskbar WM_SYSCOMMAND), restored with the Chat tab open when the technician writes, restored
+// for a new request. `--cm` is started like the installed service does (SW_HIDE startup info).
 //
 //   node e2e/cm-window-e2e.mjs --exe C:\cargo-target\cmwin\debug\tether.exe   (debug build: TETHER_DEV_PASSWORD)
 //
@@ -43,8 +45,8 @@ const ipc = (p, cmd, args) => p.evaluate(([c, a]) => window.__TAURI_INTERNALS__.
 const text = (p) => p.evaluate(() => document.body.innerText);
 
 // stdio ignored: execFileSync would otherwise wait for the started app (see direct-e2e.mjs).
-const hidden = (args, env) =>
-  execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", HIDDEN, "-Exe", opt.exe, "-Args", args, "-Desktop", DESK], {
+const hidden = (args, env, show = -1) =>
+  execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", HIDDEN, "-Exe", opt.exe, "-Args", args, "-Desktop", DESK, ...(show >= 0 ? ["-Show", String(show)] : [])], {
     env: { ...process.env, ...env },
     stdio: "ignore",
   });
@@ -52,11 +54,14 @@ const hidden = (args, env) =>
 const killAll = (filter = "") =>
   execFileSync("powershell", ["-NoProfile", "-Command", `Get-CimInstance Win32_Process -Filter "Name='tether.exe'" | Where-Object { $_.ExecutablePath -eq '${opt.exe}' ${filter} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`], { stdio: "ignore" });
 
-// Win32 view of the cm window (the process started with --cm from this exe): IsIconic / IsWindowVisible.
-function win32Cm() {
+// Win32 view of our own windows on the hidden desktop: the "Tauri Window" of the process of this
+// exe whose command line matches (`--cm` = connection window, none = main window).
+const CM = "-and $_.CommandLine -like '*--cm*'";
+const MAIN = "-and $_.CommandLine -notlike '*--*'";
+function win32(filter, op = "probe", arg = 0) {
   const ps = `
 Add-Type -TypeDefinition @'
-using System; using System.Collections.Generic; using System.Runtime.InteropServices;
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text; using System.Threading;
 public static class W {
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern IntPtr OpenDesktop(string n, int f, bool i, uint a);
@@ -64,28 +69,45 @@ public static class W {
   [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
-  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint c);
-  public static string Probe(string desk, int want) {
-    var res = new List<string>();
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  public static IntPtr Find(string desk, int want) {
+    IntPtr r = IntPtr.Zero;
     IntPtr d = OpenDesktop(desk, 0, false, 0x0041); // DESKTOP_READOBJECTS | DESKTOP_ENUMERATE
-    EnumDesktopWindows(d, (h, l) => { int pid; GetWindowThreadProcessId(h, out pid);
-      if (pid == want && GetWindow(h, 4) == IntPtr.Zero && GetWindowTextLength(h) > 0) // GW_OWNER: top-level only
-        res.Add("{\\"iconic\\":" + (IsIconic(h) ? "true" : "false") + ",\\"visible\\":" + (IsWindowVisible(h) ? "true" : "false") + "}");
-      return true; }, IntPtr.Zero);
-    return "[" + string.Join(",", res) + "]";
+    EnumDesktopWindows(d, (h, l) => { int pid; GetWindowThreadProcessId(h, out pid); var c = new StringBuilder(64); GetClassName(h, c, 64);
+      if (pid == want && c.ToString() == "Tauri Window") r = h; return true; }, IntPtr.Zero);
+    return r;
   }
+  public static string Probe(IntPtr h) {
+    return "{\\"iconic\\":" + (IsIconic(h) ? "true" : "false") + ",\\"visible\\":" + (IsWindowVisible(h) ? "true" : "false") +
+      ",\\"style\\":" + GetWindowLong(h, -16) + ",\\"ex\\":" + GetWindowLong(h, -20) + "}";
+  }
+  // How many 100 ms samples within ms the window was NOT minimized (catches re-show loops).
+  public static int Restored(IntPtr h, int ms) { int n = 0; for (int t = 0; t < ms; t += 100) { if (!IsIconic(h)) n++; Thread.Sleep(100); } return n; }
 }
 '@
-$p = Get-CimInstance Win32_Process -Filter "Name='tether.exe'" | Where-Object { $_.ExecutablePath -eq '${opt.exe}' -and $_.CommandLine -like '*--cm*' } | Select-Object -First 1
-if ($p) { [W]::Probe('${DESK}', [int]$p.ProcessId) } else { '[]' }`;
-  const r = JSON.parse(execFileSync("powershell", ["-NoProfile", "-Command", ps]).toString().trim() || "[]");
-  return r[0] ?? null;
+$p = Get-CimInstance Win32_Process -Filter "Name='tether.exe'" | Where-Object { $_.ExecutablePath -eq '${opt.exe}' ${filter} } | Select-Object -First 1
+$h = if ($p) { [W]::Find('${DESK}', [int]$p.ProcessId) } else { [IntPtr]::Zero }
+if ($h -eq [IntPtr]::Zero) { 'null' }
+elseif ('${op}' -eq 'restored') { [W]::Restored($h, ${arg}) }
+elseif ('${op}' -eq 'syscommand') { [void][W]::PostMessage($h, 0x0112, [IntPtr]${arg}, [IntPtr]::Zero); 'true' } # WM_SYSCOMMAND, as the taskbar sends
+else { [W]::Probe($h) }`;
+  return JSON.parse(execFileSync("powershell", ["-NoProfile", "-Command", ps]).toString().trim() || "null");
 }
+const win32Cm = () => win32(CM);
+const SC_MINIMIZE = 0xf020;
+const SC_RESTORE = 0xf120;
 
 async function cmState(cm) {
   const tauri = await ipc(cm, "plugin:window|is_minimized", { label: "cm" });
   return { tauri, win32: win32Cm() };
+}
+
+/** Minimized and stays so for 3.5 s: nothing re-shows the window behind the user's back. */
+function staysMinimized(filter = CM) {
+  const restored = win32(filter, "restored", 3500);
+  return restored === 0;
 }
 
 async function main() {
@@ -105,6 +127,11 @@ async function main() {
   await sleep(4000); // dev password is set 3 s after start
   console.log(`host ${st.id}`);
 
+  // Installed, the service's server starts `--cm` with STARTF_USESHOWWINDOW / SW_HIDE
+  // (LaunchProcessWin in the core); start it the same way so the server uses this one.
+  hidden("--cm", { TETHER_PROFILE: "cmw-host", WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9251" }, 0);
+  await until("cm window", () => win32Cm(), 60000);
+
   // 1. Password login: the session is active at once, the window minimizes.
   hidden(`--connect ${st.id} --password-env TETHER_E2E_PW`, { TETHER_PROFILE: "cmw-view", TETHER_E2E_PW: PW, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9252" });
   const viewB = await cdp(9252);
@@ -117,6 +144,34 @@ async function main() {
     return x.tauri ? x : null;
   }, 10000).catch(() => cmState(cm));
   check(`minimized after password login ${JSON.stringify(s)}`, s.tauri && s.win32?.iconic && s.win32?.visible);
+  // Own taskbar button that toggles: minimize box, no tool window (WS_EX_TOOLWINDOW 0x80).
+  check(`cm on the taskbar, minimizable ${JSON.stringify(s.win32)}`, (s.win32?.style & 0x20000) !== 0 && (s.win32?.ex & 0x80) === 0);
+  const m = await until("main minimized", async () => ((await ipc(main, "plugin:window|is_minimized", { label: "main" })) ? win32(MAIN) : null), 10000).catch(() => win32(MAIN));
+  check(`main window minimized with the session ${JSON.stringify(m)}`, m?.iconic && m?.visible);
+  check("main window stays minimized", staysMinimized(MAIN));
+
+  // 1b. The user restores and minimizes it again (title-bar button = window API), three times:
+  // it must stay minimized every time.
+  for (let i = 1; i <= 3; i++) {
+    await ipc(cm, "plugin:window|unminimize", { label: "cm" });
+    await until("restored", async () => !(await cmState(cm)).tauri, 5000).catch(() => null);
+    await sleep(500);
+    await ipc(cm, "plugin:window|minimize", { label: "cm" });
+    await until("minimized", async () => (await cmState(cm)).tauri, 5000).catch(() => null);
+    check(`round ${i}: minimize button keeps it minimized`, staysMinimized());
+  }
+
+  // 1c. Taskbar button: restore and minimize arrive as WM_SYSCOMMAND on the window, three times.
+  for (let i = 1; i <= 3; i++) {
+    win32(CM, "syscommand", SC_RESTORE);
+    await sleep(1000);
+    const r = win32Cm();
+    check(`round ${i}: taskbar restore ${JSON.stringify(r)}`, r && !r.iconic && r.visible);
+    win32(CM, "syscommand", SC_MINIMIZE);
+    await sleep(500);
+    check(`round ${i}: taskbar minimize stays minimized`, staysMinimized());
+  }
+  check("main window still minimized", win32(MAIN)?.iconic);
 
   // 2. The user restores it: it stays restored.
   await ipc(cm, "plugin:window|unminimize", { label: "cm" });

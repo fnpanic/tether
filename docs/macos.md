@@ -141,9 +141,14 @@ are listed in its Window menu.
 The connection window on the controlled Mac (who is connected, chat, disconnect) runs in its own
 process (`--cm`, started by the local server when someone connects). From 0.5.9 that process has
 no Dock icon and no menu bar of its own when the main Tether runs (activation policy
-*Accessory*): its window floats on top, and **a click on the Tether Dock icon brings it back**,
-also when it was minimized (the main process signals it through
-`$TMPDIR/<identifier>-cm.sock`; the main window opens as well if no Tether window is shown).
+*Accessory*): its window floats on top. A click on the Tether Dock icon is passed to it (the main
+process signals it through `$TMPDIR/<identifier>-cm.sock` and gets one byte back):
+
+- **during a session** it toggles only the connection window, like a single-window app: shown →
+  minimized, minimized → back in front, as often as you like. The main window stays as it is.
+- **without a session** the connection window is shown, and the main window opens if no Tether
+  window is shown (as up to 0.5.11).
+
 It does not appear in Cmd-Tab.
 
 Exceptions, which keep their own Dock icon as before:
@@ -155,9 +160,10 @@ Exceptions, which keep their own Dock icon as before:
 
 TetherQS runs its connection manager in its single process: one icon.
 
-When a session starts, the connection window minimizes (to the right side of the Dock, never
-hidden); a chat message from the technician, a new request or a click on the Tether Dock icon
-brings it back. Verified 2026-11-05 on an Apple Silicon Mac with 0.5.9: one Tether icon with a
+When a session starts, the connection window and the main window minimize (to the right side of
+the Dock, never hidden; the `--cm` process tells the main process through the single-instance
+socket `/tmp/<identifier with _>_si.sock`); a chat message from the technician, a new request or
+a click on the Tether Dock icon brings the connection window back. Verified 2026-11-05 on an Apple Silicon Mac with 0.5.9: one Tether icon with a
 screen and a file transfer session, the window stays minimized when the second session starts,
 a chat message restores it on the Chat tab, a Dock click restores it.
 

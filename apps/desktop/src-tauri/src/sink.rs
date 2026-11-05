@@ -120,8 +120,15 @@ impl UiSink for TauriSink {
         let _ = self
             .app
             .emit_to(EventTarget::webview_window("cm"), "cm", Evt { name, payload });
+        if action != WindowAction::None {
+            hbb_common::log::info!("cm {name}: {action:?}");
+        }
         if let Some(w) = self.app.get_webview_window("cm") {
             apply(&w, action);
+        }
+        // Like the connection window, the main window (another process) gets out of the way.
+        if action == WindowAction::Minimize {
+            crate::app::minimize_main(&self.app);
         }
     }
 }
