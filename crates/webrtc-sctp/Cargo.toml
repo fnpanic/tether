@@ -42,6 +42,8 @@ kcp-sys = { git = "https://github.com/rustdesk-org/kcp-sys", rev = "023a00653989
 kcp = ["dep:kcp-sys"]
 
 [dev-dependencies]
+# The ping/pong examples wait for Ctrl+C; upstream gets "signal" from its workspace.
+tokio = { version = "1.32.0", features = ["signal"] }
 tokio-test = "0.4"
 lazy_static = "1"
 env_logger = "0.11.3"

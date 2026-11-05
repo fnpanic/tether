@@ -32,12 +32,27 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   subnet broadcast (Hyper-V / VPN adapters) and skips loopback.
 
 ### Fixed
+- **Updates work again: 0.5.5 builds carried an outdated update-signing key.** They were built
+  with the key from before the key reset, so every update signed by Tether Manage failed with
+  "The signature was created with a different key than the one provided". Install 0.5.6 once by
+  hand; after that updates work again.
+- **A lone Alt (or Alt+F4) from the technician no longer freezes a Tether window on the host.**
+  Alt passes for Alt+Tab, but with F4 dropped Windows saw a lone Alt tap and put the window into
+  keyboard menu mode, where its page stalled until the next key or click. The host now sends an
+  unassigned key (VK 0xE8, as AutoHotkey does) right before such an Alt release, so menu mode never
+  starts. Alt+Tab, Win and Ctrl+Alt+Del work as before; other windows still get a lone Alt.
+- SCTP tests of the no-congestion-control sender failed on Windows: they tick the test bridge in
+  1 ms sleeps, which Windows stretches to 15.6 ms, so T3-rtx fired before the SACKs arrived. The
+  tests now request 1 ms timer resolution; the transport itself was not at fault.
 - **Disconnect over WebRTC (P2P / Direct (LAN)) keeps the technician disconnected.** Clicking
   Disconnect in TetherQS ended a WebRTC session with "Reset by the peer" on the technician side,
   which then reconnected (and TetherQS docked its window again); the relay path was fine. The host
   closed the peer connection while the close reason was still queued in SCTP, so it never arrived.
   Closing now waits (at most 2 s) until the peer has acknowledged everything sent, and the
   receiving side hands over data that arrived before a stream reset instead of dropping it.
+  The host's session cleanup also closed the peer connection directly, without that wait, and won
+  the race whenever the close reason was not acknowledged within a few milliseconds (seen with both
+  apps on one machine); it now closes through the same flush.
 
 ## [0.5.5] — 2026-11-05
 

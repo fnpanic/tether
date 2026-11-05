@@ -209,14 +209,13 @@ async function main() {
     const s1 = await switches();
     const ok = (await active()) && JSON.stringify(before) === JSON.stringify(s1);
     if (!ok) throw new Error(JSON.stringify({ active: await active(), before, s1 }));
-    // Alt+F4: F4 is dropped, the lone Alt that passes (needed for Alt+Tab) puts the window into
-    // keyboard menu mode, which stalls its WebView (and DevTools) until the next key: check the
-    // foreground only; the switches are compared again after Alt+Tab.
+    // Alt+F4: F4 is dropped and the window stays; the switches are compared again after Alt+Tab.
     await tap("F4", "AltLeft");
     await sleep(2000);
-    const fg2 = vm("-Action", "fg");
-    if (!fg2.includes("TetherQS")) throw new Error(JSON.stringify({ fg2 }));
-    return { foreground: fg2 };
+    // Asked from the page: the helper process `vm -Action fg` starts takes the foreground itself.
+    const focused = await Promise.race([qs.evaluate(() => document.hasFocus()), sleep(3000).then(() => "stalled")]);
+    if (focused !== true) throw new Error(JSON.stringify({ focused }));
+    return { tetherqs_focused: focused };
   });
   await check("Alt+Tab away from TetherQS works; Notepad gets keys again", async () => {
     await tap("Tab", "AltLeft");
@@ -233,6 +232,31 @@ async function main() {
       return x.includes("abcd") ? x : null;
     }, 15000, 1000);
     return { after_alt_tab: fg, file: c };
+  });
+  // Before 0.5.6's fix a lone Alt (Alt+F4: F4 dropped) put TetherQS into keyboard menu mode: its
+  // WebView (and DevTools) stalled until the next key or click.
+  await check("lone Alt and Alt+F4 on TetherQS do not stall it: it repaints, one remote click on Notepad works", async () => {
+    const repaints = () =>
+      Promise.race([qs.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))), sleep(2000).then(() => false)]);
+    const out = {};
+    let want = "abcd";
+    for (const [name, keys, letter] of [["Alt", ["AltLeft"], "e"], ["Alt+F4", ["F4", "AltLeft"], "f"]]) {
+      const fg = vm("-Action", "activate", "-Name", "TetherQS");
+      if (!fg.includes("fg=TetherQS")) throw new Error(`${name}: could not bring TetherQS to the front: ${fg}`);
+      await tap(...keys);
+      await sleep(300);
+      if (!(await repaints())) throw new Error(`${name}: TetherQS stopped repainting`);
+      // One click, then type at once: the letter lands in Notepad only if that click activated it.
+      await click(npText.x, npText.y);
+      await type(letter);
+      await tap("KeyS", "ControlLeft");
+      want += letter;
+      out[name] = await until(`${name}: "${letter}" typed into Notepad after one click`, () => {
+        const x = vm("-Action", "read");
+        return x.includes(want) ? x : null;
+      }, 15000, 1000);
+    }
+    return out;
   });
   await check("session still active, permissions as before", async () => {
     const after = await switches();

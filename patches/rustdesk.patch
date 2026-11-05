@@ -1397,7 +1397,7 @@ index f6e48a1..600a09e 100644
  pub(crate) mod update_hash;
  #[cfg(target_os = "macos")]
 diff --git a/src/rendezvous_mediator.rs b/src/rendezvous_mediator.rs
-index b1e523d..18ec23e 100644
+index b1e523d..9c5fe9a 100644
 --- a/src/rendezvous_mediator.rs
 +++ b/src/rendezvous_mediator.rs
 @@ -264,6 +264,18 @@ async fn wait_for_retry(delay: f32, restarted: tokio::sync::futures::Notified<'_
@@ -1608,7 +1608,18 @@ index b1e523d..18ec23e 100644
          let answer = stream.local_endpoint().to_owned();
          let session_key = stream.session_key().to_owned();
          let return_route = ph.socket_addr.clone();
-@@ -1074,10 +1151,16 @@ impl RendezvousMediator {
+@@ -1044,7 +1121,9 @@ impl RendezvousMediator {
+             {
+                 log::warn!("failed to create WebRTC server connection: {}", err);
+             }
+-            stream_for_cleanup.close().await;
++            // Tether: flushed like the Stream's own drop; a plain close() here raced it and
++            // dropped the unacked close reason, so the peer read "Reset by the peer".
++            stream_for_cleanup.close_detached();
+         });
+ 
+         Ok(answer)
+@@ -1074,10 +1153,16 @@ impl RendezvousMediator {
          // No enable-webrtc check here: it is LocalConfig, which the UI process writes and never
          // syncs over IPC, so this (server) process would read the private-server default of "N"
          // and refuse to answer in exactly the self-hosted deployments the transport is for.
@@ -1628,7 +1639,7 @@ index b1e523d..18ec23e 100644
          let webrtc_sdp_answer = if webrtc_viable {
              self.spawn_webrtc_answerer(
                  &ph,
-@@ -1341,7 +1424,7 @@ impl RendezvousMediator {
+@@ -1341,7 +1426,7 @@ impl RendezvousMediator {
      }
  }
  
@@ -1637,7 +1648,7 @@ index b1e523d..18ec23e 100644
      let mut port = Config::get_option("direct-access-port")
          .parse::<i32>()
          .unwrap_or(0);
-@@ -1404,7 +1487,8 @@ async fn direct_server(server: ServerPtr) {
+@@ -1404,7 +1489,8 @@ async fn direct_server(server: ServerPtr) {
                              server,
                              hbb_common::Stream::from(stream, local_addr),
                              addr,
@@ -1647,7 +1658,7 @@ index b1e523d..18ec23e 100644
                              ConnectionMeta::default(), // Direct connections don't have server-side user context.
                          )
                          .await
-@@ -1737,6 +1821,17 @@ mod tests {
+@@ -1737,6 +1823,17 @@ mod tests {
      };
      use hbb_common::protobuf::Message as _;
  
@@ -2174,10 +2185,10 @@ index 5a392bb..6e831d9 100644
      super::uinput::prepare_layout(evt);
 diff --git a/src/server/own_ui_guard.rs b/src/server/own_ui_guard.rs
 new file mode 100644
-index 0000000..8e9c2b4
+index 0000000..540e4dc
 --- /dev/null
 +++ b/src/server/own_ui_guard.rs
-@@ -0,0 +1,607 @@
+@@ -0,0 +1,674 @@
 +//! Tether: input from a remote session never reaches Tether's own windows on this computer (the
 +//! incoming-connection window, TetherQS, the main window, Tether Manage). Only the person at the
 +//! computer can use them, so a technician cannot grant themselves permissions, approve consent
@@ -2186,7 +2197,8 @@ index 0000000..8e9c2b4
 +//! The checks run where input is injected (`input_service`, also inside the elevated portable
 +//! service), per event: a button press or wheel over a Tether window is dropped together with its
 +//! release; keys are dropped while a Tether window is in the foreground, except what is needed to
-+//! leave it (modifiers on their own, Alt+Tab, Win+Tab, Cmd+Tab). Pointer moves always pass.
++//! leave it (modifiers on their own, Alt+Tab, Win+Tab, Cmd+Tab). Pointer moves always pass. A lone
++//! Alt release on a Tether window gets a masking key first, so Windows' menu mode never stalls it.
 +//! Local (physical) input never comes through here.
 +
 +use crate::input::{MOUSE_TYPE_DOWN, MOUSE_TYPE_TRACKPAD, MOUSE_TYPE_UP, MOUSE_TYPE_WHEEL};
@@ -2195,7 +2207,7 @@ index 0000000..8e9c2b4
 +    collections::HashMap,
 +    path::{Path, PathBuf},
 +    sync::{
-+        atomic::{AtomicU8, Ordering},
++        atomic::{AtomicBool, AtomicU8, Ordering},
 +        Mutex,
 +    },
 +    time::{Duration, Instant},
@@ -2219,9 +2231,35 @@ index 0000000..8e9c2b4
 +    allowed
 +}
 +
++/// Alt is down and no other key reached a window since (see `alt_alone_step`).
++static ALT_ALONE: AtomicBool = AtomicBool::new(false);
++
 +/// Whether a remote key event may be injected. Call right before injecting it.
 +pub fn key_allowed(evt: &KeyEvent) -> bool {
-+    key_step(&HELD, evt, foreground_is_own)
++    let allowed = key_step(&HELD, evt, foreground_is_own);
++    if alt_alone_step(&ALT_ALONE, evt, allowed, foreground_is_own) {
++        os::menu_mask();
++    }
++    allowed
++}
++
++/// True when this Alt release ends a lone Alt press on a Tether window (e.g. Alt+F4 with F4
++/// dropped). Windows would then put the window into keyboard menu mode and its WebView stalls
++/// until the next key or click; a masking key right before the release prevents that.
++fn alt_alone_step(alone: &AtomicBool, evt: &KeyEvent, allowed: bool, foreground_own: impl FnOnce() -> bool) -> bool {
++    let down = evt.down || evt.press;
++    if switch_modifier_bit(evt) == Some(1) {
++        if down {
++            alone.store(true, Ordering::Relaxed);
++            return false;
++        }
++        return alone.swap(false, Ordering::Relaxed) && foreground_own();
++    }
++    // Any other key that reaches a window (Tab of Alt+Tab, Shift, ...) means no menu mode.
++    if allowed && down {
++        alone.store(false, Ordering::Relaxed);
++    }
++    false
 +}
 +
 +/// Touch zoom (Ctrl+wheel) over a Tether window.
@@ -2522,6 +2560,16 @@ index 0000000..8e9c2b4
 +        unsafe { pid_of(GetForegroundWindow()) }
 +    }
 +
++    /// VK 0xE8 is unassigned: the window sees a key between Alt down and up, nothing else happens
++    /// (AutoHotkey's menu mask key).
++    pub fn menu_mask() {
++        use winapi::um::winuser::{keybd_event, KEYEVENTF_KEYUP};
++        unsafe {
++            keybd_event(0xE8, 0, 0, 0);
++            keybd_event(0xE8, 0, KEYEVENTF_KEYUP, 0);
++        }
++    }
++
 +    pub fn exe_of(pid: u32) -> Option<PathBuf> {
 +        crate::platform::windows::get_process_executable_path(pid).ok()
 +    }
@@ -2658,6 +2706,8 @@ index 0000000..8e9c2b4
 +        false // WKWebView menus belong to the app process itself
 +    }
 +
++    pub fn menu_mask() {} // a lone Option press does nothing on macOS
++
 +    pub fn parent_pid(_pid: u32) -> Option<u32> {
 +        None
 +    }
@@ -2681,6 +2731,7 @@ index 0000000..8e9c2b4
 +    pub fn parent_pid(_pid: u32) -> Option<u32> {
 +        None
 +    }
++    pub fn menu_mask() {}
 +}
 +
 +#[cfg(test)]
@@ -2749,6 +2800,33 @@ index 0000000..8e9c2b4
 +        // Other windows get everything.
 +        assert!(key_step(&held, &ck(ControlKey::Return, true, &[]), || false));
 +        assert!(key_step(&held, &chr('a' as u32, true), || false));
++    }
++
++    #[test]
++    fn lone_alt_on_tether_window_is_masked() {
++        let held = AtomicU8::new(0);
++        let alone = AtomicBool::new(false);
++        // Runs key_step like key_allowed; returns whether the menu mask goes before this event.
++        let step = |e: &KeyEvent, own: bool| {
++            let allowed = key_step(&held, e, || own);
++            alt_alone_step(&alone, e, allowed, || own)
++        };
++        let alt = |down| ck(ControlKey::Alt, down, &[]);
++        // Alt+F4 on Tether: F4 dropped, so the release is masked.
++        assert!(!step(&alt(true), true));
++        assert!(!step(&ck(ControlKey::F4, true, &[ControlKey::Alt]), true));
++        assert!(step(&alt(false), true));
++        // Alt+Tab: Tab reached the system, no mask.
++        assert!(!step(&alt(true), true));
++        assert!(!step(&ck(ControlKey::Tab, true, &[ControlKey::Alt]), true));
++        assert!(!step(&alt(false), true));
++        // A lone Alt on another window keeps its normal meaning (menu bar).
++        assert!(!step(&alt(true), false));
++        assert!(!step(&alt(false), false));
++        // Released with Tether in front after Alt+key on another window: no mask.
++        assert!(!step(&alt(true), false));
++        assert!(!step(&chr('d' as u32, true), false));
++        assert!(!step(&alt(false), true));
 +    }
 +
 +    #[cfg(windows)]

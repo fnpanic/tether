@@ -1,5 +1,5 @@
 {
-  "when": "2026-11-05T08:55:30.090Z",
+  "when": "2026-11-05T10:17:07.459Z",
   "vm": "172.30.252.30",
   "results": [
     {
@@ -51,19 +51,25 @@
       "ok": true,
       "allow": {
         "x": 1768,
-        "y": 788
+        "y": 789
       }
     },
     {
       "name": "keys on TetherQS in front (Enter, Space, Esc, Tab, letters, Alt+F4) change nothing",
       "ok": true,
-      "foreground": "fg=TetherQS"
+      "tetherqs_focused": true
     },
     {
       "name": "Alt+Tab away from TetherQS works; Notepad gets keys again",
       "ok": true,
       "after_alt_tab": "fg=powershell",
       "file": "content=[abcd]"
+    },
+    {
+      "name": "lone Alt and Alt+F4 on TetherQS do not stall it: it repaints, one remote click on Notepad works",
+      "ok": true,
+      "Alt": "content=[abcde]",
+      "Alt+F4": "content=[abcdef]"
     },
     {
       "name": "session still active, permissions as before",

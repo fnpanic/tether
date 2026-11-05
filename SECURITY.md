@@ -91,7 +91,12 @@ physical input never passes through it.
 - **Keyboard:** while a Tether window is in the foreground, keys are dropped except what is needed
   to leave it: modifier keys on their own, Alt+Tab, Win+Tab / Cmd+Tab, Ctrl+Alt+Del, lock screen.
   Enter, Space, Esc, letters, typed text (`seq`, paste as keystrokes), Alt+F4 and Cmd+Q never
-  reach a Tether window. The foreground is checked per event.
+  reach a Tether window. The foreground is checked per event. Windows: a lone Alt press (Alt
+  pressed and released with nothing passed in between, e.g. Alt+F4 with F4 dropped) would put the
+  window into keyboard menu mode and stall its page, so right before that Alt release the host
+  injects the unassigned key VK 0xE8 (AutoHotkey's "menu mask"); the window sees a key between
+  Alt down and up and stays out of menu mode. Alt+Tab, a lone Alt on other windows and
+  Ctrl+Alt+Del behave as before.
 - **Tether process** = the same executable as the host process, or any executable whose name
   starts with `tether` (TetherQS next to an installed Tether, Tether Manage). Looked up per PID,
   cached for 2 seconds.
@@ -115,17 +120,13 @@ What this does **not** stop (the technician still controls the computer as its u
   no button gets stuck); Tether's windows do not act on drops.
 - Windows that are not Tether's but change Tether (e.g. the Windows Services console, uninstall
   in Settings) are ordinary programs.
-- Windows: Alt on its own must pass (for Alt+Tab), so a lone Alt tap puts a Tether window into
-  keyboard menu mode; its page stalls until the next key or click. Every key that would act in
-  that mode (arrows, Enter, Space, letters) is still dropped, so nothing can be chosen; Alt+Tab or a
-  click by the person at the computer ends it.
 - macOS: the filter is compile-unverified until the next Mac build (0.5.6).
 
 Tests: unit tests in `own_ui_guard.rs` (`cargo test --lib --no-default-features --features
 tauri,hwcodec,use_dasp own_ui_guard` in `vendor/rustdesk`), VM end-to-end
 `apps/desktop/e2e/vm-noremote-e2e.mjs` (remote clicks on every TetherQS permission switch,
 Disconnect, Close and the recording consent's Allow; keys while TetherQS is in front; Notepad still
-works; Alt+Tab leaves).
+works; Alt+Tab leaves; a lone Alt and Alt+F4 on TetherQS do not stall it).
 
 ## The app shell (Tauri)
 

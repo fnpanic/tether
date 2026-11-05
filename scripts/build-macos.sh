@@ -7,7 +7,8 @@
 # TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD) to write .sig files (Tether Manage signs on publish anyway),
 # APPLE_SIGNING_IDENTITY (default "-" = ad-hoc), MACOSX_DEPLOYMENT_TARGET (default 11.0),
 # MAC_ARCH=arm64 (Apple silicon only: half the build time, no Intel slice, no Rosetta/sudo),
-# SKIP_QS=1 (technician app only).
+# SKIP_QS=1 (technician app only), PREBUILT_FRONTEND=<dir> (technician UI built elsewhere with
+# `npm run build`: no npm here; the Tauri CLI comes from crates.io; needs SKIP_QS=1).
 # Safe to run again: every step skips what is already in place.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -42,13 +43,14 @@ Release builds compile these into the apps. For the production relay:
   export TETHER_SERVER=tether-desk.duckdns.org
   export TETHER_PUB_KEY=fe8A7xTX72RJlJypn8aBxG3NZHHxygCLPQqCWxbeev8=
   export TETHER_ADMIN_PUB_KEY=LdVr9FeDLNbgO6T8PPHddPsicLPr5Hkly1MXqmaLwKI=
-  export TETHER_UPDATER_PUB_KEY=dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQzREZBRjA4Q0Y5RDlERDIKUldUU25aM1BDSy9mUTJqSlBadmQxUWRsc1pxUSthOVUvQTk3M3Z3dzZBV0JnVXFxcThQMXBXeFEK
+  export TETHER_UPDATER_PUB_KEY=dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFBRDBDM0ZCRENBM0I0RUEKUldUcXRLUGMrOFBRR3ZGdVZuSXp2QlBUTGRmUVl1bkVDWjk4Ymh6c0w2YnJBK0tVWm82YXZteFAK
 
 (other relays: server/install.sh output and Tether Manage -> Keys), then run this script again.
 EOF
   exit 1
 fi
 export TETHER_SERVER TETHER_PUB_KEY TETHER_ADMIN_PUB_KEY TETHER_UPDATER_PUB_KEY
+[ -z "${PREBUILT_FRONTEND:-}" ] || [ -n "${SKIP_QS:-}" ] || die "PREBUILT_FRONTEND covers the technician app only: set SKIP_QS=1 too."
 
 # ---------------------------------------------------------------- prerequisites
 step "Xcode Command Line Tools"
@@ -155,8 +157,17 @@ sign() { # file: optional .sig next to it, the format Tether Manage also writes
 
 step "Tether technician app ($ARCH_NAME .app, .dmg, updater .app.tar.gz)"
 cd "$ROOT/apps/desktop"
-npm ci
-npx tauri build --target $TARGET --bundles app,dmg
+if [ -n "${PREBUILT_FRONTEND:-}" ]; then
+  # UI built on another machine (npm blocked here): Tauri CLI from crates.io, no npm at all.
+  fe=$(cd "$PREBUILT_FRONTEND" && pwd)
+  [ -f "$fe/index.html" ] || die "PREBUILT_FRONTEND=$fe has no index.html"
+  cli=$(node -p "require('./package-lock.json').packages['node_modules/@tauri-apps/cli'].version")
+  cargo tauri --version 2>/dev/null | grep -qx "tauri-cli $cli" || cargo install tauri-cli --version "=$cli" --locked
+  cargo tauri build --target $TARGET --bundles app,dmg --config "{\"build\":{\"beforeBuildCommand\":\"\",\"frontendDist\":\"$fe\"}}"
+else
+  npm ci
+  npx tauri build --target $TARGET --bundles app,dmg
+fi
 V=$(version)
 B="src-tauri/target/$TARGET/release/bundle"
 cp "$B/dmg/Tether_${V}_${ARCH_NAME}.dmg" "$OUT/"

@@ -16,6 +16,23 @@ use super::*;
 use crate::chunk::chunk_selective_ack::GapAckBlock;
 use crate::stream::*;
 
+/// The tests tick the bridge with 1ms sleeps, one packet per tick, against RTOs of 100ms. Windows
+/// rounds sleeps up to its 15.6ms default timer tick unless the process asks for 1ms, and at that
+/// pace T3-rtx fires before the SACKs a test waits for are delivered.
+fn fine_timer_resolution() {
+    #[cfg(windows)]
+    {
+        #[link(name = "winmm")]
+        extern "system" {
+            fn timeBeginPeriod(period_ms: u32) -> u32;
+        }
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| unsafe {
+            timeBeginPeriod(1);
+        });
+    }
+}
+
 async fn create_new_association_pair(
     br: &Arc<Bridge>,
     ca: Arc<dyn Conn + Send + Sync>,
@@ -23,6 +40,7 @@ async fn create_new_association_pair(
     ack_mode: AckMode,
     recv_buf_size: u32,
 ) -> Result<(Association, Association)> {
+    fine_timer_resolution();
     let (handshake0ch_tx, mut handshake0ch_rx) = mpsc::channel(1);
     let (handshake1ch_tx, mut handshake1ch_rx) = mpsc::channel(1);
     let (closed_tx, mut closed_rx0) = broadcast::channel::<()>(1);
