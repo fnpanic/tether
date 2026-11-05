@@ -1,5 +1,5 @@
 {
-  "when": "2026-11-05T16:39:45.808Z",
+  "when": "2026-11-05T17:43:37.035Z",
   "vm": "172.30.252.30",
   "results": [
     {
@@ -12,7 +12,7 @@
     {
       "name": "CLI connect (--password-stdin) + first frame",
       "ok": true,
-      "ms": 1087
+      "ms": 1566
     },
     {
       "name": "recording denied by customer: nothing recorded",
@@ -23,34 +23,34 @@
     {
       "name": "recording saved card with Open / Show in folder, file in the list",
       "ok": true,
-      "card": "Recording saved | 2026-11-05_17-39-11_tether-bench_490209544.webm | Open | Show in folder",
+      "card": "Recording saved | 2026-11-05_18-42-59_tether-bench_490209544.webm | Open | Show in folder",
       "folder": "C:\\Users\\Thomas\\Videos\\Tether",
       "listed": [
+        "2026-11-05_18-42-59_tether-bench_490209544.webm 8s 456187B",
         "2026-11-05_17-39-11_tether-bench_490209544.webm 8s 455666B",
-        "2026-11-05_16-35-59_tether-bench_490209544.webm 8s 1208348B",
-        "outgoing_490209544_20261105140145130_display0_vp9.webm 15s 1561212B"
+        "2026-11-05_16-35-59_tether-bench_490209544.webm 8s 1208348B"
       ]
     },
     {
       "name": "recording allowed: file written and playable",
       "ok": true,
-      "file": "C:\\Users\\Thomas\\Videos\\Tether\\2026-11-05_17-39-11_tether-bench_490209544.webm",
-      "seconds": 7.806,
-      "size": 455666
+      "file": "C:\\Users\\Thomas\\Videos\\Tether\\2026-11-05_18-42-59_tether-bench_490209544.webm",
+      "seconds": 7.864,
+      "size": 456187
     },
     {
-      "name": "relay crash (hbbr SIGKILL on tether-desk2.duckdns.org, the session's relay): recovers within 2 s via the other relay",
+      "name": "relay crash (hbbr SIGKILL on tether-desk.duckdns.org, the session's relay): recovers within 2 s via the other relay",
       "ok": true,
-      "recovery_ms": 809,
-      "upper_bound_ms": 2075,
-      "ssh_cmd_ms": 1264
+      "recovery_ms": 1356,
+      "upper_bound_ms": 2644,
+      "ssh_cmd_ms": 1286
     },
     {
-      "name": "relay node down (tether-desk.duckdns.org: hbbs + hbbr killed and kept down): session continues via the other relay",
+      "name": "relay node down (tether-desk2.duckdns.org: hbbs + hbbr killed and kept down): session continues via the other relay",
       "ok": true,
-      "recovery_ms": 1504,
-      "upper_bound_ms": 2785,
-      "ssh_cmd_ms": 1278
+      "recovery_ms": 1093,
+      "upper_bound_ms": 4622,
+      "ssh_cmd_ms": 3525
     }
   ]
 }
