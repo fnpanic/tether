@@ -4,7 +4,7 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
-## [Unreleased]
+## [0.5.12] — 2026-11-05
 
 ### Fixed
 - **Host windows during a session:** when someone connects, the main window now minimizes
@@ -14,7 +14,7 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   macOS a click on the Dock icon during a session toggles only the connection window (minimize
   when shown, restore when minimized, any number of times) instead of only ever restoring it.
   Chat, a new request and a recording request still bring the connection window back.
-- **Tether Manage, Download page:** clicking inside the preview (the Windows / macOS switch or a
+- **Tether Manage 0.5.4, Download page:** clicking inside the preview (the Windows / macOS switch or a
   Download button) no longer blanks it. Its relative links resolved against Tether Manage itself
   and navigated the preview frame away; they now do nothing in the preview. **Preview** always
   redraws the page, even when the texts did not change (before, it stayed blank until the page was
