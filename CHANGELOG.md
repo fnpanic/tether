@@ -6,6 +6,13 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Added
+- **File transfer: select several files and folders at once.** Click, Ctrl/Cmd+click, Shift+click,
+  Ctrl/Cmd+A and the arrow keys select in either pane; Upload/Download ("Download 3 items") and
+  drag and drop send the whole selection, one job per item, two at a time with the rest queued,
+  and the transfer list shows how many finished and the overall progress. Delete on the remote
+  pane removes all selected items after one in-app confirmation (no browser dialog).
+
 ### Changed
 - **The host window gets out of the way during a session** (TetherQS and Tether's connection
   window on the computer being supported): when a session starts it minimizes to the taskbar
@@ -22,6 +29,11 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ### Fixed
 - Tether's connection window kept showing Accept/Decline after the user accepted an incoming
   session; it now shows the active session.
+- File transfer: a downloaded folder's file list no longer replaces the remote pane's listing
+  while the download runs; a folder's progress bar uses the folder's total size.
+- A cancelled transfer is shown as cancelled instead of staying "running".
+- Deleting a folder on the remote device removes it with everything in it (before, nothing
+  happened: the core only listed the folder's files). New command `fs_remove_empty_dirs`.
 
 ## [0.5.8] — 2026-11-05
 

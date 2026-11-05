@@ -394,6 +394,13 @@ fn fs_remove(key: String, id: i32, path: String, is_remote: bool, is_dir: bool) 
     with_session(&key, |s| core::files::remove(s, id, path, is_remote, is_dir))
 }
 
+/// A folder delete: `fs_remove` lists its files (`folder_files` with this id), the window removes
+/// them, then this removes the then empty folder tree.
+#[tauri::command]
+fn fs_remove_empty_dirs(key: String, id: i32, path: String, is_remote: bool) -> R<()> {
+    with_session(&key, |s| core::files::remove_empty_dirs(s, id, path, is_remote))
+}
+
 #[tauri::command]
 fn fs_override(key: String, id: i32, file_num: i32, need_override: bool, remember: bool, is_upload: bool) -> R<()> {
     with_session(&key, |s| {
@@ -540,6 +547,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         fs_cancel,
         fs_create_dir,
         fs_remove,
+        fs_remove_empty_dirs,
         fs_override,
         cm_clients,
         cm_authorize,

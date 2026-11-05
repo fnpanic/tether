@@ -3144,10 +3144,10 @@ index 0000000..ba16801
 +}
 diff --git a/src/tauri_ui/files.rs b/src/tauri_ui/files.rs
 new file mode 100644
-index 0000000..eaa6333
+index 0000000..8911df8
 --- /dev/null
 +++ b/src/tauri_ui/files.rs
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,73 @@
 +//! File transfer wrappers (the `FileManager` trait lives in the crate-private client module).
 +
 +use serde_json::{json, Value};
@@ -3204,6 +3204,11 @@ index 0000000..eaa6333
 +    } else {
 +        s.remove_file(id, path, 0, is_remote);
 +    }
++}
++
++/// Removes the folder `path` and the empty folders below it (after its files were removed).
++pub fn remove_empty_dirs(s: &TauriSession, id: i32, path: String, is_remote: bool) {
++    s.remove_dir(id, path, is_remote);
 +}
 +
 +pub fn confirm_override(

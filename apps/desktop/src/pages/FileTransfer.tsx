@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowLeft, ArrowUpFromLine, CheckCircle2, File, Folder, FolderPlus, HardDrive, RefreshCw, Trash2, XCircle } from "lucide-react";
 import { formatId, invoke, subscribe, videoChannel } from "../lib/ipc";
-import { Button, IconButton, Logo, TitleBar } from "../components/ui";
+import { Button, IconButton, Logo, Modal, TitleBar } from "../components/ui";
+import { clickSelect, emptySelection, moveSelect, selectAll } from "../lib/selection";
 import { passwordWhy, RESUME_GRACE_MS } from "../lib/login";
 
 interface Entry {
@@ -18,10 +19,12 @@ interface Job {
   id: number;
   name: string;
   upload: boolean;
+  from: string;
+  to: string;
   total: number;
   done: number;
   speed: number;
-  state: "running" | "done" | "error";
+  state: "queued" | "running" | "done" | "error";
   err?: string;
 }
 
@@ -49,6 +52,8 @@ function parent(dir: string, sep: string) {
 }
 
 let nextJob = 1;
+// Jobs run side by side in the core (it interleaves them); a few at a time keeps each one moving.
+const MAX_RUNNING = 2;
 
 export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; peer: string }) {
   const [connected, setConnected] = useState(false);
@@ -63,10 +68,12 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
   const localSep = navigator.userAgent.includes("Windows") ? "\\" : "/";
   const [local, setLocal] = useState<{ path: string; entries: Entry[] }>({ path: "", entries: [] });
   const [remote, setRemote] = useState<{ path: string; entries: Entry[] }>({ path: "", entries: [] });
-  const [sel, setSel] = useState<{ side: "local" | "remote"; name: string } | null>(null);
+  const [toDelete, setToDelete] = useState<Entry[] | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [hostname, setHostname] = useState("");
   const remotePathRef = useRef("");
+  // Remote folders being deleted: job id -> [folder path, separator].
+  const dirDeletes = useRef(new Map<number, [string, string]>());
 
   const loadLocal = useCallback(async (path: string) => {
     try {
@@ -101,7 +108,20 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           break;
         }
         case "folder_files":
-          if (!p.is_local && !p.only_count) setRemote({ path: p.path, entries: sortEntries(p.entries ?? []) });
+          // A job's own file list (id = job id) gives its total size; listings come with id 0.
+          if (dirDeletes.current.has(p.id)) {
+            // The folder's files (names relative to it): remove each, then the emptied folders.
+            const [dir, sep] = dirDeletes.current.get(p.id)!;
+            dirDeletes.current.delete(p.id);
+            const files: Entry[] = p.entries ?? [];
+            Promise.all(files.map((f) => invoke("fs_remove", { key, id: p.id, path: join(dir, f.name, sep), isRemote: true, isDir: false })))
+              .then(() => invoke("fs_remove_empty_dirs", { key, id: p.id, path: dir, isRemote: true }))
+              .catch((e) => setError(String(e)));
+          } else if (p.id) setJobs((js) => js.map((j) => (j.id === p.id && p.total_size ? { ...j, total: p.total_size } : j)));
+          else if (!p.is_local && !p.only_count) {
+            remotePathRef.current = p.path;
+            setRemote({ path: p.path, entries: sortEntries(p.entries ?? []) });
+          }
           break;
         case "job_progress":
           setJobs((js) => js.map((j) => (j.id === p.id ? { ...j, done: p.finished_size, speed: p.speed } : j)));
@@ -146,15 +166,54 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
     };
   }, [key, peer, loadLocal, loadRemote]);
 
-  const transfer = (side: "local" | "remote", e: Entry) => {
+  const transfer = (side: "local" | "remote", es: Entry[]) => {
     const upload = side === "local";
-    const id = nextJob++;
-    const from = join(upload ? local.path : remote.path, e.name, upload ? localSep : remoteSep);
-    const to = join(upload ? remote.path : local.path, e.name, upload ? remoteSep : localSep);
-    setJobs((js) => [{ id, name: e.name, upload, total: e.size, done: 0, speed: 0, state: "running" }, ...js]);
-    invoke("fs_transfer", { key, id, path: from, to, fileNum: 0, hidden: false, isRemote: !upload }).catch((err) =>
-      setJobs((js) => js.map((j) => (j.id === id ? { ...j, state: "error", err: String(err) } : j))),
-    );
+    const queued = es.map((e): Job => ({
+      id: nextJob++,
+      name: e.name,
+      upload,
+      from: join(upload ? local.path : remote.path, e.name, upload ? localSep : remoteSep),
+      to: join(upload ? remote.path : local.path, e.name, upload ? remoteSep : localSep),
+      total: isDir(e) ? 0 : e.size,
+      done: 0,
+      speed: 0,
+      state: "queued",
+    }));
+    setJobs((js) => [...queued.reverse(), ...js]);
+  };
+
+  // Start queued jobs (oldest first) while fewer than MAX_RUNNING run.
+  useEffect(() => {
+    const free = MAX_RUNNING - jobs.filter((j) => j.state === "running").length;
+    const start = jobs.filter((j) => j.state === "queued").reverse().slice(0, Math.max(0, free));
+    if (!start.length) return;
+    const ids = new Set(start.map((j) => j.id));
+    setJobs((js) => js.map((j) => (ids.has(j.id) ? { ...j, state: "running" } : j)));
+    for (const j of start) {
+      invoke("fs_transfer", { key, id: j.id, path: j.from, to: j.to, fileNum: 0, hidden: false, isRemote: !j.upload }).catch((err) =>
+        setJobs((js) => js.map((x) => (x.id === j.id ? { ...x, state: "error", err: String(err) } : x))),
+      );
+    }
+  }, [jobs, key]);
+
+  const cancel = (j: Job) => {
+    // The core reports nothing for a cancelled job: end it here so the queue moves on.
+    if (j.state === "running") invoke("fs_cancel", { key, id: j.id }).catch((e) => setError(String(e)));
+    setJobs((js) => js.map((x) => (x.id === j.id ? { ...x, state: "error", err: "Cancelled" } : x)));
+  };
+
+  const removeRemote = (es: Entry[]) => {
+    setToDelete(null);
+    Promise.all(
+      es.map((e) => {
+        const id = nextJob++;
+        const path = join(remote.path, e.name, remoteSep);
+        if (isDir(e)) dirDeletes.current.set(id, [path, remoteSep]);
+        return invoke("fs_remove", { key, id, path, isRemote: true, isDir: isDir(e) });
+      }),
+    )
+      .catch((e) => setError(String(e)))
+      .finally(() => setTimeout(() => loadRemote(remote.path), 300));
   };
 
   if (password) {
@@ -199,19 +258,14 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           icon={<HardDrive size={15} />}
           path={local.path}
           entries={local.entries}
-          selected={sel?.side === "local" ? sel.name : null}
-          onSelect={(n) => setSel({ side: "local", name: n })}
           onOpen={(e) => loadLocal(join(local.path, e.name, localSep))}
           onUp={() => loadLocal(parent(local.path, localSep))}
           onRefresh={() => loadLocal(local.path)}
-          onTransfer={(e) => transfer("local", e)}
+          onTransfer={(es) => transfer("local", es)}
           transferIcon={<ArrowUpFromLine size={15} />}
           transferLabel="Upload"
           onDropFrom="remote"
-          onDrop={(name) => {
-            const e = remote.entries.find((x) => x.name === name);
-            if (e) transfer("remote", e);
-          }}
+          onDrop={(names) => transfer("remote", remote.entries.filter((x) => names.includes(x.name)))}
         />
         <Pane
           title={hostname || "Remote"}
@@ -220,31 +274,38 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           entries={remote.entries}
           loading={!connected}
           loadingText={waiting ? "Waiting for the person at the remote computer to click Accept…" : "Connecting…"}
-          selected={sel?.side === "remote" ? sel.name : null}
-          onSelect={(n) => setSel({ side: "remote", name: n })}
           onOpen={(e) => loadRemote(join(remote.path, e.name, remoteSep))}
           onUp={() => loadRemote(parent(remote.path, remoteSep))}
           onRefresh={() => loadRemote(remote.path)}
-          onTransfer={(e) => transfer("remote", e)}
+          onTransfer={(es) => transfer("remote", es)}
           transferIcon={<ArrowDownToLine size={15} />}
           transferLabel="Download"
           onNewFolder={() => {
             const n = prompt("Folder name");
             if (n) invoke("fs_create_dir", { key, id: nextJob++, path: join(remote.path, n, remoteSep), isRemote: true }).then(() => setTimeout(() => loadRemote(remote.path), 300));
           }}
-          onDelete={(e) => {
-            if (confirm(`Delete "${e.name}" on the remote device?`)) {
-              invoke("fs_remove", { key, id: nextJob++, path: join(remote.path, e.name, remoteSep), isRemote: true, isDir: isDir(e) }).then(() => setTimeout(() => loadRemote(remote.path), 300));
-            }
-          }}
+          onDelete={setToDelete}
           onDropFrom="local"
-          onDrop={(name) => {
-            const e = local.entries.find((x) => x.name === name);
-            if (e) transfer("local", e);
-          }}
+          onDrop={(names) => transfer("local", local.entries.filter((x) => names.includes(x.name)))}
         />
       </div>
-      <Jobs jobs={jobs} onCancel={(id) => invoke("fs_cancel", { key, id }).catch((e) => setError(String(e)))} onClear={() => setJobs((js) => js.filter((j) => j.state === "running"))} />
+      <Jobs jobs={jobs} onCancel={cancel} onClear={() => setJobs((js) => js.filter((j) => j.state === "running" || j.state === "queued"))} />
+      {toDelete && (
+        <Modal width={360} onClose={() => setToDelete(null)}>
+          <div className="text-headline font-semibold">{toDelete.length === 1 ? `Delete "${toDelete[0].name}"?` : `Delete ${toDelete.length} items?`}</div>
+          <p className="mt-2 text-callout text-muted">
+            {toDelete.length === 1 ? "It is" : "They are"} deleted on the remote device{toDelete.some(isDir) ? ", folders with everything in them" : ""}. This cannot be undone.
+          </p>
+          <div className="mt-6 flex gap-2">
+            <Button className="flex-1" onClick={() => setToDelete(null)}>
+              Cancel
+            </Button>
+            <Button variant="danger" className="flex-1" autoFocus onClick={() => removeRemote(toDelete)}>
+              Delete
+            </Button>
+          </div>
+        </Modal>
+      )}
     </Shell>
   );
 }
@@ -273,23 +334,35 @@ interface PaneProps {
   entries: Entry[];
   loading?: boolean;
   loadingText?: string;
-  selected: string | null;
-  onSelect: (n: string) => void;
   onOpen: (e: Entry) => void;
   onUp: () => void;
   onRefresh: () => void;
-  onTransfer: (e: Entry) => void;
+  onTransfer: (es: Entry[]) => void;
   transferIcon: React.ReactNode;
   transferLabel: string;
   onNewFolder?: () => void;
-  onDelete?: (e: Entry) => void;
+  onDelete?: (es: Entry[]) => void;
   onDropFrom: "local" | "remote";
-  onDrop: (name: string) => void;
+  onDrop: (names: string[]) => void;
 }
 
 function Pane(p: PaneProps) {
   const [over, setOver] = useState(false);
-  const sel = p.entries.find((e) => e.name === p.selected);
+  const [sel, setSel] = useState(emptySelection);
+  useEffect(() => setSel(emptySelection), [p.path]);
+  const names = p.entries.map((e) => e.name);
+  const selected = p.entries.filter((e) => sel.names.includes(e.name));
+  const n = selected.length;
+  const onKey = (ev: React.KeyboardEvent) => {
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "a") setSel(selectAll(names, sel));
+    else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") setSel(moveSelect(names, sel, ev.key === "ArrowDown" ? 1 : -1, ev.shiftKey));
+    else if (ev.key === "Enter" && n) n === 1 && isDir(selected[0]) ? p.onOpen(selected[0]) : p.onTransfer(selected);
+    else if (ev.key === "Delete" && n && p.onDelete) p.onDelete(selected);
+    else if (ev.key === "Escape" && n) setSel(emptySelection);
+    else return;
+    ev.preventDefault();
+    ev.stopPropagation();
+  };
   return (
     <div
       className={`flex min-h-0 flex-col overflow-hidden rounded-2xl border bg-tile transition ${over ? "border-accent ring-2 ring-accent/30" : "border-hairline"}`}
@@ -302,8 +375,8 @@ function Pane(p: PaneProps) {
       onDragLeave={() => setOver(false)}
       onDrop={(e) => {
         setOver(false);
-        const n = e.dataTransfer.getData(`x-tether/${p.onDropFrom}`);
-        if (n) p.onDrop(n);
+        const d = e.dataTransfer.getData(`x-tether/${p.onDropFrom}`);
+        if (d) p.onDrop(JSON.parse(d));
       }}
     >
       <div className="flex items-center gap-2 border-b border-hairline px-3 py-2">
@@ -315,16 +388,17 @@ function Pane(p: PaneProps) {
             <FolderPlus size={15} />
           </IconButton>
         )}
-        {p.onDelete && sel && (
-          <IconButton label="Delete" onClick={() => p.onDelete!(sel)}>
+        {p.onDelete && n > 0 && (
+          <IconButton label={n > 1 ? `Delete ${n} items` : "Delete"} onClick={() => p.onDelete!(selected)}>
             <Trash2 size={15} />
           </IconButton>
         )}
         <IconButton label="Refresh" onClick={p.onRefresh}>
           <RefreshCw size={15} />
         </IconButton>
-        <Button size="sm" variant="primary" disabled={!sel} onClick={() => sel && p.onTransfer(sel)}>
+        <Button size="sm" variant="primary" disabled={!n} onClick={() => p.onTransfer(selected)}>
           {p.transferIcon} {p.transferLabel}
+          {n > 1 ? ` ${n} items` : ""}
         </Button>
       </div>
       <div className="flex items-center gap-1 border-b border-hairline px-2 py-1.5">
@@ -335,7 +409,14 @@ function Pane(p: PaneProps) {
           {p.path || "Drives"}
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto py-1">
+      <div
+        role="listbox"
+        aria-multiselectable
+        aria-label={p.title}
+        tabIndex={0}
+        onKeyDown={onKey}
+        className="min-h-0 flex-1 select-none overflow-y-auto py-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/30"
+      >
         {p.loading ? (
           <div className="grid h-full place-items-center px-4 text-center text-caption text-muted">{p.loadingText ?? "Connecting…"}</div>
         ) : p.entries.length === 0 ? (
@@ -344,11 +425,19 @@ function Pane(p: PaneProps) {
           p.entries.map((e) => (
             <div
               key={e.name}
+              role="option"
+              aria-selected={sel.names.includes(e.name)}
+              ref={sel.cursor === e.name ? (el) => el?.scrollIntoView({ block: "nearest" }) : undefined}
               draggable
-              onDragStart={(ev) => ev.dataTransfer.setData(`x-tether/${p.onDropFrom === "local" ? "remote" : "local"}`, e.name)}
-              onClick={() => p.onSelect(e.name)}
-              onDoubleClick={() => (isDir(e) ? p.onOpen(e) : p.onTransfer(e))}
-              className={`mx-1 flex cursor-default items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-caption ${p.selected === e.name ? "bg-accent/15" : "hover:bg-parchment"}`}
+              onDragStart={(ev) => {
+                // Dragging a selected row takes the whole selection, any other row only itself.
+                const drag = sel.names.includes(e.name) ? sel.names : [e.name];
+                if (drag.length === 1) setSel(clickSelect(names, sel, e.name));
+                ev.dataTransfer.setData(`x-tether/${p.onDropFrom === "local" ? "remote" : "local"}`, JSON.stringify(drag));
+              }}
+              onClick={(ev) => setSel(clickSelect(names, sel, e.name, { toggle: ev.ctrlKey || ev.metaKey, range: ev.shiftKey }))}
+              onDoubleClick={() => (isDir(e) ? p.onOpen(e) : p.onTransfer([e]))}
+              className={`mx-1 flex cursor-default items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-caption ${sel.names.includes(e.name) ? "bg-accent/15" : "hover:bg-parchment"}`}
             >
               {isDir(e) ? <Folder size={16} className="shrink-0 text-accent" /> : <File size={16} className="shrink-0 text-muted" />}
               <span className="min-w-0 flex-1 truncate">{e.name}</span>
@@ -361,12 +450,20 @@ function Pane(p: PaneProps) {
   );
 }
 
-function Jobs({ jobs, onCancel, onClear }: { jobs: Job[]; onCancel: (id: number) => void; onClear: () => void }) {
+function Jobs({ jobs, onCancel, onClear }: { jobs: Job[]; onCancel: (j: Job) => void; onClear: () => void }) {
   if (!jobs.length) return <div className="h-4" />;
+  const finished = jobs.filter((j) => j.state === "done" || j.state === "error").length;
+  const total = jobs.reduce((a, j) => a + j.total, 0);
+  const done = jobs.reduce((a, j) => a + (j.state === "done" ? j.total : Math.min(j.done, j.total)), 0);
   return (
     <div className="m-4 mt-3 max-h-40 overflow-y-auto rounded-2xl border border-hairline bg-tile">
       <div className="flex items-center justify-between px-3 py-2">
-        <span className="text-caption font-semibold">Transfers</span>
+        <span className="text-caption">
+          <span className="font-semibold">Transfers</span>
+          <span className="ml-2 text-muted" data-testid="ft-overall">
+            {finished} of {jobs.length} finished{total && finished < jobs.length ? ` · ${Math.floor((done / total) * 100)}%` : ""}
+          </span>
+        </span>
         <button className="text-footnote text-muted hover:text-ink" onClick={onClear}>
           Clear finished
         </button>
@@ -381,10 +478,10 @@ function Jobs({ jobs, onCancel, onClear }: { jobs: Job[]; onCancel: (id: number)
               <div className={`h-full rounded-full transition-all ${j.state === "error" ? "bg-danger" : "bg-accent"}`} style={{ width: `${pct}%` }} />
             </div>
             <span className="w-24 text-right font-mono text-footnote text-muted">
-              {j.state === "running" ? `${fmtSize(j.speed)}/s` : j.state === "done" ? <CheckCircle2 size={15} className="ml-auto text-ok" /> : <span className="text-danger">{j.err ?? "failed"}</span>}
+              {j.state === "queued" ? "Queued" : j.state === "running" ? `${fmtSize(j.speed)}/s` : j.state === "done" ? <CheckCircle2 size={15} className="ml-auto text-ok" /> : <span className="text-danger">{j.err ?? "failed"}</span>}
             </span>
-            {j.state === "running" && (
-              <button aria-label="Cancel" className="text-muted hover:text-danger" onClick={() => onCancel(j.id)}>
+            {(j.state === "running" || j.state === "queued") && (
+              <button aria-label={`Cancel ${j.name}`} className="text-muted hover:text-danger" onClick={() => onCancel(j)}>
                 <XCircle size={15} />
               </button>
             )}
