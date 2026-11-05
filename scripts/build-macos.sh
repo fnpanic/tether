@@ -8,7 +8,8 @@
 # APPLE_SIGNING_IDENTITY (default "-" = ad-hoc), MACOSX_DEPLOYMENT_TARGET (default 11.0),
 # MAC_ARCH=arm64 (Apple silicon only: half the build time, no Intel slice, no Rosetta/sudo),
 # SKIP_QS=1 (technician app only), PREBUILT_FRONTEND=<dir> (technician UI built elsewhere with
-# `npm run build`: no npm here; the Tauri CLI comes from crates.io; needs SKIP_QS=1).
+# `npm run build`: no npm here; the Tauri CLI comes from crates.io), PREBUILT_QS_FRONTEND=<dir>
+# (same for TetherQS; PREBUILT_FRONTEND needs it or SKIP_QS=1).
 # Safe to run again: every step skips what is already in place.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -50,7 +51,7 @@ EOF
   exit 1
 fi
 export TETHER_SERVER TETHER_PUB_KEY TETHER_ADMIN_PUB_KEY TETHER_UPDATER_PUB_KEY
-[ -z "${PREBUILT_FRONTEND:-}" ] || [ -n "${SKIP_QS:-}" ] || die "PREBUILT_FRONTEND covers the technician app only: set SKIP_QS=1 too."
+[ -z "${PREBUILT_FRONTEND:-}" ] || [ -n "${SKIP_QS:-}${PREBUILT_QS_FRONTEND:-}" ] || die "PREBUILT_FRONTEND covers the technician app only: set PREBUILT_QS_FRONTEND (or SKIP_QS=1) too."
 
 # ---------------------------------------------------------------- prerequisites
 step "Xcode Command Line Tools"
@@ -155,19 +156,22 @@ sign() { # file: optional .sig next to it, the format Tether Manage also writes
   fi
 }
 
-step "Tether technician app ($ARCH_NAME .app, .dmg, updater .app.tar.gz)"
-cd "$ROOT/apps/desktop"
-if [ -n "${PREBUILT_FRONTEND:-}" ]; then
-  # UI built on another machine (npm blocked here): Tauri CLI from crates.io, no npm at all.
-  fe=$(cd "$PREBUILT_FRONTEND" && pwd)
-  [ -f "$fe/index.html" ] || die "PREBUILT_FRONTEND=$fe has no index.html"
+# tauri_build <prebuilt UI dir or ""> <tauri build args>: run in the app folder. With a UI built on
+# another machine (npm blocked here): Tauri CLI from crates.io, no npm at all.
+tauri_build() {
+  local fe=$1; shift
+  if [ -z "$fe" ]; then npm ci; npx tauri build "$@"; return; fi
+  fe=$(cd "$fe" && pwd)
+  [ -f "$fe/index.html" ] || die "prebuilt UI $fe has no index.html"
+  local cli
   cli=$(node -p "require('./package-lock.json').packages['node_modules/@tauri-apps/cli'].version")
   cargo tauri --version 2>/dev/null | grep -qx "tauri-cli $cli" || cargo install tauri-cli --version "=$cli" --locked
-  cargo tauri build --target $TARGET --bundles app,dmg --config "{\"build\":{\"beforeBuildCommand\":\"\",\"frontendDist\":\"$fe\"}}"
-else
-  npm ci
-  npx tauri build --target $TARGET --bundles app,dmg
-fi
+  cargo tauri build "$@" --config "{\"build\":{\"beforeBuildCommand\":\"\",\"frontendDist\":\"$fe\"}}"
+}
+
+step "Tether technician app ($ARCH_NAME .app, .dmg, updater .app.tar.gz)"
+cd "$ROOT/apps/desktop"
+tauri_build "${PREBUILT_FRONTEND:-}" --target $TARGET --bundles app,dmg
 V=$(version)
 B="src-tauri/target/$TARGET/release/bundle"
 cp "$B/dmg/Tether_${V}_${ARCH_NAME}.dmg" "$OUT/"
@@ -179,11 +183,11 @@ sign "$OUT/Tether_${V}_${ARCH_NAME}.app.tar.gz"
 if [ -z "${SKIP_QS:-}" ]; then
 step "TetherQS (portable $ARCH_NAME .app, zipped)"
 cd "$ROOT/apps/quick"
-npm ci
 # Windows ships a bare exe (bundling off); macOS needs the .app bundle.
 # Thin LTO like the technician app: fat LTO fails on macOS ("__CLASS_MudaMenuItem: symbol multiply
 # defined", then "failed to load bitcode of module muda"). Windows keeps the Cargo.toml setting.
-CARGO_PROFILE_RELEASE_LTO=thin npx tauri build --target $TARGET --bundles app --config '{"bundle":{"active":true}}'
+export CARGO_PROFILE_RELEASE_LTO=thin # last build step: nothing after it needs the default
+tauri_build "${PREBUILT_QS_FRONTEND:-}" --target $TARGET --bundles app --config '{"bundle":{"active":true}}'
 QV=$(version)
 rm -f "$OUT/TetherQS-${QV}-${ARCH_NAME}.zip" "$OUT/TetherQS-${QV}-${ARCH_NAME}.zip.sig"
 ditto -c -k --sequesterRsrc --keepParent src-tauri/target/$TARGET/release/bundle/macos/TetherQS.app "$OUT/TetherQS-${QV}-${ARCH_NAME}.zip"
