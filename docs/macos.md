@@ -132,6 +132,19 @@ What the apps do about it (0.5.4):
 - Without that message (an older Mac app), the technician's window explains the likely cause
   after 8 s without a picture.
 
+## Remote input and App Nap
+
+On a Mac host, remote mouse and keyboard input is injected on Tether's main thread. Tether
+minimizes its windows when a session starts; macOS would then put it into App Nap and throttle
+that thread, so input stops arriving after a few seconds. From 0.5.13 Tether opts out of App Nap
+(`NSProcessInfo beginActivity`, user-initiated and latency-critical; idle system sleep stays
+allowed). The protection of Tether's own windows drops keys only while the active Tether also
+has a window on screen, not merely because Tether is the active app.
+
+Verified 2026-11-05 on an Apple Silicon Mac: before the fix, input died about 20 s after the
+session started and every key was dropped; with 0.5.13 keys pass and input still arrives after
+100 s.
+
 ## Windows and the Dock
 
 Tether shows **one** icon in the Dock. Session windows (screen, file transfer, camera, terminal),
