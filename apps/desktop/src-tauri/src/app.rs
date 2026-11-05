@@ -340,8 +340,22 @@ fn dock_click(w: &WebviewWindow) -> bool {
     hbb_common::log::info!("dock click: session {session}, cm shown {shown}");
     if session && shown {
         let _ = w.minimize();
-    } else {
+    } else if w.is_minimized().unwrap_or(false) {
+        // show() right after unminimize() interrupts the restore animation on macOS and leaves an
+        // empty, half-transparent window: restore only, focus once the animation is done.
         let _ = w.unminimize();
+        let w = w.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let _ = w.set_focus();
+            hbb_common::log::info!(
+                "dock click restored: visible {:?}, minimized {:?}, pos {:?}",
+                w.is_visible(),
+                w.is_minimized(),
+                w.outer_position()
+            );
+        });
+    } else {
         let _ = w.show();
         let _ = w.set_focus();
     }
