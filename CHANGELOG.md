@@ -4,6 +4,23 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.5.7] — 2026-11-05
+
+Re-release of 0.5.6 with the correct update-signing key; the code is the same as 0.5.6. The 0.5.6
+files first published on the relays were built before these fixes and lacked:
+
+- **The correct updater key.** They carried the key from before the 2026-11-04 key reset
+  (`43DFAF08CF9D9DD2`; releases are signed with `1AD0C3FBDCA3B4EA`), so auto-update fails with
+  "The signature was created with a different key". 0.5.5 and the published 0.5.6 for Windows
+  cannot update themselves: install 0.5.7 once by hand (Tether and TetherQS alike); later updates
+  install by themselves.
+- **The Alt freeze fix** (a lone Alt from the technician no longer puts TetherQS into keyboard menu
+  mode).
+- **The WebRTC Disconnect fix** (Disconnect in TetherQS over P2P / Direct (LAN) no longer makes
+  the technician reconnect).
+- **The macOS window-guard fix** (clicks on Tether's own windows on a Mac host are blocked and the
+  technician gets the notice).
+
 ## [0.5.6] — 2026-11-05
 
 ### Security
