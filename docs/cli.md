@@ -46,7 +46,9 @@ Rules:
 
 `--connect` checks the policy (`connect.outgoing`) and the update state first, then opens the
 session window in a new process. The command does not wait for the session: once the window is
-open, the result of the connection is shown there, not in the exit code.
+open, the result of the connection is shown there, not in the exit code. When a session window to
+the same `<id>` and connection type is already open in the running Tether, that window comes to
+the front instead of a second one (a password given with the second request is not used).
 
 ## Exit codes
 
