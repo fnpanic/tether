@@ -65,6 +65,12 @@ pub fn run(args: Vec<String>) {
     };
     #[cfg(target_os = "macos")]
     let cm_accessory = cm_show.is_some();
+    // Its own taskbar button, which toggles it natively: grouped with the main window, a click
+    // only showed thumbnails and never minimized (docs/quick-support.md).
+    #[cfg(windows)]
+    if matches!(mode, Mode::Cm) {
+        set_app_id(&format!("{}.cm", ctx.config().identifier));
+    }
     let mut builder = tauri::Builder::default();
     if matches!(mode, Mode::Main) {
         // First plugin: a second start exits before doing anything else.
@@ -118,12 +124,9 @@ pub fn run(args: Vec<String>) {
                     if let Some(l) = cm_show.take() {
                         let app = app.handle().clone();
                         std::thread::spawn(move || {
-                            for _ in l.incoming().flatten() {
-                                if let Some(w) = app.get_webview_window("cm") {
-                                    let _ = w.unminimize();
-                                    let _ = w.show();
-                                    let _ = w.set_focus();
-                                }
+                            for mut s in l.incoming().flatten() {
+                                let toggled = app.get_webview_window("cm").is_some_and(|w| dock_click(&w));
+                                let _ = std::io::Write::write_all(&mut s, if toggled { b"1" } else { b"0" });
                             }
                         });
                     }
@@ -153,14 +156,13 @@ pub fn run(args: Vec<String>) {
                 api.prevent_exit();
             }
         }
-        // Dock icon clicked: the main window if nothing is shown, and the connection window,
-        // which has no Dock icon of its own.
+        // Dock icon clicked: during a session it toggles only the connection window, which has no
+        // Dock icon of its own; otherwise the main window if nothing is shown (docs/macos.md).
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { has_visible_windows, .. } if is_main => {
-            if !has_visible_windows {
+            if !cm_dock_click(&app.config().identifier) && !has_visible_windows {
                 let _ = main_window(app);
             }
-            let _ = std::os::unix::net::UnixStream::connect(cm_show_socket(&app.config().identifier));
         }
         _ => {}
     });
@@ -169,6 +171,14 @@ pub fn run(args: Vec<String>) {
 /// Runs in the first instance when Tether is started again: a forwarded session request opens a
 /// session window, anything else brings the main window to the front.
 fn second_instance(app: &AppHandle, argv: &[String]) {
+    if argv.get(1).map(String::as_str) == Some(MINIMIZE_MAIN_ARG) {
+        // Not a hidden one: minimize would show it.
+        if let Some(w) = app.get_webview_window("main").filter(|w| w.is_visible().unwrap_or(false)) {
+            hbb_common::log::info!("host session started: minimizing the main window");
+            let _ = w.minimize();
+        }
+        return;
+    }
     if argv.get(1).map(String::as_str) != Some(cli::FORWARD_ARG) {
         let _ = main_window(app);
         return;
@@ -195,6 +205,40 @@ fn second_instance(app: &AppHandle, argv: &[String]) {
 /// shortcut: Windows only; elsewhere `--connect` still runs in its own process, as before.
 #[cfg(windows)]
 fn forward_to_running(identifier: &str, payload: &str) -> bool {
+    send_to_running(identifier, &format!("{}|{payload}", cli::FORWARD_ARG))
+}
+
+/// argv[1] the `--cm` process sends to the main window's process when a host session starts.
+const MINIMIZE_MAIN_ARG: &str = "--minimize-main";
+
+/// A host session started (`sink.rs`): the main window's process, if running, minimizes it.
+pub fn minimize_main(app: &AppHandle) {
+    let identifier = &app.config().identifier;
+    #[cfg(windows)]
+    send_to_running(identifier, MINIMIZE_MAIN_ARG);
+    // The single-instance plugin's socket and wire format (its macos.rs): "cwd\0\0argv0\0argv1".
+    #[cfg(target_os = "macos")]
+    if let Ok(mut s) = std::os::unix::net::UnixStream::connect(format!("/tmp/{}_si.sock", identifier.replace(['.', '-'], "_"))) {
+        let _ = std::io::Write::write_all(&mut s, format!("\0\0tether\0{MINIMIZE_MAIN_ARG}").as_bytes());
+    }
+    let _ = identifier;
+}
+
+/// Its own taskbar button for this process's windows (an explicit AppUserModelID).
+#[cfg(windows)]
+fn set_app_id(id: &str) {
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SetCurrentProcessExplicitAppUserModelID(id: *const u16) -> i32;
+    }
+    let w: Vec<u16> = id.encode_utf16().chain(Some(0)).collect();
+    let hr = unsafe { SetCurrentProcessExplicitAppUserModelID(w.as_ptr()) };
+    hbb_common::log::info!("cm app id {id}: {hr:#x}");
+}
+
+/// argv for the running instance's single-instance window, `|`-separated.
+#[cfg(windows)]
+fn send_to_running(identifier: &str, args: &str) -> bool {
     use windows_sys::Win32::{
         System::DataExchange::COPYDATASTRUCT,
         UI::WindowsAndMessaging::{FindWindowW, SendMessageW, WM_COPYDATA},
@@ -207,7 +251,7 @@ fn forward_to_running(identifier: &str, payload: &str) -> bool {
     }
     // The plugin's wire format (tauri-plugin-single-instance windows.rs): "cwd|argv0|argv1…\0",
     // tagged 1542; its window procedure answers 1.
-    let data = format!("|tether|{}|{payload}\0", cli::FORWARD_ARG);
+    let data = format!("|tether|{args}\0");
     let cds = COPYDATASTRUCT { dwData: 1542, cbData: data.len() as u32, lpData: data.as_ptr() as _ };
     unsafe { SendMessageW(hwnd, WM_COPYDATA, 0, &cds as *const _ as isize) == 1 }
 }
@@ -275,8 +319,37 @@ fn cm_show_socket(identifier: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{identifier}-cm.sock"))
 }
 
+/// Main process: tells the `--cm` process the Dock icon was clicked. True if that toggled the
+/// connection window of an active session (then the main window stays as it is).
+#[cfg(target_os = "macos")]
+fn cm_dock_click(identifier: &str) -> bool {
+    let Ok(mut s) = std::os::unix::net::UnixStream::connect(cm_show_socket(identifier)) else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+    let mut r = [0u8];
+    std::io::Read::read_exact(&mut s, &mut r).is_ok() && r[0] == b'1'
+}
+
+/// `--cm` process, Dock icon clicked: during a session the connection window toggles like a
+/// single-window app (minimize when shown, else bring back); without one it is just shown.
+#[cfg(target_os = "macos")]
+fn dock_click(w: &WebviewWindow) -> bool {
+    let session = sink::get().is_some_and(|s| s.cm_clients().iter().any(|c| c["authorized"] == true));
+    let shown = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
+    hbb_common::log::info!("dock click: session {session}, cm shown {shown}");
+    if session && shown {
+        let _ = w.minimize();
+    } else {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    session
+}
+
 /// The Accessory-policy `--cm` window has no Dock icon: a click on the main Dock icon connects
-/// here and brings it back, also from minimized. None if not listening (then keep the Dock icon).
+/// here (`dock_click`). None if not listening (then keep the Dock icon).
 #[cfg(target_os = "macos")]
 fn listen_show_cm(identifier: &str) -> Option<std::os::unix::net::UnixListener> {
     let path = cm_show_socket(identifier);
