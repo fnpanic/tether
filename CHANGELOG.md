@@ -4,6 +4,13 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Fixed
+- Session window: minimized from full screen (toolbar Full screen, then Minimize), it comes back in
+  full screen when restored from the taskbar or Dock instead of as a normal window. A maximized
+  window already came back maximized; an e2e (`e2e/session-maxrestore-e2e.mjs`) now checks both.
+
 ## [0.5.10] — 2026-11-05
 
 ### Fixed

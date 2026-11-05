@@ -449,7 +449,9 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       })(),
     );
 
-  // Leave full screen first: a window minimized from full screen does not restore cleanly.
+  // Leave full screen first: a window minimized from full screen does not restore cleanly (and
+  // macOS cannot minimize one at all). It goes back to full screen when it is restored.
+  const refullscreen = useRef(false);
   const minimize = () =>
     act(
       (async () => {
@@ -457,10 +459,32 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
         if (await w.isFullscreen()) {
           await w.setFullscreen(false);
           setFullscreen(false);
+          refullscreen.current = true;
         }
         await w.minimize();
       })(),
     );
+  // Restored (taskbar, Dock or unminimize) = focused again and no longer minimized.
+  useEffect(() => {
+    let off = () => {};
+    let gone = false;
+    import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => {
+        const w = getCurrentWindow();
+        return w.onFocusChanged(async ({ payload }) => {
+          if (!payload || !refullscreen.current || (await w.isMinimized())) return;
+          refullscreen.current = false;
+          await w.setFullscreen(true);
+          setFullscreen(true);
+        });
+      })
+      .then((u) => (gone ? u() : (off = u)))
+      .catch(() => {}); // outside Tauri
+    return () => {
+      gone = true;
+      off();
+    };
+  }, []);
 
   const switchDisplay = (i: number) => {
     act(invoke("session_switch_display", { key, display: i }));
