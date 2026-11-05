@@ -320,7 +320,7 @@ offered app has a stable release on any OS. Republish the page after every relea
 contain the version) and after changing the texts. **Publish…** opens the review sheet and
 uploads the page to every relay; its links are relative, so each relay serves its own files
 (publish releases to every relay first). The preview in Tether Manage shows the page without its
-script (both sections).
+script (both sections); its links and the switch do nothing there, and **Preview** always redraws it.
 
 ## Custom apps
 
