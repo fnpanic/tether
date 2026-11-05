@@ -1,63 +1,91 @@
-// Main window: the recordings on this computer, with the folder they are in.
+// Recordings dialog of the main window: the recordings on this computer, with the folder they are in.
 import { useCallback, useEffect, useState } from "react";
-import { FolderOpen, Play, Trash2, Video } from "lucide-react";
+import { FolderOpen, Play, Trash2, Video, X } from "lucide-react";
 import { Button, IconButton } from "../components/ui";
-import { RecordingSaved } from "../components/RecordingSaved";
-import { formatDuration, formatSize, peerLabel, recordingsApi, type Recording, type RecordingsState } from "../lib/recordings";
+import { formatDuration, formatSize, onRecordings, peerLabel, recordingsApi, type Recording, type RecordingsState } from "../lib/recordings";
 import { formatId } from "../lib/ipc";
 import { errorText, usePolicy } from "../lib/policy";
 
-export function RecordingsSection({ onToast }: { onToast: (m: string) => void }) {
+/** Recordings list with live updates (focus and the `recordings` event). */
+export function useRecordings() {
   const [st, setSt] = useState<RecordingsState | null>(null);
-  const [ask, setAsk] = useState<string | null>(null);
-  const eff = usePolicy();
   const load = useCallback(() => recordingsApi.list().then(setSt).catch(() => {}), []);
   useEffect(() => {
     load();
     window.addEventListener("focus", load);
-    return () => window.removeEventListener("focus", load);
+    const off = onRecordings(load);
+    return () => {
+      window.removeEventListener("focus", load);
+      off();
+    };
   }, [load]);
+  return { st, load };
+}
+
+/** Recording turned off by policy and nothing left to look at: no camera button, no dialog. */
+export const recordingsHidden = (eff: ReturnType<typeof usePolicy>, st: RecordingsState | null) =>
+  !st || (eff?.values["recording.mode"] === "off" && st.items.length === 0);
+
+/** Opened from the camera button in the main window's title bar, the same way as Settings. */
+export function Recordings({ onClose, onToast }: { onClose: () => void; onToast: (m: string) => void }) {
+  const { st, load } = useRecordings();
+  const [ask, setAsk] = useState<string | null>(null);
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [onClose]);
   const act = (p: Promise<unknown>) => p.catch((e) => onToast(errorText(e)));
-  const off = eff?.values["recording.mode"] === "off";
-  if (!st || (off && st.items.length === 0)) return <RecordingSaved onChange={load} />;
   return (
-    <section data-testid="recordings">
-      <div className="mt-12 flex items-end gap-3">
-        <h2 className="text-headline font-semibold">Recordings</h2>
-        <div className="flex-1" />
-        <Button size="sm" onClick={() => act(recordingsApi.openFolder())}>
-          <FolderOpen size={14} /> Open folder
-        </Button>
-      </div>
-      <div className="mt-1 truncate font-mono text-footnote text-muted" title={st.folder}>
-        {st.folder}
-      </div>
-      {st.items.length === 0 ? (
-        <div className="mt-4 rounded-2xl bg-parchment px-6 py-10 text-center">
-          <div className="text-callout font-semibold">No recordings yet</div>
-          <div className="mt-1 text-caption text-muted">Click the camera button in a session's toolbar to record. The other person is asked first.</div>
+    <div className="animate-fade fixed inset-0 z-30 flex bg-black/40" onMouseDown={onClose}>
+      <div
+        className="animate-rise m-auto flex h-[min(600px,92vh)] w-[min(860px,94vw)] flex-col overflow-hidden rounded-2xl border border-hairline bg-tile shadow-float"
+        onMouseDown={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-label="Recordings"
+        data-testid="recordings"
+      >
+        <div className="flex items-center gap-3 px-7 pb-2 pt-5">
+          <h2 className="text-title font-semibold">Recordings</h2>
+          <div className="flex-1" />
+          <Button size="sm" onClick={() => act(recordingsApi.openFolder())}>
+            <FolderOpen size={14} /> Open folder
+          </Button>
+          <IconButton label="Close recordings" onClick={onClose}>
+            <X size={18} />
+          </IconButton>
         </div>
-      ) : (
-        <ul className="mt-4 overflow-hidden rounded-2xl border border-hairline bg-tile">
-          {st.items.map((r) => (
-            <Row
-              key={r.name}
-              r={r}
-              asking={ask === r.name}
-              onPlay={() => act(recordingsApi.play(r.name))}
-              onReveal={() => act(recordingsApi.reveal(r.name))}
-              onAsk={() => setAsk(r.name)}
-              onCancel={() => setAsk(null)}
-              onDelete={() => {
-                setAsk(null);
-                act(recordingsApi.remove(r.name).then(load));
-              }}
-            />
-          ))}
-        </ul>
-      )}
-      <RecordingSaved onChange={load} />
-    </section>
+        <div className="truncate px-7 font-mono text-footnote text-muted" title={st?.folder}>
+          {st?.folder}
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-7 pb-7">
+          {st && st.items.length === 0 ? (
+            <div className="mt-4 rounded-2xl bg-parchment px-6 py-10 text-center">
+              <div className="text-callout font-semibold">No recordings yet</div>
+              <div className="mt-1 text-caption text-muted">Click the camera button in a session's toolbar to record. The other person is asked first.</div>
+            </div>
+          ) : (
+            <ul className="mt-4 overflow-hidden rounded-2xl border border-hairline bg-tile">
+              {st?.items.map((r) => (
+                <Row
+                  key={r.name}
+                  r={r}
+                  asking={ask === r.name}
+                  onPlay={() => act(recordingsApi.play(r.name))}
+                  onReveal={() => act(recordingsApi.reveal(r.name))}
+                  onAsk={() => setAsk(r.name)}
+                  onCancel={() => setAsk(null)}
+                  onDelete={() => {
+                    setAsk(null);
+                    act(recordingsApi.remove(r.name).then(load));
+                  }}
+                />
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 

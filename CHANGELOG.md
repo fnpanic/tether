@@ -4,6 +4,15 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Changed
+- **Main window:** the recordings list moved out of the main window into **Recordings**, opened
+  with the new camera button next to Settings in the title bar (Settings-style dialog, same
+  features: Play, Show in folder, Delete, Open folder, folder path, live updates). The main
+  window no longer scrolls: This device and Remote device always sit side by side and only the
+  Recent list scrolls.
+
 ## [0.5.10] — 2026-11-05
 
 ### Fixed

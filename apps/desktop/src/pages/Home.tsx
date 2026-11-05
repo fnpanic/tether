@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Copy, Eye, EyeOff, FolderSync, Lock, MoreHorizontal, RefreshCw, Search, Settings as SettingsIcon, Trash2 } from "lucide-react";
+import { ArrowRight, Copy, Eye, EyeOff, FolderSync, Lock, MoreHorizontal, RefreshCw, Search, Settings as SettingsIcon, Trash2, Video } from "lucide-react";
 import { api, formatId, invoke, type Peer, type Status } from "../lib/ipc";
 import { Button, IconButton, Logo, PlatformIcon, StatusDot, TitleBar, useToast } from "../components/ui";
 import { Settings } from "./Settings";
 import { UpdateCard } from "../components/UpdateCard";
-import { errorText } from "../lib/policy";
-import { RecordingsSection } from "./Recordings";
+import { errorText, usePolicy } from "../lib/policy";
+import { Recordings, recordingsHidden, useRecordings } from "./Recordings";
+import { RecordingSaved } from "../components/RecordingSaved";
 
 function useStatus() {
   const [s, setS] = useState<Status | null>(null);
@@ -211,6 +212,9 @@ export function Home() {
   const [peers, setPeers] = useState<Peer[]>([]);
   const [q, setQ] = useState("");
   const [settings, setSettings] = useState(false);
+  const [recordings, setRecordings] = useState(false);
+  const rec = useRecordings();
+  const eff = usePolicy();
   const toast = useToast();
 
   const loadPeers = useCallback(() => api.recentPeers().then(setPeers).catch(() => {}), []);
@@ -227,26 +231,31 @@ export function Home() {
   const shown = peers.filter((p) => !q || p.id.includes(q.replace(/\s/g, "")) || `${p.hostname} ${p.username}`.toLowerCase().includes(q.toLowerCase()));
 
   return (
-    <div className="flex h-full flex-col bg-canvas">
+    <div className="flex h-full flex-col overflow-hidden bg-canvas">
       <TitleBar>
         <Logo size={20} />
         <span className="text-caption font-semibold">Tether</span>
         <div className="flex-1" data-tauri-drag-region />
         <StatusPill s={s} />
+        {!recordingsHidden(eff, rec.st) && (
+          <IconButton label="Recordings" className="no-drag" onClick={() => setRecordings(true)}>
+            <Video size={17} />
+          </IconButton>
+        )}
         <IconButton label="Settings" className="no-drag" onClick={() => setSettings(true)}>
           <SettingsIcon size={17} />
         </IconButton>
       </TitleBar>
 
-      <main className="min-h-0 flex-1 overflow-y-auto px-8 pb-12 pt-4">
-        <div className="mx-auto max-w-[980px]">
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden px-8 pb-6 pt-4">
+        <div className="mx-auto flex min-h-0 w-full max-w-[980px] flex-1 flex-col">
           <MacPermissions />
-          <div className="grid grid-cols-1 gap-6 min-[834px]:grid-cols-[1.1fr_1fr]">
+          <div className="grid shrink-0 grid-cols-[1.1fr_1fr] gap-6">
             <ThisDevice s={s} onToast={toast.show} onRefresh={refresh} />
             <ConnectBox peers={peers} onConnect={connect} />
           </div>
 
-          <div className="mt-12 flex items-end gap-3">
+          <div className="mt-8 flex shrink-0 items-end gap-3">
             <h2 className="text-headline font-semibold">Recent</h2>
             <div className="flex-1" />
             {peers.length > 4 && (
@@ -263,7 +272,7 @@ export function Home() {
               <div className="mt-1 text-caption text-muted">Devices you connect to appear here.</div>
             </div>
           ) : (
-            <div className="mt-4 grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-6">
+            <div className="-mx-2 mt-2 grid min-h-0 flex-1 grid-cols-[repeat(auto-fill,minmax(200px,1fr))] content-start gap-6 overflow-y-auto p-2">
               {shown.map((p) => (
                 <PeerCard
                   key={p.id}
@@ -277,10 +286,11 @@ export function Home() {
               ))}
             </div>
           )}
-          <RecordingsSection onToast={toast.show} />
         </div>
       </main>
+      {recordings && <Recordings onClose={() => setRecordings(false)} onToast={toast.show} />}
       {settings && <Settings onClose={() => setSettings(false)} status={s} />}
+      <RecordingSaved />
       <UpdateCard />
       {toast.node}
     </div>
