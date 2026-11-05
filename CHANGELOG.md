@@ -17,7 +17,7 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   always on. The technician gets a short notice. Details and limits: SECURITY.md.
 - File transfer refuses to read or change Tether's own configuration (keys, password, permissions)
   and installation folder on the host.
-- macOS host: same filter, compile-unverified until the next Mac build.
+- macOS host: same filter (tested on a Mac, see Fixed).
 
 ### Changed
 - **Direct (LAN) on the same network, also behind a proxy and for TetherQS without admin
@@ -32,6 +32,12 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   subnet broadcast (Hyper-V / VPN adapters) and skips loopback.
 
 ### Fixed
+- **macOS host: clicks on Tether's own windows are now actually blocked, and the technician gets
+  the notice.** The Dock owns a transparent window over the whole screen (layer 20, above normal
+  and floating windows), so the hit test always found the Dock and never a Tether window. The
+  Dock's window is now skipped. The notice check also waits for the pointer moves queued before
+  the click (macOS injects on the main queue), so a fast move-and-click is judged at its real
+  position.
 - **Updates work again: 0.5.5 builds carried an outdated update-signing key.** They were built
   with the key from before the key reset, so every update signed by Tether Manage failed with
   "The signature was created with a different key than the one provided". Install 0.5.6 once by

@@ -86,7 +86,9 @@ physical input never passes through it.
 - **Mouse:** a button press or wheel over a window of a Tether process is dropped, together with
   the matching release (so no drag starts there). Windows: `WindowFromPoint` → `GetAncestor
   (GA_ROOTOWNER)` → owning process (WebView2 popups: the `msedgewebview2.exe` started by a Tether
-  process). macOS: the frontmost on-screen window under the pointer (`CGWindowListCopyWindowInfo`).
+  process). macOS: the frontmost on-screen window under the pointer (`CGWindowListCopyWindowInfo`),
+  skipping the Dock's window: it covers the whole screen above all normal windows. So a click on
+  the Dock itself where a Tether window lies underneath is dropped too.
   Pointer moves pass, so the pointer can still travel across.
 - **Keyboard:** while a Tether window is in the foreground, keys are dropped except what is needed
   to leave it: modifier keys on their own, Alt+Tab, Win+Tab / Cmd+Tab, Ctrl+Alt+Del, lock screen.

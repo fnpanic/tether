@@ -2145,10 +2145,23 @@ index e9ea313..3234e63 100644
 +    }
 +}
 diff --git a/src/server/input_service.rs b/src/server/input_service.rs
-index 5a392bb..6e831d9 100644
+index 5a392bb..88e3e5b 100644
 --- a/src/server/input_service.rs
 +++ b/src/server/input_service.rs
-@@ -1242,8 +1242,11 @@ pub fn handle_pointer_(evt: &PointerDeviceEvent, conn: i32) {
+@@ -702,6 +702,12 @@ lazy_static::lazy_static! {
+     static ref QUEUE: Queue = Queue::main();
+ }
+ 
++/// Tether: runs `f` after the input already queued for injection.
++#[cfg(target_os = "macos")]
++pub(super) fn in_input_order<T: Send>(f: impl Send + FnOnce() -> T) -> T {
++    QUEUE.exec_sync(f)
++}
++
+ #[cfg(target_os = "macos")]
+ struct VirtualInputState {
+     virtual_input: VirtualInput,
+@@ -1242,8 +1248,11 @@ pub fn handle_pointer_(evt: &PointerDeviceEvent, conn: i32) {
      match &evt.union {
          Some(TouchEvent(evt)) => match &evt.union {
              Some(ScaleUpdate(_scale_evt)) => {
@@ -2161,7 +2174,7 @@ index 5a392bb..6e831d9 100644
              }
              _ => {}
          },
-@@ -1289,6 +1292,10 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
+@@ -1289,6 +1298,10 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
      crate::platform::windows::try_change_desktop();
      let buttons = evt.mask >> 3;
      let evt_type = evt.mask & MOUSE_TYPE_MASK;
@@ -2172,7 +2185,7 @@ index 5a392bb..6e831d9 100644
      let mut en = ENIGO.lock().unwrap();
      #[cfg(target_os = "macos")]
      en.set_ignore_flags(enigo_ignore_flags());
-@@ -2488,6 +2495,10 @@ pub fn handle_key_(evt: &KeyEvent) {
+@@ -2488,6 +2501,10 @@ pub fn handle_key_(evt: &KeyEvent) {
      if EXITING.load(Ordering::SeqCst) {
          return;
      }
@@ -2185,10 +2198,10 @@ index 5a392bb..6e831d9 100644
      super::uinput::prepare_layout(evt);
 diff --git a/src/server/own_ui_guard.rs b/src/server/own_ui_guard.rs
 new file mode 100644
-index 0000000..540e4dc
+index 0000000..437016f
 --- /dev/null
 +++ b/src/server/own_ui_guard.rs
-@@ -0,0 +1,674 @@
+@@ -0,0 +1,689 @@
 +//! Tether: input from a remote session never reaches Tether's own windows on this computer (the
 +//! incoming-connection window, TetherQS, the main window, Tether Manage). Only the person at the
 +//! computer can use them, so a technician cannot grant themselves permissions, approve consent
@@ -2269,7 +2282,14 @@ index 0000000..540e4dc
 +
 +/// For the technician notice only (no state change): would this event be dropped?
 +pub fn would_drop_mouse(evt_type: i32) -> bool {
-+    evt_type == MOUSE_TYPE_DOWN && over_own_window()
++    if evt_type != MOUSE_TYPE_DOWN {
++        return false;
++    }
++    // macOS injects on the main queue: look where the moves queued before this click put the pointer.
++    #[cfg(target_os = "macos")]
++    return super::input_service::in_input_order(over_own_window);
++    #[cfg(not(target_os = "macos"))]
++    over_own_window()
 +}
 +
 +pub fn would_drop_key(evt: &KeyEvent) -> bool {
@@ -2626,6 +2646,8 @@ index 0000000..540e4dc
 +    use objc::{class, msg_send, sel, sel_impl};
 +    use std::path::{Path, PathBuf};
 +
++    const DOCK: &str = "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock";
++
 +    unsafe fn num(dict: id, key: id) -> Option<f64> {
 +        let v: id = msg_send![dict, objectForKey: key];
 +        if v == nil {
@@ -2668,6 +2690,12 @@ index 0000000..540e4dc
 +                };
 +                if x >= bx && x < bx + bw && y >= by && y < by + bh {
 +                    pid = num(w, kCGWindowOwnerPID as id).unwrap_or(0.) as u32;
++                    // The Dock's window covers the whole screen above normal windows; clicks
++                    // outside the Dock itself go through to the window below.
++                    if exe_of(pid).map_or(false, |e| e == Path::new(DOCK)) {
++                        pid = 0;
++                        continue;
++                    }
 +                    break;
 +                }
 +            }
