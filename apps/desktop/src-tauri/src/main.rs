@@ -20,6 +20,9 @@ use librustdesk::core_main::{core_main, CoreMainAction};
 pub const APP_NAME: &str = "Tether";
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const ORG: &str = "app.tether";
+/// Set in the main window's process, inherited by the `--cm` process its server starts (app.rs).
+#[cfg(target_os = "macos")]
+pub const MAIN_GUI_ENV: &str = "TETHER_MAIN_GUI";
 
 fn main() -> ExitCode {
     // Must run before anything reads config paths, service names or the IPC socket name.
@@ -45,6 +48,10 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = cli::run(&args) {
         return code;
+    }
+    #[cfg(target_os = "macos")]
+    if args.is_empty() {
+        std::env::set_var(MAIN_GUI_ENV, "1");
     }
     if args.first().map(String::as_str) == Some("--server") {
         // The server role enforces the core options: keep its policy current too.

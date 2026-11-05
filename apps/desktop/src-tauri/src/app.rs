@@ -40,6 +40,8 @@ fn mode(args: &[String]) -> Mode {
 
 pub fn run(args: Vec<String>) {
     let mode = mode(&args);
+    #[cfg(target_os = "macos")]
+    let is_main = matches!(mode, Mode::Main);
     let mut ctx = tauri::generate_context!();
     // The single-instance lock is keyed by the identifier: dev profiles must not share it.
     if let Ok(p) = std::env::var("TETHER_PROFILE") {
@@ -54,12 +56,22 @@ pub fn run(args: Vec<String>) {
             return;
         }
     }
+    // Started by the main window's process: the connection window gets no Dock icon of its own,
+    // only while the main Dock icon can bring it back (docs/macos.md).
+    #[cfg(target_os = "macos")]
+    let mut cm_show = match mode {
+        Mode::Cm if std::env::var_os(crate::MAIN_GUI_ENV).is_some() => listen_show_cm(&ctx.config().identifier),
+        _ => None,
+    };
+    #[cfg(target_os = "macos")]
+    let cm_accessory = cm_show.is_some();
     let mut builder = tauri::Builder::default();
     if matches!(mode, Mode::Main) {
         // First plugin: a second start exits before doing anything else.
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| second_instance(app, &argv)));
     }
-    builder
+    #[allow(unused_mut)]
+    let mut app = builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
@@ -102,6 +114,19 @@ pub fn run(args: Vec<String>) {
                 Mode::Cm => {
                     librustdesk::ui::cm::start();
                     cm_window(app.handle())?;
+                    #[cfg(target_os = "macos")]
+                    if let Some(l) = cm_show.take() {
+                        let app = app.handle().clone();
+                        std::thread::spawn(move || {
+                            for _ in l.incoming().flatten() {
+                                if let Some(w) = app.get_webview_window("cm") {
+                                    let _ = w.unminimize();
+                                    let _ = w.show();
+                                    let _ = w.set_focus();
+                                }
+                            }
+                        });
+                    }
                     refuse_incoming_while_update_required();
                 }
                 Mode::Connect { c, password } => {
@@ -114,16 +139,31 @@ pub fn run(args: Vec<String>) {
             Ok(())
         })
         .build(ctx)
-        .expect("failed to build tauri app")
-        .run(|app, ev| {
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = ev {
-                // Keep running in the tray while the main window is closed; the local server
-                // must stay up so this machine stays reachable.
-                if code.is_none() && app.get_webview_window("main").is_none() && has_tray(app) {
-                    api.prevent_exit();
-                }
+        .expect("failed to build tauri app");
+    // Before the event loop starts, so the Dock icon never appears.
+    #[cfg(target_os = "macos")]
+    if cm_accessory {
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    }
+    app.run(move |app, ev| match ev {
+        tauri::RunEvent::ExitRequested { api, code, .. } => {
+            // Keep running in the tray while the main window is closed; the local server
+            // must stay up so this machine stays reachable.
+            if code.is_none() && app.get_webview_window("main").is_none() && has_tray(app) {
+                api.prevent_exit();
             }
-        });
+        }
+        // Dock icon clicked: the main window if nothing is shown, and the connection window,
+        // which has no Dock icon of its own.
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen { has_visible_windows, .. } if is_main => {
+            if !has_visible_windows {
+                let _ = main_window(app);
+            }
+            let _ = std::os::unix::net::UnixStream::connect(cm_show_socket(&app.config().identifier));
+        }
+        _ => {}
+    });
 }
 
 /// Runs in the first instance when Tether is started again: a forwarded session request opens a
@@ -226,6 +266,24 @@ fn cm_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         ));
     }
     Ok(w)
+}
+
+/// Where the `--cm` process listens for "show your window" (any connection means show).
+#[cfg(target_os = "macos")]
+fn cm_show_socket(identifier: &str) -> std::path::PathBuf {
+    // $TMPDIR is per user on macOS; the identifier carries the dev profile.
+    std::env::temp_dir().join(format!("{identifier}-cm.sock"))
+}
+
+/// The Accessory-policy `--cm` window has no Dock icon: a click on the main Dock icon connects
+/// here and brings it back, also from minimized. None if not listening (then keep the Dock icon).
+#[cfg(target_os = "macos")]
+fn listen_show_cm(identifier: &str) -> Option<std::os::unix::net::UnixListener> {
+    let path = cm_show_socket(identifier);
+    let _ = std::fs::remove_file(&path);
+    std::os::unix::net::UnixListener::bind(&path)
+        .map_err(|e| hbb_common::log::warn!("cm show socket {path:?}: {e}"))
+        .ok()
 }
 
 /// Incoming sessions are refused while this version must be updated first: every connection the

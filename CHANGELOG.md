@@ -4,6 +4,14 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Changed
+- **macOS: one Tether icon in the Dock.** The connection window on a controlled Mac no longer adds
+  a second Tether icon while the main Tether runs; a click on the Tether Dock icon brings it back
+  (also from minimized) and opens the main window if no window is shown. Details:
+  [docs/macos.md](docs/macos.md#windows-and-the-dock).
+
 ## [0.5.8] — 2026-11-05
 
 Windows only (Tether and TetherQS); macOS stays on 0.5.7 until the next release.
