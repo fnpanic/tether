@@ -170,7 +170,7 @@ fn cm_authorize(id: i32) -> R<()> {
         return Err("Update TetherQS before accepting sessions.".into());
     }
     cm::authorize(id);
-    sink::set_field(id, "authorized", true);
+    sink::authorized(id);
     Ok(())
 }
 

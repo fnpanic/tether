@@ -339,9 +339,9 @@ function InSession({ c, files, s, since, rec, onError, msgs, onSend }: { c: Clie
   const [view, setView] = useState<"perm" | "chat">("perm");
   const [seen, setSeen] = useState(0);
   const incoming = msgs.filter((m) => !m.me).length;
-  // The first message opens the chat; later ones only raise the badge while Permissions is shown.
+  // Each message from the technician opens the chat (the backend restores the window).
   useEffect(() => {
-    if (incoming === 1) setView("chat");
+    if (incoming) setView("chat");
   }, [incoming]);
   useEffect(() => {
     if (view === "chat") setSeen(msgs.length);

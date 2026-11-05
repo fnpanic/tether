@@ -55,6 +55,8 @@ if (inTauri) {
     shown = true;
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     const w = getCurrentWindow();
+    // The CM window may already be minimized by a session that started before the first paint.
+    if (await w.isMinimized()) return;
     await w.show();
     await w.setFocus();
   };

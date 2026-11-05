@@ -411,6 +411,9 @@ fn cm_clients() -> Vec<Value> {
 #[tauri::command]
 fn cm_authorize(id: i32) {
     cm::authorize(id);
+    if let Some(s) = sink::get() {
+        s.cm_authorized(id);
+    }
 }
 
 #[tauri::command]
