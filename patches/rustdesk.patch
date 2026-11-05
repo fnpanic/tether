@@ -1592,10 +1592,19 @@ index b1e523d..90dc33a 100644
      async fn manual_restart_interrupts_retry_wait() {
          const WAKE_TIMEOUT: Duration = Duration::from_secs(1);
 diff --git a/src/server.rs b/src/server.rs
-index 8e4c56c..d747022 100644
+index 8e4c56c..9fb08df 100644
 --- a/src/server.rs
 +++ b/src/server.rs
-@@ -262,7 +262,15 @@ pub async fn create_tcp_connection(
+@@ -71,6 +71,8 @@ pub mod input_service {
+ }
+ 
+ mod connection;
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++pub mod own_ui_guard;
+ mod login_failure_check;
+ pub(crate) mod port_forward_mux;
+ pub mod display_service;
+@@ -262,7 +264,15 @@ pub async fn create_tcp_connection(
  /// Our signed identity goes out and, when `secure`, the controller's reply keys `stream`.
  /// Separate so it can be raced against the connection's eviction.
  async fn identity_handshake(stream: &mut Stream, secure: bool) -> ResultType<()> {
@@ -1611,7 +1620,7 @@ index 8e4c56c..d747022 100644
      if secure && pk.len() == sign::PUBLICKEYBYTES && sk.len() == sign::SECRETKEYBYTES {
          let mut sk_ = [0u8; sign::SECRETKEYBYTES];
          sk_[..].copy_from_slice(&sk);
-@@ -334,11 +342,15 @@ async fn identity_handshake(stream: &mut Stream, secure: bool) -> ResultType<()>
+@@ -334,11 +344,15 @@ async fn identity_handshake(stream: &mut Stream, secure: bool) -> ResultType<()>
                          } else if pk.asymmetric_value.is_empty() {
                              Config::set_key_confirmed(false);
                              log::info!("Force to update pk");
@@ -1627,7 +1636,7 @@ index 8e4c56c..d747022 100644
                      }
                  } else {
                      bail!("Handshake failed: invalid message format");
-@@ -407,11 +419,26 @@ async fn create_relay_connection_(
+@@ -407,11 +421,26 @@ async fn create_relay_connection_(
      // The proxy's address family does not constrain the relay target.
      let relay_server = crate::check_port(relay_server, RELAY_PORT);
      let use_ws_proxy = Config::is_proxy() && is_ws_endpoint(&check_ws(&relay_server));
@@ -1660,7 +1669,7 @@ index 8e4c56c..d747022 100644
      let licence_key = crate::get_key(true).await;
      msg_out.set_request_relay(RequestRelay {
 diff --git a/src/server/connection.rs b/src/server/connection.rs
-index e9ea313..e5770f5 100644
+index e9ea313..3234e63 100644
 --- a/src/server/connection.rs
 +++ b/src/server/connection.rs
 @@ -194,6 +194,10 @@ lazy_static::lazy_static! {
@@ -1702,7 +1711,49 @@ index e9ea313..e5770f5 100644
                                  conn.recording = enabled;
                                  conn.send_permission(Permission::Recording, enabled).await;
                              } else if &name == "block_input" {
-@@ -1936,6 +1947,9 @@ impl Connection {
+@@ -1260,10 +1271,31 @@ impl Connection {
+         }
+         #[cfg(target_os = "macos")]
+         reset_input_ondisconn();
++        // Tether: tell the technician why a click on a Tether window did nothing (throttled).
++        let mut last_notice: Option<Instant> = None;
++        let mut notice = |drop: bool| {
++            if drop && last_notice.map_or(true, |t| t.elapsed() > Duration::from_secs(5)) {
++                last_notice = Some(Instant::now());
++                let mut msg_out = Message::new();
++                msg_out.set_message_box(MessageBox {
++                    msgtype: "info".to_owned(),
++                    title: "tether-own-window".to_owned(),
++                    text: super::own_ui_guard::NOTICE.to_owned(),
++                    ..Default::default()
++                });
++                tx.send((Instant::now(), Arc::new(msg_out))).ok();
++            }
++        };
+         loop {
+             match receiver.recv_timeout(std::time::Duration::from_millis(500)) {
+                 Ok(v) => match v {
+                     MessageInput::Mouse(mouse_input) => {
++                        notice(
++                            mouse_input.simulate
++                                && super::own_ui_guard::would_drop_mouse(
++                                    mouse_input.msg.mask & crate::input::MOUSE_TYPE_MASK,
++                                ),
++                        );
+                         handle_mouse(
+                             &mouse_input.msg,
+                             mouse_input.conn_id,
+@@ -1274,6 +1306,9 @@ impl Connection {
+                         );
+                     }
+                     MessageInput::Key((mut msg, press)) => {
++                        if press || msg.down {
++                            notice(super::own_ui_guard::would_drop_key(&msg));
++                        }
+                         // Set the press state to false, use `down` only in `handle_key()`.
+                         msg.press = false;
+                         if press {
+@@ -1936,6 +1971,9 @@ impl Connection {
              self.tx_from_authed.clone(),
              self.lr.clone(),
          ));
@@ -1712,7 +1763,7 @@ index e9ea313..e5770f5 100644
          self.session_last_recv_time = SESSIONS
              .lock()
              .unwrap()
-@@ -2237,9 +2251,49 @@ impl Connection {
+@@ -2237,9 +2275,49 @@ impl Connection {
                  self.try_sub_monitor_services();
              }
          }
@@ -1762,7 +1813,7 @@ index e9ea313..e5770f5 100644
      fn try_sub_camera_displays(&mut self) {
          if let Some(s) = self.server.upgrade() {
              let mut s = s.write().unwrap();
-@@ -3044,7 +3098,17 @@ impl Connection {
+@@ -3044,7 +3122,17 @@ impl Connection {
                  crate::get_builtin_option(keys::OPTION_ALLOW_LOGON_SCREEN_PASSWORD) == "Y"
                      && is_logon();
  
@@ -1781,7 +1832,59 @@ index e9ea313..e5770f5 100644
                  || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()
              {
                  #[cfg(not(any(target_os = "android", target_os = "ios")))]
-@@ -4032,10 +4096,19 @@ impl Connection {
+@@ -3639,6 +3727,51 @@ impl Connection {
+                                 }
+                             }
+                         }
++                        // Tether: file transfer never reads or changes Tether's own configuration
++                        // (keys, password, permissions) or installation.
++                        #[cfg(not(any(target_os = "android", target_os = "ios")))]
++                        {
++                            use super::own_ui_guard::is_protected_path as protected;
++                            let in_dir = |dir: &str, name: &str| {
++                                protected(&std::path::Path::new(dir).join(name).to_string_lossy())
++                            };
++                            let denied: Option<i32> = match &fa.union {
++                                Some(file_action::Union::AllFiles(f)) if protected(&f.path) => Some(f.id),
++                                Some(file_action::Union::Send(s))
++                                    if JobType::from_proto(s.file_type) == JobType::Generic
++                                        && protected(&s.path) =>
++                                {
++                                    Some(s.id)
++                                }
++                                Some(file_action::Union::Receive(r))
++                                    if protected(&r.path) || r.files.iter().any(|f| in_dir(&r.path, &f.name)) =>
++                                {
++                                    Some(r.id)
++                                }
++                                Some(file_action::Union::RemoveDir(d)) if protected(&d.path) => Some(d.id),
++                                Some(file_action::Union::RemoveFile(f)) if protected(&f.path) => Some(f.id),
++                                Some(file_action::Union::Create(c)) if protected(&c.path) => Some(c.id),
++                                Some(file_action::Union::Rename(r))
++                                    if protected(&r.path)
++                                        || std::path::Path::new(&r.path)
++                                            .parent()
++                                            .map_or(true, |p| in_dir(&p.to_string_lossy(), &r.new_name)) =>
++                                {
++                                    Some(r.id)
++                                }
++                                _ => None,
++                            };
++                            if let Some(id) = denied {
++                                log::warn!("File transfer to Tether's own files refused");
++                                self.send(fs::new_error(
++                                    id,
++                                    "Tether's own files on this computer can't be accessed remotely",
++                                    -1,
++                                ))
++                                .await;
++                                return true;
++                            }
++                        }
+                         match fa.union {
+                             Some(file_action::Union::ReadEmptyDirs(rd)) => {
+                                 self.read_empty_dirs(&rd.path, rd.include_hidden);
+@@ -4032,10 +4165,19 @@ impl Connection {
                          .lock()
                          .unwrap()
                          .user_auto_adjust_fps(self.inner.id(), fps),
@@ -1805,7 +1908,7 @@ index e9ea313..e5770f5 100644
                      #[cfg(windows)]
                      Some(misc::Union::SelectedSid(sid)) => {
                          if let Some(current_process_sid) =
-@@ -5310,6 +5383,7 @@ impl Connection {
+@@ -5310,6 +5452,7 @@ impl Connection {
              return;
          }
          self.closed = true;
@@ -1813,7 +1916,7 @@ index e9ea313..e5770f5 100644
          // If voice A,B -> C, and A,B has voice call
          // B disconnects, C will reset the voice call input.
          //
-@@ -5356,6 +5430,10 @@ impl Connection {
+@@ -5356,6 +5499,10 @@ impl Connection {
          msg_out.set_misc(misc);
          self.send(msg_out).await;
          raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
@@ -1824,7 +1927,7 @@ index e9ea313..e5770f5 100644
      }
  
      async fn handle_read_job_init_result(
-@@ -5813,6 +5891,44 @@ impl Connection {
+@@ -5813,6 +5960,44 @@ impl Connection {
          }
      }
  
@@ -1869,7 +1972,7 @@ index e9ea313..e5770f5 100644
      fn is_authed_remote_conn(&self) -> bool {
          if let Some(id) = self.authed_conn_id.as_ref() {
              return id.conn_type() == AuthConnType::Remote;
-@@ -7874,3 +7990,86 @@ mod test {
+@@ -7874,3 +8059,86 @@ mod test {
          assert!(!replaced_by(&conn(3, remote, key(7, "other")), 2, &mine));
      }
  }
@@ -1954,6 +2057,658 @@ index e9ea313..e5770f5 100644
 +        assert!(recent.admits(&s, false));
 +        let old = ResumeTicket { ended: Instant::now().checked_sub(RESUME_WINDOW + Duration::from_secs(1)), ..recent };
 +        assert!(old.ended.is_some() && !old.admits(&s, false), "window over");
++    }
++}
+diff --git a/src/server/input_service.rs b/src/server/input_service.rs
+index 5a392bb..6e831d9 100644
+--- a/src/server/input_service.rs
++++ b/src/server/input_service.rs
+@@ -1242,8 +1242,11 @@ pub fn handle_pointer_(evt: &PointerDeviceEvent, conn: i32) {
+     match &evt.union {
+         Some(TouchEvent(evt)) => match &evt.union {
+             Some(ScaleUpdate(_scale_evt)) => {
++                // Tether: no touch zoom (Ctrl+wheel) on Tether's own windows; releasing passes.
+                 #[cfg(target_os = "windows")]
+-                handle_scale(_scale_evt.scale);
++                if _scale_evt.scale == 0 || super::own_ui_guard::scale_allowed() {
++                    handle_scale(_scale_evt.scale);
++                }
+             }
+             _ => {}
+         },
+@@ -1289,6 +1292,10 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
+     crate::platform::windows::try_change_desktop();
+     let buttons = evt.mask >> 3;
+     let evt_type = evt.mask & MOUSE_TYPE_MASK;
++    // Tether: clicks and wheel on Tether's own windows are for the local user only.
++    if !super::own_ui_guard::mouse_allowed(evt_type, buttons) {
++        return;
++    }
+     let mut en = ENIGO.lock().unwrap();
+     #[cfg(target_os = "macos")]
+     en.set_ignore_flags(enigo_ignore_flags());
+@@ -2488,6 +2495,10 @@ pub fn handle_key_(evt: &KeyEvent) {
+     if EXITING.load(Ordering::SeqCst) {
+         return;
+     }
++    // Tether: keys never reach Tether's own windows, except those needed to leave them.
++    if !super::own_ui_guard::key_allowed(evt) {
++        return;
++    }
+ 
+     #[cfg(target_os = "linux")]
+     super::uinput::prepare_layout(evt);
+diff --git a/src/server/own_ui_guard.rs b/src/server/own_ui_guard.rs
+new file mode 100644
+index 0000000..8e9c2b4
+--- /dev/null
++++ b/src/server/own_ui_guard.rs
+@@ -0,0 +1,607 @@
++//! Tether: input from a remote session never reaches Tether's own windows on this computer (the
++//! incoming-connection window, TetherQS, the main window, Tether Manage). Only the person at the
++//! computer can use them, so a technician cannot grant themselves permissions, approve consent
++//! prompts or change settings.
++//!
++//! The checks run where input is injected (`input_service`, also inside the elevated portable
++//! service), per event: a button press or wheel over a Tether window is dropped together with its
++//! release; keys are dropped while a Tether window is in the foreground, except what is needed to
++//! leave it (modifiers on their own, Alt+Tab, Win+Tab, Cmd+Tab). Pointer moves always pass.
++//! Local (physical) input never comes through here.
++
++use crate::input::{MOUSE_TYPE_DOWN, MOUSE_TYPE_TRACKPAD, MOUSE_TYPE_UP, MOUSE_TYPE_WHEEL};
++use base::message_proto::{key_event, ControlKey, KeyEvent, KeyboardMode};
++use std::{
++    collections::HashMap,
++    path::{Path, PathBuf},
++    sync::{
++        atomic::{AtomicU8, Ordering},
++        Mutex,
++    },
++    time::{Duration, Instant},
++};
++
++/// Shown to the technician (at most every few seconds) when something was dropped.
++pub const NOTICE: &str =
++    "The Tether window on the remote computer can only be used by the person at that computer.";
++
++/// Buttons pressed over a Tether window; their release is dropped too.
++static SWALLOWED: Mutex<i32> = Mutex::new(0);
++/// Alt / Win / Cmd held by remote input (bit 0 Alt, bit 1 Win/Cmd), for Alt+Tab and friends.
++static HELD: AtomicU8 = AtomicU8::new(0);
++
++/// Whether a remote mouse event may be injected. Call right before injecting it.
++pub fn mouse_allowed(evt_type: i32, buttons: i32) -> bool {
++    let allowed = mouse_step(&mut SWALLOWED.lock().unwrap(), evt_type, buttons, over_own_window);
++    if !allowed {
++        hbb_common::log::debug!("remote mouse event on a Tether window dropped");
++    }
++    allowed
++}
++
++/// Whether a remote key event may be injected. Call right before injecting it.
++pub fn key_allowed(evt: &KeyEvent) -> bool {
++    key_step(&HELD, evt, foreground_is_own)
++}
++
++/// Touch zoom (Ctrl+wheel) over a Tether window.
++pub fn scale_allowed() -> bool {
++    !over_own_window()
++}
++
++/// For the technician notice only (no state change): would this event be dropped?
++pub fn would_drop_mouse(evt_type: i32) -> bool {
++    evt_type == MOUSE_TYPE_DOWN && over_own_window()
++}
++
++pub fn would_drop_key(evt: &KeyEvent) -> bool {
++    (evt.down || evt.press) && !is_exit_key(evt, HELD.load(Ordering::Relaxed) != 0) && foreground_is_own()
++}
++
++fn mouse_step(swallowed: &mut i32, evt_type: i32, buttons: i32, over: impl FnOnce() -> bool) -> bool {
++    match evt_type {
++        MOUSE_TYPE_DOWN => {
++            if over() {
++                *swallowed |= buttons;
++                false
++            } else {
++                *swallowed &= !buttons;
++                true
++            }
++        }
++        // A release whose press was injected always passes, so no button stays stuck.
++        MOUSE_TYPE_UP => {
++            let drop = *swallowed & buttons != 0;
++            *swallowed &= !buttons;
++            !drop
++        }
++        MOUSE_TYPE_WHEEL | MOUSE_TYPE_TRACKPAD => !over(),
++        _ => true,
++    }
++}
++
++fn key_step(held: &AtomicU8, evt: &KeyEvent, foreground_own: impl FnOnce() -> bool) -> bool {
++    let down = evt.down || evt.press;
++    if let Some(bit) = switch_modifier_bit(evt) {
++        if down {
++            held.fetch_or(bit, Ordering::Relaxed);
++        } else {
++            held.fetch_and(!bit, Ordering::Relaxed);
++        }
++    }
++    is_exit_key(evt, held.load(Ordering::Relaxed) != 0) || !foreground_own()
++}
++
++/// Alt (1) or Win/Cmd (2) pressed or released by this event.
++fn switch_modifier_bit(evt: &KeyEvent) -> Option<u8> {
++    match &evt.union {
++        Some(key_event::Union::ControlKey(ck)) => match ck.enum_value_or(ControlKey::Unknown) {
++            ControlKey::Alt | ControlKey::RAlt => Some(1),
++            ControlKey::Meta | ControlKey::RWin => Some(2),
++            _ => None,
++        },
++        Some(key_event::Union::Chr(code)) if !is_legacy(evt) => {
++            match crate::keyboard::keycode_to_rdev_key(*code) {
++                rdev::Key::Alt | rdev::Key::AltGr => Some(1),
++                rdev::Key::MetaLeft | rdev::Key::MetaRight => Some(2),
++                _ => None,
++            }
++        }
++        _ => None,
++    }
++}
++
++fn is_legacy(evt: &KeyEvent) -> bool {
++    evt.mode.enum_value_or(KeyboardMode::Legacy) == KeyboardMode::Legacy
++}
++
++/// Keys that may reach a Tether window: what it takes to leave it, nothing that types or
++/// activates anything (Enter, Space, Esc, letters, Alt+F4, Cmd+Q are all dropped).
++fn is_exit_key(evt: &KeyEvent, switch_held: bool) -> bool {
++    let switch = switch_held
++        || evt.modifiers.iter().any(|m| {
++            matches!(
++                m.enum_value_or(ControlKey::Unknown),
++                ControlKey::Alt | ControlKey::RAlt | ControlKey::Meta | ControlKey::RWin
++            )
++        });
++    match &evt.union {
++        Some(key_event::Union::ControlKey(ck)) => {
++            let ck = ck.enum_value_or(ControlKey::Unknown);
++            match ck {
++                ControlKey::Alt
++                | ControlKey::RAlt
++                | ControlKey::Shift
++                | ControlKey::RShift
++                | ControlKey::Control
++                | ControlKey::RControl
++                | ControlKey::Meta
++                | ControlKey::RWin
++                // Handled by the system, never by the window in front.
++                | ControlKey::CtrlAltDel
++                | ControlKey::LockScreen => true,
++                ControlKey::Tab => switch,
++                _ => false,
++            }
++        }
++        Some(key_event::Union::Chr(code)) if !is_legacy(evt) => {
++            match crate::keyboard::keycode_to_rdev_key(*code) {
++                rdev::Key::Alt
++                | rdev::Key::AltGr
++                | rdev::Key::ShiftLeft
++                | rdev::Key::ShiftRight
++                | rdev::Key::ControlLeft
++                | rdev::Key::ControlRight
++                | rdev::Key::MetaLeft
++                | rdev::Key::MetaRight => true,
++                rdev::Key::Tab => switch,
++                _ => false,
++            }
++        }
++        _ => false,
++    }
++}
++
++fn over_own_window() -> bool {
++    is_own_pid(os::pid_at_cursor())
++}
++
++fn foreground_is_own() -> bool {
++    is_own_pid(os::foreground_pid())
++}
++
++/// Tether process = same executable as this one, or any `tether*` executable (TetherQS next to an
++/// installed Tether, Tether Manage). Cached briefly per PID: clicks and keys come in bursts.
++fn is_own_pid(pid: u32) -> bool {
++    if pid == 0 {
++        return false;
++    }
++    if pid == std::process::id() {
++        return true;
++    }
++    static CACHE: Mutex<Option<HashMap<u32, (bool, Instant)>>> = Mutex::new(None);
++    const TTL: Duration = Duration::from_secs(2); // short: PIDs get reused
++    let mut cache = CACHE.lock().unwrap();
++    let cache = cache.get_or_insert_with(HashMap::new);
++    if let Some((own, at)) = cache.get(&pid) {
++        if at.elapsed() < TTL {
++            return *own;
++        }
++    }
++    let own = os::exe_of(pid).map_or(false, |exe| {
++        is_own_exe(&exe)
++            // WebView2 popups (dropdowns, context menus) belong to the browser process that the
++            // Tether process started.
++            || (os::is_webview_host(&exe)
++                && os::parent_pid(pid)
++                    .and_then(os::exe_of)
++                    .map_or(false, |p| is_own_exe(&p)))
++    });
++    if cache.len() > 256 {
++        cache.clear();
++    }
++    cache.insert(pid, (own, Instant::now()));
++    own
++}
++
++fn is_own_exe(exe: &Path) -> bool {
++    static ME: Mutex<Option<Option<PathBuf>>> = Mutex::new(None);
++    let me = ME
++        .lock()
++        .unwrap()
++        .get_or_insert_with(|| std::env::current_exe().ok().and_then(|p| p.canonicalize().ok()))
++        .clone();
++    let canon = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
++    if me.map_or(false, |me| same_path(&me, &canon)) {
++        return true;
++    }
++    exe.file_stem()
++        .and_then(|s| s.to_str())
++        .map_or(false, |s| s.to_lowercase().starts_with("tether"))
++}
++
++fn same_path(a: &Path, b: &Path) -> bool {
++    if cfg!(windows) {
++        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
++    } else {
++        a == b
++    }
++}
++
++/// File transfer must not read or change Tether's own configuration (ID key pair, password,
++/// permissions) or installation. `path` is a peer supplied path on this computer.
++pub fn is_protected_path(path: &str) -> bool {
++    let full = resolve(Path::new(path));
++    let lower: Vec<String> = full
++        .components()
++        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
++        .collect();
++    // Config dirs: %APPDATA%\Tether*, also for the service (ServiceProfiles\LocalService\AppData\
++    // Roaming\Tether) and TetherQS (Tether-QS); macOS ~/Library/Preferences/app.tether.* and
++    // /var/root/Library/Preferences/...
++    let config = lower.windows(2).any(|w| {
++        (w[0] == "roaming" && w[1].starts_with("tether"))
++            || (w[0] == "preferences" && (w[1].starts_with("app.tether") || w[1].starts_with("net.tether")))
++    });
++    if config {
++        return true;
++    }
++    // The installation: Program Files\Tether (installed) or the .app bundle; for a portable exe
++    // (TetherQS in Downloads) only the exe itself.
++    if let Ok(exe) = std::env::current_exe().and_then(|p| p.canonicalize()) {
++        let lower_full = PathBuf::from(lower.join(std::path::MAIN_SEPARATOR_STR));
++        let lower_of = |p: &Path| {
++            PathBuf::from(
++                p.components()
++                    .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
++                    .collect::<Vec<_>>()
++                    .join(std::path::MAIN_SEPARATOR_STR),
++            )
++        };
++        let bundle = exe.ancestors().find(|a| a.extension().map_or(false, |e| e == "app"));
++        let root = match bundle {
++            Some(b) => b.to_path_buf(),
++            None if crate::platform::is_installed() => exe.parent().map(Path::to_path_buf).unwrap_or(exe.clone()),
++            None => exe.clone(),
++        };
++        if lower_full.starts_with(lower_of(&root)) {
++            return true;
++        }
++    }
++    false
++}
++
++/// Absolute path with `..` and links resolved as far as the path exists (a file to be created
++/// does not exist yet).
++fn resolve(p: &Path) -> PathBuf {
++    let mut lexical = PathBuf::new();
++    for c in p.components() {
++        match c {
++            std::path::Component::ParentDir => {
++                lexical.pop();
++            }
++            std::path::Component::CurDir => {}
++            c => lexical.push(c),
++        }
++    }
++    let mut existing = lexical.as_path();
++    let mut rest = Vec::new();
++    loop {
++        if let Ok(c) = existing.canonicalize() {
++            let mut out = c;
++            for r in rest.iter().rev() {
++                out.push(r);
++            }
++            return out;
++        }
++        match (existing.parent(), existing.file_name()) {
++            (Some(parent), Some(name)) => {
++                rest.push(name.to_os_string());
++                existing = parent;
++            }
++            _ => return lexical,
++        }
++    }
++}
++
++#[cfg(windows)]
++mod os {
++    use std::path::{Path, PathBuf};
++    use winapi::{
++        shared::windef::{HWND, POINT},
++        um::winuser::{GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, WindowFromPoint, GA_ROOTOWNER},
++    };
++
++    unsafe fn pid_of(w: HWND) -> u32 {
++        if w.is_null() {
++            return 0;
++        }
++        let mut pid = 0;
++        GetWindowThreadProcessId(w, &mut pid);
++        pid
++    }
++
++    pub fn pid_at_cursor() -> u32 {
++        // A SYSTEM process must be on the input desktop to see its windows.
++        crate::platform::windows::try_change_desktop();
++        let Some((x, y)) = crate::platform::windows::get_cursor_pos() else {
++            return 0;
++        };
++        unsafe {
++            let w = WindowFromPoint(POINT { x, y });
++            if w.is_null() {
++                return 0;
++            }
++            // Parents and owners: WebView2 content windows belong to msedgewebview2.exe.
++            pid_of(GetAncestor(w, GA_ROOTOWNER))
++        }
++    }
++
++    pub fn foreground_pid() -> u32 {
++        crate::platform::windows::try_change_desktop();
++        unsafe { pid_of(GetForegroundWindow()) }
++    }
++
++    pub fn exe_of(pid: u32) -> Option<PathBuf> {
++        crate::platform::windows::get_process_executable_path(pid).ok()
++    }
++
++    pub fn is_webview_host(exe: &Path) -> bool {
++        exe.file_name()
++            .map_or(false, |n| n.to_string_lossy().eq_ignore_ascii_case("msedgewebview2.exe"))
++    }
++
++    pub fn parent_pid(pid: u32) -> Option<u32> {
++        use windows::Win32::{
++            Foundation::CloseHandle,
++            System::Diagnostics::ToolHelp::{
++                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
++                TH32CS_SNAPPROCESS,
++            },
++        };
++        unsafe {
++            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
++            let mut e = PROCESSENTRY32W {
++                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
++                ..Default::default()
++            };
++            let mut found = None;
++            let mut ok = Process32FirstW(snap, &mut e).is_ok();
++            while ok {
++                if e.th32ProcessID == pid {
++                    found = Some(e.th32ParentProcessID);
++                    break;
++                }
++                ok = Process32NextW(snap, &mut e).is_ok();
++            }
++            let _ = CloseHandle(snap);
++            found
++        }
++    }
++}
++
++// shortcut: compile-unverified on macOS until the next Mac build.
++#[cfg(target_os = "macos")]
++mod os {
++    use cocoa::{
++        base::{id, nil},
++        foundation::NSString,
++    };
++    use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex};
++    use core_graphics::{
++        display::{
++            kCGNullWindowID, kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly,
++            CGWindowListCopyWindowInfo,
++        },
++        window::{kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowOwnerPID},
++    };
++    use objc::{class, msg_send, sel, sel_impl};
++    use std::path::{Path, PathBuf};
++
++    unsafe fn num(dict: id, key: id) -> Option<f64> {
++        let v: id = msg_send![dict, objectForKey: key];
++        if v == nil {
++            return None;
++        }
++        Some(msg_send![v, doubleValue])
++    }
++
++    /// Owner of the frontmost on-screen window under the pointer (CoreGraphics global
++    /// coordinates, top-left origin, like the window bounds).
++    pub fn pid_at_cursor() -> u32 {
++        let Some((x, y)) = crate::get_cursor_pos() else {
++            return 0;
++        };
++        let (x, y) = (x as f64, y as f64);
++        unsafe {
++            let list = CGWindowListCopyWindowInfo(
++                kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
++                kCGNullWindowID,
++            );
++            if list.is_null() {
++                return 0;
++            }
++            let keys: [id; 4] = ["X", "Y", "Width", "Height"].map(|k| NSString::alloc(nil).init_str(k));
++            let mut pid = 0u32;
++            for i in 0..CFArrayGetCount(list) {
++                let w: id = CFArrayGetValueAtIndex(list, i) as _;
++                // Below normal windows (desktop) or invisible overlays: not what a click hits.
++                if num(w, kCGWindowLayer as id).unwrap_or(0.) < 0. || num(w, kCGWindowAlpha as id).unwrap_or(1.) <= 0. {
++                    continue;
++                }
++                let b: id = msg_send![w, objectForKey: kCGWindowBounds as id];
++                if b == nil {
++                    continue;
++                }
++                let (Some(bx), Some(by), Some(bw), Some(bh)) =
++                    (num(b, keys[0]), num(b, keys[1]), num(b, keys[2]), num(b, keys[3]))
++                else {
++                    continue;
++                };
++                if x >= bx && x < bx + bw && y >= by && y < by + bh {
++                    pid = num(w, kCGWindowOwnerPID as id).unwrap_or(0.) as u32;
++                    break;
++                }
++            }
++            for k in keys {
++                let _: () = msg_send![k, release];
++            }
++            core_foundation::base::CFRelease(list as _);
++            pid
++        }
++    }
++
++    pub fn foreground_pid() -> u32 {
++        unsafe {
++            let ws: id = msg_send![class!(NSWorkspace), sharedWorkspace];
++            let app: id = msg_send![ws, frontmostApplication];
++            if app == nil {
++                return 0;
++            }
++            let pid: i32 = msg_send![app, processIdentifier];
++            pid.max(0) as u32
++        }
++    }
++
++    pub fn exe_of(pid: u32) -> Option<PathBuf> {
++        use hbb_common::libc;
++        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
++        let n = unsafe { libc::proc_pidpath(pid as _, buf.as_mut_ptr() as _, buf.len() as _) };
++        if n <= 0 {
++            return None;
++        }
++        buf.truncate(n as usize);
++        Some(PathBuf::from(String::from_utf8_lossy(&buf).into_owned()))
++    }
++
++    pub fn is_webview_host(_exe: &Path) -> bool {
++        false // WKWebView menus belong to the app process itself
++    }
++
++    pub fn parent_pid(_pid: u32) -> Option<u32> {
++        None
++    }
++}
++
++#[cfg(not(any(windows, target_os = "macos")))]
++mod os {
++    use std::path::{Path, PathBuf};
++    pub fn pid_at_cursor() -> u32 {
++        0
++    }
++    pub fn foreground_pid() -> u32 {
++        0
++    }
++    pub fn exe_of(_pid: u32) -> Option<PathBuf> {
++        None
++    }
++    pub fn is_webview_host(_exe: &Path) -> bool {
++        false
++    }
++    pub fn parent_pid(_pid: u32) -> Option<u32> {
++        None
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::input::{MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_TYPE_MOVE};
++
++    #[test]
++    fn swallowed_press_drops_its_release_only() {
++        let mut s = 0;
++        assert!(!mouse_step(&mut s, MOUSE_TYPE_DOWN, MOUSE_BUTTON_LEFT, || true));
++        assert!(mouse_step(&mut s, MOUSE_TYPE_MOVE, 0, || panic!("moves are not checked")));
++        // Released elsewhere: still dropped, it was never pressed.
++        assert!(!mouse_step(&mut s, MOUSE_TYPE_UP, MOUSE_BUTTON_LEFT, || false));
++        assert_eq!(s, 0);
++        // Pressed outside, released over Tether: passes so the button does not stick.
++        assert!(mouse_step(&mut s, MOUSE_TYPE_DOWN, MOUSE_BUTTON_LEFT, || false));
++        assert!(mouse_step(&mut s, MOUSE_TYPE_UP, MOUSE_BUTTON_LEFT, || true));
++        // Buttons are tracked separately.
++        assert!(!mouse_step(&mut s, MOUSE_TYPE_DOWN, MOUSE_BUTTON_RIGHT, || true));
++        assert!(mouse_step(&mut s, MOUSE_TYPE_DOWN, MOUSE_BUTTON_LEFT, || false));
++        assert!(mouse_step(&mut s, MOUSE_TYPE_UP, MOUSE_BUTTON_LEFT, || true));
++        assert!(!mouse_step(&mut s, MOUSE_TYPE_UP, MOUSE_BUTTON_RIGHT, || false));
++        assert!(!mouse_step(&mut s, MOUSE_TYPE_WHEEL, 0, || true));
++        assert!(mouse_step(&mut s, MOUSE_TYPE_WHEEL, 0, || false));
++    }
++
++    fn ck(k: ControlKey, down: bool, mods: &[ControlKey]) -> KeyEvent {
++        let mut e = KeyEvent::new();
++        e.set_control_key(k);
++        e.down = down;
++        e.modifiers = mods.iter().map(|m| (*m).into()).collect();
++        e
++    }
++
++    fn chr(c: u32, down: bool) -> KeyEvent {
++        let mut e = KeyEvent::new();
++        e.set_chr(c);
++        e.down = down;
++        e
++    }
++
++    #[test]
++    fn keys_on_tether_window() {
++        let held = AtomicU8::new(0);
++        let own = || true;
++        for k in [ControlKey::Return, ControlKey::Space, ControlKey::Escape, ControlKey::F4, ControlKey::Tab, ControlKey::Delete] {
++            assert!(!key_step(&held, &ck(k, true, &[]), own), "{k:?}");
++        }
++        // Alt+F4 / Alt+Space would close or open the window menu.
++        assert!(!key_step(&held, &ck(ControlKey::F4, true, &[ControlKey::Alt]), own));
++        assert!(!key_step(&held, &ck(ControlKey::Space, true, &[ControlKey::Alt]), own));
++        assert!(!key_step(&held, &chr('a' as u32, true), own));
++        let mut seq = KeyEvent::new();
++        seq.set_seq("hello\n".into());
++        seq.press = true;
++        assert!(!key_step(&held, &seq, own));
++        // Leaving the window works.
++        assert!(key_step(&held, &ck(ControlKey::Alt, true, &[]), own));
++        assert!(key_step(&held, &ck(ControlKey::Tab, true, &[]), own), "Tab while Alt is held");
++        assert!(key_step(&held, &ck(ControlKey::Alt, false, &[]), own));
++        assert!(!key_step(&held, &ck(ControlKey::Tab, true, &[]), own), "Tab alone");
++        assert!(key_step(&held, &ck(ControlKey::Tab, true, &[ControlKey::Meta]), own));
++        assert!(key_step(&held, &ck(ControlKey::Meta, true, &[]), own));
++        assert!(key_step(&held, &ck(ControlKey::CtrlAltDel, true, &[]), own));
++        // Other windows get everything.
++        assert!(key_step(&held, &ck(ControlKey::Return, true, &[]), || false));
++        assert!(key_step(&held, &chr('a' as u32, true), || false));
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn map_mode_alt_tab() {
++        // Map mode sends scancodes: Alt 0x38, Tab 0x0F, Enter 0x1C.
++        let held = AtomicU8::new(0);
++        let map = |c, down| {
++            let mut e = chr(c, down);
++            e.mode = KeyboardMode::Map.into();
++            e
++        };
++        let own = || true;
++        assert!(!key_step(&held, &map(0x0F, true), own));
++        assert!(key_step(&held, &map(0x38, true), own));
++        assert!(key_step(&held, &map(0x0F, true), own));
++        assert!(!key_step(&held, &map(0x1C, true), own));
++        assert!(key_step(&held, &map(0x38, false), own));
++        assert!(!key_step(&held, &map(0x0F, true), own));
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn protected_paths() {
++        let appdata = std::env::var("APPDATA").unwrap();
++        assert!(is_protected_path(&format!("{appdata}\\Tether\\config\\Tether2.toml")));
++        assert!(is_protected_path(&format!("{appdata}\\TETHER-QS\\config")));
++        assert!(is_protected_path(&format!("{appdata}\\foo\\..\\Tether\\config\\x.toml")));
++        assert!(is_protected_path(
++            "C:\\Windows\\ServiceProfiles\\LocalService\\AppData\\Roaming\\Tether\\config\\Tether.toml"
++        ));
++        assert!(is_protected_path(std::env::current_exe().unwrap().to_str().unwrap()));
++        assert!(!is_protected_path(&format!("{appdata}\\Notepad\\x.txt")));
++        assert!(!is_protected_path("C:\\Users\\Public\\Documents\\tether.txt"));
 +    }
 +}
 diff --git a/src/server/video_qos.rs b/src/server/video_qos.rs

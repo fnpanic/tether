@@ -139,10 +139,10 @@ export function TextField({ className = "", ...rest }: React.InputHTMLAttributes
 export function useToast() {
   const [msg, setMsg] = useState<string | null>(null);
   const t = useRef<number>(0);
-  const show = (m: string) => {
+  const show = (m: string, ms = 1800) => {
     setMsg(m);
     clearTimeout(t.current);
-    t.current = window.setTimeout(() => setMsg(null), 1800);
+    t.current = window.setTimeout(() => setMsg(null), ms);
   };
   useEffect(() => () => clearTimeout(t.current), []);
   const node = msg ? (

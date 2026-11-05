@@ -300,6 +300,8 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       else show();
       return;
     }
+    // The host dropped a click or key aimed at its own Tether window (only its user may use it).
+    if (type === "info" && title === "tether-own-window") return toast.show(text, 4000);
     if (type === "connecting") return setPhase({ kind: "connecting", text: friendly(text) || "Connecting…" });
     if (type === "success" || type === "info" || type === "nocancel-info") return;
     if (text.toLowerCase().includes("waiting") || type.includes("wait")) return setPhase({ kind: "connecting", text: "Waiting for the person at the remote computer to click Accept…" });

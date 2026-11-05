@@ -73,6 +73,60 @@ Privacy defaults that the user can change:
 
 - `enable-lan-discovery = N`: the device is not discoverable on the local network.
 
+## Tether's own windows are for the local user only (0.5.6)
+
+A technician controls the host's mouse and keyboard, so without a guard they could click in the
+host's own Tether windows: grant themselves permissions on the session card, approve a consent
+prompt (recording, admin access), or change settings. The host therefore filters every remote
+event right before it is injected (`vendor/rustdesk/src/server/own_ui_guard.rs`, called from
+`input_service.rs`, so it also covers the elevated portable service of TetherQS). Always on, no
+setting, for every host (installed Tether with the service, TetherQS elevated or not). Local,
+physical input never passes through it.
+
+- **Mouse:** a button press or wheel over a window of a Tether process is dropped, together with
+  the matching release (so no drag starts there). Windows: `WindowFromPoint` → `GetAncestor
+  (GA_ROOTOWNER)` → owning process (WebView2 popups: the `msedgewebview2.exe` started by a Tether
+  process). macOS: the frontmost on-screen window under the pointer (`CGWindowListCopyWindowInfo`).
+  Pointer moves pass, so the pointer can still travel across.
+- **Keyboard:** while a Tether window is in the foreground, keys are dropped except what is needed
+  to leave it: modifier keys on their own, Alt+Tab, Win+Tab / Cmd+Tab, Ctrl+Alt+Del, lock screen.
+  Enter, Space, Esc, letters, typed text (`seq`, paste as keystrokes), Alt+F4 and Cmd+Q never
+  reach a Tether window. The foreground is checked per event.
+- **Tether process** = the same executable as the host process, or any executable whose name
+  starts with `tether` (TetherQS next to an installed Tether, Tether Manage). Looked up per PID,
+  cached for 2 seconds.
+- **Touch zoom** (Ctrl+wheel) over a Tether window is dropped.
+- **File transfer** refuses to read, write, rename or delete Tether's configuration (`AppData  Roaming\Tether*`, also under `ServiceProfiles\LocalService`; macOS `Library/Preferences/
+  app.tether.*`) and its installation (the install folder, the `.app` bundle, or a portable
+  TetherQS exe itself). Paths are resolved (`..`, links, short names) before the check.
+- The technician sees "The Tether window on the remote computer can only be used by the person at
+  that computer." (at most every 5 s; older viewers ignore it).
+
+What this does **not** stop (the technician still controls the computer as its user):
+
+- Starting programs (Start menu, Win+R) and using them: a command prompt can run
+  `tether.exe --password …` / `--config` / `--option` only as an administrator of an installed
+  Tether (`core_main` checks it); a technician who already has admin rights (UAC approved, or the
+  user is an admin) can change Tether like any other software. Programs running as the user can
+  also talk to Tether's local IPC the way its own windows do.
+- The terminal feature (when the host allows it) and file transfer outside the protected folders
+  are full access by design.
+- A drag started outside a Tether window may be released over one (the release is not dropped, so
+  no button gets stuck); Tether's windows do not act on drops.
+- Windows that are not Tether's but change Tether (e.g. the Windows Services console, uninstall
+  in Settings) are ordinary programs.
+- Windows: Alt on its own must pass (for Alt+Tab), so a lone Alt tap puts a Tether window into
+  keyboard menu mode; its page stalls until the next key or click. Every key that would act in
+  that mode (arrows, Enter, Space, letters) is still dropped, so nothing can be chosen; Alt+Tab or a
+  click by the person at the computer ends it.
+- macOS: the filter is compile-unverified until the next Mac build (0.5.6).
+
+Tests: unit tests in `own_ui_guard.rs` (`cargo test --lib --no-default-features --features
+tauri,hwcodec,use_dasp own_ui_guard` in `vendor/rustdesk`), VM end-to-end
+`apps/desktop/e2e/vm-noremote-e2e.mjs` (remote clicks on every TetherQS permission switch,
+Disconnect, Close and the recording consent's Allow; keys while TetherQS is in front; Notepad still
+works; Alt+Tab leaves).
+
 ## The app shell (Tauri)
 
 - Strict CSP: `default-src 'self'`, no remote scripts, `connect-src` limited to Tauri IPC

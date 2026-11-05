@@ -4,6 +4,21 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.5.6] — 2026-11-05
+
+### Security
+- **The technician can no longer use Tether's own windows on the remote computer.** Clicks, wheel
+  and keys from a session never reach the host's connection window, TetherQS, the main Tether
+  window or Tether Manage, so a technician cannot switch on their own permissions, approve a
+  consent prompt (recording, admin access) or change settings. Checked on the host for every event
+  right before it is injected (also in TetherQS's elevated helper): a press over a Tether window is
+  dropped with its release; keys are dropped while a Tether window is in front, except modifiers,
+  Alt+Tab, Win+Tab / Cmd+Tab, Ctrl+Alt+Del. Pointer moves still pass, local input is unaffected,
+  always on. The technician gets a short notice. Details and limits: SECURITY.md.
+- File transfer refuses to read or change Tether's own configuration (keys, password, permissions)
+  and installation folder on the host.
+- macOS host: same filter, compile-unverified until the next Mac build.
+
 ## [0.5.5] — 2026-11-05
 
 ### Added

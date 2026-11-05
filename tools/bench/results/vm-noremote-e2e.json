@@ -1,0 +1,73 @@
+{
+  "when": "2026-11-05T08:01:37.126Z",
+  "vm": "172.30.252.30",
+  "results": [
+    {
+      "name": "Notepad in the VM: remote click and typing work, Ctrl+S saves",
+      "ok": true,
+      "notepad": "rect=40,40,740,490 fg=notepad",
+      "file": "content=[abc]"
+    },
+    {
+      "name": "pointer moves still reach the TetherQS window (hover)",
+      "ok": true,
+      "at": {
+        "x": 1836,
+        "y": 656
+      },
+      "hovered": "Control mouse and keyboard"
+    },
+    {
+      "name": "remote clicks on every permission switch of TetherQS change nothing",
+      "ok": true,
+      "switches": {
+        "Control mouse and keyboard": "true",
+        "Use the clipboard": "true",
+        "Transfer files": "true",
+        "Hear this computer's sound": "false",
+        "Restart this computer": "true",
+        "Block my mouse and keyboard": "true"
+      }
+    },
+    {
+      "name": "technician is told why (notice in the session window)",
+      "ok": true,
+      "notice_mutations": 1
+    },
+    {
+      "name": "remote click on Disconnect (and the window's Close) does not end the session",
+      "ok": true,
+      "disconnect": {
+        "x": 1686,
+        "y": 912
+      },
+      "close": {
+        "x": 1873,
+        "y": 467
+      }
+    },
+    {
+      "name": "remote click on Allow of the recording consent grants nothing",
+      "ok": true,
+      "allow": {
+        "x": 1768,
+        "y": 788
+      }
+    },
+    {
+      "name": "keys on TetherQS in front (Enter, Space, Esc, Tab, letters, Alt+F4) change nothing",
+      "ok": true,
+      "foreground": "fg=TetherQS"
+    },
+    {
+      "name": "Alt+Tab away from TetherQS works; Notepad gets keys again",
+      "ok": true,
+      "after_alt_tab": "fg=powershell",
+      "file": "content=[abcd]"
+    },
+    {
+      "name": "session still active, permissions as before",
+      "ok": true
+    }
+  ]
+}

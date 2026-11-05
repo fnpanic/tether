@@ -1,7 +1,7 @@
 {
-  "when": "2026-11-04T22:13:25.496Z",
+  "when": "2026-11-05T08:03:02.251Z",
   "vm": "172.30.252.30",
-  "key": "6436793ca3fb4d5994849b82d08b031e",
+  "key": "4e5919ea268841218107b31122122745",
   "results": [
     {
       "name": "QS diagnostics list every server, each checked",
@@ -68,7 +68,7 @@
     {
       "name": "file transfer opens without a second accept on TetherQS; one card there",
       "ok": true,
-      "ms": 588,
+      "ms": 288,
       "cards": 1,
       "indicator": true,
       "listed": true
