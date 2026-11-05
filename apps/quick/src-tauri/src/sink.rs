@@ -172,7 +172,14 @@ fn apply(w: &tauri::WebviewWindow, action: WindowAction) {
     match action {
         WindowAction::None => {}
         WindowAction::Minimize => {
-            let _ = w.show();
+            // Already minimized (a second session): show() would restore it on macOS and the
+            // minimize after it gets lost in the restore animation.
+            if w.is_minimized().unwrap_or(false) {
+                return;
+            }
+            if !w.is_visible().unwrap_or(true) {
+                let _ = w.show();
+            }
             let _ = w.minimize();
         }
         WindowAction::Prompt | WindowAction::Notify => {
