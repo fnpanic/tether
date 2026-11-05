@@ -6,6 +6,8 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [0.5.8] — 2026-11-05
 
+Windows only (Tether and TetherQS); macOS stays on 0.5.7 until the next release.
+
 ### Added
 - **Recordings are easy to find.** When a recording stops, a "Recording saved" card shows the file
   name with **Open** and **Show in folder**, and the upload status when recordings are uploaded.
