@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useApp } from "../App";
 import { api, host, invoke, type RelayResult } from "../lib/ipc";
+import { previewDoc } from "../lib/page-preview";
 import { PublishSheet } from "../components/publish";
 import { Button, Card, ErrorText, Label, PageHeader, TextArea, TextField, Toggle } from "../components/ui";
 
@@ -12,6 +13,8 @@ export function DownloadPage() {
   const [technician, setTechnician] = useState<boolean>(s.page_technician ?? true);
   const [customer, setCustomer] = useState<boolean>(s.page_customer ?? true);
   const [html, setHtml] = useState<string | null>(null);
+  // Bumped on every Preview so the iframe is rebuilt even when the HTML did not change.
+  const [shown, setShown] = useState(0);
   const [reviewing, setReviewing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -20,6 +23,7 @@ export function DownloadPage() {
     try {
       const h = await invoke<string>("page_render", { title, intro, technician, customer });
       setHtml(h);
+      setShown((n) => n + 1);
       return h;
     } catch (e: any) {
       setError(e.message);
@@ -66,7 +70,7 @@ export function DownloadPage() {
         </Card>
         <div className="h-[560px] overflow-hidden rounded-2xl border border-hairline bg-tile">
           {html ? (
-            <iframe title="Download page preview" sandbox="" srcDoc={html} className="h-full w-full" />
+            <iframe key={shown} title="Download page preview" sandbox="" srcDoc={previewDoc(html)} className="h-full w-full" />
           ) : (
             <p className="grid h-full place-items-center text-caption text-muted">Preview appears here.</p>
           )}

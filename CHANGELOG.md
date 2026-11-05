@@ -4,6 +4,15 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Fixed
+- **Tether Manage, Download page:** clicking inside the preview (the Windows / macOS switch or a
+  Download button) no longer blanks it. Its relative links resolved against Tether Manage itself
+  and navigated the preview frame away; they now do nothing in the preview. **Preview** always
+  redraws the page, even when the texts did not change (before, it stayed blank until the page was
+  left and reopened).
+
 ## [0.5.11] — 2026-11-05
 
 ### Changed
