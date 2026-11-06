@@ -357,6 +357,8 @@ fn has_tray(app: &AppHandle) -> bool {
 fn base<'a>(app: &'a AppHandle, label: &str, route: &str) -> tauri::Result<WebviewWindowBuilder<'a, tauri::Wry, AppHandle>> {
     let b = WebviewWindowBuilder::new(app, label, WebviewUrl::App(format!("index.html#{route}").into()))
         .visible(false) // shown by the page after first paint, avoids a white flash
+        // macOS: the first click into an inactive window clicks too (Accept needed two clicks)
+        .accept_first_mouse(true)
         .title(crate::APP_NAME);
     // Separate profiles must not share a webview browser process or its storage.
     let b = match std::env::var("TETHER_PROFILE") {

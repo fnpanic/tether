@@ -170,6 +170,11 @@ impl Mapper {
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn altgr_active(&self) -> bool {
+        self.altgr
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn ctrl_held(&self) -> bool {
         self.held.iter().any(|&k| matches!(k, K::ControlLeft | K::ControlRight))
     }
@@ -298,6 +303,8 @@ struct Sess {
     paused: bool,
     /// Set by the local escape and a local Alt+Tab; cleared on focus or a click into the picture.
     released: bool,
+    /// Key-downs the hook sent and also let through locally (lock keys): the webview skips them.
+    passed: Vec<Key>,
 }
 
 #[derive(Default)]
@@ -312,9 +319,6 @@ impl State {
     /// The session the system-key hook should capture for, if any.
     fn hook_target(&self) -> Option<&str> {
         let k = self.focused.as_deref()?;
-        if cfg!(debug_assertions) && std::env::var_os("TETHER_DEV_NOHOOK").is_some() {
-            return None; // e2e: no keyboard hook on the test machine
-        }
         let s = self.sessions.get(k)?;
         (s.system_keys && !s.paused && !s.released && cfg!(windows)).then_some(k)
     }
@@ -327,6 +331,7 @@ impl State {
             alt_tab_remote: false,
             paused: false,
             released: false,
+            passed: vec![],
         });
         // peer_info arrives after the window opened: pick the direction up once it is known
         if s.mapper.dir != dir && s.mapper.held.is_empty() {
@@ -364,15 +369,21 @@ fn peer(key: &str) -> String {
     librustdesk::ui::session(key).map(|s| s.peer_platform()).unwrap_or_default()
 }
 
-/// A key from the webview. Dropped while the hook captures for this session (the hook already
-/// sent it; releases pass the hook so local key state stays right and end up here too).
+/// A key from the webview. A key-down the hook took never gets here, so every key-down that does
+/// is sent: also when Windows silently dropped a slow hook (dropping them here left the session
+/// with no keyboard at all). Key-ups pass the hook and arrive here too; a second key-up of a key
+/// the hook already released sends nothing. Lock keys pass the hook on the way down as well.
 pub fn webview_input(key: &str, k: Key, down: bool, ch: &str, lock_modes: i32) {
     let peer = peer(key);
     let mut st = STATE.lock().unwrap();
-    if st.hook_installed && st.hook_target() == Some(key) {
-        return;
+    let s = st.sess(key, &peer);
+    if down {
+        if let Some(i) = s.passed.iter().position(|&p| p == k) {
+            s.passed.remove(i);
+            return;
+        }
     }
-    let outs = st.sess(key, &peer).mapper.map(k, down, ch);
+    let outs = s.mapper.map(k, down, ch);
     drop(st);
     send(key, outs, lock_modes);
 }
@@ -447,6 +458,7 @@ pub fn focus(key: &str, focused: bool) {
         }
         if let Some(s) = st.sessions.get_mut(key) {
             outs = s.mapper.release_all();
+            s.passed.clear();
         }
     }
     apply(&mut st);
@@ -479,26 +491,81 @@ pub fn mac_force_quit(key: &str) {
 
 // ------------------------------------------------------------------------- system-key hook
 
+/// Installs the hook the first time a session wants it and keeps it: rdev's `exit_grab` clears
+/// its thread id before the old hook thread ends, and that thread then clears the id of a newer
+/// hook, so focus in/out/in left hooks behind. An installed hook that does not capture passes
+/// every key at once (`ours_in_front` before anything else).
 #[cfg(windows)]
 fn apply(st: &mut State) {
-    let want = st.hook_target().is_some();
-    if want == st.hook_installed {
+    if st.hook_installed || st.hook_target().is_none() {
         return;
     }
-    st.hook_installed = want;
-    if want {
-        std::env::set_var("KEYBOARD_ONLY", "y"); // no mouse hook
-        rdev::set_event_popup(false);
-        rdev::set_get_key_unicode(true); // the character, for AltGr/Option text
-        std::thread::spawn(|| {
-            // `hook` is a plain fn: rdev keeps it in a global, replacing it is harmless.
-            if let Err(e) = rdev::grab(hook) {
-                hbb_common::log::error!("keyboard hook: {:?}", e);
-                STATE.lock().unwrap().hook_installed = false;
-            }
-        });
-    } else if let Err(e) = rdev::exit_grab() {
-        hbb_common::log::error!("keyboard hook exit: {:?}", e);
+    st.hook_installed = true;
+    std::env::set_var("KEYBOARD_ONLY", "y"); // no mouse hook
+    rdev::set_event_popup(false);
+    // rdev would call ToUnicodeEx for every key of every program (that breaks dead keys
+    // elsewhere); the hook asks for the character itself, and only for AltGr towards a Mac.
+    rdev::set_get_key_unicode(false);
+    std::thread::spawn(|| {
+        if let Err(e) = rdev::grab(hook) {
+            hbb_common::log::error!("keyboard hook: {:?}", e);
+            STATE.lock().unwrap().hook_installed = false;
+        }
+    });
+}
+
+/// The foreground window of the desktop that gets the keyboard belongs to this process. A Tether
+/// whose session window is focused on another desktop (a second instance, a test run on a hidden
+/// desktop) or that is not in front must never take keys: its hook is global.
+#[cfg(windows)]
+fn ours_in_front() -> bool {
+    use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, GetThreadDesktop, GetUserObjectInformationW, OpenInputDesktop, UOI_NAME};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, &mut pid);
+        if pid != GetCurrentProcessId() {
+            return false;
+        }
+        let name = |d| {
+            let mut buf = [0u16; 128];
+            let mut n = 0u32;
+            let ok = GetUserObjectInformationW(d, UOI_NAME, buf.as_mut_ptr().cast(), (buf.len() * 2) as u32, &mut n) != 0;
+            ok.then(|| String::from_utf16_lossy(&buf[..(n as usize / 2).saturating_sub(1)]))
+        };
+        let input = OpenInputDesktop(0, 0, 0x0001 /* DESKTOP_READOBJECTS */);
+        if input.is_null() {
+            return false; // secure desktop (UAC, lock screen)
+        }
+        let same = name(input).is_some() && name(input) == name(GetThreadDesktop(GetCurrentThreadId()));
+        CloseDesktop(input);
+        same
+    }
+}
+
+/// The character the local layout makes for this key (AltGr text towards a Mac); asks without
+/// changing the keyboard state (flag 4), so dead keys keep working.
+#[cfg(windows)]
+fn key_char(ev: &rdev::Event) -> String {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, GetKeyboardState, ToUnicodeEx};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    unsafe {
+        let mut state = [0u8; 256];
+        if GetKeyboardState(state.as_mut_ptr()) == 0 {
+            return String::new();
+        }
+        // the hook runs before the OS updates the key state: AltGr = Ctrl + Alt held
+        state[0x11] |= 0x80;
+        state[0x12] |= 0x80;
+        let layout = GetKeyboardLayout(GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut()));
+        let mut buf = [0u16; 8];
+        let n = ToUnicodeEx(ev.platform_code, ev.position_code, state.as_ptr(), buf.as_mut_ptr(), buf.len() as i32, 4, layout);
+        if n > 0 { String::from_utf16_lossy(&buf[..n as usize]) } else { String::new() }
     }
 }
 
@@ -544,15 +611,18 @@ fn hook(ev: rdev::Event) -> Option<rdev::Event> {
         rdev::EventType::KeyRelease(k) => (k, false),
         _ => return Some(ev),
     };
-    if matches!(k, K::Unknown(_)) {
-        return Some(ev); // media and vendor keys stay local
+    if matches!(k, K::Unknown(_)) || !ours_in_front() {
+        return Some(ev); // media and vendor keys, and every key while no window of ours is in front
     }
     let mut st = STATE.lock().unwrap();
     let Some(key) = st.hook_target().map(str::to_owned) else { return Some(ev) };
     let Some(s) = st.sessions.get_mut(&key) else { return Some(ev) };
     let (outs, keep) = match hook_action(&s.mapper, k, down, s.alt_tab_remote) {
         HookAction::Forward { pass } => {
-            let ch = ev.unicode.as_ref().and_then(|u| u.name.clone()).unwrap_or_default();
+            let ch = if down && s.mapper.dir == Dir::PcToMac && (k != K::AltGr) && s.mapper.altgr_active() { key_char(&ev) } else { String::new() };
+            if pass && down {
+                s.passed.push(k);
+            }
             (s.mapper.map(k, down, &ch), pass)
         }
         HookAction::Escape => {

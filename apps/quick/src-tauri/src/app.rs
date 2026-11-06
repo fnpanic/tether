@@ -44,6 +44,8 @@ pub fn run(args: Vec<String>) {
                 .maximizable(false)
                 .decorations(false)
                 .visible(false) // shown by the page after first paint, avoids a white flash
+                // macOS: the first click into an inactive window clicks too (Accept needed two clicks)
+                .accept_first_mouse(true)
                 .center()
                 .build()?;
             Ok(())

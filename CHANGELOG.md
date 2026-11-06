@@ -4,6 +4,24 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.5.19] — 2026-11-06
+
+### Fixed
+- **Typing stopped working in sessions (Windows technician app 0.5.18).** With "Send system keys"
+  on (the default), the session window threw away every key that came through the webview,
+  trusting the keyboard hook to have sent it. When the hook was not catching keys - Windows
+  silently removes a hook that answers too slowly, and turning focus away and back could leave a
+  stale hook (rdev's `exit_grab` race) - nothing reached the remote computer, to Windows and Mac
+  alike, until "Send system keys" was turned off. Now every key that reaches the window is sent
+  (a key the hook took never gets there), the hook is installed once and kept, and it only takes
+  keys while the foreground window of the active desktop belongs to that Tether: a second Tether
+  (or one on another desktop) can no longer catch another window's keys. The hook also no longer
+  asks Windows for the character of every key of every program (that could break dead keys such
+  as ^ and ´ elsewhere); it asks only for AltGr characters towards a Mac, without changing the
+  keyboard state. The keyboard end-to-end test now runs with the hook installed.
+- **macOS: Accept needed two clicks.** The first click into an inactive Tether window only
+  activated it. All windows of Tether and TetherQS now take that first click as a click.
+
 ## [0.5.18] — 2026-11-06
 
 Tether / TetherQS 0.5.18 (Windows and macOS). Windows 0.5.17 was published before these

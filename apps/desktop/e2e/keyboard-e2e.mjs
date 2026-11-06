@@ -7,7 +7,7 @@
 // Host (profile kbd-host) and viewer (kbd-view) run on an invisible desktop (hidden-run.ps1). The
 // host is a debug build with TETHER_DEV_KEYLOG: it logs every received key event instead of
 // injecting it (and ignores mouse events), so nothing is typed on this PC. The viewer pretends the
-// host is a Mac (TETHER_DEV_PEER_PLATFORM) and installs no keyboard hook (TETHER_DEV_NOHOOK).
+// host is a Mac (TETHER_DEV_PEER_PLATFORM) with the keyboard hook installed: it must pass every key, the window is on a hidden desktop (0.5.18 dropped them all).
 // Only the process trees this script started are stopped (by PID).
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -97,7 +97,6 @@ async function main() {
   hidden(`--connect ${st.id} --password-env TETHER_E2E_PW`, {
     TETHER_PROFILE: "kbd-view",
     TETHER_E2E_PW: PW,
-    TETHER_DEV_NOHOOK: "1",
     TETHER_DEV_PEER_PLATFORM: "Mac OS",
     WEBVIEW2_USER_DATA_FOLDER: join(tmpdir(), "tether-kbd-view-wv"),
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9262",
