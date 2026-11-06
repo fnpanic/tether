@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { announceList, confirmed, isKey, newest, retireList, step, switchCommands } from "./serverkeys.ts";
+import { announceList, confirmed, isKey, newest, notSwitched, retireList, step, switchCommands } from "./serverkeys.ts";
 
 const A = "A".repeat(43) + "=";
 const B = "B".repeat(43) + "=";
@@ -42,4 +42,15 @@ test("relay commands and key format", () => {
   assert.match(c, /opc@r1\.example\.org:\/tmp\//);
   assert.match(c, /ssh opc@127\.0\.0\.1 'sudo bash \/tmp\/rotate-key\.sh switch \/tmp\/id_ed25519/);
   assert.ok(isKey(A) && !isKey("abc") && !isKey(A + "x"));
+});
+
+test("the switch step needs every relay to sign with the new key", () => {
+  const relays = [
+    { server: "https://a", reachable: true, signing: B },
+    { server: "https://b", reachable: true, signing: A },
+    { server: "https://c", reachable: false, signing_note: "update hbbs" },
+  ];
+  assert.deepEqual(notSwitched(relays, B).map((r) => r.server), ["https://b", "https://c"]);
+  assert.deepEqual(notSwitched(relays.slice(0, 1), B), []);
+  assert.equal(notSwitched(relays.slice(0, 1), undefined).length, 1);
 });

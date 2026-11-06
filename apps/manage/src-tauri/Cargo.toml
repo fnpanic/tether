@@ -1,6 +1,6 @@
 [package]
 name = "tether-manage"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Tether Manage: keys, policy, releases and diagnostics for a Tether relay"
@@ -28,6 +28,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 # Already in the tree via reqwest; streams release uploads for the progress bar.
 futures-util = { version = "0.3", default-features = false }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Already in the tree (0.61 via tauri); the private server key file gets a user-only DACL.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # What tauri-plugin-updater 2.x verifies with.

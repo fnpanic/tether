@@ -4,6 +4,39 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+Tether Manage 0.5.5; Tether / TetherQS client changes for the next release; hbbs and the Caddyfile
+on the relays.
+
+### Security
+- **Tether Manage: policy serial only from signed documents.** The next policy serial came from
+  `/api/admin/status` `policy_serial`, which a relay can set to anything: `u64::MAX` overflowed and
+  ended publishing for good. It now comes, like the server key list serial, only from policies a
+  relay serves that verify with the admin key and from this PC's own `policy/published/*.json`,
+  with an overflow check and a clear error.
+- **Tether Manage: the saved server private key is readable by the current user only.**
+  "Save key files…" creates `id_ed25519` with a protected ACL that grants only the current user's
+  SID (0600 on unix), warns that it is the private server key, and offers **Delete key files**
+  until it is deleted.
+- **Tether Manage: "Every relay is switched" is checked.** hbbs reports the key it signs with
+  (`/pubkey` on its health port, `https://<relay>/rendezvous/pubkey` through Caddy and the Helm
+  proxy); Manage enables the step only when every relay reports the new key and names the ones
+  that do not.
+- **Rollback floor for the server key list.** Tether and TetherQS keep the highest accepted key
+  list serial in `server-keys.serial`; deleting `server-keys.json` no longer lets an older, validly
+  signed list back in.
+- **Tether Manage: vault format version.** `keys.json` with server keys is written as format 2,
+  which Tether Manage before 0.5.5 refuses to open (instead of dropping the server keys when it
+  saves). Unknown fields are kept; a vault of a newer format can be used but is never saved.
+- **Size limits while reading.** Tether and TetherQS read the policy and key list answers with a
+  hard limit (stop after limit + 1 bytes) instead of reading the whole answer first.
+
+### Relays
+- hbbs (`patches/rustdesk-server.patch`) and the Caddyfile (`/rendezvous/pubkey`) must be updated
+  for the switch check; until then Manage keeps the step closed for that relay. hbbr and
+  tether-api are unchanged.
+
 ## [0.5.16] — 2026-11-06
 
 Windows and macOS. macOS: the server key rotation client (0.5.15 already had the AV1 change).

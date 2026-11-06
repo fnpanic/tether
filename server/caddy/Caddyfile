@@ -31,6 +31,13 @@
 		reverse_proxy 127.0.0.1:21121
 	}
 
+	# Public key hbbs signs with (one base64 line; 404 without a signing key). Tether Manage reads
+	# it to see that this relay switched during a server key rotation (docs/key-rotation.md).
+	handle /rendezvous/pubkey {
+		rewrite * /pubkey
+		reverse_proxy 127.0.0.1:21122
+	}
+
 	# Relay API (tether-api). Caddy ignores client-sent X-Forwarded-For and sets the real peer.
 	handle /api/* {
 		reverse_proxy 127.0.0.1:21120

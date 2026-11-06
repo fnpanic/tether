@@ -4,7 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { Check, Copy } from "lucide-react";
 import { useApp } from "../App";
 import { api, host, invoke, type Device, type RelayResult } from "../lib/ipc";
-import { announceList, confirmed, HELM_RETIRE, helmSwitch, isKey, newest, retireList, retireCommands, step, switchCommands, type LiveKeys, type Rotation, type Step } from "../lib/serverkeys";
+import { announceList, confirmed, HELM_RETIRE, helmSwitch, isKey, newest, notSwitched, retireList, retireCommands, step, switchCommands, type LiveKeys, type Rotation, type Step } from "../lib/serverkeys";
 import { PublishSheet } from "./publish";
 import { Badge, Button, CopyField, ErrorText, IconButton, Label, StatusDot, TextField } from "./ui";
 
@@ -57,6 +57,40 @@ function Confirmations({ serial }: { serial: number }) {
   );
 }
 
+/** Which key each relay's hbbs signs with; phase 2 is done when every one shows the new key. */
+function Signing({ relays, to }: { relays: LiveKeys[]; to?: string }) {
+  return (
+    <ul className="flex flex-col gap-1.5" data-testid="sk-signing">
+      {relays.map((r) => (
+        <li key={r.server} className="flex flex-wrap items-center gap-2 text-caption">
+          <StatusDot tone={r.signing === to ? "ok" : r.signing ? "warn" : "danger"} />
+          <span className="font-semibold">{host(r.server)}</span>
+          {r.signing ? (
+            <span className={r.signing === to ? "text-muted" : "text-danger"}>{r.signing === to ? "signs with the new key" : `still signs with ${short(r.signing)}`}</span>
+          ) : (
+            <span className="text-danger">{r.signing_note ?? "cannot tell which key it signs with"}</span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The private key file on this PC: a warning and a way to delete it. */
+function KeyFiles({ folder, onDeleted, run }: { folder: string; onDeleted: () => Promise<void>; run: (f: () => Promise<unknown>) => Promise<void> }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-warn/60 p-3 text-caption" role="alert" data-testid="sk-keyfiles">
+      <p className="min-w-0 flex-1">
+        <b>{folder}</b> holds <code className="font-mono">id_ed25519</code>, the server's <b>private</b> key (only your user account can open it). Whoever has it can impersonate the relays. Delete it
+        once it is installed on every relay.
+      </p>
+      <Button variant="danger" size="sm" onClick={() => run(async () => { await invoke("serverkeys_delete_files", { folder }); await onDeleted(); })}>
+        Delete key files
+      </Button>
+    </div>
+  );
+}
+
 const STEPS: { id: Step; title: string }[] = [
   { id: "generate", title: "Generate the new key" },
   { id: "announce", title: "Announce it to the devices" },
@@ -102,6 +136,11 @@ export function ServerKey() {
     }
   };
   const fromLive = live?.keys[0] ?? "";
+  const pending = notSwitched(relays ?? [], rot.to);
+  const filesDeleted = async () => {
+    await save({ ...rot, files: undefined });
+    toast("Key files deleted");
+  };
   const from = rot.from ?? (current || fromLive);
 
   const publish = async (keys: ReturnType<typeof retireList>): Promise<RelayResult[]> => {
@@ -216,6 +255,7 @@ export function ServerKey() {
                           const folder = await open({ directory: true, title: "Folder for id_ed25519 and id_ed25519.pub" });
                           if (typeof folder !== "string") return;
                           await invoke("serverkeys_save_files", { public: rot.to, folder });
+                          await save({ ...rot, files: folder });
                           toast("Key files saved. Delete them after installing.");
                         })
                       }
@@ -229,15 +269,21 @@ export function ServerKey() {
                   <p className="text-caption text-muted">
                     From now on build new installers with <code className="font-mono">TETHER_PUB_KEY={rot.to}</code>.
                   </p>
-                  <div>
-                    <Button variant="primary" onClick={() => run(() => save({ ...rot, switched: true }))}>
+                  {rot.files && <KeyFiles folder={rot.files} onDeleted={filesDeleted} run={run} />}
+                  <p className="text-caption font-semibold">Key each relay signs with</p>
+                  <Signing relays={relays ?? []} to={rot.to} />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button variant="primary" disabled={!relays || pending.length > 0} onClick={() => run(() => save({ ...rot, switched: true }))}>
                       Every relay is switched
                     </Button>
+                    <Button onClick={() => run(load)}>Check again</Button>
+                    {relays && pending.length > 0 && <span className="text-caption text-muted">Waiting for {pending.map((r) => host(r.server)).join(", ")}.</span>}
                   </div>
                 </div>
               )}
               {now && s.id === "retire" && (
                 <div className="mt-3 flex flex-col gap-3">
+                  {rot.files && <KeyFiles folder={rot.files} onDeleted={filesDeleted} run={run} />}
                   <p className="text-caption text-muted">Publishes a list with only the new key. Devices present the new key and stop trusting the old one.</p>
                   <div>
                     <Button variant="primary" onClick={() => setSheet("retire")}>

@@ -197,10 +197,7 @@ fn fetch_server_keys(keys: &[VerifyingKey]) -> Result<(), String> {
         200 => {}
         s => return Err(format!("server key list fetch: HTTP {s}")),
     }
-    let raw = resp.bytes().map_err(|e| e.to_string())?;
-    if raw.len() > 16 * 1024 {
-        return Err("server key list too large".into());
-    }
+    let raw = tether_trust::read_limited(resp, 16 * 1024).map_err(|e| format!("server key list: {e}"))?;
     if let Some(l) = serverkeys::accept(&Config::path("server-keys.json"), &raw, keys)? {
         hbb_common::log::info!("server key list {} applied", l.serial);
     }
@@ -234,10 +231,7 @@ fn fetch(keys: &[VerifyingKey]) -> Result<bool, String> {
         200 => {}
         s => return Err(format!("policy fetch: HTTP {s}")),
     }
-    let raw = resp.bytes().map_err(|e| e.to_string())?;
-    if raw.len() > MAX_DOC {
-        return Err("policy document too large".into());
-    }
+    let raw = tether_trust::read_limited(resp, MAX_DOC).map_err(|e| format!("policy document: {e}"))?;
     let Some(b) = accept(&raw, keys, serial)? else { return Ok(false) };
     let path = Config::path("policy.json");
     let tmp = path.with_extension("json.tmp");
