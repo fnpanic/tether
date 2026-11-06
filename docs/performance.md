@@ -374,3 +374,126 @@ and `... auto 0 4`, three runs each, stress page full-screen in Safari; count st
 run of pictures 3 s apart; at most one ~1 s hitch where the content switches.
 Windows VM: the 2 h `vm-long` run with the host log kept; the `fluxrt video/min` lines show
 whether a slow stretch comes with longer encode times (CPU), backlog waits (path) or a QoS state.
+
+# Sharpening in the viewer (2026-11-06)
+
+Text and fine lines of the remote picture get soft when the viewer scales it to the window (the
+usual case: a 2560×1440 screen in a 1600×900 window) and from lossy coding. The viewer now scales
+and sharpens in one WebGL2 pass (`apps/desktop/src/lib/sharpen.ts`); the earlier 2D canvas path
+stays for **Off**, for webviews without WebGL2 and after a lost GPU context.
+
+## Design
+
+- **One pass.** The decoded `VideoFrame` is uploaded with `texImage2D` (GPU to GPU, no CPU copy) and
+  drawn with a fragment shader into a canvas sized to its on-screen device pixels
+  (`ResizeObserver` `device-pixel-content-box`; rounded CSS size × DPR where that box is missing,
+  WebKit). Scaling is bilinear. Natively decoded pictures (`PKT_RGBA`) are uploaded as bytes and
+  BGRA is swizzled in the shader instead of a JS loop.
+- **Filter: clamped luma unsharp mask with a noise gate.** 5 taps (centre + cross; one output pixel
+  apart when shrinking, one source pixel otherwise). The luma Laplacian is added to all three
+  channels (no colour fringes), scaled by `smoothstep(0.02, 0.08, local luma range)` so flat areas
+  and compression noise below ~5–20 levels are left alone, and the result is clamped per channel to
+  the min/max of the taps: it cannot overshoot its neighbourhood, so no halos or ringing. A CAS
+  port was not used: CAS backs off most on high-contrast edges, which is exactly black-on-white
+  text, and sharpens low-contrast areas most, which is where block noise lives.
+- **Strength.** Auto: k = 0.2 when the picture is scaled (either way), 0 at 1:1 (a box that differs
+  by a rounding pixel counts as 1:1). Strong: k = 0.5 at every size. Off: the 2D canvas.
+- **Switching** needs a new canvas element (a canvas keeps its first context): the canvas is keyed
+  by the path, the pipeline takes over the new element and carries the current picture over
+  (`readPixels` of the source texture, or the old 2D canvas as a texture), so a switch neither
+  blanks the picture nor asks the host for a key frame. A lost context falls back to the 2D canvas
+  for the rest of the window and asks for a key frame.
+- `preserveDrawingBuffer: true` keeps the canvas readable after compositing (stress sampler, mode
+  switch); its cost is inside the measurements below.
+
+## Picture quality: `apps/desktop/e2e/sharpen-quality.mjs`
+
+Deterministic 1920×1080 fixture (`e2e/sharpen-fixture.html`): text at 9–16 px (black, grey, white
+on blue, red), 1 px lines with 1–4 px gaps, a star, a photo-like area, a flat grey area with ±6
+levels of noise. Encoded and decoded with WebCodecs (12 frames of a static screen, or the key frame
+alone), drawn at 1:1, 0.75× and 1.5× by the 2D path (Off) and the shader, read back with
+`drawImage` of the canvas (as the stress sampler does) and compared with the original scaled by
+the browser's high-quality resampler (the ideal picture). Metrics on luma: **sharpness** = mean
+|Laplacian| relative to the ideal (1.0 = as sharp as the ideal, below = soft); **MAE** against the
+ideal (levels of 255); **overshoot** = mean amount the picture leaves the ideal's 3×3 min/max
+(halos, ringing). Headless Edge, ANGLE D3D11 on the RTX 3080. Full tables:
+`tools/bench/results/sharpen/quality.txt` and `quality-*.json`.
+
+Text area, sharpness / MAE / overshoot (Auto = k 0.2 when scaled, Strong = k 0.5):
+
+| Stream | Scale | Off | Auto | Strong |
+|---|---|---|---|---|
+| VP9 1 Mbit/s, static (12 frames) | 1:1 | 1.05 / 2.26 / 0.93 | = Off | 1.20 / 2.67 / 1.10 |
+| | 0.75× | 1.01 / 1.83 / 0.63 | 1.10 / 1.95 / 0.70 | 1.18 / 2.46 / 0.75 |
+| | 1.5× | 1.00 / 2.07 / 0.73 | 1.10 / 2.00 / 0.76 | 1.23 / 2.41 / 0.79 |
+| VP9 1 Mbit/s, key frame only | 1:1 | 0.93 / 5.04 / 1.47 | = Off | 1.09 / 4.83 / 1.62 |
+| | 0.75× | 0.94 / 3.91 / 1.02 | 1.02 / 3.79 / 1.09 | 1.10 / 3.94 / 1.16 |
+| | 1.5× | 0.90 / 4.21 / 1.23 | 1.00 / 4.03 / 1.26 | 1.12 / 4.08 / 1.29 |
+| VP9 3 Mbit/s, static | 1:1 | 1.03 / 1.10 / 0.43 | = Off | 1.16 / 1.83 / 0.55 |
+| | 0.75× | 1.01 / 0.91 / 0.28 | 1.09 / 1.22 / 0.34 | 1.17 / 1.86 / 0.38 |
+| | 1.5× | 0.98 / 1.21 / 0.31 | 1.08 / 1.21 / 0.33 | 1.20 / 1.76 / 0.35 |
+| H.264 1 Mbit/s, static | 1:1 | 0.95 / 3.04 / 0.83 | = Off | 1.10 / 2.92 / 0.95 |
+| | 0.75× | 0.96 / 2.30 / 0.58 | 1.04 / 2.24 / 0.65 | 1.12 / 2.53 / 0.69 |
+| | 1.5× | 0.92 / 2.60 / 0.67 | 1.02 / 2.40 / 0.69 | 1.14 / 2.60 / 0.70 |
+
+- Soft pictures (key frames, H.264 at 1 Mbit/s, enlarged ones) are 4–10 % less sharp than the
+  ideal; Auto brings them to 1.00–1.04 and lowers their error (H.264 1.5×: MAE 2.60 → 2.40).
+- Well-coded static pictures are already as sharp as the ideal; Auto makes them ~10 % sharper at a
+  small MAE cost (+0.1 to +0.3 levels). At 1:1, k 0.2 came out neutral on average (MAE −0.23 …
+  +0.22 over the four streams), so Auto skips 1:1.
+- Overshoot grows by 2–12 % with Auto (the clamp keeps it inside the decoded neighbourhood), by
+  4–28 % with Strong. Flat noisy area: sharpness unchanged (0.026 → 0.026 at 1:1, 0.042 → 0.044 at
+  1.5×): the noise gate does not amplify compression noise or blocking.
+- k 0.8 and 1.2 (swept) raise MAE and overshoot on every stream; not offered.
+
+Comparison strips (original | Off | Auto | Strong, zoomed nearest-neighbour, VP9 1 Mbit/s static):
+`tools/bench/results/sharpen/s{1,0.75,1.5}-{text,lines,photo}.png`.
+
+Draw cost in the same browser, each draw waited for with a 1-pixel readback (200 draws, ms):
+2D `drawImage` 0.57–1.39, WebGL without sharpening 0.29–0.62, WebGL with k 0.2 0.29–0.43. The
+sharpening taps cost nothing measurable next to the upload.
+
+## In a session: `apps/desktop/e2e/sharpen-e2e.mjs`
+
+Two debug instances (host `sharp-host`, viewer `sharp-view`) on a hidden desktop of this PC
+(RTX 3080, 2560×1440 at 125 %), direct LAN, H.265 (hardware encode and decode). The host streams
+the screen with `tools/bench/stress.html?phase=1` (scrolling text + barcode) on top; the viewer
+window shows it at 1600×900 device pixels, so Auto sharpens (2560×1440 → 1600×900, k 0.2). Phases
+of 40 s, Off → Auto → Off → Auto → Strong; latency from `tools/bench/stress-sampler.mjs` (barcode
+every 100 ms, ~370 samples per phase; host and viewer share the clock, the absolute value includes
+the sampler's own read and the 60 Hz capture). Result: `tools/bench/results/sharpen/e2e.json`.
+
+| | Off (2D) | Auto | Off (2D) | Auto | Strong |
+|---|---|---|---|---|---|
+| pictures shown / s (= received) | 50.3 | 51.1 | 51.5 | 50.9 | 50.1 |
+| draw, CPU (ms per picture) | 0.17 | 0.11 | 0.16 | 0.12 | 0.12 |
+| latency p50 / p95 (ms) | 137 / 154 | 135 / 152 | 132 / 151 | 136 / 155 | 138 / 156 |
+
+Debug measurement mode (`localStorage["tether.renderSync"] = "1"`, read once a second: each draw
+waits for the GPU with a 1-pixel readback, so the time includes the GPU work; for measuring only):
+
+| | Off (2D) | Auto | Strong | Off (2D) | Auto |
+|---|---|---|---|---|---|
+| draw incl. GPU (ms per picture) | 4.54 | 3.16 | 3.22 | 4.90 | 3.27 |
+
+- No extra time per picture: the WebGL path is cheaper than the 2D path (−0.05 ms CPU, −1.5 ms
+  with the GPU wait). Target was < 0.5 ms extra at 1080p.
+- No frame-rate drop (every phase shows every received picture, 50–51.5 / s) and no latency change
+  beyond the run-to-run spread (this run: Off 132–137 ms p50, Auto 135–136, Strong 138; an earlier
+  run of the same script: Off 115–119, Auto 119–120, Strong 117).
+- Same run: Original size → canvas 2560×1440 = its device pixels, Auto skips 1:1 (`auto 0.00`);
+  a 1100×650 viewport (DevTools emulation) → canvas 1375×773 = its device pixels at 125 %;
+  30 switches Off/Auto/Strong → WebGL again, picture moving, no "too many WebGL contexts";
+  `WEBGL_lose_context` → the 2D canvas takes over, picture back after a key frame (317 ms);
+  the stress sampler decodes the barcode from both canvases; JS heap 63.7 MB before and 57.8 MB
+  after the switches. One texture per pipeline, re-specified per picture (no per-frame allocations
+  that could leak).
+
+## Not verified
+
+- macOS WebKit (WKWebView): WebGL2 and `texImage2D(VideoFrame)` exist in Safari 17+, but this was
+  not run on a Mac. Without `device-pixel-content-box` the canvas size is CSS size × DPR rounded,
+  which can be a pixel off (slight resampling by the compositor). Without WebGL2 the viewer uses
+  the 2D canvas as before.
+- GPU-less viewers (WARP/SwiftShader): not measured; the shader reads 5 texels per pixel.
+- Sessions longer than the ~12 min of the e2e run; GPU memory was not read directly.

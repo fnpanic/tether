@@ -24,6 +24,7 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   dropped. Every held key is now released on the remote side when the window loses the focus.
 - Alt+Space in a session opened PowerToys Run / Windows search on the technician's PC.
 
+
 ### Added
 - **Keyboard between PC and Mac.** Towards a Mac, Ctrl works as ⌘ (Ctrl+C, Ctrl+V…), the Win key
   as Control, Ctrl+Y as redo, Home/End as line start/end, Ctrl+arrows as word jumps, Alt+F4 as ⌘Q,
@@ -39,6 +40,17 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   system keys**.
 - The session shows when the person at the remote computer has turned off control of mouse and
   keyboard.
+
+- **Viewer: sharpening.** The remote picture is scaled to the window and sharpened in one WebGL2
+  pass (a luma unsharp mask with a noise gate, clamped to the neighbourhood so it cannot make
+  halos or ringing; frames are uploaded from the decoder without a CPU copy). Toolbar → Image
+  quality → **Sharpening**: **Auto** (default: only when the picture is scaled), **Strong**,
+  **Off** (the previous 2D canvas path). Remembered per user on the PC. Without WebGL2, or when the
+  GPU context is lost, the viewer falls back to the 2D canvas by itself. Measurements in
+  `docs/performance.md` ("Sharpening"); fixture `apps/desktop/e2e/sharpen-quality.mjs`, session
+  check `apps/desktop/e2e/sharpen-e2e.mjs`.
+- Statistics overlay: draw time per picture and the sharpening in use. Debug measurement mode
+  (`localStorage["tether.renderSync"] = "1"`): each draw waits for the GPU, so the draw time includes it.
 
 
 ## [0.5.17] — 2026-11-06

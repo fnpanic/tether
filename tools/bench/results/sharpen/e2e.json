@@ -1,0 +1,266 @@
+{
+ "date": "2026-11-06T16:47:12.640Z",
+ "exe": "C:\\cargo-target\\sharp\\debug\\tether.exe",
+ "seconds": 40,
+ "normal": [
+  {
+   "mode": "Off",
+   "fps": 50.325,
+   "recv": 50.325,
+   "renderMs": 0.174,
+   "sharpen": "off",
+   "gl": false,
+   "canvas": [
+    2560,
+    1440
+   ],
+   "box": [
+    1600,
+    900
+   ],
+   "dpr": 1.25
+  },
+  {
+   "mode": "Auto",
+   "fps": 51.05,
+   "recv": 51.05,
+   "renderMs": 0.112,
+   "sharpen": "auto 0.20",
+   "gl": true,
+   "canvas": [
+    1600,
+    900
+   ],
+   "box": [
+    1600,
+    900
+   ],
+   "dpr": 1.25
+  },
+  {
+   "mode": "Off",
+   "fps": 51.45,
+   "recv": 51.45,
+   "renderMs": 0.163,
+   "sharpen": "off",
+   "gl": false,
+   "canvas": [
+    2560,
+    1440
+   ],
+   "box": [
+    1600,
+    900
+   ],
+   "dpr": 1.25
+  },
+  {
+   "mode": "Auto",
+   "fps": 50.875,
+   "recv": 50.875,
+   "renderMs": 0.118,
+   "sharpen": "auto 0.20",
+   "gl": true,
+   "canvas": [
+    1600,
+    900
+   ],
+   "box": [
+    1600,
+    900
+   ],
+   "dpr": 1.25
+  },
+  {
+   "mode": "Strong",
+   "fps": 50.1,
+   "recv": 50.1,
+   "renderMs": 0.122,
+   "sharpen": "strong 0.50",
+   "gl": true,
+   "canvas": [
+    1600,
+    900
+   ],
+   "box": [
+    1600,
+    900
+   ],
+   "dpr": 1.25
+  }
+ ],
+ "latency": [
+  {
+   "mode": "Off",
+   "samples": 369,
+   "p50": 137,
+   "p95": 154,
+   "mean": 137.6
+  },
+  {
+   "mode": "Auto",
+   "samples": 369,
+   "p50": 135,
+   "p95": 152,
+   "mean": 135.5
+  },
+  {
+   "mode": "Off",
+   "samples": 370,
+   "p50": 132,
+   "p95": 151,
+   "mean": 133.7
+  },
+  {
+   "mode": "Auto",
+   "samples": 368,
+   "p50": 136,
+   "p95": 155,
+   "mean": 136.8
+  },
+  {
+   "mode": "Strong",
+   "samples": 367,
+   "p50": 138,
+   "p95": 156,
+   "mean": 138.1
+  }
+ ],
+ "sync": [
+  {
+   "mode": "Off",
+   "fps": 50.8,
+   "recv": 50.8,
+   "renderMs": 4.539,
+   "sharpen": "off",
+   "gl": false,
+   "canvas": [
+    2560,
+    1440
+   ],
+   "box": [
+    1600,
+    900
+   ],
+   "dpr": 1.25
+  },
+  {
+   "mode": "Auto",
+   "fps": 51.35,
+   "recv": 51.35,
+   "renderMs": 3.163,
+   "sharpen": "auto 0.20",
+   "gl": true,
+   "canvas": [
+    1600,
+    900
+   ],
+   "box": [
+    1600,
+    900
+   ],
+   "dpr": 1.25
+  },
+  {
+   "mode": "Strong",
+   "fps": 50.95,
+   "recv": 50.95,
+   "renderMs": 3.221,
+   "sharpen": "strong 0.50",
+   "gl": true,
+   "canvas": [
+    1600,
+    900
+   ],
+   "box": [
+    1600,
+    900
+   ],
+   "dpr": 1.25
+  },
+  {
+   "mode": "Off",
+   "fps": 51.5,
+   "recv": 51.5,
+   "renderMs": 4.899,
+   "sharpen": "off",
+   "gl": false,
+   "canvas": [
+    2560,
+    1440
+   ],
+   "box": [
+    1600,
+    900
+   ],
+   "dpr": 1.25
+  },
+  {
+   "mode": "Auto",
+   "fps": 51.25,
+   "recv": 51.25,
+   "renderMs": 3.272,
+   "sharpen": "auto 0.20",
+   "gl": true,
+   "canvas": [
+    1600,
+    900
+   ],
+   "box": [
+    1600,
+    900
+   ],
+   "dpr": 1.25
+  }
+ ],
+ "resize": [
+  {
+   "what": "original size",
+   "canvas": [
+    2560,
+    1440
+   ],
+   "box": [
+    2560,
+    1440
+   ],
+   "dpr": 1.25,
+   "sharpen": "auto 0.00"
+  },
+  {
+   "what": "window 1100×650",
+   "canvas": [
+    1375,
+    773
+   ],
+   "box": [
+    1375,
+    773
+   ],
+   "dpr": 1.25,
+   "sharpen": "auto 0.20"
+  },
+  {
+   "what": "window restored",
+   "canvas": [
+    1600,
+    900
+   ],
+   "box": [
+    1600,
+    900
+   ],
+   "dpr": 1.25,
+   "sharpen": "auto 0.20"
+  }
+ ],
+ "heap": {
+  "before": 63701415,
+  "after": 57805746
+ },
+ "warnings": [
+  "[video] WebGL context lost: drawing with the 2D canvas",
+  "[video] waiting for a key frame: renderer changed",
+  "[video] key frame after 317 ms"
+ ]
+}
