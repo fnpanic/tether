@@ -991,7 +991,7 @@ index 0ec190a..69ae13b 100644
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..dc2a3ac 100644
+index dff45eb..c5cad42 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,12 @@ use std::{
@@ -1012,10 +1012,10 @@ index dff45eb..dc2a3ac 100644
  type Sender = mpsc::UnboundedSender<Data>;
  type Receiver = mpsc::UnboundedReceiver<Data>;
  static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
-+/// `-r` entries as given: `<address>[|<health URL>]`.
++/// `-r` entries as given: `<address>[|<health URL>][|backup]`.
  type RelayServers = Vec<String>;
-+/// Relays that passed the last check: (address handed to clients, open sessions).
-+type HealthyRelays = Vec<(String, usize)>;
++/// Relays that passed the last check: (address handed to clients, open sessions, backup).
++type HealthyRelays = Vec<(String, usize, bool)>;
 +const HEALTH_PORT: u16 = 21122;
  const CHECK_RELAY_TIMEOUT: u64 = 3_000;
  static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
@@ -1094,7 +1094,7 @@ index dff45eb..dc2a3ac 100644
          let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
          loop {
              tokio::select! {
-@@ -251,7 +281,13 @@ impl RendezvousServer {
+@@ -251,9 +281,24 @@ impl RendezvousServer {
                  }
                  Some(data) = rx.recv() => {
                      match data {
@@ -1107,9 +1107,21 @@ index dff45eb..dc2a3ac 100644
 +                            }
 +                        }
                          Data::RelayServers0(rs) => { self.parse_relay_servers(&rs); }
-                         Data::RelayServers(rs) => { self.relay_servers = Arc::new(rs); }
+-                        Data::RelayServers(rs) => { self.relay_servers = Arc::new(rs); }
++                        Data::RelayServers(rs) => {
++                            let had = has_primary(&self.relay_servers);
++                            let has = has_primary(&rs);
++                            if had && !has && rs.iter().any(|r| r.2) {
++                                log::info!("relay failover: no healthy primary relay, using backups");
++                            } else if !had && has && self.relay_servers.iter().any(|r| r.2) {
++                                log::info!("relay failover: primary relay healthy again");
++                            }
++                            self.relay_servers = Arc::new(rs);
++                        }
                      }
-@@ -321,6 +357,16 @@ impl RendezvousServer {
+                 }
+                 res = socket.next() => {
+@@ -321,6 +366,16 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> ResultType<()> {
@@ -1126,7 +1138,7 @@ index dff45eb..dc2a3ac 100644
          if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
              match msg_in.union {
                  Some(rendezvous_message::Union::RegisterPeer(rp)) => {
-@@ -340,89 +386,9 @@ impl RendezvousServer {
+@@ -340,89 +395,9 @@ impl RendezvousServer {
                      }
                  }
                  Some(rendezvous_message::Union::RegisterPk(rk)) => {
@@ -1139,9 +1151,7 @@ index dff45eb..dc2a3ac 100644
 -                        return send_rk_res(socket, addr, UUID_MISMATCH).await;
 -                    } else if !self.check_ip_blocker(&ip, &id).await {
 -                        return send_rk_res(socket, addr, TOO_FREQUENT).await;
-+                    if let Some(msg_out) = self.register_pk(rk, addr).await {
-+                        socket.send(&msg_out, addr).await?
-                     }
+-                    }
 -                    let peer = self.pm.get_or(&id).await;
 -                    let (changed, ip_changed) = {
 -                        let peer = peer.read().await;
@@ -1183,7 +1193,9 @@ index dff45eb..dc2a3ac 100644
 -                        req_pk.0 = 0;
 -                    } else if req_pk.0 > 2 {
 -                        return send_rk_res(socket, addr, TOO_FREQUENT).await;
--                    }
++                    if let Some(msg_out) = self.register_pk(rk, addr).await {
++                        socket.send(&msg_out, addr).await?
+                     }
 -                    req_pk.0 += 1;
 -                    req_pk.1 = Instant::now();
 -                    peer.write().await.reg_pk = req_pk;
@@ -1218,7 +1230,7 @@ index dff45eb..dc2a3ac 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // UDP PunchHoleRequest is intentionally unsupported.
-@@ -479,9 +445,29 @@ impl RendezvousServer {
+@@ -479,9 +454,29 @@ impl RendezvousServer {
          addr: SocketAddr,
          key: &str,
          ws: bool,
@@ -1248,7 +1260,7 @@ index dff45eb..dc2a3ac 100644
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // there maybe several attempt, so sink can be none
                      if let Some(sink) = sink.take() {
-@@ -521,8 +507,18 @@ impl RendezvousServer {
+@@ -521,8 +516,18 @@ impl RendezvousServer {
                              rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
                          }
                      }
@@ -1268,7 +1280,7 @@ index dff45eb..dc2a3ac 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
                      allow_err!(self.handle_hole_sent(phs, addr, None).await);
-@@ -545,14 +541,19 @@ impl RendezvousServer {
+@@ -545,14 +550,19 @@ impl RendezvousServer {
                      msg_out.set_test_nat_response(res);
                      Self::send_to_sink(sink, msg_out).await;
                  }
@@ -1296,7 +1308,7 @@ index dff45eb..dc2a3ac 100644
                  }
                  _ => {}
              }
-@@ -567,6 +568,12 @@ impl RendezvousServer {
+@@ -567,6 +577,12 @@ impl RendezvousServer {
          socket_addr: SocketAddr,
          socket: &mut FramedSocket,
      ) -> ResultType<()> {
@@ -1309,7 +1321,7 @@ index dff45eb..dc2a3ac 100644
          let (request_pk, ip_change) = if let Some(old) = self.pm.get_in_memory(&id).await {
              let mut old = old.write().await;
              let ip = socket_addr.ip();
-@@ -601,7 +608,107 @@ impl RendezvousServer {
+@@ -601,7 +617,107 @@ impl RendezvousServer {
              request_pk,
              ..Default::default()
          });
@@ -1418,7 +1430,7 @@ index dff45eb..dc2a3ac 100644
      }
  
      #[inline]
-@@ -620,17 +727,25 @@ impl RendezvousServer {
+@@ -620,17 +736,25 @@ impl RendezvousServer {
              &addr
          );
          let mut msg_out = RendezvousMessage::new();
@@ -1445,7 +1457,7 @@ index dff45eb..dc2a3ac 100644
              socket.send(&msg_out, addr_a).await?;
          } else {
              self.send_to_tcp(msg_out, addr_a).await;
-@@ -658,6 +773,7 @@ impl RendezvousServer {
+@@ -658,6 +782,7 @@ impl RendezvousServer {
              socket_addr: la.local_addr.clone(),
              pk: self.get_pk(&la.version, la.id).await,
              relay_server: la.relay_server,
@@ -1453,7 +1465,7 @@ index dff45eb..dc2a3ac 100644
              ..Default::default()
          };
          p.set_is_local(true);
-@@ -679,7 +795,7 @@ impl RendezvousServer {
+@@ -679,7 +804,7 @@ impl RendezvousServer {
          ws: bool,
      ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
          let mut ph = ph;
@@ -1462,7 +1474,7 @@ index dff45eb..dc2a3ac 100644
              log::warn!("Authentication failed from {} for peer {} - invalid key", addr, ph.id);
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
-@@ -754,6 +870,7 @@ impl RendezvousServer {
+@@ -754,6 +879,7 @@ impl RendezvousServer {
                  msg_out.set_fetch_local_addr(FetchLocalAddr {
                      socket_addr,
                      relay_server,
@@ -1470,7 +1482,7 @@ index dff45eb..dc2a3ac 100644
                      ..Default::default()
                  });
              } else {
-@@ -763,10 +880,23 @@ impl RendezvousServer {
+@@ -763,10 +889,23 @@ impl RendezvousServer {
                      peer_addr,
                      addr
                  );
@@ -1494,7 +1506,7 @@ index dff45eb..dc2a3ac 100644
                      ..Default::default()
                  });
              }
-@@ -821,19 +951,57 @@ impl RendezvousServer {
+@@ -821,19 +960,57 @@ impl RendezvousServer {
      #[inline]
      async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) {
          if let Some(sink) = sink.as_mut() {
@@ -1560,7 +1572,7 @@ index dff45eb..dc2a3ac 100644
      #[inline]
      async fn send_to_tcp_sync(
          &mut self,
-@@ -911,19 +1079,25 @@ impl RendezvousServer {
+@@ -911,19 +1088,26 @@ impl RendezvousServer {
      }
  
      fn parse_relay_servers(&mut self, relay_servers: &str) {
@@ -1568,7 +1580,7 @@ index dff45eb..dc2a3ac 100644
 +        let rs: RelayServers = relay_servers
 +            .split(',')
 +            .filter(|x| {
-+                let addr = relay_addr(x);
++                let addr = relay_entry(x).0;
 +                // ws(s):// URLs (e.g. per-pod relays behind a proxy) are handed out as they are.
 +                !addr.is_empty()
 +                    && (addr.starts_with("ws://")
@@ -1578,7 +1590,8 @@ index dff45eb..dc2a3ac 100644
 +            .map(|x| x.to_owned())
 +            .collect();
 +        log::info!("relay-servers={:?}", rs);
-+        self.relay_servers = Arc::new(rs.iter().map(|x| (relay_addr(x).to_owned(), 0)).collect());
++        self.relay_servers =
++            Arc::new(rs.iter().map(|x| relay_entry(x)).map(|(a, _, b)| (a.to_owned(), 0, b)).collect());
          self.relay_servers0 = Arc::new(rs);
 -        self.relay_servers = self.relay_servers0.clone();
      }
@@ -1595,18 +1608,19 @@ index dff45eb..dc2a3ac 100644
      }
  
      async fn check_cmd(&self, cmd: &str) -> String {
-@@ -948,8 +1122,8 @@ impl RendezvousServer {
+@@ -948,8 +1132,9 @@ impl RendezvousServer {
                  if let Some(rs) = fds.next() {
                      self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                  } else {
 -                    for ip in self.relay_servers.iter() {
 -                        let _ = writeln!(res, "{ip}");
-+                    for (ip, sessions) in self.relay_servers.iter() {
-+                        let _ = writeln!(res, "{ip} sessions={sessions}");
++                    for (ip, sessions, backup) in self.relay_servers.iter() {
++                        let role = if *backup { "backup" } else { "primary" };
++                        let _ = writeln!(res, "{ip} sessions={sessions} {role}");
                      }
                  }
              }
-@@ -1148,20 +1322,27 @@ impl RendezvousServer {
+@@ -1148,20 +1333,27 @@ impl RendezvousServer {
          key: &str,
          ws: bool,
      ) -> ResultType<()> {
@@ -1637,7 +1651,7 @@ index dff45eb..dc2a3ac 100644
                      }
                  }
                  Ok(response)
-@@ -1169,22 +1350,71 @@ impl RendezvousServer {
+@@ -1169,22 +1361,71 @@ impl RendezvousServer {
              let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
              let (a, mut b) = ws_stream.split();
              sink = Some(Sink::Ws(a));
@@ -1716,7 +1730,7 @@ index dff45eb..dc2a3ac 100644
          if sink.is_none() {
              self.tcp_punch.lock().await.remove(&try_into_v4(addr));
          }
-@@ -1268,18 +1498,43 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
+@@ -1268,18 +1509,43 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
      let mut futs = Vec::new();
      let rs = Arc::new(Mutex::new(Vec::new()));
      for x in rs0.iter() {
@@ -1724,8 +1738,8 @@ index dff45eb..dc2a3ac 100644
 -        if !host.contains(':') {
 -            host = format!("{}:{}", host, config::RELAY_PORT);
 -        }
-+        let addr = relay_addr(x).to_owned();
-+        let check_url = x.split_once('|').map(|(_, url)| url.trim().to_owned());
++        let (addr, check_url, backup) = relay_entry(x);
++        let (addr, check_url) = (addr.to_owned(), check_url.map(str::to_owned));
          let rs = rs.clone();
 -        let x = x.clone();
          futs.push(tokio::spawn(async move {
@@ -1742,7 +1756,7 @@ index dff45eb..dc2a3ac 100644
 +                    Ok::<_, reqwest::Error>((ok, r.text().await.unwrap_or_default()))
 +                };
 +                match res.await {
-+                    Ok((true, body)) => rs.lock().await.push((addr, parse_sessions(&body))),
++                    Ok((true, body)) => rs.lock().await.push((addr, parse_sessions(&body), backup)),
 +                    Ok((false, body)) => log::debug!("relay {addr} not ready: {}", body.trim()),
 +                    Err(err) => log::debug!("relay {addr} check failed: {err}"),
 +                }
@@ -1750,7 +1764,7 @@ index dff45eb..dc2a3ac 100644
 +            }
 +            if addr.starts_with("ws://") || addr.starts_with("wss://") {
 +                // No health URL for a WebSocket relay: nothing to check.
-+                rs.lock().await.push((addr, 0));
++                rs.lock().await.push((addr, 0, backup));
 +                return;
 +            }
 +            let mut host = addr.clone();
@@ -1762,11 +1776,11 @@ index dff45eb..dc2a3ac 100644
                  .is_ok()
              {
 -                rs.lock().await.push(x);
-+                rs.lock().await.push((addr, 0));
++                rs.lock().await.push((addr, 0, backup));
              }
          }));
      }
-@@ -1330,17 +1585,13 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+@@ -1330,17 +1596,13 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
  }
  
  #[inline]
@@ -1786,14 +1800,28 @@ index dff45eb..dc2a3ac 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1612,73 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1623,124 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
 +
-+/// The address part of a `-r` entry `<address>[|<health URL>]`.
-+fn relay_addr(entry: &str) -> &str {
-+    entry.split('|').next().unwrap_or("").trim()
++/// A `-r` entry `<address>[|<health URL>][|backup]` as (address, health URL, backup).
++fn relay_entry(entry: &str) -> (&str, Option<&str>, bool) {
++    let mut parts = entry.split('|').map(str::trim);
++    let addr = parts.next().unwrap_or("");
++    let (mut url, mut backup) = (None, false);
++    for p in parts {
++        if p.eq_ignore_ascii_case("backup") {
++            backup = true;
++        } else if !p.is_empty() {
++            url = Some(p);
++        }
++    }
++    (addr, url, backup)
++}
++
++fn has_primary(relays: &[(String, usize, bool)]) -> bool {
++    relays.iter().any(|r| !r.2)
 +}
 +
 +/// Open sessions from a relay's `/readyz` body (`ready sessions=N`); 0 if it does not say.
@@ -1803,14 +1831,17 @@ index dff45eb..dc2a3ac 100644
 +        .unwrap_or(0)
 +}
 +
-+/// The least loaded healthy relay; `rotation` spreads new sessions over equally loaded ones.
++/// The least loaded healthy primary relay, or backup relay when no primary is healthy;
++/// `rotation` spreads new sessions over equally loaded ones.
 +// shortcut: load is sampled every 3 s, so a burst inside one interval goes to the same relay;
 +// count handed-out sessions locally if bursts matter.
-+fn pick_relay(relays: &[(String, usize)], rotation: usize) -> String {
-+    let Some(min) = relays.iter().map(|r| r.1).min() else {
++fn pick_relay(relays: &[(String, usize, bool)], rotation: usize) -> String {
++    let backup = !has_primary(relays);
++    let pool: Vec<_> = relays.iter().filter(|r| r.2 == backup).collect();
++    let Some(min) = pool.iter().map(|r| r.1).min() else {
 +        return "".to_owned();
 +    };
-+    let best: Vec<&String> = relays.iter().filter(|r| r.1 == min).map(|r| &r.0).collect();
++    let best: Vec<&String> = pool.iter().filter(|r| r.1 == min).map(|r| &r.0).collect();
 +    best[rotation % best.len()].clone()
 +}
 +
@@ -1832,19 +1863,53 @@ index dff45eb..dc2a3ac 100644
 +
 +    #[test]
 +    fn entries_and_load() {
-+        assert_eq!(relay_addr("a.example|https://a.example/readyz/relay"), "a.example");
-+        assert_eq!(relay_addr("wss://k8s.example/ws/relay/1"), "wss://k8s.example/ws/relay/1");
++        let url = Some("https://a.example/readyz/relay");
++        assert_eq!(relay_entry("a.example"), ("a.example", None, false));
++        assert_eq!(relay_entry("a.example:21117"), ("a.example:21117", None, false));
++        assert_eq!(relay_entry("a.example|https://a.example/readyz/relay"), ("a.example", url, false));
++        assert_eq!(relay_entry(" a.example | https://a.example/readyz/relay |backup"), ("a.example", url, true));
++        assert_eq!(relay_entry("a.example:21117|backup"), ("a.example:21117", None, true));
++        assert_eq!(relay_entry("a.example|BACKUP"), ("a.example", None, true));
++        let ws = "wss://k8s.example/ws/relay/1";
++        assert_eq!(relay_entry(ws), (ws, None, false));
++        assert_eq!(relay_entry("wss://k8s.example/ws/relay/1|backup"), (ws, None, true));
++        assert_eq!(
++            relay_entry("ws://10.0.0.1:21119/r|http://10.0.0.1:21121/readyz|backup"),
++            ("ws://10.0.0.1:21119/r", Some("http://10.0.0.1:21121/readyz"), true)
++        );
 +        assert_eq!(parse_sessions("ready sessions=7\n"), 7);
 +        assert_eq!(parse_sessions("Tether relay"), 0);
 +    }
 +
 +    #[test]
 +    fn least_loaded_then_rotation() {
-+        let rs = vec![("a".to_owned(), 2), ("b".to_owned(), 0), ("c".to_owned(), 0)];
++        let rs = vec![r("a", 2, false), r("b", 0, false), r("c", 0, false)];
 +        assert_eq!(pick_relay(&rs, 0), "b");
 +        assert_eq!(pick_relay(&rs, 1), "c");
 +        assert_eq!(pick_relay(&rs, 2), "b");
 +        assert_eq!(pick_relay(&[], 0), "");
++    }
++
++    fn r(a: &str, n: usize, backup: bool) -> (String, usize, bool) {
++        (a.to_owned(), n, backup)
++    }
++
++    #[test]
++    fn primary_before_backup() {
++        // Primary wins even when more loaded; rotation stays among equally loaded primaries.
++        let rs = vec![r("p1", 5, false), r("p2", 5, false), r("o1", 0, true), r("o2", 0, true)];
++        assert_eq!(pick_relay(&rs, 0), "p1");
++        assert_eq!(pick_relay(&rs, 1), "p2");
++        assert_eq!(pick_relay(&rs, 2), "p1");
++        // No primary healthy (absent from the healthy set): least loaded backup, ties rotate.
++        let rs = vec![r("o1", 1, true), r("o2", 0, true), r("o3", 0, true)];
++        assert_eq!(pick_relay(&rs, 0), "o2");
++        assert_eq!(pick_relay(&rs, 1), "o3");
++        assert!(!has_primary(&rs));
++        // Primary healthy again: back to it.
++        let rs = vec![r("p1", 9, false), r("o2", 0, true)];
++        assert_eq!(pick_relay(&rs, 0), "p1");
++        assert_eq!(pick_relay(&rs, 1), "p1");
 +    }
 +}
 +
