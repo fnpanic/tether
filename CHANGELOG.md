@@ -4,6 +4,44 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Security
+Relay fixes from the code audit. They take effect when the relay's `hbbs`, `tether-api` and
+Caddyfile are redeployed (Helm: the proxy ConfigMap and the hbbs/api images). Clients and wire
+formats are unchanged.
+- **hbbs: any client could take over a host's signalling path.** A connection that only named a
+  host's ID (`RegisterPeer`) was kept as that host's signalling path, and its heartbeats moved
+  the host's address to it, so punch-hole, relay and ICE messages for the host (with the
+  controller's IP and TURN credentials) went to the attacker and the host looked offline. Now a
+  connection becomes a host's path only when its registration is accepted: a `RegisterPeer` from
+  the host's IP with a known key, or a `RegisterPk` that passes upstream's UUID/key checks. Only
+  the connection that is the current path refreshes it.
+- **hbbs trusted a client-sent `X-Real-IP`.** Caddy passed it through, so any client could pick
+  the IP hbbs used for its brute-force blocker, IP-change tracking and same-IP checks. hbbs now
+  takes the last `X-Forwarded-For` hop (the peer Caddy saw, set by Caddy itself), and Caddy
+  overwrites `X-Real-IP` (read by hbbr) on every hbbs/hbbr route, in `server/caddy/Caddyfile`
+  and the Helm proxy template.
+- **TURN took rendezvous traffic from hosts behind the same NAT as a TURN peer.** Datagrams from
+  any port of a peer's IP went to the TURN allocation for as long as it lived (up to 12 h): such a
+  host's registrations were lost (it looked offline) and its UUID and key reached the TURN
+  client. A controller could aim this at a host on purpose. Now only the exact address an
+  allocation sent to within the last 5 minutes is routed to it, and nothing that parses as a
+  rendezvous message is.
+- **TURN request limits could be bypassed.** The cap on unauthenticated requests (50/s, each
+  one makes the TURN library keep a nonce for an hour) skipped any request that merely carried a
+  MESSAGE-INTEGRITY attribute; it now applies to every request whose MESSAGE-INTEGRITY does not
+  verify. The first client address of a credential is recorded only for a verified request, and
+  that table is capped (100 000 live entries) and pruned by expiry instead of growing without
+  bound.
+- **tether-api: one slow client blocked the whole relay API.** Requests were served one at a
+  time with no timeout, so a client trickling a body, or a slow custom TetherQS download, held up
+  every heartbeat, policy fetch, audit post and admin call. Requests are now served concurrently
+  (up to 32, then 503); bodies are read and responses written outside the state lock; every read
+  and write on a connection times out after 30 s and a body must arrive within 60 s plus
+  64 KiB/s. Caddy reads API request bodies up to 512 KiB whole before passing them on. All size
+  and rate limits are unchanged.
+
 ## [0.5.20] — 2026-11-06
 
 ### Fixed

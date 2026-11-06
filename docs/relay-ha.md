@@ -40,7 +40,8 @@ flowchart LR
 ## Connection flow
 
 1. **Hosts register with every node** (client list, client side). Each node's hbbs keeps the
-   host's WebSocket as its signalling path, the same as today.
+   host's WebSocket as its signalling path once it accepted the registration (known key from the
+   host's IP, or a `RegisterPk` with the right UUID), the same as today.
 2. **The viewer races its PunchHoleRequest across the nodes.** The first hbbs that knows the host
    wins. That hbbs picks a relay and sends `PunchHole{relay_server}` to the host over the host's
    registration.

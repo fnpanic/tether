@@ -44,17 +44,24 @@ Abuse limits (TURN is a classic open-relay/SSRF vector, see the coturn CVEs abov
   documentation ranges, IPv4-mapped/compatible, NAT64 and 6to4 forms of them, or the relay's own
   public address (unit test `peers_filtered`);
 - credentials open allocations for 300 s; afterwards only the client address that first used a
-  credential may keep refreshing its allocation (12 h at most);
+  credential (in a request whose MESSAGE-INTEGRITY verified) may keep refreshing its allocation
+  (12 h at most); at most 100 000 such first uses are kept, pruned by expiry;
+- Allocate, Refresh, CreatePermission and ChannelBind requests without a valid MESSAGE-INTEGRITY
+  (each makes the TURN library keep a nonce for an hour) are capped at 50/s for all clients;
 - `TURN_MAX_ALLOCATIONS` (64), 16 peers per allocation, `TURN_BANDWIDTH_MBPS` (32) per
   allocation and direction, extra datagrams dropped;
 - IPv4 relays only, UDP only.
 
 Single port: every relayed address is `<public IP>:21116`. hbbs passes each datagram to
 `Turn::dispatch` first: TURN requests (Allocate, Refresh, Send, CreatePermission, ChannelBind) and
-ChannelData from a known TURN client go to the TURN server, datagrams from an address an
-allocation has sent to go to that allocation; everything else (rendezvous, STUN binding) stays
-with hbbs as before. A peer is told apart by its address (normally the relayed port does that);
-a NAT that maps per destination is covered when exactly one allocation knows that peer's IP.
+ChannelData from a known TURN client go to the TURN server, datagrams from the exact address an
+allocation has sent to in the last 5 minutes (the TURN permission lifetime) go to that
+allocation; everything else (rendezvous, STUN binding) stays with hbbs as before, and so does any
+datagram that parses as a rendezvous message, even from a peer address. A peer is told apart by
+its full address (normally the relayed port does that). Other sockets behind the peer's NAT are
+not taken: a host there keeps registering with hbbs. A peer behind a NAT that maps per
+destination, answering from a port the allocation never sent to, is not relayed (ICE uses another
+candidate pair).
 
 ## Measurements
 
