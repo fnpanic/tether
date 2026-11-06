@@ -6,7 +6,7 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [0.5.16] — 2026-11-06
 
-Windows only (Tether and TetherQS); macOS 0.5.15 already contains the AV1 change.
+Windows and macOS. macOS: the server key rotation client (0.5.15 already had the AV1 change).
 
 ### Added
 - **Server key rotation without reinstalling clients** ([docs/key-rotation.md](docs/key-rotation.md)).
