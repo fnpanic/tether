@@ -8,6 +8,7 @@ Type=simple
 User=tether-api
 Group=tether-api
 # ADMIN_PUB_KEY=<base64 Ed25519 key>[,<key>…]; empty disables the admin endpoints.
+# Optional: AUDIT_RETENTION_DAYS (default 90, 0 = store no audit records), AUDIT_MAX_MB (default 50).
 EnvironmentFile=/etc/tether/api.env
 ExecStart=/usr/local/bin/tether-api --data /var/lib/tether-api --listen 127.0.0.1:21120
 Restart=always

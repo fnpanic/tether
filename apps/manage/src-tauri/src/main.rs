@@ -266,6 +266,35 @@ async fn devices_all(app: State<'_, App>) -> R<Value> {
     Ok(json!({ "devices": live::merge_devices(lists), "failed": failed }))
 }
 
+/// Session audit records of every relay (`GET /api/admin/audit`), each tagged with `relay`. Hosts
+/// post to the first relay of their build, so the lists differ; the page merges and dedupes them.
+#[tauri::command]
+async fn audit_all(app: State<'_, App>, since: u64, limit: u32) -> R<Value> {
+    let (mut events, mut failed, mut answered) = (Vec::new(), Vec::new(), 0);
+    for sv in app.servers() {
+        match app.call_on(&sv, "GET", &format!("/api/admin/audit?since={since}&limit={limit}"), Vec::new(), "application/json").await {
+            Ok(b) => {
+                answered += 1;
+                for mut e in serde_json::from_slice::<Vec<Value>>(&b).map_err(|_| format!("{sv}: unexpected audit list"))? {
+                    e["relay"] = json!(sv);
+                    events.push(e);
+                }
+            }
+            Err(e) => failed.push(format!("{sv}: {e}")),
+        }
+    }
+    if answered == 0 {
+        return Err(failed.join("; "));
+    }
+    Ok(json!({ "events": events, "failed": failed }))
+}
+
+/// Writes a text export (Sessions CSV) to the path the save dialog returned.
+#[tauri::command]
+fn text_save(path: String, text: String) -> R<()> {
+    fs::write(path, text).map_err(err)
+}
+
 // ---- server key rotation (docs/key-rotation.md) ----
 
 /// A new server key pair, sealed into `keys.json` right away. Needs the passphrase again because
@@ -1209,6 +1238,8 @@ fn main() {
             admin,
             relays_check,
             devices_all,
+            audit_all,
+            text_save,
             features,
             serverkeys_generate,
             serverkeys_live,

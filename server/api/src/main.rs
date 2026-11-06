@@ -3,7 +3,9 @@
 //! Layout: `policy.json`, `policy-history/<serial>.json`, `server-keys.json` (signed server key
 //! list, docs/key-rotation.md), `devices.json`, `nonces.json`,
 //! `diag/tickets.json` + `diag/<ticket>.zip`, `custom/<id>.json` (custom TetherQS apps),
-//! `download/…` (served by Caddy), `tmp/`.
+//! `audit/<YYYY-MM-DD>.jsonl` (session audit log, `audit.rs`), `download/…` (served by Caddy), `tmp/`.
+
+mod audit;
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -131,6 +133,9 @@ struct App {
     devices_dirty: bool,
     ip_hits: HashMap<String, (u64, u32)>,
     q_hits: HashMap<String, (u64, u32)>,
+    audit_ip_hits: HashMap<String, (u64, u32)>,
+    audit_dev_hits: HashMap<String, (u64, u32)>,
+    audit: audit::Log,
     custom: Vec<CustomApp>,
     nonces: HashMap<String, u64>,
     tickets: Vec<Ticket>,
@@ -331,10 +336,10 @@ fn load_json<T: for<'de> Deserialize<'de> + Default>(p: &Path) -> T {
 }
 
 impl App {
-    fn open(data: PathBuf, keys: Vec<VerifyingKey>) -> io::Result<Self> {
+    fn open(data: PathBuf, keys: Vec<VerifyingKey>, audit_days: u64, audit_max: u64) -> io::Result<Self> {
         mkdirs(&data, 0o750)?;
         mkdirs(&data.join("download"), 0o750)?;
-        for d in ["policy-history", "diag", "custom", "tmp"] {
+        for d in ["policy-history", "diag", "custom", "audit", "tmp"] {
             mkdirs(&data.join(d), 0o700)?;
         }
         for e in fs::read_dir(data.join("tmp"))? {
@@ -355,6 +360,9 @@ impl App {
         }
         Ok(App {
             q_hits: HashMap::new(),
+            audit_ip_hits: HashMap::new(),
+            audit_dev_hits: HashMap::new(),
+            audit: audit::Log::open(data.join("audit"), audit_days, audit_max)?,
             custom,
             devices: devices.into_iter().map(|d| (d.uuid.clone(), d)).collect(),
             devices_dirty: false,
@@ -461,6 +469,9 @@ impl App {
             ("GET", "/api/policy") => self.get_signed(rq, self.policy_serial, "policy.json", "no policy published"),
             ("GET", "/api/server-keys") => self.get_signed(rq, self.server_keys_serial, "server-keys.json", "no server key list published"),
             ("POST", "/api/heartbeat") => self.heartbeat(rq),
+            ("POST", "/api/audit/conn") => self.audit_post(rq, "conn"),
+            ("POST", "/api/audit/file") => self.audit_post(rq, "file"),
+            ("POST", "/api/audit/alarm") => self.audit_post(rq, "alarm"),
             ("POST", p) if p.starts_with("/api/diag/") => self.diag_upload(rq, &p["/api/diag/".len()..]),
             ("GET", p) if p.starts_with("/q/") => self.custom_download(rq, &p["/q/".len()..]),
             (m, p) if p.starts_with("/api/admin/") => self.admin(rq, m, &url, &p["/api/admin/".len()..]),
@@ -517,6 +528,48 @@ impl App {
         Ok(empty(204))
     }
 
+    /// `POST /api/audit/<kind>` from a host (unauthenticated, see audit.rs). Success is an empty
+    /// 2xx body: the client retries anything else except a 4xx other than 408/429.
+    fn audit_post(&mut self, rq: &mut Request, kind: &str) -> Result<Resp, Resp> {
+        let t = now();
+        let src = client_ip(rq);
+        if !rate_ok(&mut self.audit_ip_hits, src.clone(), t, audit::IP_PER_MIN) {
+            return Err(text(429, "too many requests"));
+        }
+        let body = read_body(rq, audit::LIMIT)?;
+        let (uuid, nonce, mut rec) = audit::parse(kind, &body).map_err(|e| text(400, &e))?;
+        if !rate_ok(&mut self.audit_dev_hits, uuid, t, audit::DEVICE_PER_MIN) {
+            return Err(text(429, "too many requests"));
+        }
+        if self.audit.seen(&nonce) {
+            return Ok(empty(204));
+        }
+        self.check_space(audit::LIMIT)?;
+        rec.insert("ts".into(), t.into());
+        rec.insert("src".into(), src.into());
+        match self.audit.append(nonce, &rec, t) {
+            Ok(()) => Ok(empty(204)),
+            Err(None) => Err(text(507, "audit log full")),
+            Err(Some(e)) => Err(internal(format!("audit log: {e}"))),
+        }
+    }
+
+    /// `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>`.
+    fn audit_read(&self, url: &str) -> Result<Resp, Resp> {
+        let (mut since, mut limit, mut device) = (0, 1000, String::new());
+        for kv in url.split_once('?').map_or("", |(_, q)| q).split('&').filter(|s| !s.is_empty()) {
+            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+            let bad = || text(400, &format!("bad {k}"));
+            match k {
+                "since" => since = v.parse().map_err(|_| bad())?,
+                "limit" => limit = v.parse::<usize>().ok().filter(|n| (1..=audit::READ_MAX).contains(n)).ok_or_else(bad)?,
+                "device" => device = audit::unescape(v),
+                _ => return Err(text(400, &format!("unknown parameter {k}"))),
+            }
+        }
+        Ok(json(&self.audit.read(since, limit, &device)))
+    }
+
     fn diag_upload(&mut self, rq: &mut Request, ticket: &str) -> Result<Resp, Resp> {
         let t = now();
         let idx = self
@@ -561,7 +614,7 @@ impl App {
             ("POST", "diag-ticket") => LIMIT_SMALL,
             ("PUT", r) if r.starts_with("custom/") => LIMIT_CUSTOM,
             ("DELETE", r) if r.starts_with("custom/") => LIMIT_SMALL,
-            ("GET", "policy-history" | "devices" | "diag" | "releases" | "status" | "custom") => LIMIT_SMALL,
+            ("GET", "policy-history" | "devices" | "diag" | "releases" | "status" | "custom" | "audit") => LIMIT_SMALL,
             ("GET", r) if r.starts_with("diag/") || r.starts_with("policy-history/") => LIMIT_SMALL,
             _ => return Err(not_found()),
         };
@@ -597,6 +650,7 @@ impl App {
                 Ok(json(&v))
             }
             ("GET", "diag") => Ok(json(&self.tickets)),
+            ("GET", "audit") => self.audit_read(url),
             ("GET", "releases") => self.list_releases(),
             ("GET", r) if r.starts_with("policy-history/") => {
                 // The signed document exactly as published, so another admin PC can restore it.
@@ -855,6 +909,9 @@ impl App {
         self.devices_dirty |= self.devices.len() != before;
         self.ip_hits.retain(|_, (start, _)| t < *start + 60);
         self.q_hits.retain(|_, (start, _)| t < *start + 60);
+        self.audit_ip_hits.retain(|_, (start, _)| t < *start + 60);
+        self.audit_dev_hits.retain(|_, (start, _)| t < *start + 60);
+        self.audit.prune(t, 0);
         let n = self.nonces.len();
         self.nonces.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
         if self.nonces.len() != n {
@@ -931,7 +988,16 @@ fn main() {
     if keys.is_empty() {
         eprintln!("warning: ADMIN_PUB_KEY is empty; admin endpoints are disabled");
     }
-    let mut app = App::open(data, keys).unwrap_or_else(|e| {
+    // AUDIT_RETENTION_DAYS (default 90, 0 = do not store) and AUDIT_MAX_MB (default 50), api.env.
+    let env_num = |k: &str, d: u64| match std::env::var(k) {
+        Ok(v) if !v.trim().is_empty() => v.trim().parse().unwrap_or_else(|_| {
+            eprintln!("{k}: not a number");
+            std::process::exit(1);
+        }),
+        _ => d,
+    };
+    let (audit_days, audit_max) = (env_num("AUDIT_RETENTION_DAYS", 90), env_num("AUDIT_MAX_MB", 50).saturating_mul(1 << 20));
+    let mut app = App::open(data, keys, audit_days, audit_max).unwrap_or_else(|e| {
         eprintln!("data dir: {e}");
         std::process::exit(1);
     });
@@ -939,6 +1005,7 @@ fn main() {
         eprintln!("listen {listen}: {e}");
         std::process::exit(1);
     });
+    app.maintain(); // before announcing readiness: retention applies from the first request
     match server.server_addr().to_ip() {
         Some(a) => println!("listening on {a}"),
         None => println!("listening"),
@@ -948,7 +1015,6 @@ fn main() {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
     }
     let mut last_maint = now();
-    app.maintain();
     while !STOP.load(Ordering::SeqCst) {
         match server.recv_timeout(Duration::from_secs(1)) {
             Ok(Some(rq)) => app.handle(rq),

@@ -51,6 +51,15 @@ on the relays.
   Clean links still reach 60 fps within about a second.
 
 ### Added
+- **Session audit log.** tether-api now accepts the connection, file-transfer and alarm records
+  hosts post (`POST /api/audit/conn|file|alarm`; until now every session logged "Audit post
+  dropped … 404") and stores them as daily JSON lines, 90 days or 50 MB (`AUDIT_RETENTION_DAYS`,
+  `AUDIT_MAX_MB` in `api.env`), size- and rate-limited, deduplicated by nonce. Signed
+  `GET /api/admin/audit?since=&limit=&device=` reads them newest first. Tether Manage › **Sessions**
+  merges the records of every relay: time, host, technician, IP, action (with file paths),
+  duration, search, 24 h to 90 days, CSV export. Unauthenticated telemetry: see SECURITY.md.
+  Deploy: the new tether-api binary only (Caddy already routes `/api/*`). Regression check:
+  `apps/desktop/e2e/audit-e2e.mjs`.
 - Host log: one `fluxrt video/min` line per minute while video is sent (encode time avg / p95,
   fps, kbit/s, largest frame, key frames, frames not taken within 1 s / 3 s, QoS fps / ratio /
   target), so long sessions can be diagnosed from the host log. Replaces the 5 s `fluxrt encode`

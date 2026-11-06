@@ -68,6 +68,46 @@ Upload a diagnostics zip for a ticket an admin opened. `<ticket>` is 8 character
 (no ambiguous letters). Body `application/zip`, ≤ 2 MiB. `204` if the ticket is open and
 unused, else `404`. One upload per ticket. Stored 7 days.
 
+### `POST /api/audit/conn`, `POST /api/audit/file`, `POST /api/audit/alarm` (session audit log)
+The host side of every Tether app (`vendor/rustdesk/src/server/connection.rs`, `post_conn_audit` /
+`post_file_audit` / `post_alarm_audit`, RustDesk Pro shape) posts one record per event to
+`<api-server>/api/audit/<kind>`. `api-server` is `https://<first TETHER_SERVER host>`
+(`netpolicy.rs`), so every host posts to the **first relay of its build**, through Caddy's
+`/api/*` route; Tether Manage reads every relay and merges. Bodies (JSON, ≤ 8 KiB, unknown fields
+rejected), all with `"id"` (Tether ID, ≤ 32), `"uuid"` (base64 machine uuid, ≤ 128; not the
+heartbeat install uuid), `"conn_id"` (per-process connection number) and `"nonce"` (unique per
+record, ≤ 64 `[A-Za-z0-9-]`):
+```
+conn, TCP connection opened:  {"action":"new","ip":"<technician ip>","session_id":0,…}
+conn, technician logged in:   {"peer":["<technician id>","<technician name>"],"type":0,"primary_auth":1,"two_factor":1,"session_id":<u64>,…}
+conn, connection closed:      {"action":"close","session_id":<u64>,…}
+file, files sent/received:    {"peer_id":"…","type":0,"path":"<folder or file>","is_file":false,
+                               "info":"{\"ip\":\"…\",\"name\":\"<technician name>\",\"num\":12,\"files\":[[\"name\",size],…≤10]}",…}
+alarm (whitelist block, …):   {"typ":0,"info":"<JSON text ≤ 1024>",…}
+```
+`type` (conn): 0 remote, 1 file transfer, 2 port forward, 3 camera, 4 terminal. `type` (file):
+0 = the host sent files to the technician, 1 = the host received files. `primary_auth`: 1 click,
+2 one-time password, 3 permanent password, 4 switch sides. Optional `conn_audit_ref` (≤ 128).
+
+Answers: `204` with an empty body when stored (also when the same `nonce` was stored in the last
+10 minutes: a client retry), `400` invalid (the client drops it), `413` too large, `429` more than
+120 posts/min from one IP or 60/min from one device `uuid` (the client retries 429 and 5xx for up
+to 120 s), `507` disk low or the log at its size cap. Not authenticated: see SECURITY.md
+"Session audit log". Records never change devices, policy or anything else on the relay.
+
+Stored record (one JSON line in `audit/<YYYY-MM-DD>.jsonl`, UTC day; files `0600`):
+`{"ts": <server unix time>, "src": "<poster ip from X-Forwarded-For>", "kind": "conn|file|alarm",
+"action": "connect|login|disconnect|send|receive|alarm", "id", "uuid", "conn_id", "nonce", …}` plus,
+when present: `session_id` (string, u64), `ip` (technician address as the host saw it), `peer_id`,
+`peer_name`, `conn_type` (`remote`, `file_transfer`, `port_forward`, `view_camera`, `terminal`),
+`primary_auth` (`click`, `temporary_password`, `permanent_password`, `switch_sides`),
+`two_factor`, `ref`, `path`, `is_file`, `num`, `files`, `typ`, `info`.
+
+Retention (`/etc/tether/api.env`, read at start): `AUDIT_RETENTION_DAYS` (default 90; whole UTC
+days; `0` = accept and store nothing), `AUDIT_MAX_MB` (default 50; above it the oldest days are
+deleted, never today's; if today's file alone reaches the cap, new records get `507`). Applied at
+start and every minute.
+
 ## Admin endpoints (signed requests)
 
 Every request carries `Tether-Sig: v1 ts=… nonce=… sig=…` (see `tether_trust::reqauth`; the path
@@ -89,6 +129,7 @@ Failure: `401` with a short reason. Bodies over the limits: `413`.
 | `DELETE /api/admin/release/<channel>/<path>` | – | `204` |
 | `GET /api/admin/releases` | – | `[{channel,path,size,modified}]` |
 | `PUT /api/admin/download-page` | HTML (≤ 512 KiB) | `204`, stored as `download/index.html` |
+| `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>` | – | Session audit records (above), newest first. All optional: `since` (default 0), `limit` 1–5000 (default 1000), `device` matches `id` or `uuid` exactly (URL-encoded). Unknown parameter or bad value: `400`. |
 | `GET /api/admin/status` | – | `{version, disk_free, devices, policy_serial, server_keys_serial, uptime}` |
 
 The server refuses uploads that would leave less than 2 GiB free on the disk (`507`).

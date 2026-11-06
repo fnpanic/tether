@@ -54,6 +54,27 @@ The relay operator is **not trusted with content**. The relay only forwards ciph
 | Recording consent | Recording requires an explicit Allow from the other party for every connection, regardless of policy. The viewer never assumes the permission. | core `client.rs`, `server/connection.rs`, `docs/recording.md` |
 | Diagnostics | Exports redact passwords, salts, key pairs and tokens. Uploads are accepted only for tickets an admin opened (8 characters, 24 h, one upload, kept 7 days). | `diag.rs`, `server/api` |
 
+### Session audit log
+
+Every host reports its incoming connections to the first relay of its build
+(`POST /api/audit/conn|file|alarm`, [docs/api.md](docs/api.md)); Tether Manage › Sessions shows them.
+
+- **What is logged**: time (relay clock), host Tether ID and base64 machine uuid, connection
+  number, the technician's Tether ID, display name and IP address as the host saw them, the
+  address the host posted from, connection kind and how it was approved (click, password), file
+  transfers with folder or file path, count and up to 10 file names with sizes, disconnects, and
+  alarms such as IP whitelist blocks. No session content, no file content, no passwords.
+- **Not authenticated.** Hosts have no device key, so a post is unauthenticated device telemetry
+  like the heartbeat: anyone who can reach a relay can add records under any ID, or fill the log
+  within the limits (8 KiB per record, 120/min per IP, 60/min per device, size cap). Records are
+  never used for anything else (no device, policy or access decision); read them as a log of what
+  hosts reported, not as proof. A host that cannot reach the first relay within 120 s drops the
+  record (its log says "Audit post dropped").
+- **Privacy and retention**: names, IP addresses and file paths are personal data. Files are
+  `0600` under `/var/lib/tether-api/audit/`, readable only with an admin-signed request, kept 90
+  days or 50 MB (`AUDIT_RETENTION_DAYS`, `AUDIT_MAX_MB`; `AUDIT_RETENTION_DAYS=0` stores nothing).
+  CSV exports leave the relay: handle them like the records.
+
 ## Least privilege and attack surface
 
 Settings below are **forced** for every Tether process (UI, server, service and connection manager).
