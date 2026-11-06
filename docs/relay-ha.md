@@ -361,3 +361,15 @@ Failover test (Hetzner hbbr killed with SIGKILL and kept stopped):
 - a new session went over Oracle at once (first frame 1.0 s);
 - hbbr started again: Oracle's hbbs logged `primary relay healthy again` within 1 s and the next
   new session used Hetzner.
+
+## Security update deployed (2026-11-06, 23:55)
+
+hbbs `f36df28e`, tether-api `21730844` and the Caddyfile with `header_up X-Real-IP {remote_host}`
+and `request_buffers 512k` (main 31af99a; CHANGELOG [Unreleased] › Security) on Oracle relay 2
+(backup) first, then on Hetzner (primary); hbbr unchanged. The deploy script validates the new
+Caddyfile with the node's `RELAY_HOST` before touching anything and keeps `*.bak-0520` backups
+(`/tmp/relay-0521/rollback.sh`). Checks before the rollout: keyrot e2e against the hardened hbbs
+and tether-api 22/22 (real host and viewer, registration, rotation, relay), audit e2e 15/15,
+`test-relay.sh` (hbbs 19, tether-api 16, backup failover) all green. After: both relays answer
+pubkey, policy, download page, audit (400 on an empty record) and the WebSocket upgrade (101);
+cm-window e2e through the production hbbs 33/33; no hbbs errors, devices registering.
