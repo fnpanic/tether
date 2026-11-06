@@ -4,7 +4,9 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
-## [Unreleased]
+## [0.5.16] — 2026-11-06
+
+Windows only (Tether and TetherQS); macOS 0.5.15 already contains the AV1 change.
 
 ### Added
 - **Server key rotation without reinstalling clients** ([docs/key-rotation.md](docs/key-rotation.md)).
