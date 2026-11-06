@@ -275,6 +275,32 @@ today, and devices not yet on the live policy.
 
 The server keeps at most 10 000 devices and drops entries older than 180 days.
 
+## Sessions
+
+The session audit log ([api.md](api.md), "session audit log"): what the hosts reported about
+incoming connections, read from **every** relay (`GET /api/admin/audit`, newest 5000 per relay
+and range) and merged. A host posts to the first relay of its build only. Records are
+deduplicated by their nonce (else host + connection + action + time), so a record two relays have
+is listed once. A relay that does not answer, or runs a tether-api without the audit log (404), is
+named above the list.
+
+Filters: **24 h / 7 days / 30 days / 90 days** (read from the relays again) and a search over host
+ID, technician ID and name, IPs and path (spaces in IDs ignored). **Export CSV** saves the rows
+shown (UTC times; cells a spreadsheet would run as a formula are prefixed with `'`).
+
+| Column | Meaning |
+| --- | --- |
+| Time | When the relay received the record (server clock); hover: the relay that logged it |
+| Host | Tether ID of the computer that was connected to, and its OS if it heartbeats |
+| Technician | Name and Tether ID the viewer presented (filled in on every row of the connection from its login record) |
+| IP | Technician address as the host saw it (through a relay: the relay's); hover: the address the host posted from |
+| Action | Connected (connection opened), Session started (logged in; a badge names the kind unless remote control), Files sent to / received from the technician with folder or file and count (hover: up to 10 names), Disconnected, Alarm (e.g. blocked by the IP whitelist) |
+| Duration | On Disconnected: time since the connection opened |
+
+The records are posted without a device key: anyone who can reach a relay can add rows. Read
+them as a log of what hosts reported, not as proof (SECURITY.md). Retention on the relays: 90 days
+or 50 MB (`AUDIT_RETENTION_DAYS`, `AUDIT_MAX_MB` in `/etc/tether/api.env`).
+
 ## Releases
 
 **Publish the latest builds** is the usual way to release: **Choose…** the build folder once

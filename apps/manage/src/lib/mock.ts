@@ -57,6 +57,23 @@ const devices = [
   { uuid: "d0d0e1aa-0101", id: "611 093 448", profile: "customer", version: "0.4.0", os: "macos 14.6", serial: 3, ip: "77.20.1.5", last_seen: today - 3600 },
 ];
 
+// Session audit log (audit_all): one remote session with an upload, one file-transfer session
+// still open, both relays logged the first connect (deduplicated by nonce), an IP whitelist alarm.
+const conn = (ts: number, action: string, id: string, conn_id: number, extra: Record<string, unknown> = {}) => ({
+  ts, kind: "conn", action, id, uuid: `dXVpZC0${id.replace(/ /g, "")}=`, conn_id, src: "91.4.77.3", relay: R1, nonce: `${id}-${conn_id}-${action}`, ...extra,
+});
+const audit = [
+  conn(now - 7300, "connect", "305 662 901", 3, { ip: "84.12.9.20" }),
+  conn(now - 7299, "connect", "305 662 901", 3, { ip: "84.12.9.20", relay: R2 }),
+  conn(now - 7295, "login", "305 662 901", 3, { peer_id: "482 019 337", peer_name: "Anna Berger", conn_type: "remote", primary_auth: "click" }),
+  { ...conn(now - 6900, "receive", "305 662 901", 3), kind: "file", peer_id: "482 019 337", peer_name: "Anna Berger", ip: "84.12.9.20", path: "C:\\Users\\praxis\\Desktop", is_file: false, num: 2, files: [["Treiber-Setup.exe", 4_200_000], ["readme.txt", 812]] },
+  conn(now - 5400, "disconnect", "305 662 901", 3),
+  conn(now - 900, "connect", "611 093 448", 1, { ip: "84.12.9.40", src: "77.20.1.5" }),
+  conn(now - 897, "login", "611 093 448", 1, { peer_id: "120 554 902", peer_name: "Ben Kraus", conn_type: "file_transfer", primary_auth: "permanent_password", src: "77.20.1.5" }),
+  { ...conn(now - 600, "send", "611 093 448", 1, { src: "77.20.1.5" }), kind: "file", peer_id: "120 554 902", peer_name: "Ben Kraus", ip: "84.12.9.40", path: "/Users/empfang/Documents/Rechnung-2026-10.pdf", is_file: true, num: 1, files: [["", 182_000]] },
+  { ts: now - 86400 * 2, kind: "alarm", action: "alarm", id: "305 662 950", uuid: "dXVpZC0zMDU2NjI5NTA=", conn_id: 0, typ: 0, info: '{"ip":"203.0.113.9"}', src: "91.4.77.9", relay: R1, nonce: "alarm-1" },
+].sort((x, y) => y.ts - x.ts);
+
 const admin: Record<string, unknown> = {
   "/api/admin/devices": devices,
   "/api/admin/releases": [
@@ -172,6 +189,8 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
     admin: () => (a.path === "/api/admin/status" ? status(R1) : admin[a.path] ?? null),
     relays_check: () => servers.map((s) => ok(s, status(s))),
     devices_all: () => ({ devices, failed: [] }),
+    audit_all: () => ({ events: audit.filter((e) => e.ts >= a.since), failed: [] }),
+    text_save: () => null,
     features: () => FEATURES,
     policy_draft: () => draft,
     policy_save_draft: () => (draft = a.bundle),
