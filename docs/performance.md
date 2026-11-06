@@ -276,3 +276,101 @@ Mac 1-hour long run (host and viewer 0.5.16, stress page full-screen in Safari, 
 12:17-13:14): 57 min, 3245 samples, no stall >= 0.5 s, no error, no reconnect. Every phase within
 +87 ms (p95) of idle. Viewer 57-58 MB + WebView 139-148 MB, flat. 18 % of the samples had no
 visible pattern because another agent brought Edge to the front on the Mac; they are excluded.
+
+# Freezes in ~3 s steps when the content gets heavy, and the long-run check (2026-11-06)
+
+## Mac host, H.265: what the freezes are
+
+The morning runs (`mac-after-h265`, `mac-after-auto`, 4 min each) had one episode each, not
+several independent freezes: at the switch to the noise phase (H.265) or 15 s into the photo
+phase (Auto = H.265), 4 pictures arrived **3.02–3.03 s apart in host time** (the barcode values of
+consecutive pictures), each shown ~2.9 s after the host drew it; then the stream was back at idle
+latency for the rest of the phase (H.265 in the 45 s of noise after the episode: +9 / +25 ms median / p95 over idle; VP9 in noise on the same Mac: +183 / +331 ms).
+
+- 3.0 s is the video loop's wait for the connection to take the previous frame
+  (`video_service.rs`, `timeout_millis = 3_000`): the connection takes the next frame only after
+  it has written the previous one into the stream, so a full link makes the loop wait, and at
+  3 s it gives up and encodes the next frame. Nothing else on the host or the viewer runs on a
+  3 s period with frames in flight (the viewer's key-frame retry is 1 s, its decode queue resync
+  would show a burst, not one picture per 3 s).
+- VideoToolbox is not latency-free (`HwRamEncoder::latency_free`): its packet for a frame comes
+  out with the next encode call, so each picture is one loop step (~3 s) old when it is sent.
+- It ended after ~11 s: the probe-based controller needs two to three bad TestDelay replies
+  (the probes queue behind the same video) plus a 3 s cooldown per ratio step, so it took three
+  steps to bring the bitrate under what the path carried.
+
+So the trigger is a burst above what the path carries when the content switches from light to
+full-screen (VideoToolbox's average-bitrate rate control lets a scene change overshoot), and the
+multi-second part is the slow confirmation. Hardware H.265 itself is not the problem: in steady
+noise it was the fastest codec on that Mac. Auto stays as it is.
+
+## Fix: the host reacts to its own backlog
+
+`VideoQoS::on_send_backlog` (`video_qos.rs`), called from the video loop's wait: once a frame has
+not been taken for 1 s (`BACKLOG_MS`), the bitrate is halved at once (at most once a second, not
+below the usual floor), and replies to probes sent before the cut neither cut again nor lower the
+fps. Without ABR (encoders that cannot change the bitrate) the fps is halved instead, down to the
+usual 5 fps floor. The normal controller earns the bitrate back as before.
+
+Closed-loop simulation (`video_qos/tests/sim.rs`, `sim_switch_to_heavy_content_drains_fast_with_backlog_signal`):
+office content, then full-screen video at 2.7x what a 1.5 Mbit/s link carries, 20 seeds. Longest
+span with >= 1 s of queue after the switch, worst seed: CBR encoder (VP8/VP9/AV1 model) 59.5 s
+without the signal (the queue never drained in the 60 s) -> 2.5 s with it; fixed-rate encoder
+(hardware model) 30 s -> 5.5 s. The existing scenarios keep their bounds with the signal on and
+improve where the path really shrinks (queue p95, p90 over 20 seeds): `bandwidth_halved_30`
+2083 -> 592 ms, `bandwidth_halved_fixed_rate_30` 636 -> 524 ms,
+`bandwidth_halved_fixed_rate_no_abr_30` 1688 -> 912 ms; Wi-Fi with stalls 299 -> 276 ms, clean
+links unchanged.
+
+Not covered by the model: the real VideoToolbox frame sizes after a scene change. Whether the
+Mac episode is gone has to be measured on the Mac (plan below).
+
+## Windows VM, 2 h: the second hour
+
+Per 15 minutes (extra delay over idle, median / p95 ms, from `vmlong-auto.jsonl`):
+
+| minutes | idle | scroll | photo | noise |
+| --- | --- | --- | --- | --- |
+| 0–15 | -3 / 40 | 182 / 454 | -3 / 61 | 941 / 1726 |
+| 45–60 | -4 / 36 | 135 / 453 | -4 / 60 | 920 / 1711 |
+| 90–105 | -2 / 38 | 187 / 466 | -3 / 61 | 934 / 1728 |
+| 105–120 | 65 / 419 | 581 / 1912 | 253 / 4956 | 1288 / 4258 |
+
+Flat for 105 minutes, then every phase got worse at once from about 06:04, the idle phase too
+(nothing to encode there but the clock barcode). That is the environment (the VM, this PC or the
+proxy path), not a controller state that builds up over an hour. The controller was checked
+anyway: `sim_two_hours_of_stress_cycles_do_not_drift` runs two hours of the stress cycle (idle,
+scroll, photo every 2 s, noise that a small software encoder cannot fit into a 3 Mbit/s path)
+for CBR, fixed-rate and non-ABR encoders over 4 seeds and asserts that hour 2 ends every cycle
+in the same state as hour 1 (ratio and fps after the idle minute, queue p95, longest backlog).
+It passes: ratio 0.670 / 0.670 and 30 / 30 fps after every idle minute in both hours, queue p95
+hour 1 / hour 2 e.g. 530 / 522 ms (CBR), 397 / 402 ms (fixed-rate), 752 / 734 ms (fixed-rate
+without ABR). No drift found in `video_qos.rs`; nothing to fix there.
+
+To tell next time what changes, the host logs one line per minute while video is sent
+(`fluxrt video/min`, replaces the 5 s `fluxrt encode` line): codec, fps, encode time avg / p95 /
+max, kbit/s, largest frame, key frames, encode calls without output, frames the connection did
+not take within 1 s / 3 s and the longest wait, and the QoS state (fps, ratio, target kbit/s).
+A backlog cut is logged as `video backlog: ...` (at most every 10 s).
+
+## Start-up fast path
+
+The tauri-only fast path in `user_network_delay` set the frame rate to the viewer's cap on any
+clean reply. Two `video_qos` tests failed with it (they were also written for 30 fps; they now
+derive their values from `FPS`): at a 120 fps cap with a fixed-rate encoder the start-up queue
+reached 4.0 s on a 2.5 Mbit/s path (15 -> 120 fps at once), and after a restore that congested
+the jump returned to the failed level at once. It now doubles per clean reply and only during
+start-up (until a reply shows queue growth, a reduction or the cap). Simulation: start-up queue
+peak at most 1.16 s for every cap (was 4.0 s at 120); clean relay reaches 60 fps in 1.1 s; the
+jittery Wi-Fi scenario takes 8.1 s to 90 % of 60 fps (was 0.1 s) with the same mean target
+(58.3 fps).
+
+## How to check on real hosts
+
+Mac (host with this build, viewer on the PC, direct LAN): `tools/bench/stress-exp.sh <label> h265 0 4`
+and `... auto 0 4`, three runs each, stress page full-screen in Safari; count stalls >= 0.5 s with
+`stress-report.py` and look in the host log for `video backlog:` (each cut) and the per-minute
+`fluxrt video/min` lines (`wait >=1s`, `largest frame`, `kbit/s` against `target`). Expected: no
+run of pictures 3 s apart; at most one ~1 s hitch where the content switches.
+Windows VM: the 2 h `vm-long` run with the host log kept; the `fluxrt video/min` lines show
+whether a slow stretch comes with longer encode times (CPU), backlog waits (path) or a QoS state.

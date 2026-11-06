@@ -37,6 +37,25 @@ on the relays.
   for the switch check; until then Manage keeps the step closed for that relay. hbbr and
   tether-api are unchanged.
 
+### Fixed
+- **No more freezes in ~3 s steps when the screen content suddenly gets heavy** (seen on a Mac
+  host with H.265: a switch to full-screen noise or photos froze the picture 4 times for ~2.7 s).
+  The host's video loop now treats a frame the connection has not taken within 1 s as a full
+  link and halves the bitrate at once (without adjustable bitrate: the frame rate), instead of
+  waiting seconds for the delay probes to confirm it (docs/performance.md).
+
+- The host's start-up fast path doubles the frame rate per clean delay reply (up to the viewer's
+  cap) instead of jumping straight to it, and only during start-up: a jump to 120 fps offered 8x
+  the bytes to an unmeasured path (4 s of queue in the simulation, now 1.2 s), and a jump at any
+  time undid the guard that keeps a frame rate which just congested from coming back at once.
+  Clean links still reach 60 fps within about a second.
+
+### Added
+- Host log: one `fluxrt video/min` line per minute while video is sent (encode time avg / p95,
+  fps, kbit/s, largest frame, key frames, frames not taken within 1 s / 3 s, QoS fps / ratio /
+  target), so long sessions can be diagnosed from the host log. Replaces the 5 s `fluxrt encode`
+  line.
+
 ## [0.5.16] — 2026-11-06
 
 Windows and macOS. macOS: the server key rotation client (0.5.15 already had the AV1 change).

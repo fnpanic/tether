@@ -3295,7 +3295,7 @@ index 0000000..a8fcbb1
 +    }
 +}
 diff --git a/src/server/video_qos.rs b/src/server/video_qos.rs
-index 96ffa63..895ace5 100644
+index 96ffa63..bbb6a6c 100644
 --- a/src/server/video_qos.rs
 +++ b/src/server/video_qos.rs
 @@ -48,7 +48,11 @@ delay:
@@ -3327,23 +3327,106 @@ index 96ffa63..895ace5 100644
  const MAX_BR_MULTIPLE: f32 = 1.0;
  
  const HISTORY_DELAY_LEN: usize = 2;
-@@ -566,6 +578,15 @@ impl VideoQoS {
+@@ -297,6 +309,7 @@ pub struct VideoQoS {
+     adjust_ratio_instant: Instant,
+     abr_config: bool,
+     first_reply_adjusts_ratio: bool, // false on Linux, where it can create vaapi twice
++    backlog_cut_instant: Option<Instant>, // last cut by on_send_backlog
+     #[cfg(test)]
+     test_now: Option<Instant>,
+ }
+@@ -312,6 +325,7 @@ impl Default for VideoQoS {
+             adjust_ratio_instant: Instant::now(),
+             abr_config: true,
+             first_reply_adjusts_ratio: !cfg!(target_os = "linux"),
++            backlog_cut_instant: None,
+             #[cfg(test)]
+             test_now: None,
+         }
+@@ -557,6 +571,11 @@ impl VideoQoS {
+                 fps = fps.max(min_fps);
+             }
+             fps = fps.max(MIN_AUTO_FPS.min(user_cap));
++            // The fast path below is a start-up accelerator: once a reply showed queue growth,
++            // a reduction happened or the cap was reached, the controller owns the frame rate
++            // (its restore returns to the level held before a congestion within two replies).
++            #[cfg(feature = "tauri")]
++            let starting = user.delay.startup_good_samples != u8::MAX;
+             fps = user
+                 .delay
+                 .limit_fps_change(current_fps, fps, delay, bitrate_first, braked);
+@@ -566,6 +585,20 @@ impl VideoQoS {
              reduce_bitrate = bitrate_first
                  && user.delay.needs_bitrate_reduction()
                  && user.delay.replies_after_bitrate_reduction.is_none();
-+            // FluxRT fast path: on a clean low-latency link go straight to the viewer's cap instead
-+            // of ramping from INIT_FPS; any queue growth falls back to the controller above.
++            // FluxRT fast path: during start-up on a clean low-latency link, double the frame rate
++            // on every clean reply (up to the viewer's cap) instead of the controller's two clean
++            // replies per step; any queue growth ends it. Doubling, not a jump to the cap:
++            // 15 -> 120 fps at once offered 8x the bytes to a path nobody had measured yet
++            // (fixed-rate encoders: 4 s of queue in `constrained_startup_does_not_leave_a_large_queue`),
++            // and a jump at any time defeated the restore guard (`restore_aims_lower_...`).
 +            #[cfg(feature = "tauri")]
 +            if !braked
++                && starting
 +                && avg_delay < 50
 +                && delay.saturating_sub(user.delay.rtt_calculator.get_rtt().unwrap_or(delay)) < 15
 +            {
-+                fps = user_cap;
++                fps = fps.max(current_fps.saturating_mul(2)).min(user_cap);
 +            }
              fps = fps.clamp(MIN_FPS, user_cap);
              // first network delay message
              adjust_ratio = user.delay.fps.is_none();
-@@ -685,11 +706,11 @@ impl VideoQoS {
+@@ -633,6 +666,49 @@ impl VideoQoS {
+     }
+ }
+ 
++/// A frame no connection took within this long means the path in front of it is full.
++pub const BACKLOG_MS: u128 = 1000;
++
++impl VideoQoS {
++    /// Tether: the video loop waited `waited_ms` (>= BACKLOG_MS) for a connection to take the
++    /// previous frame, i.e. the stream/link in front of it is full. This is seen on the host at
++    /// once, while the TestDelay probes behind the same backlog take seconds to confirm it and
++    /// the ratio then comes down one 3 s cooldown at a time: on a Mac host (H.265) a switch to
++    /// full-screen content froze the picture in ~3 s steps for ~11 s (docs/performance.md).
++    /// Halve the bitrate now (at most once a second); without ABR halve the fps instead.
++    /// Returns true when it changed something.
++    pub fn on_send_backlog(&mut self, waited_ms: u128) -> bool {
++        if waited_ms < BACKLOG_MS
++            || self
++                .backlog_cut_instant
++                .is_some_and(|t| self.since(t) < Duration::from_secs(1))
++        {
++            return false;
++        }
++        self.backlog_cut_instant = Some(self.now());
++        if self.can_reduce_bitrate() {
++            let min = self.min_ratio();
++            self.ratio = (self.ratio * 0.5).max(min);
++            // The periodic controller starts a cooldown, and replies to probes sent before the
++            // cut must not cut again (bitrate) or brake the fps on top of it.
++            self.adjust_ratio_instant = self.now();
++            self.reset_send_counters();
++            for user in self.users.values_mut() {
++                user.delay.replies_after_bitrate_reduction = Some(0);
++            }
++        } else {
++            for user in self.users.values_mut() {
++                let cap = user.fps_cap();
++                let current = user.delay.fps.unwrap_or(INIT_FPS.min(cap));
++                user.delay.on_reduction(current);
++                user.delay.fps = Some((current / 2).max(MIN_AUTO_FPS.min(cap)).min(current));
++            }
++            self.adjust_fps();
++        }
++        true
++    }
++}
++
+ // Common adjust functions
+ impl VideoQoS {
+     pub fn new_display(&mut self, video_service_name: String) {
+@@ -685,11 +761,11 @@ impl VideoQoS {
              .1
      }
  
@@ -3357,8 +3440,424 @@ index 96ffa63..895ace5 100644
          } else {
              None
          };
+@@ -886,6 +962,11 @@ impl RttCalculator {
+ mod tests {
+     use super::*;
+ 
++    /// One halving step of `limit_fps_change` (a second of excess cannot wait).
++    pub(super) fn halved(fps: u32) -> u32 {
++        fps - fps / 2
++    }
++
+     fn stable_qos() -> VideoQoS {
+         let mut qos = VideoQoS::default();
+         qos.advance_ms(2000);
+@@ -919,18 +1000,20 @@ mod tests {
+     fn response_timeout_recovers_in_two_good_replies() {
+         let mut qos = stable_qos();
+         qos.user_delay_response_elapsed(1, 3000);
+-        assert_eq!(qos.fps(), 7);
++        // Three seconds out: the third second quarters the frame rate.
++        let braked = FPS / 4;
++        assert_eq!(qos.fps(), braked);
+         qos.user_network_delay(1, 3200);
+         assert_eq!(
+             qos.fps(),
+-            7,
++            braked,
+             "the late reply belongs to the stall that was braked"
+         );
+         qos.user_delay_response_elapsed(1, 0);
+         qos.user_network_delay(1, 10);
+         assert_eq!(
+             qos.fps(),
+-            8,
++            braked + (braked / 10).max(1),
+             "one good reply must not restore the full frame rate"
+         );
+         qos.user_network_delay(1, 10);
+@@ -949,7 +1032,7 @@ mod tests {
+         for _ in 0..2 {
+             qos.user_network_delay(1, 1200);
+         }
+-        assert_eq!(qos.fps(), 8);
++        assert_eq!(qos.fps(), halved(halved(FPS)));
+         qos.user_network_delay(1, 10);
+         qos.user_network_delay(1, 10);
+         assert_eq!(qos.fps(), FPS);
+diff --git a/src/server/video_qos/tests/adaptation.rs b/src/server/video_qos/tests/adaptation.rs
+index 7a49a2d..9d258d5 100644
+--- a/src/server/video_qos/tests/adaptation.rs
++++ b/src/server/video_qos/tests/adaptation.rs
+@@ -89,3 +89,58 @@ fn static_to_dynamic_ratio_recovery() {
+         }
+     }
+ }
++
++#[test]
++fn send_backlog_halves_the_bitrate_at_most_once_a_second() {
++    let mut qos = session(true);
++    for _ in 0..30 {
++        second(&mut qos, 10, true);
++    }
++    let ratio = qos.ratio();
++    assert!(!qos.on_send_backlog(BACKLOG_MS - 1), "a short wait is no backlog");
++    assert!(qos.on_send_backlog(3000));
++    assert!((qos.ratio() - ratio * 0.5).abs() < 1e-6);
++    assert_eq!(qos.fps(), FPS, "bitrate first: the fps stays");
++    qos.advance_ms(500);
++    assert!(!qos.on_send_backlog(3000), "once a second");
++    qos.advance_ms(500);
++    sync_bitrate(&mut qos);
++    assert!(qos.on_send_backlog(3000));
++    // A stale bad reply right after the cut neither cuts again nor brakes the fps (a reply
++    // with a whole second of excess still halves the fps, as before).
++    let cut = qos.ratio();
++    qos.user_network_delay(1, 600);
++    assert_eq!(qos.ratio(), cut);
++    assert_eq!(qos.fps(), FPS);
++    for _ in 0..20 {
++        qos.advance_ms(1000);
++        sync_bitrate(&mut qos);
++        qos.on_send_backlog(3000);
++    }
++    assert!(qos.ratio() >= qos.min_ratio() * 0.999, "never below the floor");
++    // Healthy again: the controller earns the bitrate back.
++    for _ in 0..240 {
++        second(&mut qos, 10, true);
++    }
++    assert!((qos.ratio() - ratio).abs() < ratio * 0.05, "{} vs {ratio}", qos.ratio());
++}
++
++#[test]
++fn send_backlog_without_abr_halves_the_fps() {
++    let mut qos = session(false);
++    for _ in 0..30 {
++        second(&mut qos, 10, true);
++    }
++    assert_eq!(qos.fps(), FPS);
++    assert!(qos.on_send_backlog(1500));
++    assert_eq!(qos.fps(), FPS / 2);
++    for _ in 0..10 {
++        qos.advance_ms(1000);
++        qos.on_send_backlog(3000);
++    }
++    assert_eq!(qos.fps(), MIN_AUTO_FPS);
++    for _ in 0..30 {
++        second(&mut qos, 10, true);
++    }
++    assert_eq!(qos.fps(), FPS, "recovers to the cap");
++}
+diff --git a/src/server/video_qos/tests/jitter.rs b/src/server/video_qos/tests/jitter.rs
+index bd0913f..bc05656 100644
+--- a/src/server/video_qos/tests/jitter.rs
++++ b/src/server/video_qos/tests/jitter.rs
+@@ -49,9 +49,10 @@ fn severe_delay_and_timeout_bypass_bitrate_cooldown() {
+     let mut qos = abr_session();
+     qos.adjust_ratio_instant = qos.now();
+     qos.user_network_delay(1, 1200);
+-    assert_eq!(qos.fps(), 15);
++    assert_eq!(qos.fps(), halved(FPS));
++    // Two seconds out halve the level the stall started from.
+     qos.user_delay_response_elapsed(1, 2500);
+-    assert_eq!(qos.fps(), 7);
++    assert_eq!(qos.fps(), halved(FPS) / 2);
+ }
+ 
+ #[test]
+@@ -115,7 +116,7 @@ fn a_congested_viewer_does_not_lower_another_viewers_target() {
+     for _ in 0..2 {
+         qos.user_network_delay(1, 1200);
+     }
+-    assert_eq!(qos.fps(), 8);
++    assert_eq!(qos.fps(), halved(halved(FPS)));
+     // Viewer 2 is fine and keeps its own target rather than inheriting viewer 1's.
+     qos.user_network_delay(2, 10);
+     assert_eq!(qos.users[&2].delay.fps, Some(FPS));
+diff --git a/src/server/video_qos/tests/sim.rs b/src/server/video_qos/tests/sim.rs
+index 790f23b..e1b3490 100644
+--- a/src/server/video_qos/tests/sim.rs
++++ b/src/server/video_qos/tests/sim.rs
+@@ -175,8 +175,42 @@ pub enum Content {
+     Video,
+     /// Mostly static: a couple of changed frames per second.
+     Office,
++    /// `tools/bench/stress.html`, by wall-clock minute: idle (only the clock barcode changes),
++    /// scrolling, a new full-screen photo every 2 s, full-screen noise (the encoder cannot go
++    /// below `NOISE_FLOOR_BITS` per frame and manages at most `NOISE_MAX_FPS`).
++    Stress,
++    /// Office content until this instant (ms), then video: a switch to full-screen content.
++    OfficeThenVideo(u32),
+ }
+ 
++/// What the encoder sees at one instant.
++#[derive(Clone, Copy, PartialEq)]
++enum Load {
++    Barcode,
++    Office,
++    Video,
++    Photo,
++    Noise,
++}
++
++impl Content {
++    fn load(self, now_ms: u32) -> Load {
++        match self {
++            Content::Video => Load::Video,
++            Content::Office => Load::Office,
++            Content::Stress => [Load::Barcode, Load::Video, Load::Photo, Load::Noise]
++                [(now_ms / 60_000 % 4) as usize],
++            Content::OfficeThenVideo(at) if now_ms < at => Load::Office,
++            Content::OfficeThenVideo(_) => Load::Video,
++        }
++    }
++}
++
++/// Noise is incompressible: a frame costs at least this much whatever the bitrate.
++const NOISE_FLOOR_BITS: f64 = 60_000.0;
++/// A software encoder on a small host cannot encode noise faster than this.
++const NOISE_MAX_FPS: f64 = 12.0;
++
+ /// How the encoder turns a bitrate into frame sizes.
+ #[derive(Clone, Copy, PartialEq)]
+ pub enum EncoderModel {
+@@ -201,6 +235,8 @@ pub struct Scenario {
+     pub encoder: EncoderModel,
+     pub link: Link,
+     pub seed: u64,
++    /// The video loop reports a frame the connection did not take within `BACKLOG_MS`.
++    pub backlog: bool,
+ }
+ 
+ /// Bitrate at ratio 1.0; balanced quality (0.67) then encodes at about 4 Mbps.
+@@ -224,6 +260,7 @@ struct Encoder {
+     rng: Rng,
+     next_scene_ms: u32,
+     debt_bits: f64,
++    last_photo: u32,
+ }
+ 
+ /// A scene change every five seconds of video.
+@@ -231,21 +268,35 @@ const SCENE_INTERVAL_MS: u32 = 5_000;
+ 
+ impl Encoder {
+     fn frame_bits(&mut self, now_ms: u32, bitrate_kbps: f64, produce_rate: f64) -> f64 {
+-        let target = match (self.content, self.model) {
++        let load = self.content.load(now_ms);
++        let video = match self.model {
++            EncoderModel::Cbr => bitrate_kbps * 1000.0 / produce_rate,
++            EncoderModel::FixedRate => bitrate_kbps * 1000.0 / ENCODER_CONFIGURED_FPS,
++        };
++        let target = match load {
+             // A changed region of a static screen is small whatever the rate control does.
+-            (Content::Office, _) => bitrate_kbps * 1000.0 / ENCODER_CONFIGURED_FPS * 0.3,
+-            (Content::Video, EncoderModel::Cbr) => bitrate_kbps * 1000.0 / produce_rate,
+-            (Content::Video, EncoderModel::FixedRate) => {
+-                bitrate_kbps * 1000.0 / ENCODER_CONFIGURED_FPS
++            Load::Office => bitrate_kbps * 1000.0 / ENCODER_CONFIGURED_FPS * 0.3,
++            Load::Barcode => bitrate_kbps * 1000.0 / ENCODER_CONFIGURED_FPS * 0.02,
++            // A new photo costs half a second of bitrate, the frames around it only the barcode.
++            Load::Photo if now_ms / 2000 != self.last_photo => {
++                self.last_photo = now_ms / 2000;
++                bitrate_kbps * 1000.0 * 0.5
+             }
++            Load::Photo => bitrate_kbps * 1000.0 / ENCODER_CONFIGURED_FPS * 0.02,
++            Load::Video => video,
++            Load::Noise => video.max(NOISE_FLOOR_BITS),
+         };
++        if load != Load::Video {
++            // Scenes are counted from when video starts.
++            self.next_scene_ms = now_ms + SCENE_INTERVAL_MS;
++        }
+         // Mean one: the spread must not change the offered load.
+         let noise = self.rng.log_normal(1.0, FRAME_SIZE_SIGMA)
+             * (-FRAME_SIZE_SIGMA * FRAME_SIZE_SIGMA / 2.0).exp();
+         let mut bits = target * noise;
+         // Scene changes follow the wall clock, not the frame count, so every
+         // controller meets the same content timeline.
+-        let scene_change = self.content == Content::Video && now_ms >= self.next_scene_ms;
++        let scene_change = load == Load::Video && now_ms >= self.next_scene_ms;
+         if scene_change {
+             self.next_scene_ms += SCENE_INTERVAL_MS;
+             // A scene change costs a few frames' worth of data; rate control claws
+@@ -325,6 +376,7 @@ pub fn run(sc: &Scenario) -> Report {
+         rng: Rng::new(sc.seed ^ 0x454E_434F_4445),
+         next_scene_ms: SCENE_INTERVAL_MS,
+         debt_bits: 0.0,
++        last_photo: u32::MAX,
+     };
+     let total_ms = sc.seconds * 1000;
+     let ticks = (total_ms / TICK_MS) as usize;
+@@ -373,9 +425,10 @@ pub fn run(sc: &Scenario) -> Report {
+         let ratio = qos.ratio();
+         let bitrate_kbps = BASE_KBPS * ratio as f64;
+         qos.store_bitrate(bitrate_kbps as u32);
+-        let produce_rate = match sc.content {
+-            Content::Video => fps as f64,
+-            Content::Office => (fps as f64).min(2.0),
++        let produce_rate = match sc.content.load(now) {
++            Load::Office => (fps as f64).min(2.0),
++            Load::Noise => (fps as f64).min(NOISE_MAX_FPS),
++            Load::Barcode | Load::Video | Load::Photo => fps as f64,
+         };
+         encode_phase += produce_rate * TICK_MS as f64 / 1000.0;
+         while encode_phase >= 1.0 {
+@@ -385,6 +438,12 @@ pub fn run(sc: &Scenario) -> Report {
+                 produced += 1;
+             }
+             let bits = encoder.frame_bits(now, bitrate_kbps, produce_rate);
++            // The video loop waits for the connection to take a frame before encoding the next:
++            // that wait is about the time the path needs for what is already in front.
++            let queue_ms = (queued_bits / capacity_kbps.max(1.0)) as u128;
++            if sc.backlog && queue_ms >= BACKLOG_MS {
++                qos.on_send_backlog(queue_ms);
++            }
+             queue.push_back(Packet {
+                 bits,
+                 enqueued_ms: now,
+@@ -644,6 +703,7 @@ pub fn scenarios() -> Vec<Scenario> {
+         encoder,
+         link,
+         seed: 1,
++        backlog: true,
+     };
+     use EncoderModel::*;
+     vec![
+@@ -908,3 +968,132 @@ fn replay_recorded_trace() {
+         trace.len()
+     );
+ }
++
++/// Longest time (ms) the trace kept at least `min_queue_ms` of queue, from `from_ms` on.
++fn longest_queue_span(trace: &[(u32, u32, u32, f32)], from_ms: u32, min_queue_ms: u32) -> u32 {
++    let (mut longest, mut start) = (0, None);
++    for (t, _, queue, _) in trace.iter().filter(|s| s.0 >= from_ms) {
++        if *queue >= min_queue_ms {
++            let s = *start.get_or_insert(*t);
++            longest = longest.max(t - s + 100);
++        } else {
++            start = None;
++        }
++    }
++    longest
++}
++
++/// The steady state one stress.html cycle (4 minutes) ends in.
++#[derive(Debug, Clone, Copy)]
++struct Cycle {
++    ratio_after_idle: f32,
++    fps_after_idle: u32,
++    queue_p95_ms: u32,
++    longest_queue_over_1s_ms: u32,
++}
++
++fn cycles(trace: &[(u32, u32, u32, f32)]) -> Vec<Cycle> {
++    let len = 240_000;
++    let count = trace.last().map_or(0, |s| (s.0 + 100) / len);
++    (0..count)
++        .map(|k| {
++            let span: Vec<_> = trace
++                .iter()
++                .filter(|s| s.0 >= k * len && s.0 < (k + 1) * len)
++                .copied()
++                .collect();
++            // The last sample of the idle minute.
++            let idle_end = span.iter().filter(|s| s.0 < k * len + 60_000).last().unwrap();
++            let queues: Vec<u32> = span.iter().map(|s| s.2).collect();
++            Cycle {
++                ratio_after_idle: idle_end.3,
++                fps_after_idle: idle_end.1,
++                queue_p95_ms: percentile_u32(&queues, 0.95),
++                longest_queue_over_1s_ms: longest_queue_span(&span, 0, 1000),
++            }
++        })
++        .collect()
++}
++
++/// Issue seen on a GPU-less Windows host: the second hour of a stress run (idle, scroll, photo,
++/// noise every minute, noise overloading the host and link) was slower than the first. Two hours
++/// of that cycle must end every cycle in the same state: the controller keeps nothing from one
++/// overload that makes the next one worse.
++#[test]
++fn sim_two_hours_of_stress_cycles_do_not_drift() {
++    for (encoder, abr) in [
++        (EncoderModel::Cbr, true),
++        (EncoderModel::FixedRate, true),
++        // Without ABR a CBR queue never drains (see bound_violations); fixed-rate drains by fps.
++        (EncoderModel::FixedRate, false),
++    ] {
++        for seed in 1..=4 {
++            let sc = Scenario {
++                name: "stress_two_hours",
++                seconds: 7200,
++                limit: 30,
++                quality: Quality::Balanced,
++                abr,
++                content: Content::Stress,
++                encoder,
++                link: Link {
++                    base_rtt_ms: 30.0,
++                    ..clean_link(3000.0)
++                },
++                seed,
++                backlog: true,
++            };
++            let c = cycles(&run(&sc).trace);
++            assert_eq!(c.len(), 30);
++            let mean = |cs: &[Cycle], f: fn(&Cycle) -> f64| {
++                cs.iter().map(f).sum::<f64>() / cs.len() as f64
++            };
++            // The first cycle starts from a cold controller.
++            let (h1, h2) = (&c[1..15], &c[15..]);
++            let what = format!("abr={abr} seed={seed} hour 1 {h1:?}\nhour 2 {h2:?}");
++            let q = |cs: &[Cycle]| mean(cs, |c| c.queue_p95_ms as f64);
++            let r = |cs: &[Cycle]| mean(cs, |c| c.ratio_after_idle as f64);
++            let f = |cs: &[Cycle]| mean(cs, |c| c.fps_after_idle as f64);
++            let worst = |cs: &[Cycle]| cs.iter().map(|c| c.longest_queue_over_1s_ms).max().unwrap();
++            println!(
++                "abr={abr} seed={seed}: queue p95 {:.0}/{:.0} ms, ratio after idle {:.3}/{:.3}, fps after idle {:.1}/{:.1}, longest queue>1s {}/{} ms",
++                q(h1), q(h2), r(h1), r(h2), f(h1), f(h2), worst(h1), worst(h2)
++            );
++            assert!(q(h2) <= q(h1) * 1.15 + 50.0, "queue grew: {what}");
++            assert!((r(h2) - r(h1)).abs() <= r(h1) * 0.1, "ratio drifted: {what}");
++            assert!((f(h2) - f(h1)).abs() <= 2.0, "fps drifted: {what}");
++            assert!(worst(h2) as f64 <= worst(h1) as f64 * 1.15 + 1000.0, "stalls grew: {what}");
++        }
++    }
++}
++
++/// Mac host, H.265: a switch from office content to full-screen content above what the link
++/// carries froze the picture in ~3 s steps for ~11 s while the delay probes confirmed it. The
++/// host sees the full link at once (the connection does not take the next frame).
++#[test]
++fn sim_switch_to_heavy_content_drains_fast_with_backlog_signal() {
++    for encoder in [EncoderModel::Cbr, EncoderModel::FixedRate] {
++        let mut worst = [0u32; 2];
++        for seed in SEEDS {
++            for (i, backlog) in [false, true].into_iter().enumerate() {
++                let sc = Scenario {
++                    name: "switch_to_heavy",
++                    seconds: 120,
++                    limit: 60,
++                    quality: Quality::Balanced,
++                    abr: true,
++                    content: Content::OfficeThenVideo(60_000),
++                    encoder,
++                    link: clean_link(1500.0),
++                    seed,
++                    backlog,
++                };
++                let r = run(&sc);
++                worst[i] = worst[i].max(longest_queue_span(&r.trace, 60_000, 1000));
++            }
++        }
++        println!("longest queue >= 1 s after the switch, worst seed: without {} ms, with backlog signal {} ms", worst[0], worst[1]);
++        assert!(worst[1] * 5 <= worst[0], "backlog signal must drain much faster: {worst:?}");
++        assert!(worst[1] <= 6000, "long backlog: {worst:?}");
++    }
++}
 diff --git a/src/server/video_service.rs b/src/server/video_service.rs
-index a13aebb..91ed2de 100644
+index a13aebb..e616098 100644
 --- a/src/server/video_service.rs
 +++ b/src/server/video_service.rs
 @@ -815,6 +815,7 @@ fn run(vs: VideoService) -> ResultType<()> {
@@ -3369,7 +3868,7 @@ index a13aebb..91ed2de 100644
          let res = match c.frame(spf) {
              Ok(frame) => {
                  repeat_encode_counter = 0;
-@@ -1007,6 +1008,8 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -1007,8 +1008,11 @@ fn run(vs: VideoService) -> ResultType<()> {
          }
  
          let mut fetched_conn_ids = HashSet::new();
@@ -3377,16 +3876,40 @@ index a13aebb..91ed2de 100644
 +        let t_wait0 = Instant::now();
          let timeout_millis = 3_000u64;
          let wait_begin = Instant::now();
++        let mut backlog_reported = false;
          while wait_begin.elapsed().as_millis() < timeout_millis as _ {
-@@ -1020,6 +1023,7 @@ fn run(vs: VideoService) -> ResultType<()> {
+             if vs.source.is_monitor() {
+                 check_privacy_mode_changed(&sp, display_idx, &c)?;
+@@ -1018,8 +1022,28 @@ fn run(vs: VideoService) -> ResultType<()> {
+             if fetched_conn_ids.len() >= frame_controller.send_conn_ids.len() {
+                 break;
              }
++            // Tether: a full link is known here, seconds before the delay probes confirm it.
++            let waited = t_wait0.elapsed().as_millis();
++            if !backlog_reported && waited >= video_qos::BACKLOG_MS {
++                backlog_reported = true;
++                if VIDEO_QOS.lock().unwrap().on_send_backlog(waited) {
++                    hbb_common::throttled_log!(
++                        Duration::from_secs(10),
++                        warn,
++                        "video backlog: frame not taken by the connection for {waited} ms, quality/fps cut"
++                    );
++                }
++            }
          }
          DISPLAY_CONN_IDS.lock().unwrap().remove(&display_idx);
 +        log::trace!("fluxrt_phase fetch_wait={:?}", t_wait0.elapsed());
++        #[cfg(feature = "tauri")]
++        if !frame_controller.send_conn_ids.is_empty() {
++            fluxrt_stats::waited(
++                t_wait0.elapsed(),
++                fetched_conn_ids.len() < frame_controller.send_conn_ids.len(),
++            );
++        }
  
          let elapsed = now.elapsed();
          // may need to enable frame(timeout)
-@@ -1300,8 +1304,12 @@ fn handle_one_frame(
+@@ -1300,8 +1324,12 @@ fn handle_one_frame(
      let mut vpx_no_output = false;
      let first = *first_frame;
      *first_frame = false;
@@ -3399,29 +3922,47 @@ index a13aebb..91ed2de 100644
              *encode_fail_counter = 0;
              *encoder_warmed_up = true;
              vf.display = display as _;
-@@ -1590,3 +1598,52 @@ mod tests {
+@@ -1315,6 +1343,8 @@ fn handle_one_frame(
+             send_conn_ids = sp.send_video_frame(msg);
+         }
+         Err(e) => {
++            #[cfg(feature = "tauri")]
++            fluxrt_stats::no_output();
+             vpx_no_output = e.is::<scrap::VpxNoOutput>();
+             *encode_fail_counter += 1;
+             // Encoding errors are not frequent except on Android
+@@ -1590,3 +1620,97 @@ mod tests {
          assert!(refresh_allowed(true, false, false));
      }
  }
 +
-+/// Tether: host-side encoder statistics, logged every few seconds while video is being sent, so
-+/// slow software encoding or a stalled stream shows up in the host log (docs/performance.md).
++/// Tether: host-side video statistics, one INFO line per minute while video is being sent, so a
++/// long session can be diagnosed from the host log alone (docs/performance.md): slow software
++/// encoding, an encoder overshooting its target, a full link (the video loop waiting for the
++/// connection to take a frame) or a QoS state that does not recover.
 +#[cfg(feature = "tauri")]
 +mod fluxrt_stats {
 +    use super::*;
 +
++    const WINDOW: Duration = Duration::from_secs(60);
++
 +    #[derive(Default)]
 +    struct Window {
 +        since: Option<Instant>,
++        codec: Option<CodecFormat>,
 +        frames: u32,
 +        keys: u32,
 +        bytes: usize,
-+        enc: Duration,
-+        enc_max: Duration,
++        max_frame: usize,
++        enc_us: Vec<u32>,
++        empty: u32,     // encode calls without output (errors, or a delayed hardware encoder)
++        backlogs: u32,  // frames no connection took within video_qos::BACKLOG_MS
++        timeouts: u32,  // ... nor within the 3 s wait
++        max_wait: Duration,
 +    }
 +
 +    lazy_static::lazy_static! {
-+        static ref WINDOW: Mutex<Window> = Default::default();
++        static ref STATS: Mutex<Window> = Default::default();
 +    }
 +
 +    pub(super) fn encoded(vf: &VideoFrame, took: Duration) {
@@ -3430,26 +3971,62 @@ index a13aebb..91ed2de 100644
 +            Some(Vp8s(f)) | Some(Vp9s(f)) | Some(Av1s(f)) | Some(H264s(f)) | Some(H265s(f)) => &f.frames,
 +            _ => return,
 +        };
-+        let mut w = WINDOW.lock().unwrap();
-+        let since = *w.since.get_or_insert_with(Instant::now);
++        let mut w = STATS.lock().unwrap();
++        w.since.get_or_insert_with(Instant::now);
++        w.codec = Some(CodecFormat::from(vf));
 +        w.frames += 1;
 +        w.keys += frames.iter().filter(|f| f.key).count() as u32;
-+        w.bytes += frames.iter().map(|f| f.data.len()).sum::<usize>();
-+        w.enc += took;
-+        w.enc_max = w.enc_max.max(took);
-+        let secs = since.elapsed().as_secs_f64();
-+        if secs >= 5.0 {
-+            log::info!(
-+                "fluxrt encode: {:?} {:.1} fps, encode avg {:.1} ms max {} ms, {:.0} kbit/s, {} key frames",
-+                CodecFormat::from(vf),
-+                w.frames as f64 / secs,
-+                w.enc.as_secs_f64() * 1000.0 / w.frames as f64,
-+                w.enc_max.as_millis(),
-+                w.bytes as f64 * 8.0 / 1000.0 / secs,
-+                w.keys
-+            );
-+            *w = Window::default();
++        let bytes = frames.iter().map(|f| f.data.len()).sum::<usize>();
++        w.bytes += bytes;
++        w.max_frame = w.max_frame.max(bytes);
++        w.enc_us.push(took.as_micros().min(u32::MAX as _) as u32);
++        report(&mut w);
++    }
++
++    pub(super) fn no_output() {
++        STATS.lock().unwrap().empty += 1;
++    }
++
++    pub(super) fn waited(took: Duration, timed_out: bool) {
++        let mut w = STATS.lock().unwrap();
++        if took.as_millis() >= crate::server::video_qos::BACKLOG_MS {
++            w.backlogs += 1;
 +        }
++        w.timeouts += timed_out as u32;
++        w.max_wait = w.max_wait.max(took);
++        report(&mut w);
++    }
++
++    fn report(w: &mut Window) {
++        let Some(since) = w.since else { return };
++        let secs = since.elapsed().as_secs_f64();
++        if secs < WINDOW.as_secs_f64() {
++            return;
++        }
++        let (fps, ratio, kbps) = {
++            let mut q = VIDEO_QOS.lock().unwrap();
++            (q.fps(), q.ratio(), q.bitrate())
++        };
++        w.enc_us.sort_unstable();
++        let ms = |us: u32| us as f64 / 1000.0;
++        let p95 = w.enc_us.get(w.enc_us.len() * 95 / 100).copied().unwrap_or_default();
++        let avg = w.enc_us.iter().map(|&u| u as f64).sum::<f64>() / w.enc_us.len().max(1) as f64;
++        log::info!(
++            "fluxrt video/min: {:?} {:.1} fps, encode avg {:.1} p95 {:.1} max {:.1} ms, {:.0} kbit/s, largest frame {} KB, {} key, {} no output, wait >=1s {} (3s timeout {}, max {} ms); qos fps {fps} ratio {ratio:.3} target {kbps} kbit/s",
++            w.codec,
++            w.frames as f64 / secs,
++            avg / 1000.0,
++            ms(p95),
++            ms(w.enc_us.last().copied().unwrap_or_default()),
++            w.bytes as f64 * 8.0 / 1000.0 / secs,
++            w.max_frame / 1024,
++            w.keys,
++            w.empty,
++            w.backlogs,
++            w.timeouts,
++            w.max_wait.as_millis(),
++        );
++        *w = Window::default();
 +    }
 +}
 diff --git a/src/tauri_ui/cm.rs b/src/tauri_ui/cm.rs
