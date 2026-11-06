@@ -182,6 +182,19 @@ works; Alt+Tab leaves; a lone Alt and Alt+F4 on TetherQS do not stall it).
   (`ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`, a single writable path).
 - Only TCP 443 (and 80, forwarded to 443) needs to be open: clients use WebSocket over TLS through
   Caddy (`docs/corporate-networks.md`). hbbs/hbbr/tether-api listen on localhost behind it.
+- Client IPs behind Caddy: hbbs takes the last `X-Forwarded-For` hop, which Caddy sets to the
+  peer it saw; Caddy overwrites `X-Real-IP` (read by hbbr) the same way. A client cannot choose the
+  IP the brute-force and IP-change checks see.
+- A host's signalling path (the connection hbbs sends its punch-hole, relay and ICE messages
+  over) is only a connection whose registration hbbs accepted: `RegisterPeer` from the host's IP
+  with its key known, or `RegisterPk` passing upstream's UUID/key checks. Naming an ID is not
+  enough, and only the current path's heartbeats keep it alive.
+- TURN on hbbs's UDP port takes only datagrams from the exact address an allocation sent to in
+  the last 5 minutes, never a rendezvous message; requests without a valid MESSAGE-INTEGRITY are
+  capped at 50/s ([docs/stun-turn.md](docs/stun-turn.md)).
+- tether-api serves up to 32 requests at once with 30 s read/write timeouts and a whole-body
+  deadline, reading bodies outside its state lock, so a slow or stalled client holds only its own
+  request.
 - The server stores only its key pair and an ID → public-key/IP registry. It never sees session
   content.
 - Keep `/var/lib/tether/id_ed25519` secret and back it up. Losing it, or a suspected leak, means a

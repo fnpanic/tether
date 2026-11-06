@@ -678,3 +678,44 @@ fn audit_retention_and_cap() {
     assert_eq!(s.req("POST", "/api/audit/conn", &[], conn_close(1, "z-1").as_bytes()).status, 204);
     assert_eq!(s.admin(&k, "GET", "/api/admin/audit", b"").json().as_array().unwrap().len(), 0);
 }
+
+/// A client that sends the head and part of a heartbeat body, then stalls.
+fn stalled_client(s: &Srv) -> TcpStream {
+    let mut c = TcpStream::connect(&s.addr).unwrap();
+    c.write_all(b"POST /api/heartbeat HTTP/1.1\r\nHost: t\r\nContent-Length: 2000\r\n\r\n").unwrap();
+    c.write_all(&[b' '; 1500]).unwrap();
+    c
+}
+
+#[test]
+fn stalled_client_does_not_block_others() {
+    let s = start("");
+    let stalled = stalled_client(&s);
+    std::thread::sleep(std::time::Duration::from_millis(300)); // the server takes it first
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|sc| {
+        sc.spawn(|| tx.send(s.req("GET", "/api/policy", &[], b"").status));
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(stalled); // unblocks a serial server, so the scope can end either way
+        assert_eq!(got.ok(), Some(404), "a stalled client blocked the API");
+    });
+}
+
+#[test]
+fn stalled_body_read_times_out() {
+    let s = start("");
+    let mut c = stalled_client(&s);
+    c.set_read_timeout(Some(std::time::Duration::from_secs(60))).unwrap();
+    let t0 = std::time::Instant::now();
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 512];
+    while !raw.windows(2).any(|w| w == b"\r\n") {
+        match c.read(&mut buf) {
+            Ok(n) if n > 0 => raw.extend_from_slice(&buf[..n]),
+            _ => break,
+        }
+    }
+    let took = t0.elapsed().as_secs();
+    assert!(raw.starts_with(b"HTTP/1.1 400"), "no 400 after {took} s: {:?}", String::from_utf8_lossy(&raw));
+    assert!((20..50).contains(&took), "{took} s");
+}

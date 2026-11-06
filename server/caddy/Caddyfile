@@ -13,13 +13,17 @@
 	}
 
 	# Rendezvous (hbbs) and relay (hbbr) WebSocket endpoints. Only Caddy can reach these ports.
+	# The client IP they use: hbbs takes the last X-Forwarded-For hop (the peer Caddy saw), hbbr
+	# X-Real-IP, which Caddy overwrites so a client-sent one never reaches them.
 	handle /ws/id {
 		reverse_proxy 127.0.0.1:21118 {
+			header_up X-Real-IP {remote_host}
 			flush_interval -1
 		}
 	}
 	handle /ws/relay {
 		reverse_proxy 127.0.0.1:21119 {
+			header_up X-Real-IP {remote_host}
 			flush_interval -1
 		}
 	}
@@ -39,8 +43,11 @@
 	}
 
 	# Relay API (tether-api). Caddy ignores client-sent X-Forwarded-For and sets the real peer.
+	# Small bodies are read whole by Caddy first, so a slow client waits here, not in tether-api.
 	handle /api/* {
-		reverse_proxy 127.0.0.1:21120
+		reverse_proxy 127.0.0.1:21120 {
+			request_buffers 512k
+		}
 	}
 
 	# Private custom-app download links (GET /q/<token>, docs/api.md "Custom apps"). No access log

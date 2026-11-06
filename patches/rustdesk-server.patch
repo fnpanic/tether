@@ -991,7 +991,7 @@ index 0ec190a..69ae13b 100644
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..c5cad42 100644
+index dff45eb..cd61d7d 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,12 @@ use std::{
@@ -1193,9 +1193,7 @@ index dff45eb..c5cad42 100644
 -                        req_pk.0 = 0;
 -                    } else if req_pk.0 > 2 {
 -                        return send_rk_res(socket, addr, TOO_FREQUENT).await;
-+                    if let Some(msg_out) = self.register_pk(rk, addr).await {
-+                        socket.send(&msg_out, addr).await?
-                     }
+-                    }
 -                    req_pk.0 += 1;
 -                    req_pk.1 = Instant::now();
 -                    peer.write().await.reg_pk = req_pk;
@@ -1220,7 +1218,9 @@ index dff45eb..c5cad42 100644
 -                    }
 -                    if changed {
 -                        self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
--                    }
++                    if let Some(msg_out) = self.register_pk(rk, addr).await {
++                        socket.send(&msg_out, addr).await?
+                     }
 -                    let mut msg_out = RendezvousMessage::new();
 -                    msg_out.set_register_pk_response(RegisterPkResponse {
 -                        result: register_pk_response::Result::OK.into(),
@@ -1230,7 +1230,7 @@ index dff45eb..c5cad42 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // UDP PunchHoleRequest is intentionally unsupported.
-@@ -479,9 +454,29 @@ impl RendezvousServer {
+@@ -479,9 +454,33 @@ impl RendezvousServer {
          addr: SocketAddr,
          key: &str,
          ws: bool,
@@ -1239,10 +1239,14 @@ index dff45eb..c5cad42 100644
          if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
              match msg_in.union {
 +                Some(rendezvous_message::Union::RegisterPeer(rp)) => {
-+                    // Host registered over TCP/WebSocket: keep this connection as its signalling path.
++                    // Host registered over TCP/WebSocket: keep this connection as its signalling path,
++                    // but only once register_peer accepted it (known key, same IP). Otherwise the
++                    // answer is request_pk and the RegisterPk that follows decides.
 +                    if !rp.id.is_empty() {
-+                        TCP_PEERS.lock().await.insert(try_into_v4(addr), (peer_tx.clone(), rp.id.clone()));
-+                        let mut msg_out = self.register_peer(rp.id, addr).await;
++                        let mut msg_out = self.register_peer(rp.id.clone(), addr).await;
++                        if !msg_out.register_peer_response().request_pk {
++                            TCP_PEERS.lock().await.insert(try_into_v4(addr), (peer_tx.clone(), rp.id.clone()));
++                        }
 +                        Self::send_to_sink(sink, msg_out.clone()).await;
 +                        if self.inner.serial > rp.serial {
 +                            msg_out = RendezvousMessage::new();
@@ -1260,7 +1264,7 @@ index dff45eb..c5cad42 100644
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // there maybe several attempt, so sink can be none
                      if let Some(sink) = sink.take() {
-@@ -521,8 +516,18 @@ impl RendezvousServer {
+@@ -521,8 +520,18 @@ impl RendezvousServer {
                              rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
                          }
                      }
@@ -1280,7 +1284,7 @@ index dff45eb..c5cad42 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
                      allow_err!(self.handle_hole_sent(phs, addr, None).await);
-@@ -545,14 +550,19 @@ impl RendezvousServer {
+@@ -545,14 +554,23 @@ impl RendezvousServer {
                      msg_out.set_test_nat_response(res);
                      Self::send_to_sink(sink, msg_out).await;
                  }
@@ -1300,7 +1304,11 @@ index dff45eb..c5cad42 100644
 +                        if ok {
 +                            // This connection is now the host's signalling path.
 +                            TCP_PEERS.lock().await.insert(try_into_v4(addr), (peer_tx.clone(), id.clone()));
-+                            Self::touch_tcp_peer(&self.pm, &id, addr).await;
++                            if let Some(peer) = self.pm.get_in_memory(&id).await {
++                                let mut peer = peer.write().await;
++                                peer.socket_addr = addr;
++                                peer.last_reg_time = Instant::now();
++                            }
 +                        }
 +                        Self::send_to_sink(sink, msg_out).await;
 +                    }
@@ -1308,7 +1316,7 @@ index dff45eb..c5cad42 100644
                  }
                  _ => {}
              }
-@@ -567,6 +577,12 @@ impl RendezvousServer {
+@@ -567,6 +585,12 @@ impl RendezvousServer {
          socket_addr: SocketAddr,
          socket: &mut FramedSocket,
      ) -> ResultType<()> {
@@ -1321,7 +1329,7 @@ index dff45eb..c5cad42 100644
          let (request_pk, ip_change) = if let Some(old) = self.pm.get_in_memory(&id).await {
              let mut old = old.write().await;
              let ip = socket_addr.ip();
-@@ -601,7 +617,107 @@ impl RendezvousServer {
+@@ -601,7 +625,109 @@ impl RendezvousServer {
              request_pk,
              ..Default::default()
          });
@@ -1330,12 +1338,14 @@ index dff45eb..c5cad42 100644
 +    }
 +
 +    /// A TCP/WebSocket host is online while its connection lives: refresh what the UDP path
-+    /// refreshes on every RegisterPeer.
++    /// refreshes on every RegisterPeer. Only the connection that is the host's current path does:
++    /// moving the path takes an accepted RegisterPeer or RegisterPk.
 +    async fn touch_tcp_peer(pm: &PeerMap, id: &str, addr: SocketAddr) {
 +        if let Some(peer) = pm.get_in_memory(id).await {
 +            let mut peer = peer.write().await;
-+            peer.socket_addr = addr;
-+            peer.last_reg_time = Instant::now();
++            if peer.socket_addr == addr {
++                peer.last_reg_time = Instant::now();
++            }
 +        }
 +    }
 +
@@ -1430,7 +1440,7 @@ index dff45eb..c5cad42 100644
      }
  
      #[inline]
-@@ -620,17 +736,25 @@ impl RendezvousServer {
+@@ -620,17 +746,25 @@ impl RendezvousServer {
              &addr
          );
          let mut msg_out = RendezvousMessage::new();
@@ -1457,7 +1467,7 @@ index dff45eb..c5cad42 100644
              socket.send(&msg_out, addr_a).await?;
          } else {
              self.send_to_tcp(msg_out, addr_a).await;
-@@ -658,6 +782,7 @@ impl RendezvousServer {
+@@ -658,6 +792,7 @@ impl RendezvousServer {
              socket_addr: la.local_addr.clone(),
              pk: self.get_pk(&la.version, la.id).await,
              relay_server: la.relay_server,
@@ -1465,7 +1475,7 @@ index dff45eb..c5cad42 100644
              ..Default::default()
          };
          p.set_is_local(true);
-@@ -679,7 +804,7 @@ impl RendezvousServer {
+@@ -679,7 +814,7 @@ impl RendezvousServer {
          ws: bool,
      ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
          let mut ph = ph;
@@ -1474,7 +1484,7 @@ index dff45eb..c5cad42 100644
              log::warn!("Authentication failed from {} for peer {} - invalid key", addr, ph.id);
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
-@@ -754,6 +879,7 @@ impl RendezvousServer {
+@@ -754,6 +889,7 @@ impl RendezvousServer {
                  msg_out.set_fetch_local_addr(FetchLocalAddr {
                      socket_addr,
                      relay_server,
@@ -1482,7 +1492,7 @@ index dff45eb..c5cad42 100644
                      ..Default::default()
                  });
              } else {
-@@ -763,10 +889,23 @@ impl RendezvousServer {
+@@ -763,10 +899,23 @@ impl RendezvousServer {
                      peer_addr,
                      addr
                  );
@@ -1506,7 +1516,7 @@ index dff45eb..c5cad42 100644
                      ..Default::default()
                  });
              }
-@@ -821,19 +960,57 @@ impl RendezvousServer {
+@@ -821,19 +970,57 @@ impl RendezvousServer {
      #[inline]
      async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) {
          if let Some(sink) = sink.as_mut() {
@@ -1572,7 +1582,7 @@ index dff45eb..c5cad42 100644
      #[inline]
      async fn send_to_tcp_sync(
          &mut self,
-@@ -911,19 +1088,26 @@ impl RendezvousServer {
+@@ -911,19 +1098,26 @@ impl RendezvousServer {
      }
  
      fn parse_relay_servers(&mut self, relay_servers: &str) {
@@ -1608,7 +1618,7 @@ index dff45eb..c5cad42 100644
      }
  
      async fn check_cmd(&self, cmd: &str) -> String {
-@@ -948,8 +1132,9 @@ impl RendezvousServer {
+@@ -948,8 +1142,9 @@ impl RendezvousServer {
                  if let Some(rs) = fds.next() {
                      self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                  } else {
@@ -1620,7 +1630,7 @@ index dff45eb..c5cad42 100644
                      }
                  }
              }
-@@ -1148,20 +1333,27 @@ impl RendezvousServer {
+@@ -1148,20 +1343,21 @@ impl RendezvousServer {
          key: &str,
          ws: bool,
      ) -> ResultType<()> {
@@ -1634,14 +1644,13 @@ index dff45eb..c5cad42 100644
 +            // the same NAT (or IP) stay distinct.
 +            let conn_port = addr.port();
              let callback = |req: &Request, response: Response| {
-                 let headers = req.headers();
-                 let real_ip = headers
-                     .get("X-Real-IP")
-                     .or_else(|| headers.get("X-Forwarded-For"))
+-                let headers = req.headers();
+-                let real_ip = headers
+-                    .get("X-Real-IP")
+-                    .or_else(|| headers.get("X-Forwarded-For"))
 -                    .and_then(|header_value| header_value.to_str().ok());
-+                    .and_then(|header_value| header_value.to_str().ok())
-+                    .map(|v| v.split(',').next().unwrap_or(v).trim().to_owned());
-                 if let Some(ip) = real_ip {
+-                if let Some(ip) = real_ip {
++                if let Some(ip) = forwarded_ip(req.headers()) {
                      if ip.contains('.') {
 -                        addr = format!("{ip}:0").parse().unwrap_or(addr);
 +                        addr = format!("{ip}:{conn_port}").parse().unwrap_or(addr);
@@ -1651,7 +1660,7 @@ index dff45eb..c5cad42 100644
                      }
                  }
                  Ok(response)
-@@ -1169,22 +1361,71 @@ impl RendezvousServer {
+@@ -1169,22 +1365,71 @@ impl RendezvousServer {
              let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
              let (a, mut b) = ws_stream.split();
              sink = Some(Sink::Ws(a));
@@ -1730,7 +1739,7 @@ index dff45eb..c5cad42 100644
          if sink.is_none() {
              self.tcp_punch.lock().await.remove(&try_into_v4(addr));
          }
-@@ -1268,18 +1509,43 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
+@@ -1268,18 +1513,43 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
      let mut futs = Vec::new();
      let rs = Arc::new(Mutex::new(Vec::new()));
      for x in rs0.iter() {
@@ -1780,7 +1789,7 @@ index dff45eb..c5cad42 100644
              }
          }));
      }
-@@ -1330,17 +1596,13 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+@@ -1330,17 +1600,13 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
  }
  
  #[inline]
@@ -1800,7 +1809,7 @@ index dff45eb..c5cad42 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1623,124 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1627,236 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
@@ -1846,6 +1855,13 @@ index dff45eb..c5cad42 100644
 +}
 +
 +/// Canonical text form of an IP: IPv4-mapped IPv6 (`::ffff:a.b.c.d`) becomes `a.b.c.d`.
++/// Client IP of a WebSocket connection behind the proxy: the last X-Forwarded-For hop, which the
++/// proxy (Caddy) appends itself. X-Real-IP and earlier hops can come from the client.
++fn forwarded_ip(headers: &tokio_tungstenite::tungstenite::http::HeaderMap) -> Option<String> {
++    let xff = headers.get_all("X-Forwarded-For").iter().last()?.to_str().ok()?;
++    Some(xff.rsplit(',').next()?.trim().to_owned()).filter(|ip| !ip.is_empty())
++}
++
 +fn norm_ip(ip: &str) -> String {
 +    match ip.parse::<std::net::IpAddr>() {
 +        Ok(std::net::IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
@@ -1925,12 +1941,117 @@ index dff45eb..c5cad42 100644
 +        assert_eq!(norm_ip("not-an-ip"), "not-an-ip");
 +    }
 +}
++
++#[cfg(test)]
++mod signalling_path_tests {
++    use super::*;
++    use tokio_tungstenite::tungstenite::http::HeaderMap;
++
++    fn server(pm: PeerMap) -> RendezvousServer {
++        let (tx, _) = mpsc::unbounded_channel::<Data>();
++        RendezvousServer {
++            tcp_punch: Default::default(),
++            pm,
++            tx,
++            relay_servers: Default::default(),
++            relay_servers0: Default::default(),
++            rendezvous_servers: Default::default(),
++            inner: Arc::new(Inner {
++                serial: 0,
++                version: String::new(),
++                software_url: String::new(),
++                mask: None,
++                local_ip: String::new(),
++                sk: None,
++            }),
++        }
++    }
++
++    fn register_pk(id: &str, uuid: &'static [u8], pk: &'static [u8]) -> Vec<u8> {
++        let mut m = RendezvousMessage::new();
++        m.set_register_pk(RegisterPk { id: id.into(), uuid: Bytes::from_static(uuid), pk: Bytes::from_static(pk), ..Default::default() });
++        m.write_to_bytes().unwrap()
++    }
++
++    fn register_peer(id: &str) -> Vec<u8> {
++        let mut m = RendezvousMessage::new();
++        m.set_register_peer(RegisterPeer { id: id.into(), ..Default::default() });
++        m.write_to_bytes().unwrap()
++    }
++
++    async fn path(rs: &RendezvousServer, id: &str) -> SocketAddr {
++        rs.pm.get_in_memory(id).await.unwrap().read().await.socket_addr
++    }
++
++    async fn is_signalling_path(addr: SocketAddr) -> bool {
++        TCP_PEERS.lock().await.contains_key(&addr)
++    }
++
++    #[test]
++    fn unverified_connection_cannot_take_a_hosts_path() {
++        tokio::runtime::Runtime::new().unwrap().block_on(async {
++            let db = std::env::temp_dir().join(format!("hbbs-sigpath-{}.sqlite3", std::process::id()));
++            let _ = std::fs::remove_file(&db);
++            std::env::set_var("DB_URL", db.to_str().unwrap());
++            let mut rs = server(PeerMap::new().await.unwrap());
++            let id = "sigpath1";
++            let host: SocketAddr = "198.51.100.10:40000".parse().unwrap();
++            let host2: SocketAddr = "198.51.100.10:40002".parse().unwrap();
++            let evil: SocketAddr = "203.0.113.66:40001".parse().unwrap();
++            let (host_tx, _h) = mpsc::unbounded_channel();
++            let (host2_tx, _h2) = mpsc::unbounded_channel();
++            let (evil_tx, _e) = mpsc::unbounded_channel();
++
++            // The host registers its key: this connection is its signalling path.
++            assert!(rs.handle_tcp(&register_pk(id, b"host-uuid", b"host-pk"), &mut None, host, "", true, &host_tx).await);
++            assert!(is_signalling_path(host).await);
++            assert_eq!(path(&rs, id).await, host);
++
++            // Someone else names the host's id: answered with request_pk, never its path.
++            rs.handle_tcp(&register_peer(id), &mut None, evil, "", true, &evil_tx).await;
++            assert!(!is_signalling_path(evil).await, "unverified RegisterPeer became a signalling path");
++            // ... and its heartbeats must not move the host's address.
++            RendezvousServer::touch_tcp_peer(&rs.pm, id, evil).await;
++            assert_eq!(path(&rs, id).await, host, "heartbeat of another connection moved the host");
++            // A wrong uuid is refused (upstream rule) and does not register either.
++            rs.handle_tcp(&register_pk(id, b"evil-uuid", b"evil-pk"), &mut None, evil, "", true, &evil_tx).await;
++            assert!(!is_signalling_path(evil).await);
++            assert_eq!(path(&rs, id).await, host);
++
++            // The host reconnecting from its own IP (known key) moves its path to the new connection,
++            // and the old connection's heartbeats do not move it back.
++            rs.handle_tcp(&register_peer(id), &mut None, host2, "", true, &host2_tx).await;
++            assert!(is_signalling_path(host2).await);
++            assert_eq!(path(&rs, id).await, host2);
++            RendezvousServer::touch_tcp_peer(&rs.pm, id, host).await;
++            assert_eq!(path(&rs, id).await, host2, "stale connection took the path back");
++            let _ = std::fs::remove_file(&db);
++        });
++    }
++
++    #[test]
++    fn client_ip_is_the_proxys_last_hop() {
++        let h = |kv: &[(&'static str, &'static str)]| {
++            let mut m = HeaderMap::new();
++            for (k, v) in kv {
++                m.append(*k, v.parse().unwrap());
++            }
++            forwarded_ip(&m)
++        };
++        // Caddy appends the peer it saw; a client-sent X-Real-IP or X-Forwarded-For prefix is ignored.
++        assert_eq!(h(&[("X-Real-IP", "6.6.6.6"), ("X-Forwarded-For", "198.51.100.7")]).as_deref(), Some("198.51.100.7"));
++        assert_eq!(h(&[("X-Forwarded-For", "6.6.6.6, 198.51.100.7")]).as_deref(), Some("198.51.100.7"));
++        assert_eq!(h(&[("X-Forwarded-For", "2001:db8::1")]).as_deref(), Some("2001:db8::1"));
++        assert_eq!(h(&[("X-Real-IP", "6.6.6.6")]), None);
++        assert_eq!(h(&[]), None);
++    }
++}
 diff --git a/src/turn.rs b/src/turn.rs
 new file mode 100644
-index 0000000..7957cfe
+index 0000000..60d95ea
 --- /dev/null
 +++ b/src/turn.rs
-@@ -0,0 +1,768 @@
+@@ -0,0 +1,911 @@
 +//! Tether: a TURN server (RFC 5766, UDP) inside hbbs, on hbbs's own UDP port (21116), so a
 +//! WebRTC session that cannot form a direct pair is relayed over UDP instead of hbbr's
 +//! TCP/WebSocket leg. The core's WebRTC data channel (KCP-style SCTP, see
@@ -1978,6 +2099,11 @@ index 0000000..7957cfe
 +const QUEUE: usize = 512;
 +/// Unauthenticated TURN requests (the first Allocate of each session) per second, all clients.
 +const UNAUTH_PER_SEC: usize = 50;
++/// A peer an allocation has not sent to for this long is no longer routed to it (RFC 5766
++/// permission lifetime).
++const PEER_TTL: Duration = Duration::from_secs(300);
++/// Credentials whose first client address is remembered (one per verified Allocate).
++const FIRST_USE_MAX: usize = 100_000;
 +pub const REALM: &str = "tether";
 +
 +pub fn now_secs() -> u64 {
@@ -2068,18 +2194,20 @@ index 0000000..7957cfe
 +    Some(((t & 0x3e00) >> 2) | ((t & 0x00e0) >> 1) | (t & 0x000f))
 +}
 +
-+/// Whether a STUN message carries MESSAGE-INTEGRITY, i.e. is an authenticated request.
-+fn has_integrity(b: &[u8]) -> bool {
++/// First STUN attribute of type `typ`: (offset of its header, value).
++fn stun_attr(b: &[u8], typ: u16) -> Option<(usize, &[u8])> {
 +    let mut i = 20;
 +    while i + 4 <= b.len() {
 +        let t = u16::from_be_bytes([b[i], b[i + 1]]);
-+        if t == 0x0008 {
-+            return true;
++        let n = u16::from_be_bytes([b[i + 2], b[i + 3]]) as usize;
++        if t == typ {
++            return b.get(i + 4..i + 4 + n).map(|v| (i, v));
 +        }
-+        i += 4 + ((u16::from_be_bytes([b[i + 2], b[i + 3]]) as usize + 3) & !3);
++        i += 4 + ((n + 3) & !3);
 +    }
-+    false
++    None
 +}
++
 +
 +fn is_channel_data(b: &[u8]) -> bool {
 +    b.len() >= 4 && (0x40..=0x4f).contains(&b[0]) && {
@@ -2092,7 +2220,8 @@ index 0000000..7957cfe
 +/// only the client address that used it first may go on refreshing, up to `SESSION_MAX`.
 +pub struct RestAuth {
 +    secret: String,
-+    first_use: Mutex<HashMap<String, SocketAddr>>,
++    /// Username -> (first client address, credential expiry).
++    first_use: Mutex<HashMap<String, (SocketAddr, u64)>>,
 +}
 +
 +impl RestAuth {
@@ -2106,23 +2235,43 @@ index 0000000..7957cfe
 +            .next()
 +            .and_then(|e| e.parse().ok())
 +            .ok_or("malformed username")?;
-+        let mut first = self.first_use.lock().unwrap();
 +        if expiry >= now {
 +            if expiry > now + CREDENTIAL_TTL + 60 {
 +                return Err("credential lifetime too long".into());
 +            }
-+            // shortcut: recorded before MESSAGE-INTEGRITY is verified, so someone who saw the
-+            // username (not the password) could claim it first; the host allocates within ms.
-+            first.entry(username.to_owned()).or_insert(src);
-+            if first.len() > 100_000 {
-+                first.retain(|u, _| {
-+                    u.split(':').next().and_then(|e| e.parse::<u64>().ok()).map_or(false, |e| e + SESSION_MAX >= now)
-+                });
-+            }
-+        } else if expiry + SESSION_MAX < now || first.get(username) != Some(&src) {
++        } else if expiry + SESSION_MAX < now || self.first_use.lock().unwrap().get(username).map(|f| f.0) != Some(src) {
 +            return Err(format!("expired credential {username}"));
 +        }
 +        Ok(password(&self.secret, username))
++    }
++
++    /// The username of a STUN request whose MESSAGE-INTEGRITY is valid under this secret.
++    fn verified_user(&self, b: &[u8]) -> Option<String> {
++        let (at, mac) = stun_attr(b, 0x0008).filter(|(_, v)| v.len() == 20)?;
++        let user = std::str::from_utf8(stun_attr(&b[..at], 0x0006)?.1).ok()?;
++        let key = generate_auth_key(user, REALM, &password(&self.secret, user));
++        // The HMAC covers the message up to the attribute, with the length field ending after it.
++        let mut msg = b[..at].to_vec();
++        msg[2..4].copy_from_slice(&((at - 20 + 24) as u16).to_be_bytes());
++        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &key);
++        ring::hmac::verify(&key, &msg, mac).ok()?;
++        Some(user.to_owned())
++    }
++
++    /// Remembers the first client address of a credential (verified requests only, see `dispatch`).
++    fn record_first_use(&self, username: &str, src: SocketAddr, now: u64) {
++        let Some(expiry) = username.split(':').next().and_then(|e| e.parse::<u64>().ok()) else { return };
++        if expiry < now {
++            return;
++        }
++        let mut first = self.first_use.lock().unwrap();
++        if first.len() >= FIRST_USE_MAX && !first.contains_key(username) {
++            first.retain(|_, f| f.1 + SESSION_MAX >= now);
++            if first.len() >= FIRST_USE_MAX {
++                return; // full of live sessions: this one cannot refresh past its credential
++            }
++        }
++        first.entry(username.to_owned()).or_insert((src, expiry));
 +    }
 +}
 +
@@ -2205,8 +2354,9 @@ index 0000000..7957cfe
 +    sock: Mutex<Option<Arc<UdpSocket>>>,
 +    control: Tx,
 +    clients: Mutex<HashMap<SocketAddr, Instant>>,
-+    /// Peer address -> (allocation id, its queue).
-+    peers: Mutex<HashMap<SocketAddr, (u64, Tx)>>,
++    /// Peer address -> (allocation id, its queue, last sent to).
++    peers: Mutex<HashMap<SocketAddr, (u64, Tx, Instant)>>,
++    auth: Arc<RestAuth>,
 +    live: AtomicUsize,
 +    next_id: AtomicU64,
 +    server: Mutex<Option<Server>>,
@@ -2226,6 +2376,7 @@ index 0000000..7957cfe
 +    pub async fn start(cfg: TurnConfig) -> Result<Arc<Self>, turn::Error> {
 +        let secret = hex(&sodiumoxide::randombytes::randombytes(32));
 +        let (control, rx) = mpsc::channel(QUEUE);
++        let auth = Arc::new(RestAuth::new(secret.clone()));
 +        let t = Arc::new(Self {
 +            public_ip: AtomicU32::new(cfg.public_ip.map_or(0, u32::from)),
 +            cfg,
@@ -2234,6 +2385,7 @@ index 0000000..7957cfe
 +            control,
 +            clients: Default::default(),
 +            peers: Default::default(),
++            auth: auth.clone(),
 +            live: AtomicUsize::new(0),
 +            next_id: AtomicU64::new(1),
 +            server: Default::default(),
@@ -2245,7 +2397,7 @@ index 0000000..7957cfe
 +                relay_addr_generator: Box::new(Relays(t.clone())),
 +            }],
 +            realm: REALM.to_owned(),
-+            auth_handler: Arc::new(RestAuth::new(secret)),
++            auth_handler: auth,
 +            channel_bind_timeout: Duration::from_secs(600),
 +            alloc_close_notify: None,
 +        })
@@ -2329,19 +2481,20 @@ index 0000000..7957cfe
 +    pub fn dispatch(&self, b: &[u8], from: SocketAddr) -> bool {
 +        let from = v4(from);
 +        let to_control = match stun_method(b) {
-+            // The TURN crate keeps every nonce it hands out for an hour; unauthenticated requests
-+            // (each gets one) are capped so a flood cannot grow that map without bound.
-+            Some(3) | Some(4) | Some(8) | Some(9) if !has_integrity(b) && !self.unauth.lock().unwrap().take(1) => {
-+                return true;
++            // The TURN crate keeps every nonce it hands out for an hour; requests without a valid
++            // MESSAGE-INTEGRITY (each gets one) are capped so a flood cannot grow that map
++            // without bound. Only a verified request claims its credential's first use.
++            Some(3) | Some(4) | Some(8) | Some(9) => {
++                match self.auth.verified_user(b) {
++                    Some(user) => self.auth.record_first_use(&user, from, now_secs()),
++                    None if !self.unauth.lock().unwrap().take(1) => return true,
++                    None => {}
++                }
++                self.client(from);
++                true
 +            }
-+            Some(3) | Some(4) | Some(6) | Some(8) | Some(9) => {
-+                let mut c = self.clients.lock().unwrap();
-+                if c.len() > 10_000 {
-+                    c.retain(|_, at| at.elapsed() < Duration::from_secs(900));
-+                }
-+                if c.len() < 10_000 {
-+                    c.insert(from, Instant::now());
-+                }
++            Some(6) => {
++                self.client(from);
 +                true
 +            }
 +            _ => is_channel_data(b) && self.clients.lock().unwrap().contains_key(&from),
@@ -2352,24 +2505,29 @@ index 0000000..7957cfe
 +            }
 +            return true;
 +        }
-+        let peers = self.peers.lock().unwrap();
-+        let tx = peers.get(&from).map(|p| &p.1).or_else(|| {
-+            // A peer behind a NAT that maps per destination answers from a port the allocation
-+            // has not sent to yet; take it when exactly one allocation knows that address.
-+            let mut same_ip = peers.iter().filter(|(a, _)| a.ip() == from.ip());
-+            let first = same_ip.next()?;
-+            if same_ip.all(|(_, p)| p.0 == (first.1).0) {
-+                Some(&(first.1).1)
-+            } else {
-+                None
-+            }
-+        });
-+        match tx {
-+            Some(tx) => {
-+                tx.try_send((b.to_vec(), from)).ok();
-+                true
-+            }
-+            None => false,
++        // A peer is the exact address an allocation sent to within PEER_TTL: other sockets behind
++        // the same NAT (a host's rendezvous socket) stay with hbbs, and so does anything that
++        // parses as a rendezvous message, whatever address an allocation was told to send to.
++        let tx = match self.peers.lock().unwrap().get(&from) {
++            Some(p) if p.2.elapsed() < PEER_TTL => p.1.clone(),
++            _ => return false,
++        };
++        let rendezvous = hbb_common::protobuf::Message::parse_from_bytes(b)
++            .map_or(false, |m: hbb_common::rendezvous_proto::RendezvousMessage| m.union.is_some());
++        if rendezvous {
++            return false;
++        }
++        tx.try_send((b.to_vec(), from)).ok();
++        true
++    }
++
++    fn client(&self, from: SocketAddr) {
++        let mut c = self.clients.lock().unwrap();
++        if c.len() > 10_000 {
++            c.retain(|_, at| at.elapsed() < Duration::from_secs(900));
++        }
++        if c.len() < 10_000 {
++            c.insert(from, Instant::now());
 +        }
 +    }
 +
@@ -2493,11 +2651,16 @@ index 0000000..7957cfe
 +        }
 +        {
 +            let mut peers = self.turn.peers.lock().unwrap();
-+            if !peers.contains_key(&to) {
-+                if peers.values().filter(|p| p.0 == self.id).count() >= MAX_PEERS {
-+                    return Ok(b.len());
++            match peers.get_mut(&to) {
++                Some(p) if p.0 == self.id || p.2.elapsed() >= PEER_TTL => *p = (self.id, self.tx.clone(), Instant::now()),
++                Some(_) => {} // another allocation's live peer keeps it
++                None => {
++                    peers.retain(|_, p| p.0 != self.id || p.2.elapsed() < PEER_TTL);
++                    if peers.values().filter(|p| p.0 == self.id).count() >= MAX_PEERS {
++                        return Ok(b.len());
++                    }
++                    peers.insert(to, (self.id, self.tx.clone(), Instant::now()));
 +                }
-+                peers.insert(to, (self.id, self.tx.clone()));
 +            }
 +        }
 +        if !self.send.lock().unwrap().take(b.len()) {
@@ -2582,6 +2745,8 @@ index 0000000..7957cfe
 +        let b: SocketAddr = "203.0.113.8:4000".parse().unwrap();
 +        let (u, p) = credential("0123456789abcdef", "s1", 1000);
 +        assert_eq!(auth.check(&u, a, 1000).unwrap(), p);
++        auth.record_first_use(&u, a, 1000);
++        auth.record_first_use(&u, b, 1001); // the first address stays
 +        assert_ne!(credential("fedcba9876543210", "s1", 1000).1, p);
 +        // after expiry: the first client keeps refreshing, nobody else gets in
 +        assert!(auth.check(&u, a, 1000 + CREDENTIAL_TTL + 10).is_ok());
@@ -2591,6 +2756,23 @@ index 0000000..7957cfe
 +        assert!(auth.check(&u, b, 1001).is_ok());
 +        assert!(auth.check("nonsense", a, 1000).is_err());
 +        assert!(auth.check(&format!("{}:x", 1000 + 86400), a, 1000).is_err());
++    }
++
++    #[test]
++    fn first_use_is_bounded() {
++        let auth = RestAuth::new("0123456789abcdef".into());
++        let a: SocketAddr = "203.0.113.7:4000".parse().unwrap();
++        for i in 0..FIRST_USE_MAX as u64 {
++            auth.record_first_use(&format!("{}:{i}", 1000 + CREDENTIAL_TTL), a, 1000);
++        }
++        auth.record_first_use("1300:new", a, 1000);
++        assert_eq!(auth.first_use.lock().unwrap().len(), FIRST_USE_MAX, "full of live sessions: refused");
++        // Past their sessions the old entries make room.
++        let later = 1000 + CREDENTIAL_TTL + SESSION_MAX + 1;
++        auth.record_first_use(&format!("{}:new", later + 100), a, later);
++        assert_eq!(auth.first_use.lock().unwrap().len(), 1);
++        auth.record_first_use("10:expired", a, later); // an expired credential claims nothing
++        assert_eq!(auth.first_use.lock().unwrap().len(), 1);
 +    }
 +
 +    #[test]
@@ -2607,11 +2789,11 @@ index 0000000..7957cfe
 +        assert_eq!(stun_method(&[0x0a, 0x02, 0x08, 0x01]), None);
 +        assert!(is_channel_data(&[0x40, 0x00, 0x00, 0x02, 1, 2, 0, 0]));
 +        assert!(!is_channel_data(&[0x42, 0x10, 0x0a, 0x0e, 1, 2]));
-+        assert!(!has_integrity(&alloc));
++        assert!(stun_attr(&alloc, 0x0008).is_none());
 +        let mut signed = alloc.clone();
 +        signed.extend([0x00, 0x19, 0x00, 0x04, 17, 0, 0, 0, 0x00, 0x08, 0x00, 0x14]);
 +        signed.extend([0u8; 20]);
-+        assert!(has_integrity(&signed));
++        assert_eq!(stun_attr(&signed, 0x0008).map(|(at, v)| (at, v.len())), Some((28, 20)));
 +    }
 +
 +    async fn roundtrip(allow_private: bool) -> bool {
@@ -2641,6 +2823,7 @@ index 0000000..7957cfe
 +        let userinfo = url["turn://".len()..].rsplit_once('@').unwrap().0;
 +        let (user, pass) = userinfo.split_once(':').unwrap();
 +        let (user, pass) = (percent_decode(user), percent_decode(pass));
++        let username = user.clone();
 +        let client = turn::client::Client::new(turn::client::ClientConfig {
 +            stun_serv_addr: format!("127.0.0.1:{port}"),
 +            turn_serv_addr: format!("127.0.0.1:{port}"),
@@ -2658,6 +2841,8 @@ index 0000000..7957cfe
 +        let relay = client.allocate().await.unwrap();
 +        assert_eq!(relay.local_addr().unwrap().port(), port);
 +        assert_eq!(t.live.load(Ordering::SeqCst), 1);
++        // The client's MESSAGE-INTEGRITY verified in dispatch (same check as the TURN crate's).
++        assert!(t.auth.first_use.lock().unwrap().contains_key(&username));
 +        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 +        relay.send_to(b"hi", peer.local_addr().unwrap()).await.unwrap();
 +        let mut buf = [0u8; 64];
@@ -2691,6 +2876,85 @@ index 0000000..7957cfe
 +            }
 +        }
 +        String::from_utf8(out).unwrap()
++    }
++
++    async fn lab_turn() -> Arc<Turn> {
++        Turn::start(TurnConfig {
++            host: "127.0.0.1".into(),
++            port: 3478,
++            public_ip: Some(Ipv4Addr::LOCALHOST),
++            max_allocations: 4,
++            bandwidth: 1 << 20,
++            allow_private: true, // documentation-range test peers
++        })
++        .await
++        .unwrap()
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn peer_datagrams_by_exact_address_never_rendezvous() {
++        let t = lab_turn().await;
++        let (conn, _) = Relays(t.clone()).allocate_conn(true, 0).await.unwrap();
++        let peer: SocketAddr = "198.51.100.20:5000".parse().unwrap();
++        conn.send_to(b"x", peer).await.unwrap();
++        let dtls = [0x17, 0xfe, 0xfd, 0, 1, 2, 3];
++        assert!(t.dispatch(&dtls, peer), "the peer's datagram goes to its allocation");
++        // Not sent to for PEER_TTL: no longer this allocation's peer.
++        t.peers.lock().unwrap().get_mut(&peer).unwrap().2 -= PEER_TTL;
++        assert!(!t.dispatch(&dtls, peer), "expired peer still routed to TURN");
++        conn.send_to(b"x", peer).await.unwrap();
++        assert!(t.dispatch(&dtls, peer));
++        // Another socket behind the same NAT (e.g. a host's rendezvous socket) stays with hbbs.
++        assert!(!t.dispatch(&dtls, "198.51.100.20:5001".parse().unwrap()), "same IP, other port taken by TURN");
++        // A rendezvous message is hbbs's even from the peer's exact address.
++        let mut m = hbb_common::rendezvous_proto::RendezvousMessage::new();
++        m.set_register_peer(hbb_common::rendezvous_proto::RegisterPeer { id: "123456789".into(), ..Default::default() });
++        let rp = hbb_common::protobuf::Message::write_to_bytes(&m).unwrap();
++        assert!(!t.dispatch(&rp, peer), "RegisterPeer swallowed by TURN");
++        conn.close().await.unwrap();
++        t.close().await;
++    }
++
++    /// An Allocate request with USERNAME and a MESSAGE-INTEGRITY attribute that is not valid.
++    fn bogus_signed_allocate(n: u32) -> Vec<u8> {
++        let mut b = vec![0x00, 0x03, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42];
++        b.extend(n.to_be_bytes());
++        b.extend([0u8; 8]);
++        let user = format!("{}:x", now_secs() + 100);
++        b.extend([0x00, 0x06]);
++        b.extend((user.len() as u16).to_be_bytes());
++        b.extend(user.as_bytes());
++        while b.len() % 4 != 0 {
++            b.push(0);
++        }
++        b.extend([0x00, 0x08, 0x00, 0x14]);
++        b.extend([0u8; 20]);
++        let len = (b.len() - 20) as u16;
++        b[2..4].copy_from_slice(&len.to_be_bytes());
++        b
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn invalid_integrity_counts_as_unauthenticated() {
++        let t = lab_turn().await;
++        for i in 0..200u32 {
++            let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 30)), 10_000 + i as u16);
++            t.dispatch(&bogus_signed_allocate(i), from);
++        }
++        // Only what the unauthenticated budget (UNAUTH_PER_SEC, burst a quarter of it) let through.
++        let passed = t.clients.lock().unwrap().len();
++        assert!(passed <= UNAUTH_PER_SEC / 2, "{passed} requests with a bogus MESSAGE-INTEGRITY passed the cap");
++        t.close().await;
++    }
++
++    #[test]
++    fn unverified_request_does_not_claim_a_credential() {
++        let auth = RestAuth::new("0123456789abcdef".into());
++        let a: SocketAddr = "203.0.113.7:4000".parse().unwrap();
++        let (u, _) = credential("0123456789abcdef", "s1", 1000);
++        // The password lookup happens before MESSAGE-INTEGRITY is checked: it must not record `a`.
++        assert!(auth.check(&u, a, 1000).is_ok());
++        assert!(auth.check(&u, a, 1000 + CREDENTIAL_TTL + 10).is_err());
 +    }
 +
 +    #[tokio::test(flavor = "multi_thread")]

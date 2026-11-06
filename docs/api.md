@@ -188,5 +188,8 @@ verifying a new plain exe it re-appends its own trailer. Custom apps are Windows
 
 ## Limits (1 GB relay VM)
 
-`tether-api` is a single-threaded `tiny_http` service with `MemoryMax=64M`; request bodies are
-streamed to disk for uploads; every JSON write is temp file + rename; no database.
+`tether-api` is a `tiny_http` service with `MemoryMax=64M`. It serves up to 32 requests at once
+(more get 503) and keeps its state behind one lock that is never held while a body is read or a
+response written; each read and write times out after 30 s, and a body must arrive within 60 s
+plus 64 KiB/s. Request bodies are streamed to disk for uploads (release, diagnostics) and held in
+memory otherwise (512 KiB at most); every JSON write is temp file + rename; no database.
