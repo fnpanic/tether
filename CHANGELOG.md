@@ -4,6 +4,21 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Fixed
+- **No more freezes in ~3 s steps when the screen content suddenly gets heavy** (seen on a Mac
+  host with H.265: a switch to full-screen noise or photos froze the picture 4 times for ~2.7 s).
+  The host's video loop now treats a frame the connection has not taken within 1 s as a full
+  link and halves the bitrate at once (without adjustable bitrate: the frame rate), instead of
+  waiting seconds for the delay probes to confirm it (docs/performance.md).
+
+### Added
+- Host log: one `fluxrt video/min` line per minute while video is sent (encode time avg / p95,
+  fps, kbit/s, largest frame, key frames, frames not taken within 1 s / 3 s, QoS fps / ratio /
+  target), so long sessions can be diagnosed from the host log. Replaces the 5 s `fluxrt encode`
+  line.
+
 ## [0.5.16] — 2026-11-06
 
 Windows and macOS. macOS: the server key rotation client (0.5.15 already had the AV1 change).
