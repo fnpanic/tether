@@ -76,9 +76,13 @@ export function App() {
             {pending ? (
               <Request c={pending} s={s} onError={say} />
             ) : active.length ? (
-              active.map((c) => (
+              // Several sessions: the cards keep their full height and the list scrolls (squeezed
+              // into the window, each card's permission list shrank to nothing).
+              <div className="-mx-2 flex min-h-0 flex-1 flex-col overflow-y-auto px-2">
+              {active.map((c) => (
                 <InSession
                   key={c.id}
+                  stacked={active.length > 1}
                   c={c}
                   files={companions(c)}
                   s={s}
@@ -93,7 +97,8 @@ export function App() {
                     )
                   }
                 />
-              ))
+              ))}
+              </div>
             ) : (
               <Idle s={s} onCopied={say} />
             )}
@@ -334,7 +339,7 @@ function Indicator({ on, icon, label, tone = "accent" }: { on: boolean; icon?: R
   );
 }
 
-function InSession({ c, files, s, since, rec, onError, msgs, onSend }: { c: Client; files: Client[]; s: State; since: number; rec: boolean; onError: (m: string) => void; msgs: Msg[]; onSend: (t: string) => void }) {
+function InSession({ c, files, s, since, rec, onError, msgs, onSend, stacked }: { c: Client; files: Client[]; s: State; since: number; rec: boolean; onError: (m: string) => void; msgs: Msg[]; onSend: (t: string) => void; stacked: boolean }) {
   const elapsed = useElapsed(since);
   const [view, setView] = useState<"perm" | "chat">("perm");
   const [seen, setSeen] = useState(0);
@@ -348,7 +353,7 @@ function InSession({ c, files, s, since, rec, onError, msgs, onSend }: { c: Clie
   }, [view, msgs.length]);
   const unread = msgs.slice(seen).filter((m) => !m.me).length;
   return (
-    <Card className="mt-2 flex min-h-0 flex-1 flex-col !p-5">
+    <Card className={`mt-2 flex flex-col !p-5 ${stacked ? "shrink-0" : "min-h-0 flex-1"}`}>
       <div className="flex items-center gap-3">
         <Avatar c={c} />
         <div className="min-w-0 flex-1">
@@ -381,11 +386,13 @@ function InSession({ c, files, s, since, rec, onError, msgs, onSend }: { c: Clie
         ))}
       </div>
       {view === "perm" ? (
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className={stacked ? "" : "min-h-0 flex-1 overflow-y-auto"}>
           <Perms c={c} s={s} onError={onError} also={files} />
         </div>
       ) : (
-        <Chat msgs={msgs} onSend={onSend} />
+        <div className={`flex flex-col ${stacked ? "h-64" : "min-h-0 flex-1"}`}>
+          <Chat msgs={msgs} onSend={onSend} />
+        </div>
       )}
       <Button variant="disconnect" className="mt-3 w-full" onClick={() => [c, ...files].forEach((x) => api.close(x.id))}>
         Disconnect

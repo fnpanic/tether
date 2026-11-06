@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:ui": "node e2e/viewer-mock.e2e.mjs && node e2e/cm-two-clients.e2e.mjs"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

@@ -406,14 +406,23 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       pending = e;
       if (!raf) raf = requestAnimationFrame(flush);
     };
+    // A press or release goes out after the last position, never before it.
+    const flushNow = () => {
+      cancelAnimationFrame(raf);
+      flush();
+    };
     const down = (e: PointerEvent) => {
+      flushNow();
       c.setPointerCapture(e.pointerId);
       c.focus();
       // A click into the picture always gives the session the keyboard (ends a local escape).
       invoke("session_keyboard", { key, pause: false }).catch(() => {});
       send(mouseMask(MOUSE.DOWN, e.button), e);
     };
-    const up = (e: PointerEvent) => send(mouseMask(MOUSE.UP, e.button), e);
+    const up = (e: PointerEvent) => {
+      flushNow();
+      send(mouseMask(MOUSE.UP, e.button), e);
+    };
     const wheel = (e: WheelEvent) => {
       e.preventDefault();
       const s = wheelSteps(e, wheelAcc);
@@ -467,7 +476,9 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const setKeyboard = (v: Partial<Record<"shortcuts" | "systemKeys" | "altTabRemote", boolean>>) =>
     act(invoke<KbdSettings>("session_keyboard", { key, ...v }).then(setKbd));
 
-  // Auto-hide the toolbar unless pinned; reveal at the top edge.
+  // Auto-hide the toolbar unless pinned. Only the small handle at the top centre brings it back
+  // (hover ~300 ms or click): the top edge belongs to the remote picture (title bars, tabs).
+  const reveal = useRef(() => {});
   useEffect(() => {
     if (pinned || phase.kind !== "connected") return setToolbar(true);
     const hide = () => {
@@ -475,22 +486,28 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       setToolbar(false);
     };
     let t = window.setTimeout(hide, 2200);
+    reveal.current = () => {
+      setToolbar(true);
+      clearTimeout(t);
+      t = window.setTimeout(hide, 2200); // time to reach the bar
+    };
     const m = (e: MouseEvent) => {
       // Over the bar or one of its open menus it stays up (a menu must not vanish under the
-      // pointer); the countdown starts once the pointer is elsewhere.
-      const over = !!barRef.current?.contains(e.target as Node);
-      if (over || e.clientY < 56) {
-        setToolbar(true);
+      // pointer); once the pointer has left it, it hides shortly after.
+      if (barRef.current?.contains(e.target as Node)) {
         clearTimeout(t);
-        t = over ? 0 : window.setTimeout(hide, 2200);
-      } else if (!t) t = window.setTimeout(hide, 2200);
+        t = -1;
+      } else if (t === -1) t = window.setTimeout(hide, 800);
     };
     window.addEventListener("mousemove", m);
     return () => {
       clearTimeout(t);
+      reveal.current = () => {};
       window.removeEventListener("mousemove", m);
     };
   }, [pinned, phase.kind]);
+  const hoverTimer = useRef(0);
+  useEffect(() => () => clearTimeout(hoverTimer.current), []);
 
   const toggleFullscreen = () =>
     act(
@@ -588,13 +605,37 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
         <RecordingSaved />
       </div>
 
+      {/* toolbar handle: the only place that reveals a hidden toolbar */}
+      {connected && !!frameSize.w && !(toolbar || chat.unread > 0) && (
+        <button
+          aria-label="Show toolbar"
+          title="Show toolbar"
+          // A held button is a drag on the remote picture, not a request for the toolbar.
+          onPointerMove={(e) => {
+            if (!e.buttons && !hoverTimer.current) hoverTimer.current = window.setTimeout(() => {
+                hoverTimer.current = 0;
+                reveal.current();
+              }, 300);
+          }}
+          onPointerLeave={() => {
+            clearTimeout(hoverTimer.current);
+            hoverTimer.current = 0;
+          }}
+          onClick={() => reveal.current()}
+          onFocus={() => reveal.current()}
+          className="animate-fade absolute left-1/2 top-0 z-20 grid h-3.5 w-16 -translate-x-1/2 place-items-center rounded-b-lg border border-t-0 border-white/10 bg-black/45 text-white/60 backdrop-blur transition hover:h-5 hover:bg-black/70 hover:text-white"
+        >
+          <ChevronDown size={12} />
+        </button>
+      )}
+
       {/* floating toolbar */}
       <div
         className={`pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center transition duration-200 ${
           (toolbar || chat.unread > 0) && connected && frameSize.w ? "translate-y-0 opacity-100" : "pointer-events-none invisible -translate-y-3 opacity-0"
         }`}
       >
-        <div ref={barRef} className="drag pointer-events-auto mt-2 flex items-center gap-1 glass rounded-full border border-white/10 p-1 shadow-float" data-tauri-drag-region>
+        <div ref={barRef} data-testid="toolbar" className="drag pointer-events-auto mt-2 flex items-center gap-1 glass rounded-full border border-white/10 p-1 shadow-float" data-tauri-drag-region>
           <div className="flex items-center gap-2 pl-2 pr-3" data-tauri-drag-region>
             <span className={`h-2 w-2 rounded-full ${connected ? latencyColor : "bg-warn"}`} />
             <span className="max-w-[180px] truncate text-caption font-normal">{name}</span>

@@ -46,7 +46,8 @@ export function subscribe(event: "session" | "cm", cb: (e: Evt) => void): { off:
 }
 
 export function videoChannel(onPacket: (buf: ArrayBuffer) => void): Channel<ArrayBuffer> | null {
-  if (!inTauri) return null;
+  // Mock mode: a plain object the mock backend calls (see mock.ts session_start).
+  if (!inTauri) return { onmessage: onPacket } as unknown as Channel<ArrayBuffer>;
   const ch = new Channel<ArrayBuffer>();
   ch.onmessage = onPacket;
   return ch;

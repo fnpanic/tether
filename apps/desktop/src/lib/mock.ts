@@ -19,9 +19,21 @@ function emit(event: string, name: string, payload: unknown) {
   for (const cb of listeners[event] ?? []) cb({ name, payload });
 }
 
+function rgbaFrame(w: number, h: number): ArrayBuffer {
+  const buf = new ArrayBuffer(16 + w * h * 4);
+  const v = new DataView(buf);
+  v.setUint8(0, 1); // PKT_RGBA
+  v.setUint32(4, w, true);
+  v.setUint32(8, h, true);
+  new Uint8Array(buf, 16).fill(90);
+  return buf;
+}
+
 export const mock = {
   async invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     const a = args ?? {};
+    // UI tests set `window.__mockCalls = []` to see what the page asked the backend for.
+    (globalThis as { __mockCalls?: unknown[] }).__mockCalls?.push({ cmd, args: a });
     switch (cmd) {
       case "status":
         return { id: "731204986", password: state.password, status: 1, key_confirmed: true, installed: false, version: "0.1.0" } as T;
@@ -58,6 +70,8 @@ export const mock = {
       case "session_start":
         setTimeout(() => emit("session", "peer_info", { hostname: "Design-Studio", username: "maria", platform: "Mac OS", displays: [{ x: 0, y: 0, width: 2560, height: 1440 }, { x: 2560, y: 0, width: 1920, height: 1080 }], current_display: 0 }), 600);
         setTimeout(() => emit("session", "connection_type", { secured: true, direct: true, stream_type: "" }), 650);
+        // One grey 16:9 picture (RGBA packet, see video.ts), so the stage and the toolbar show.
+        setTimeout(() => (a.video as { onmessage?: (b: ArrayBuffer) => void } | null)?.onmessage?.(rgbaFrame(320, 180)), 700);
         setTimeout(() => emit("session", "quality", { fps: { 0: 60 }, delay: 14, target_bitrate: 3800, codec: "H264", speed: "4.2MB/s" }), 900);
         return undefined as T;
       case "recordings_list":
@@ -71,7 +85,8 @@ export const mock = {
           ],
         } as T;
       case "cm_clients":
-        return [{ id: 1, peer_id: "184392571", name: "maria@Design-Studio", authorized: false, keyboard: true, clipboard: true, audio: true, file: true, restart: true, recording: false, block_input: false, is_file_transfer: false }] as T;
+        return [{ id: 1, peer_id: "184392571", name: "maria@Design-Studio", authorized: false, keyboard: true, clipboard: true, audio: true, file: true, restart: true, recording: false, block_input: false, is_file_transfer: false },
+          { id: 2, peer_id: "902114538", name: "j.berg@FINANCE-PC-07", authorized: true, keyboard: true, clipboard: true, audio: true, file: true, restart: true, recording: false, block_input: false, is_file_transfer: false }] as T;
       case "fs_home_dir":
         return "C:\\Users\\demo" as T;
       case "fs_local_dir":

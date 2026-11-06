@@ -6,6 +6,29 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Fixed
+- **TetherQS: with two connections the permissions could not be changed.** Both session cards
+  were squeezed into the fixed 420x560 window, and each card's permission list shrank to a
+  sliver (or to nothing with an update notice or "Allow admin access" shown), so no switch could
+  be seen or clicked. With more than one session the cards now keep their full height and the
+  list of cards scrolls; every switch sends the change for its own connection. The technician
+  app's connection window (one tab per connection) was not affected; both are covered by
+  `apps/desktop/e2e/cm-two-clients.e2e.mjs`.
+- **Session toolbar popped up whenever the pointer touched the top edge**, covering title bars
+  and tabs of the remote screen, so they could not be clicked. The hidden toolbar now comes back
+  only from a small handle at the top centre (hover about 300 ms or click); it never appears
+  while a mouse button is held, and it hides shortly after the pointer leaves it. Pin keeps it
+  up as before; full screen and window behave the same. Clicks anywhere else at the top edge go
+  to the remote computer.
+- **Selection rectangles on the remote screen could not be moved (e.g. the screenshot tool, seen
+  with the macOS technician app).** A drag that reached the top edge brought up the toolbar,
+  whose bar then took the next press meant for the selection; and a quick drag sent its last
+  position only after the release (moves wait for the next animation frame, which WebKit, the
+  engine of the macOS app, often ran only after the button was up), so the remote side saw a
+  click instead of a drag. Presses and releases now go out after the pending position, and the
+  toolbar no longer appears during drags. Covered in Chromium and WebKit by
+  `apps/desktop/e2e/viewer-mock.e2e.mjs` (mock mode, no Tauri).
+
 ### Relays
 - **Backup relays.** A `RELAY_SERVERS` entry may end in `|backup`
   (`<address>[|<health URL>][|backup]`). hbbs hands out healthy primary relays only, even when a

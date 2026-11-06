@@ -126,7 +126,9 @@ async function countEvents(p) {
 const events = (p) => p.evaluate(() => JSON.parse(JSON.stringify(window.__ev)));
 
 async function toolbarUp(s) {
-  await s.mouse.move(400, 20);
+  // A hidden toolbar comes back only from its handle at the top centre.
+  const handle = s.getByRole("button", { name: "Show toolbar" });
+  if (await handle.isVisible()) await handle.click();
   await until("toolbar visible", () => s.getByRole("button", { name: "Disconnect" }).isVisible(), 5000, 100);
 }
 async function notBlank(s) {
