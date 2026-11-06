@@ -4,6 +4,19 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Added
+- **Session audit log.** tether-api now accepts the connection, file-transfer and alarm records
+  hosts post (`POST /api/audit/conn|file|alarm`; until now every session logged "Audit post
+  dropped … 404") and stores them as daily JSON lines, 90 days or 50 MB (`AUDIT_RETENTION_DAYS`,
+  `AUDIT_MAX_MB` in `api.env`), size- and rate-limited, deduplicated by nonce. Signed
+  `GET /api/admin/audit?since=&limit=&device=` reads them newest first. Tether Manage › **Sessions**
+  merges the records of every relay: time, host, technician, IP, action (with file paths),
+  duration, search, 24 h to 90 days, CSV export. Unauthenticated telemetry: see SECURITY.md.
+  Deploy: the new tether-api binary only (Caddy already routes `/api/*`). Regression check:
+  `apps/desktop/e2e/audit-e2e.mjs`.
+
 ## [0.5.16] — 2026-11-06
 
 Windows and macOS. macOS: the server key rotation client (0.5.15 already had the AV1 change).
