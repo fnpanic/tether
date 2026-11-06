@@ -6,30 +6,37 @@
 //   (debug build: TETHER_DEV_API points its API at the local tether-api), as host "kr-host",
 //   viewer "kr-view" (gets the lists), "kr-stale" (cannot reach the API, never gets a list) and
 //   "kr-new" (a fresh install of the old build after the rotation).
+// - a small reverse proxy in this script stands in for Caddy: /api/* -> tether-api,
+//   /rendezvous/pubkey -> hbbs /pubkey (health port 22132); Tether Manage talks to it, so its
+//   "Every relay is switched" check sees the key the running hbbs signs with.
 // Every app runs on an invisible desktop, with its own WebView2 data folder (a Tether or Tether
 // Manage already running on this PC keeps the default one locked), and is driven over DevTools only. Only processes started
 // here are stopped (by PID).
 //
 //   node e2e/keyrot-e2e.mjs
-// Env: TECH_EXE, MANAGE_EXE, SERVER_BIN (dir with hbbs.exe/hbbr.exe), KEY_A (dir with id_ed25519 of
+// Env: TECH_EXE, MANAGE_EXE, SERVER_BIN (dir with hbbs.exe/hbbr.exe that serve /pubkey, default
+// C:\cargo-target\keyrot-e2e\debug: `cargo build --bin hbbs --bin hbbr` in vendor/rustdesk-server), KEY_A (dir with id_ed25519 of
 // key A), VAULT (C:\vms\manage-test), API_BIN (tether-api path inside WSL).
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createServer, request } from "node:http";
 import { chromium } from "playwright-core";
 
 const T = "C:\\cargo-target\\keyrot";
 const TECH = process.env.TECH_EXE || `${T}\\debug\\tether.exe`;
 const MANAGE = process.env.MANAGE_EXE || `${T}\\debug\\tether-manage.exe`;
-const SBIN = process.env.SERVER_BIN || `${T}\\debug`;
+const SBIN = process.env.SERVER_BIN || "C:\\cargo-target\\keyrot-e2e\\debug";
 const KEY_A = process.env.KEY_A || `${T}\\e2e\\keyA`;
 const VAULT = process.env.VAULT || "C:\\vms\\manage-test";
 const API_BIN = process.env.API_BIN || "/home/thomas/keyrot-build/server/api/target/debug/tether-api";
 const HIDDEN = resolve(import.meta.dirname, "hidden-run.ps1");
 const DESK = "tether-keyrot-test";
 const API = "http://127.0.0.1:22130";
+const HBBS_HEALTH = 22132;
+const PROXY = "http://127.0.0.1:22131"; // the relay address Manage uses
 const PW = "Kr-Pass-" + randomBytes(4).toString("hex") + "!";
 const PASS = readFileSync(join(VAULT, "test-passphrase.txt"), "utf8").trim();
 const ADMIN_PUB = readFileSync(join(VAULT, "env.txt"), "utf8").trim().split(/\s+/)[0];
@@ -102,8 +109,8 @@ async function startRelay(accept) {
   for (const p of relay) p.kill();
   relay = [];
   await sleep(1500);
-  const env = { ...process.env, HEALTH_PORT: "0", KEYS_ACCEPT: accept };
-  for (const [bin, args] of [["hbbr", ["-p", "22117", "-k", "_"]], ["hbbs", ["-p", "22116", "-r", "127.0.0.1:22117", "-k", "_"]]]) {
+  for (const [bin, args, health] of [["hbbr", ["-p", "22117", "-k", "_"], "0"], ["hbbs", ["-p", "22116", "-r", "127.0.0.1:22117", "-k", "_"], String(HBBS_HEALTH)]]) {
+    const env = { ...process.env, HEALTH_PORT: health, KEYS_ACCEPT: accept };
     const p = spawn(join(SBIN, `${bin}.exe`), args, { cwd: relayDir, env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     const grab = (d) => (out += d);
@@ -115,6 +122,25 @@ async function startRelay(accept) {
   await until("hbbs listening", () => relay[1].out().includes("Listening on websocket"), 20000);
   await sleep(1000);
 }
+
+// ---- Caddy stand-in (server/caddy/Caddyfile): the routes Manage uses ----
+let proxy;
+function startProxy() {
+  proxy = createServer((req, res) => {
+    const [port, path] = req.url === "/rendezvous/pubkey" ? [HBBS_HEALTH, "/pubkey"] : [22130, req.url];
+    const up = request({ host: "127.0.0.1", port, path, method: req.method, headers: req.headers }, (r) => {
+      res.writeHead(r.statusCode, r.headers);
+      r.pipe(res);
+    });
+    up.on("error", () => {
+      res.writeHead(502);
+      res.end("bad gateway");
+    });
+    req.pipe(up);
+  });
+  return new Promise((r) => proxy.listen(22131, "127.0.0.1", r));
+}
+const pubkey = () => fetch(PROXY + "/rendezvous/pubkey", { signal: AbortSignal.timeout(5000) }).then((r) => r.text()).then((t) => t.trim());
 
 // ---- tether-api in WSL ----
 function startApi() {
@@ -136,7 +162,7 @@ async function startManage() {
   const dir = join(work, "manage");
   mkdirSync(dir);
   copyFileSync(join(VAULT, "keys.json"), join(dir, "keys.json"));
-  writeFileSync(join(dir, "settings.json"), JSON.stringify({ server: API }));
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ server: PROXY }));
   hidden(MANAGE, "", { TETHER_MANAGE_DIR: dir, WEBVIEW2_USER_DATA_FOLDER: join(dir, "wv2"), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9381" });
   const b = await until("manage devtools", () => chromium.connectOverCDP("http://127.0.0.1:9381"), 60000, 500);
   const p = await until("manage page", () => pages(b).find((x) => !x.url().startsWith("devtools")), 30000);
@@ -191,6 +217,8 @@ async function main() {
   console.log(`work dir ${work}\nkey A ${A}`);
   setRelayKey(KEY_A);
   await startRelay("");
+  await startProxy();
+  check("hbbs reports its signing key A through the proxy", (await pubkey()) === A);
   startApi();
   await until("tether-api", () => fetch(API + "/api/policy", { signal: AbortSignal.timeout(3000) }).then((r) => r.status === 404), 30000, 500);
 
@@ -246,6 +274,11 @@ async function main() {
     const n = +(t.match(/^(\d+) of/) || [])[1];
     return n >= 1 ? t : null; // the host; --connect viewers quit before their first heartbeat
   }, 150000, 5000).catch(() => null);
+  // Relays still sign with A: the step must stay closed and name the relay.
+  const switched = m.getByRole("button", { name: "Every relay is switched" });
+  await m.getByRole("button", { name: "Check again" }).click();
+  const waiting = await until("relay named as not switched", async () => (await switched.isDisabled()) && (await m.getByText(/^Waiting for /).isVisible()) && (await m.getByTestId("sk-signing").innerText()), 20000).catch(() => null);
+  check('phase 1: "Every relay is switched" stays disabled while hbbs signs with A', waiting && /still signs with/.test(waiting), waiting ?? "enabled or relay not named");
   const devs = (await ipc(m, "devices_all")).devices.map((d) => `${d.id}:${d.server_keys_serial ?? "-"}`).join(" ");
   check("Manage counts devices that applied the list (heartbeat server_keys_serial)", confirmed, `${confirmed ?? "no count"}; devices ${devs}`);
 
@@ -262,7 +295,14 @@ async function main() {
   check("phase 2: viewer with the list connects without reinstall", (await connect(VIEW, hostId)) === "connected");
   let out = await connect(STALE, hostId);
   check("phase 2: viewer without the list fails with the server key message", /server key mismatch: the server's key is not trusted/i.test(out), out.slice(0, 160));
-  await m.getByRole("button", { name: "Every relay is switched" }).click();
+  check("hbbs reports B through the proxy", (await pubkey()) === B);
+  const enabled = await until("switch step enabled", async () => {
+    await m.getByRole("button", { name: "Check again" }).click();
+    await sleep(1000);
+    return (await switched.isEnabled()) && /signs with the new key/.test(await m.getByTestId("sk-signing").innerText());
+  }, 30000, 1000).catch(() => false);
+  check('phase 2: "Every relay is switched" opens once hbbs signs with B', enabled);
+  await switched.click();
   await until("retire step", async () => (await steps.getAttribute("data-step")) === "retire", 20000);
 
   // Phase 3a: list [B] only.
@@ -298,6 +338,8 @@ try {
   for (const p of pids) kill(p);
   for (const p of relay) p.kill();
   for (const p of children) p.kill();
+  proxy?.closeAllConnections?.();
+  proxy?.close();
   try {
     execFileSync("wsl", ["-d", "Ubuntu-22.04", "--", "pkill", "-f", `keyrot-e2e-api-${process.pid}`], { stdio: "ignore" });
   } catch {}
