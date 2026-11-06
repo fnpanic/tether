@@ -228,3 +228,17 @@ Extra delay over idle, median / p95 (ms); stalls = spans >= 0.5 s without a new 
 
 Mac (lock screen, direct LAN, viewer 0.5.15): 46 min until the run was stopped for low memory on
 the test PC: no errors, no reconnect, viewer 250-270 MB and WebView 141 MB, steady.
+
+Windows VM (TetherQS 0.5.15, stress page cycling all phases, Auto = VP9, corporate proxy path):
+2 h, 27,317 samples, every one decoded, no error, no reconnect. Viewer (~190 MB with WebView),
+proxy (~180 MB) and TetherQS in the VM (380 MB) stayed flat. The picture got slower in the second
+hour, though:
+
+| | median | p95 | longest stall |
+| --- | --- | --- | --- |
+| hour 1 | 139 ms | 1579 ms | 1.6 s (noise) |
+| hour 2 | 196 ms | 1778 ms | 5.8 s (noise), 4.2 s (photo) |
+
+Open: the cause of the second-hour slowdown (no memory growth on either side; next step is
+encoder time per frame and relay load over time). AV1, smoother on this host in every phase, would
+likely change the picture; see [Unreleased] in the CHANGELOG.
