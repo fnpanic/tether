@@ -176,3 +176,55 @@ runs without it (welcome page reloaded in a new Edge window, technician minimize
 recorded in the viewer and decoded with ffmpeg): 0.5.4 10.2 % of 618 and 0.6 % of 510 frames with
 a band (the artifact comes and goes with Edge's state), fix 0 of 552 and 0 of 445. In-VM capture alone (`tearprobe`):
 Desktop Duplication 13–52 %, Windows.Graphics.Capture 0 % in every run.
+
+# Stress test under heavy screen changes (2026-11-06)
+
+Tools: `tools/bench/stress.html` on the host (the `probe.html` barcode plus a workload that cycles
+by wall-clock minute: idle, scrolling text, a new full-screen "photo" every 2 s, full-screen noise
+every frame), `tools/bench/stress-sampler.mjs` on the viewer (decodes the barcode from the session
+canvas over CDP every 250 ms), `tools/bench/stress-report.py` (per phase; latency includes the
+viewer-host clock offset, so compare each phase against idle), `stress-matrix.sh` (codec matrix),
+`stress-exp.sh` (one experiment), `inv.mjs` (invoke a Tauri command in a viewer).
+
+## Mac host (MacBook Pro 14", direct LAN connection), before the fixes
+
+Codec Auto: the delay grew to **67 s median, 135 s p95**; the viewer quit after a few minutes.
+Causes, both fixed in 0.5.15:
+
+1. The Mac streams a Retina display at its logical size, here 1728x1117. The odd height made the
+   viewer's WebCodecs decoders fail (`EncodingError: Decoding error` for VP9 and AV1; locally, at
+   an even size, the same decoders work). Every Mac session fell back to native decoding.
+2. The native fallback sent every decoded picture (about 8 MB at that size) over the Tauri IPC
+   channel without waiting, so the queue grew without bound.
+
+Fixes: the Mac host captures at even dimensions (`even()` in `libs/scrap/src/quartz/display.rs`);
+the native path sends a picture only after the window drew the previous one (`TauriSink::video`,
+`session_frame_drawn`). The Mac build with the first fix was not run yet (the Mac was locked).
+
+## Windows host (GPU-less 1080p Hyper-V VM, TetherQS, corporate proxy path)
+
+Extra delay over idle, median / p95 (ms); stalls = spans >= 0.5 s without a new picture.
+
+| Build | Codec | scroll | photo | noise | stalls |
+| --- | --- | --- | --- | --- | --- |
+| 0.5.15 before the encoder change | Auto (VP9) | +112 / +453 | 0 / +76 | +955 / +1748 | 37 (1.6 s) |
+| | VP8 | +716 / +3064 | +80 / +1299 | +1481 / +3335 | 104, one reconnect (18.8 s) |
+| | AV1 | +22 / +77 | -2 / +71 | +1708 / +2369 | 1 |
+| 0.5.15 (quantizer headroom under overload) | Auto (VP9) | +232 / +484 | -2 / +72 | +927 / +1720 | 66 (1.6 s) |
+| | VP8 | +309 / +626 | -3 / +53 | +1224 / +2293 | 71, **no reconnect** |
+| | VP9 | +150 / +452 | -2 / +59 | +937 / +1727 | 70 (1.6 s) |
+| | AV1 | **+15 / +56** | -2 / +61 | **+342 / +1439** | **0** |
+
+- Opening a picture (photo phase) adds under 80 ms with every codec but VP8.
+- The VP8 reconnect was the 3 s relay-silence check: one huge noise frame sat whole in the TLS
+  proxy (it forwards WebSocket messages only when complete). With the quantizer allowed up to 63
+  under overload the frames stay small enough.
+- AV1 is the smoothest codec on this host in every phase, but Auto picked VP9: the one-time AV1
+  speed test (`test_av1`) failed its 90 ms key-frame limit here and stored `N` for good. The limits
+  are now 400 ms (key frame) / 50 ms (other frames) and the option is renamed (`av1-test-2`) so
+  every host tests once more. That change is not measured yet.
+
+## Long session
+
+Mac (lock screen, direct LAN, viewer 0.5.15): 46 min until the run was stopped for low memory on
+the test PC: no errors, no reconnect, viewer 250-270 MB and WebView 141 MB, steady.

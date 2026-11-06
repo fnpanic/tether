@@ -60,6 +60,20 @@ index 5f920bc..02650df 100644
  }
  
  message Terminal {
+diff --git a/libs/base/src/config/keys.rs b/libs/base/src/config/keys.rs
+index 5f5bf8f..1228f95 100644
+--- a/libs/base/src/config/keys.rs
++++ b/libs/base/src/config/keys.rs
+@@ -89,7 +89,8 @@ pub const OPTION_ENABLE_ANDROID_SOFTWARE_ENCODING_HALF_SCALE: &str =
+     "enable-android-software-encoding-half-scale";
+ pub const OPTION_ENABLE_TRUSTED_DEVICES: &str = "enable-trusted-devices";
+ pub const OPTION_TRUSTED_DEVICE_EXPIRATION: &str = "trusted-device-expiration-days";
+-pub const OPTION_AV1_TEST: &str = "av1-test";
++// Tether: "-2" makes every host rerun the speed test once with the thresholds of 0.5.15.
++pub const OPTION_AV1_TEST: &str = "av1-test-2";
+ /// Maximum number of files allowed during a single file transfer request.
+ ///
+ /// Key: `file-transfer-max-files`.
 diff --git a/libs/scrap/Cargo.toml b/libs/scrap/Cargo.toml
 index 185c38f..48c5e3d 100644
 --- a/libs/scrap/Cargo.toml
@@ -164,7 +178,7 @@ index d77c306..3022ace 100644
          (q_min, q_max)
      }
 diff --git a/libs/scrap/src/common/codec.rs b/libs/scrap/src/common/codec.rs
-index 606a4be..de7934c 100644
+index 606a4be..15e8d9a 100644
 --- a/libs/scrap/src/common/codec.rs
 +++ b/libs/scrap/src/common/codec.rs
 @@ -284,7 +284,10 @@ impl Encoder {
@@ -224,7 +238,21 @@ index 606a4be..de7934c 100644
      res = std::cmp::min(res, limit);
      // avoid frequent log
      let log = match THREAD_LOG_TIME.lock().unwrap().clone() {
-@@ -1155,3 +1177,28 @@ pub fn test_av1() {
+@@ -1143,8 +1165,11 @@ pub fn test_av1() {
+                 non_key_frame_time,
+                 pts.elapsed()
+             );
+-            key_frame_time < Duration::from_millis(90)
+-                && non_key_frame_time < Duration::from_millis(30)
++            // Tether: key frames are rare (start, resync); the steady per-frame cost decides. A
++            // GPU-less 1080p VM failed the old 90 ms key-frame limit although AV1 beat VP9 there on
++            // every stress phase (tools/bench/stress*, docs/performance.md).
++            key_frame_time < Duration::from_millis(400)
++                && non_key_frame_time < Duration::from_millis(50)
+         };
+         std::thread::spawn(move || {
+             let v = f();
+@@ -1155,3 +1180,28 @@ pub fn test_av1() {
          });
      });
  }

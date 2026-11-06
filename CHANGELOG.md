@@ -4,9 +4,22 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Changed
+- **Auto codec picks AV1 on more hosts without a GPU.** The one-time AV1 speed test allowed 90 ms
+  per key frame and 30 ms per frame; a GPU-less 1080p host failed it and stayed on VP9 for good,
+  although AV1 was smoother there in every stress phase (docs/performance.md). Limits are now
+  400 ms / 50 ms and every host reruns the test once (`av1-test-2`). Not measured yet.
+
 ## [0.5.15] — 2026-11-06
 
 ### Fixed
+- **Heavy screen changes stay within the bitrate.** Once the connection cannot keep up (quality
+  lowered by the bitrate control), the VP8/VP9/AV1 encoders may now use their coarsest steps, so a
+  photo or a full-screen change is coarse for a moment instead of producing multi-second frames.
+  A VP8 session behind a TLS-inspecting proxy no longer drops into "Reconnecting" under heavy
+  changes (docs/performance.md).
 - **Mac hosts: smooth picture under heavy screen changes.** A Retina display is streamed at its
   logical size, which can be odd (1728x1117 on a 14" MacBook Pro). The viewer's hardware video
   decoders (WebCodecs) reject odd frame sizes, so every Mac session fell back to decoding in the
