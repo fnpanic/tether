@@ -271,7 +271,7 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <div class="note warn"><strong>Passwords on the command line</strong> (<code>--connect &lt;id&gt; &lt;password&gt;</code> or <code>--password</code>) are visible in the process list and in shell history. Use them only for tests. Exit codes are listed under <a href="#exit-codes">Exit codes</a>.</div>
 
 <h2 id="tech-toolbar">The session toolbar</h2>
-<p>The toolbar floats at the top of the session window and hides itself after about two seconds. Move the mouse to the top edge to bring it back, or pin it. Every button either works or tells you why it did not.</p>
+<p>The toolbar floats at the top of the session window and hides itself after about two seconds. To bring it back, point at the small tab at the top centre of the picture for a moment or click it; the rest of the top edge belongs to the remote screen, so title bars and tabs there can be clicked. The toolbar never appears while you hold a mouse button (dragging), and it hides again shortly after the mouse leaves it. Pin it to keep it visible. Every button either works or tells you why it did not.</p>
 <p>On the left it shows the device name, a coloured dot for the connection quality, a shield when the session is end-to-end encrypted (hover it to see the peer's fingerprint for an out-of-band check) and a <span class="pill">RELAY</span> badge: Tether sessions always run through your relay.</p>
 <div class="tw"><table>
 <thead><tr><th>Button</th><th>What it does</th></tr></thead>

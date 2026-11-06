@@ -41,7 +41,8 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    see [macos.md](macos.md#windows-and-the-dock).
 4. During the session the card shows the technician, elapsed time, indicators (Control,
    Transferring files, REC) and a red **Disconnect** button. Permissions can be revoked at any
-   time. A file transfer the technician opens from the session is part of it: no second request,
+   time. With two or more technicians connected, each has its own card at full height and the
+   window scrolls between them; each card's switches change only that connection. A file transfer the technician opens from the session is part of it: no second request,
    no second card. The host admits it because it carries the accepted session's key and its
    random 128-bit companion secret (sent only inside the encrypted logins), and only while that
    session's **Transfer files** switch is on; switching Files off or Disconnect ends it. With
