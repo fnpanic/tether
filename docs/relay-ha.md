@@ -324,3 +324,39 @@ Two things learned: `caddy validate` needs `RELAY_HOST` from `server.env` (the C
 `{$RELAY_HOST}`; sourcing the whole file in a shell fails on the `|` in `RELAY_SERVERS`), and
 Caddy runs with the admin API off, so a new Caddyfile needs `systemctl restart tether-https`
 (about a second without HTTPS), not `caddy reload`.
+
+## Hetzner primary, Oracle backup (2026-11-06)
+
+The Oracle free-tier relays delivered 4-7 Mbit/s to a 170 Mbit/s home line (the route from the
+Oracle region drops packets: TCP connects of 1 s and 2 s = SYN retransmits), while Hetzner and
+OVH test files arrived at 170-185 Mbit/s. Layout since 22:00:
+
+| Name | Host | Role |
+|---|---|---|
+| `tether-desk.duckdns.org` | Hetzner CX23, Nuremberg (`tether-relay-hz1`, 46.224.17.114), AlmaLinux 9 | primary: hbbs, hbbr, tether-api, Caddy |
+| `tether-desk2.duckdns.org` | Oracle relay 2 | backup: hbbs, hbbr (`|backup`), tether-api, Caddy |
+| (none) | Oracle relay 1 (158.101.205.185) | out of service; its DuckDNS timer is off |
+
+`RELAY_SERVERS` on both hbbs: Hetzner first, Oracle 2 with `|backup` (see "Relay choice"). Clients
+did not change: same names, same server key (`fe8A7x…`, copied from Oracle 1), and the tether-api
+data (policy, device list, audit log, 171 release files checked by SHA-256) and Caddy's
+certificate moved with it. Hetzner keeps `tether-desk` pointed at itself (`tether-ddns.timer`).
+
+Hardening on the Hetzner node: root login off (admin user `tadmin`, key only, modern KEX/ciphers,
+no forwarding), SELinux enforcing, firewalld plus the Hetzner Cloud Firewall (22, 80, 443,
+21115-21119/tcp, 21116/udp; SSH open to all because the admin's IP is dynamic), fail2ban for sshd,
+sysctl hardening, no core dumps, dnf-automatic applies all updates at 02:30 and
+`nightly-reboot.timer` reboots at 04:00 (Europe/Berlin); while it reboots the Oracle backup takes
+the sessions.
+
+Measured after the switch (VM behind the TLS-inspecting proxy, Auto, extra delay over idle, p95):
+scrolling +53 ms (Oracle that evening: +492 ms), photo +45 ms (+818 ms), full-screen noise +2.2 s
+(+42 s with reconnects), no stall. Download of a release file from the relay: 157-174 Mbit/s
+(Oracle: 4-7).
+
+Failover test (Hetzner hbbr killed with SIGKILL and kept stopped):
+- Oracle's hbbs logged `relay failover: no healthy primary relay, using backups` after 4 s;
+- the running session came back over `tether-desk2` by itself after 22 s;
+- a new session went over Oracle at once (first frame 1.0 s);
+- hbbr started again: Oracle's hbbs logged `primary relay healthy again` within 1 s and the next
+  new session used Hetzner.
