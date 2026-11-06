@@ -238,7 +238,10 @@ Extra delay over idle, median / p95 (ms); stalls = spans >= 0.5 s without a new 
 - AV1 is the smoothest codec on this host in every phase, but Auto picked VP9: the one-time AV1
   speed test (`test_av1`) failed its 90 ms key-frame limit here and stored `N` for good. The limits
   are now 400 ms (key frame) / 50 ms (other frames) and the option is renamed (`av1-test-2`) so
-  every host tests once more. That change is not measured yet.
+  every host tests once more. Measured 2026-11-06 on the same VM: the test now passes (key frame
+23 ms, other frames 8 ms) and Auto picks AV1. Auto before -> after, extra delay p95: scroll
++475 -> +121 ms, photo +62 -> +80 ms, noise +1679 -> +1324 ms (median +876 -> +349 ms), stalls
+68 -> 0 in 8 min.
 
 ## Long session
 

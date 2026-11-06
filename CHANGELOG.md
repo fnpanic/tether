@@ -10,7 +10,8 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 - **Auto codec picks AV1 on more hosts without a GPU.** The one-time AV1 speed test allowed 90 ms
   per key frame and 30 ms per frame; a GPU-less 1080p host failed it and stayed on VP9 for good,
   although AV1 was smoother there in every stress phase (docs/performance.md). Limits are now
-  400 ms / 50 ms and every host reruns the test once (`av1-test-2`). Not measured yet.
+  400 ms / 50 ms and every host reruns the test once (`av1-test-2`). Measured on a GPU-less
+  Windows host: scrolling p95 +475 ms -> +121 ms, no more freezes under full-screen changes.
 
 ## [0.5.15] — 2026-11-06
 
