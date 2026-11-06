@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 7b7263a..f362b78 100644
+index 7b7263a..0ab1f67 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -7436,6 +7436,7 @@ dependencies = [
@@ -10,6 +10,23 @@ index 7b7263a..f362b78 100644
   "zbus",
  ]
  
+@@ -9710,7 +9711,6 @@ dependencies = [
+ [[package]]
+ name = "webrtc-sctp"
+ version = "0.12.0"
+-source = "git+https://github.com/rustdesk-org/webrtc?rev=49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63#49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63"
+ dependencies = [
+  "arc-swap",
+  "async-trait",
+@@ -11019,3 +11019,8 @@ dependencies = [
+  "quote 1.0.36",
+  "syn 1.0.109",
+ ]
++
++[[patch.unused]]
++name = "webrtc-sctp"
++version = "0.12.0"
++source = "git+https://github.com/rustdesk-org/webrtc?rev=49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63#49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63"
 diff --git a/Cargo.toml b/Cargo.toml
 index 1002586..83b1fb8 100644
 --- a/Cargo.toml
@@ -134,6 +151,18 @@ index 0000000..c879fdf
 +    }
 +    println!("frames {frames} band {bad} ({:.1}%) frame() avg {:.1} ms", 100.0 * bad as f64 / frames.max(1) as f64, cost.as_secs_f64() * 1000.0 / frames.max(1) as f64);
 +}
+diff --git a/libs/scrap/src/common/aom.rs b/libs/scrap/src/common/aom.rs
+index d77c306..3022ace 100644
+--- a/libs/scrap/src/common/aom.rs
++++ b/libs/scrap/src/common/aom.rs
+@@ -367,6 +367,7 @@ impl AomEncoder {
+ 
+         q_min = q_min.clamp(q_min2, q_min1);
+         q_max = q_max.clamp(q_max2, q_max1);
++        let q_max = crate::common::overload_q_max(b, q_max);
+ 
+         (q_min, q_max)
+     }
 diff --git a/libs/scrap/src/common/codec.rs b/libs/scrap/src/common/codec.rs
 index 606a4be..de7934c 100644
 --- a/libs/scrap/src/common/codec.rs
@@ -224,6 +253,51 @@ index 606a4be..de7934c 100644
 +        assert!(!keep_av1_on_low_memory(CodecFormat::VP9));
 +    }
 +}
+diff --git a/libs/scrap/src/common/mod.rs b/libs/scrap/src/common/mod.rs
+index 1670020..c249940 100644
+--- a/libs/scrap/src/common/mod.rs
++++ b/libs/scrap/src/common/mod.rs
+@@ -550,3 +550,28 @@ pub fn screen_size() -> (u16, u16, u16) {
+ pub fn is_start() -> Option<bool> {
+     android::is_start()
+ }
++
++/// Tether: the quantizer ceiling for a quality ratio `b` (ratio x 100). At normal quality the
++/// codec's own ceiling stays; once QoS has lowered the ratio below 0.5 because the path cannot
++/// keep up, the ceiling rises towards 63 so heavy content (a photo, a full-screen change) still
++/// fits the bitrate: a coarser picture for a moment instead of multi-second frames and freezes.
++pub fn overload_q_max(b: u32, q_max: u32) -> u32 {
++    const KNEE: u32 = 50;
++    if b >= KNEE || q_max >= 63 {
++        return q_max;
++    }
++    q_max + (63 - q_max) * (KNEE - b) / KNEE
++}
++
++#[cfg(test)]
++mod overload_q_tests {
++    use super::overload_q_max;
++
++    #[test]
++    fn ceiling_only_rises_under_overload() {
++        assert_eq!(overload_q_max(100, 47), 47);
++        assert_eq!(overload_q_max(50, 52), 52);
++        assert_eq!(overload_q_max(0, 56), 63);
++        assert!(overload_q_max(20, 56) > 56 && overload_q_max(20, 56) < 63);
++    }
++}
+diff --git a/libs/scrap/src/common/vpxcodec.rs b/libs/scrap/src/common/vpxcodec.rs
+index d7413cd..2a8c36b 100644
+--- a/libs/scrap/src/common/vpxcodec.rs
++++ b/libs/scrap/src/common/vpxcodec.rs
+@@ -343,6 +343,7 @@ impl VpxEncoder {
+ 
+         q_min = q_min.clamp(q_min2, q_min1);
+         q_max = q_max.clamp(q_max2, q_max1);
++        let q_max = crate::common::overload_q_max(b, q_max);
+ 
+         (q_min, q_max)
+     }
 diff --git a/libs/scrap/src/dxgi/mod.rs b/libs/scrap/src/dxgi/mod.rs
 index 20c994e..5efcf13 100644
 --- a/libs/scrap/src/dxgi/mod.rs

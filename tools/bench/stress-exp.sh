@@ -1,6 +1,6 @@
 #!/bin/bash
 # stress-exp.sh <label> <codec> <relay:0|1> <minutes>: fresh viewer to the Mac, set codec/route, sample, log viewer memory.
-S=/c/Users/Thomas/AppData/Local/Temp/claude/d231af633959fc39/b8e5adc8-578e-49b0-9110-773345c4e220/scratchpad
+S=/c/vms/night
 B=/c/install/remote-support/tools/bench; L=$1; C=$2; R=$3; M=$4; O=$S/stress/$L
 powershell -NoProfile -Command 'Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "tether.exe" -and $_.CommandLine -like "*password-env MACPW*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; exit 0'
 sleep 4
