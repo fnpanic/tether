@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { api, formatId, invoke, subscribe, videoChannel } from "../lib/ipc";
 import { probeCodecs, VideoPipeline, type VideoStats } from "../lib/video";
+import { loadSharpen, saveSharpen, SHARPEN_MODES, type SharpenMode } from "../lib/sharpen";
 import { Button, IconButton, Logo, TitleBar, useToast } from "../components/ui";
 import { RecordingSaved } from "../components/RecordingSaved";
 import { FileTransfer } from "./FileTransfer";
@@ -72,6 +73,12 @@ const QUALITY = [
   { value: "balanced", label: "Balanced", hint: "Quality and speed" },
   { value: "low", label: "Speed", hint: "Lowest latency and bandwidth" },
 ];
+
+const SHARPEN: Record<SharpenMode, { label: string; hint: string }> = {
+  off: { label: "Off", hint: "Picture as received" },
+  auto: { label: "Auto", hint: "Crisper text when scaled or compressed" },
+  strong: { label: "Strong", hint: "Maximum crispness" },
+};
 
 const stored = (k: string) => {
   try {
@@ -124,6 +131,11 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const [chat, setChat] = useState<{ open: boolean; unread: number; msgs: { me: boolean; text: string }[] }>({ open: false, unread: 0, msgs: [] });
   const [cursor, setCursor] = useState("default");
   const [imageQuality, setImageQuality] = useState("balanced");
+  const [sharpen, setSharpenState] = useState<SharpenMode>(loadSharpen);
+  // WebGL unavailable or its context lost: draw with the 2D canvas for the rest of this window.
+  const [glFailed, setGlFailed] = useState(false);
+  const useGl = sharpen !== "off" && !glFailed;
+  const glRef = useRef({ sharpen, useGl });
   const [fullscreen, setFullscreen] = useState(false);
   const cursors = useRef(new Map<string, string>());
   const displayRef = useRef(display);
@@ -174,7 +186,9 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       onNeedKey: (d) => invoke("session_refresh", { key, display: d }).catch(() => {}),
       onSize: (w, h) => setFrameSize({ w, h }),
       onRgbaDrawn: () => invoke("session_frame_drawn", { key }).catch(() => {}),
-    });
+      onGlLost: () => setGlFailed(true),
+    }, glRef.current.sharpen, glRef.current.useGl);
+    if (glRef.current.useGl && !pipe.webgl) setGlFailed(true);
     pipeRef.current = pipe;
     const sub = subscribe("session", (e) => {
       const p = e.payload;
@@ -280,6 +294,15 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       invoke("session_close", { key });
     };
   }, [key, peer]);
+
+  // Sharpening: Off draws with the 2D canvas, Auto/Strong with WebGL; a switch remounts the canvas
+  // (key below), whose new element the pipeline takes over with the current picture.
+  useEffect(() => {
+    const p = pipeRef.current;
+    if (!p) return;
+    p.setSharpen(sharpen);
+    if (!p.attach(canvasRef.current!, useGl) && useGl) setGlFailed(true);
+  }, [sharpen, useGl]);
 
   const onMsgbox = (type: string, title: string, text: string, retry: boolean) => {
     // Sent by a Mac host that lacks permissions (the session itself keeps running).
@@ -413,7 +436,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       window.removeEventListener("keydown", kd);
       window.removeEventListener("keyup", ku);
     };
-  }, [phase.kind, key, toRemote, chat.open]);
+  }, [phase.kind, key, toRemote, chat.open, useGl]);
 
   // Auto-hide the toolbar unless pinned; reveal at the top edge.
   useEffect(() => {
@@ -509,6 +532,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       {/* stage */}
       <div ref={stageRef} className={`relative min-h-0 flex-1 ${fit === "original" ? "overflow-auto" : "overflow-hidden"} grid place-items-center`}>
         <canvas
+          key={useGl ? "gl" : "2d"}
           ref={canvasRef}
           tabIndex={0}
           style={{
@@ -561,7 +585,15 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           <TB label={fit === "fit" ? "Original size" : "Fit to window"} onClick={() => setFit(fit === "fit" ? "original" : "fit")}>
             {fit === "fit" ? <Scan size={17} /> : <Expand size={17} />}
           </TB>
-          <QualityMenu value={imageQuality} onChange={setQ} />
+          <QualityMenu
+            value={imageQuality}
+            onChange={setQ}
+            sharpen={sharpen}
+            onSharpen={(m) => {
+              setSharpenState(m);
+              saveSharpen(m);
+            }}
+          />
           <TB label="Statistics" active={showStats} onClick={() => setShowStats(!showStats)}>
             <Activity size={17} />
           </TB>
@@ -631,6 +663,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           <Stat k="fps" v={vstats ? `${vstats.fps} shown / ${vstats.inFps} recv` : "–"} />
           <Stat k="latency" v={delay != null ? `${delay} ms` : "–"} />
           <Stat k="decode" v={vstats ? `${vstats.decodeMs} ms` : "–"} />
+          <Stat k="render" v={vstats ? `${vstats.renderMs} ms · sharpen ${vstats.sharpen}` : "–"} />
           <Stat k="stall" v={vstats ? `${vstats.maxGapMs} ms max gap · ${vstats.keyRequests} key req · ${vstats.dropped} dropped` : "–"} />
           <Stat k="codec" v={vstats?.codec || quality.codec || "–"} />
           <Stat k="bitrate" v={quality.target_bitrate ? `${(quality.target_bitrate / 1000).toFixed(1)} Mbps` : "–"} />
@@ -693,7 +726,9 @@ function Stat({ k, v }: { k: string; v: React.ReactNode }) {
 
 /** Largest size of a w×h picture inside the stage, keeping its aspect ratio. */
 export function fitSize(f: { w: number; h: number }, stage: { w: number; h: number }) {
-  if (!f.w || !f.h || !stage.w || !stage.h) return { maxWidth: "100%", maxHeight: "100%" };
+  // No picture yet: no size (a WebGL canvas sizes itself to its box, which must not follow it).
+  if (!f.w || !f.h) return { width: 0, height: 0 };
+  if (!stage.w || !stage.h) return { maxWidth: "100%", maxHeight: "100%" };
   const s = Math.min(stage.w / f.w, stage.h / f.h);
   return { width: Math.floor(f.w * s), height: Math.floor(f.h * s) };
 }
@@ -765,7 +800,7 @@ function ConfirmAction({ what, windows, service, onCancel, onConfirm }: { what: 
   );
 }
 
-function QualityMenu({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function QualityMenu({ value, onChange, sharpen, onSharpen }: { value: string; onChange: (v: string) => void; sharpen: SharpenMode; onSharpen: (m: SharpenMode) => void }) {
   const [open, setOpen] = useState(false);
   const cur = QUALITY.find((q) => q.value === value) ?? QUALITY[1];
   return (
@@ -794,6 +829,21 @@ function QualityMenu({ value, onChange }: { value: string; onChange: (v: string)
               <span className="text-footnote text-white/50">{q.hint}</span>
             </button>
           ))}
+          <div className="mx-3 mb-1 mt-2 border-t border-white/10 pt-2 text-footnote text-white/50">Sharpening</div>
+          <div className="flex gap-1 px-2 pb-1" role="radiogroup" aria-label="Sharpening">
+            {SHARPEN_MODES.map((m) => (
+              <button
+                key={m}
+                role="radio"
+                aria-checked={m === sharpen}
+                title={SHARPEN[m].hint}
+                onClick={() => onSharpen(m)}
+                className={`flex-1 rounded-lg px-2 py-1.5 text-caption transition hover:bg-white/10 ${m === sharpen ? "bg-white/10 text-white" : "text-white/70"}`}
+              >
+                {SHARPEN[m].label}
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>

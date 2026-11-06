@@ -1,6 +1,9 @@
 // Hardware video decoding in the webview (WebCodecs) for frames forwarded raw from the Rust core.
+// Drawing: WebGL2 with scaling + sharpening (sharpen.ts), or the 2D canvas (sharpening off, no WebGL).
 // Packet layout (little endian, see vendor/rustdesk/src/tauri_ui/mod.rs):
 //   kind u8 | codec u8 | flags u8 (bit0 key, bit1 bgra) | display u8 | w u32 | h u32 | pts u32 | payload
+
+import { GlRenderer, type SharpenMode } from "./sharpen";
 
 export const PKT_ENCODED = 0;
 export const PKT_RGBA = 1;
@@ -125,6 +128,20 @@ export interface VideoStats {
   keyRequests: number;
   /** Delta frames dropped since the session started (waiting for a key frame). */
   dropped: number;
+  /** Average time to draw a picture (ms, CPU; GPU included when `tether.renderSync` is set). */
+  renderMs: number;
+  /** Sharpening: "off", or the mode and the strength of the last draw. */
+  sharpen: string;
+}
+
+/** Debug measurement mode (localStorage `tether.renderSync` = 1, read once a second): every draw
+ * waits for the GPU, so renderMs includes GPU time. Adds latency; never on by default. */
+function syncMode() {
+  try {
+    return localStorage.getItem("tether.renderSync") === "1";
+  } catch {
+    return false;
+  }
 }
 
 interface Callbacks {
@@ -135,10 +152,16 @@ interface Callbacks {
   onSize: (w: number, h: number) => void;
   /** A natively decoded picture is on screen: the backend sends the next one only after this. */
   onRgbaDrawn?: () => void;
+  /** The WebGL context was lost: attach a fresh canvas without WebGL. */
+  onGlLost?: () => void;
 }
 
 export class VideoPipeline {
-  private ctx: CanvasRenderingContext2D;
+  private ctx: CanvasRenderingContext2D | null = null;
+  private gl: GlRenderer | null = null;
+  private sharpen: SharpenMode = "auto";
+  private renderSum = 0;
+  private sync = syncMode();
   private decoder: VideoDecoder | null = null;
   private codec = 0;
   private key = new KeyRecovery();
@@ -153,16 +176,62 @@ export class VideoPipeline {
   private w = 0;
   private expected: { w: number; h: number } | null = null;
   private h = 0;
-  stats: VideoStats = { fps: 0, inFps: 0, coded: "", decodeMs: 0, width: 0, height: 0, codec: "", maxGapMs: 0, keyRequests: 0, dropped: 0 };
+  stats: VideoStats = { fps: 0, inFps: 0, coded: "", decodeMs: 0, width: 0, height: 0, codec: "", maxGapMs: 0, keyRequests: 0, dropped: 0, renderMs: 0, sharpen: "off" };
   private packets = 0;
   private decodedSinceConfigure = 0;
   display = 0;
 
-  constructor(private canvas: HTMLCanvasElement, private cb: Callbacks) {
-    // desynchronized: bypass the compositor queue where supported → lower glass-to-glass latency.
-    const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
-    if (!ctx) throw new Error("2d context unavailable");
-    this.ctx = ctx;
+  private canvas!: HTMLCanvasElement;
+
+  constructor(canvas: HTMLCanvasElement, private cb: Callbacks, sharpen: SharpenMode = "off", gl = sharpen !== "off") {
+    this.sharpen = sharpen;
+    this.attach(canvas, gl);
+  }
+
+  /**
+   * Draw into `canvas`: with WebGL (scaling + sharpening) when `gl`, else with the 2D canvas. A canvas
+   * keeps the context it got first, so switching needs a new canvas element; the current picture is
+   * carried over. Returns whether WebGL is in use (false: unavailable, the 2D canvas draws).
+   */
+  attach(canvas: HTMLCanvasElement, gl: boolean): boolean {
+    if (canvas === this.canvas) return !!this.gl;
+    const snap = this.gl ? this.gl.snapshot() : this.ctx && this.w ? this.canvas : null;
+    this.gl?.dispose(true);
+    this.gl = null;
+    this.ctx = null;
+    this.canvas = canvas;
+    this.w = this.h = 0;
+    if (gl) {
+      this.gl = GlRenderer.create(canvas, () => this.cb.onGlLost?.());
+      if (this.gl) this.gl.mode = this.sharpen;
+    }
+    if (!this.gl) {
+      // desynchronized: bypass the compositor queue where supported → lower glass-to-glass latency.
+      const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+      if (!ctx) throw new Error("2d context unavailable");
+      this.ctx = ctx;
+    }
+    if (snap) {
+      this.resize(snap.width, snap.height);
+      if (this.gl) this.gl.frame(snap, snap.width, snap.height);
+      else if (snap instanceof ImageData) this.ctx!.putImageData(snap, 0, 0);
+      else this.ctx!.drawImage(snap, 0, 0);
+    } else if (this.decodedSinceConfigure > 0) this.needKey("renderer changed");
+    return !!this.gl;
+  }
+
+  /** Drawing with WebGL (sharpening) rather than the 2D canvas. */
+  get webgl() {
+    return !!this.gl;
+  }
+
+  /** Sharpening mode for the WebGL path (Off is drawn by the 2D canvas, see attach). */
+  setSharpen(m: SharpenMode) {
+    this.sharpen = m;
+    if (this.gl) {
+      this.gl.mode = m;
+      this.gl.draw();
+    }
   }
 
   /** Need a key frame: ask now and keep asking until one arrives (see KeyRecovery). */
@@ -198,9 +267,22 @@ export class VideoPipeline {
 
   private resize(w: number, h: number) {
     if (w === this.w && h === this.h) return;
-    this.w = this.canvas.width = w;
-    this.h = this.canvas.height = h;
+    this.w = w;
+    this.h = h;
+    // The WebGL canvas is sized to its on-screen pixels instead (GlRenderer), the shader scales.
+    if (!this.gl) {
+      this.canvas.width = w;
+      this.canvas.height = h;
+    }
     this.cb.onSize(w, h);
+  }
+
+  /** Time a draw; in the debug measurement mode wait for the GPU as well. */
+  private timed(draw: () => void) {
+    const t = performance.now();
+    draw();
+    if (this.sync) this.gl ? this.gl.sync() : this.ctx!.getImageData(0, 0, 1, 1);
+    this.renderSum += performance.now() - t;
   }
 
   private configure(codec: number) {
@@ -265,7 +347,7 @@ export class VideoPipeline {
     } catch {
       // An engine that refuses the wider rect: draw what it reports.
     }
-    this.ctx.drawImage(src, 0, 0, w, h);
+    this.timed(() => (this.gl ? this.gl.frame(src, w, h) : this.ctx!.drawImage(src, 0, 0, w, h)));
     if (src !== frame) src.close();
     const t0 = this.pending.get(frame.timestamp);
     if (t0 !== undefined) {
@@ -279,14 +361,17 @@ export class VideoPipeline {
   private drawRgba(p: Packet) {
     this.resize(p.width, p.height);
     const px = new Uint8ClampedArray(p.data.buffer as ArrayBuffer, p.data.byteOffset, p.width * p.height * 4);
-    if (p.bgra) {
-      for (let i = 0; i < px.length; i += 4) {
-        const b = px[i];
-        px[i] = px[i + 2];
-        px[i + 2] = b;
+    this.timed(() => {
+      if (this.gl) return this.gl.rgba(p.data.subarray(0, px.length), p.width, p.height, p.bgra);
+      if (p.bgra) {
+        for (let i = 0; i < px.length; i += 4) {
+          const b = px[i];
+          px[i] = px[i + 2];
+          px[i + 2] = b;
+        }
       }
-    }
-    this.ctx.putImageData(new ImageData(px, p.width, p.height), 0, 0);
+      this.ctx!.putImageData(new ImageData(px, p.width, p.height), 0, 0);
+    });
     this.cb.onRgbaDrawn?.();
     this.stats.codec = "native";
     this.tick();
@@ -314,7 +399,11 @@ export class VideoPipeline {
         maxGapMs: Math.round(Math.max(this.maxGap, this.lastDraw ? now - this.lastDraw : 0)),
         keyRequests: this.key.requests,
         dropped: this.dropped,
+        renderMs: this.frames ? +(this.renderSum / this.frames).toFixed(2) : 0,
+        sharpen: this.gl ? `${this.sharpen} ${this.gl.amount.toFixed(2)}` : this.sharpen === "off" ? "off" : "unavailable (2D canvas)",
       };
+      this.renderSum = 0;
+      this.sync = syncMode();
       this.maxGap = 0;
       this.frames = 0;
       this.packets = 0;
@@ -346,6 +435,8 @@ export class VideoPipeline {
 
   close() {
     clearInterval(this.retryTimer);
+    this.gl?.dispose();
+    this.gl = null;
     if (this.decoder && this.decoder.state !== "closed") this.decoder.close();
     this.decoder = null;
   }
