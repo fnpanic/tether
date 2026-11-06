@@ -15,8 +15,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::mem::ManuallyDrop;
+use std::net::{SocketAddr, TcpStream};
+use std::os::unix::io::FromRawFd;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tether_trust::{custom, envelope, policy::Bundle, reqauth, serverkeys::KeyList, VerifyingKey};
@@ -44,7 +48,13 @@ const LIMIT_CUSTOM: u64 = 300 << 10;
 const CUSTOM_MAX_DAYS: u64 = 366;
 const Q_IP_PER_MIN: u32 = 30;
 
+/// Requests served at once; more get 503. Each holds at most one in-memory body (LIMIT_PAGE).
+const MAX_WORKERS: usize = 32;
+/// Longest wait for one read or write on a client connection.
+const IO_TIMEOUT: Duration = Duration::from_secs(30);
+
 static STOP: AtomicBool = AtomicBool::new(false);
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 type Resp = Response<Box<dyn Read + Send>>;
 
@@ -125,6 +135,69 @@ struct BundleMeta {
     issued_at: u64,
 }
 
+/// A request body, read before the state lock is taken: a slow client holds only its own worker.
+enum Body {
+    Mem(Vec<u8>),
+    /// The large uploads (release, diagnostics), streamed to a temp file that is removed on drop
+    /// unless the handler renamed it into place.
+    File(PathBuf, u64),
+}
+
+impl Body {
+    fn bytes(&self, limit: u64) -> Result<&[u8], Resp> {
+        match self {
+            Body::Mem(b) if b.len() as u64 <= limit => Ok(b),
+            _ => Err(too_large()),
+        }
+    }
+
+    fn file(&self) -> Result<(&Path, u64), Resp> {
+        match self {
+            Body::File(p, n) => Ok((p, *n)),
+            Body::Mem(_) => Err(internal("upload not streamed to a file")),
+        }
+    }
+}
+
+impl Drop for Body {
+    fn drop(&mut self) {
+        if let Body::File(p, _) = self {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
+
+/// Fails a body read once its whole-body deadline has passed (IO_TIMEOUT bounds each read).
+struct Deadline<R>(R, Instant);
+
+impl<R: Read> Read for Deadline<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if Instant::now() > self.1 {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.0.read(buf)
+    }
+}
+
+/// Reading `limit` bytes may take a minute plus 64 KiB/s (200 MiB: about 55 min).
+fn body_deadline(limit: u64) -> Instant {
+    Instant::now() + Duration::from_secs(60 + limit / (64 << 10))
+}
+
+/// tiny_http does not expose a request's socket: find it by its peer address among our fds to
+/// set (or with `None` clear) its read and write timeouts.
+fn set_io_timeouts(peer: SocketAddr, t: Option<Duration>) {
+    let Ok(fds) = fs::read_dir("/proc/self/fd") else { return };
+    for fd in fds.flatten().filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok()) {
+        // Borrowed, never closed here; getpeername fails on anything that is not a TCP connection.
+        let s = ManuallyDrop::new(unsafe { TcpStream::from_raw_fd(fd) });
+        if s.peer_addr().is_ok_and(|a| a == peer) {
+            let _ = s.set_read_timeout(t);
+            let _ = s.set_write_timeout(t);
+        }
+    }
+}
+
 struct App {
     data: PathBuf,
     keys: Vec<VerifyingKey>,
@@ -141,7 +214,6 @@ struct App {
     tickets: Vec<Ticket>,
     policy_serial: Option<u64>,
     server_keys_serial: Option<u64>,
-    tmp_seq: u64,
 }
 
 fn now() -> u64 {
@@ -205,11 +277,79 @@ fn read_body(rq: &mut Request, limit: u64) -> Result<Vec<u8>, Resp> {
         return Err(too_large());
     }
     let mut buf = Vec::new();
-    rq.as_reader().take(limit + 1).read_to_end(&mut buf).map_err(|_| text(400, "could not read body"))?;
+    Deadline(rq.as_reader(), body_deadline(limit))
+        .take(limit + 1)
+        .read_to_end(&mut buf)
+        .map_err(|_| text(400, "could not read body"))?;
     if buf.len() as u64 > limit {
         return Err(too_large());
     }
     Ok(buf)
+}
+
+fn tmp_path(data: &Path) -> PathBuf {
+    data.join("tmp").join(format!("{}-{}", std::process::id(), TMP_SEQ.fetch_add(1, Ordering::SeqCst) + 1))
+}
+
+fn check_space(data: &Path, incoming: u64) -> Result<(), Resp> {
+    if disk_free(data).saturating_sub(incoming) < MIN_FREE {
+        return Err(text(507, "insufficient storage"));
+    }
+    Ok(())
+}
+
+/// Streams the body to a new temp file (mode `mode`), enforcing `limit`.
+fn body_to_file(rq: &mut Request, data: &Path, limit: u64, mode: u32) -> Result<Body, Resp> {
+    if rq.body_length().is_some_and(|n| n as u64 > limit) {
+        return Err(too_large());
+    }
+    check_space(data, rq.body_length().map_or(limit, |n| n as u64))?;
+    let tmp = tmp_path(data);
+    let r = (|| -> io::Result<u64> {
+        let mut f = OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
+        let n = io::copy(&mut Deadline(rq.as_reader(), body_deadline(limit)).take(limit + 1), &mut f)?;
+        f.sync_all()?;
+        Ok(n)
+    })();
+    let body = Body::File(tmp, *r.as_ref().unwrap_or(&0));
+    match r {
+        Ok(n) if n <= limit => Ok(body),
+        Ok(_) => Err(too_large()),
+        Err(e) => Err(internal(format!("upload failed: {e}"))),
+    }
+}
+
+/// Reads the body a route takes, before any state is locked: the large uploads to a temp file,
+/// everything else into memory up to the largest in-memory limit (LIMIT_PAGE); each handler
+/// still applies its own limit.
+fn read_request_body(rq: &mut Request, data: &Path) -> Result<Body, Resp> {
+    let path = rq.url().split('?').next().unwrap_or("").to_owned();
+    match rq.method().as_str() {
+        "PUT" if path.starts_with("/api/admin/release/") => body_to_file(rq, data, LIMIT_RELEASE, 0o640),
+        "POST" if path.starts_with("/api/diag/") => body_to_file(rq, data, LIMIT_DIAG, 0o600),
+        _ => read_body(rq, LIMIT_PAGE).map(Body::Mem),
+    }
+}
+
+fn lock(app: &Mutex<App>) -> MutexGuard<'_, App> {
+    app.lock().unwrap_or_else(|e| e.into_inner()) // a panicked request leaves the state usable
+}
+
+/// One request on its own worker thread. Only routing holds the state lock; the body is read
+/// before it and the response written after it, each read and write bounded by IO_TIMEOUT.
+fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
+    let peer = rq.remote_addr().copied();
+    if let Some(p) = peer {
+        set_io_timeouts(p, Some(IO_TIMEOUT));
+    }
+    let resp = match read_request_body(&mut rq, data) {
+        Ok(body) => lock(app).route(&mut rq, &body).unwrap_or_else(|e| e),
+        Err(e) => e,
+    };
+    let _ = rq.respond(resp);
+    if let Some(p) = peer {
+        set_io_timeouts(p, None); // an idle keep-alive connection from the proxy may wait
+    }
 }
 
 fn disk_free(p: &Path) -> u64 {
@@ -372,19 +512,13 @@ impl App {
             policy_serial,
             server_keys_serial,
             started: now(),
-            tmp_seq: 0,
             keys,
             data,
         })
     }
 
-    fn tmp_path(&mut self) -> PathBuf {
-        self.tmp_seq += 1;
-        self.data.join("tmp").join(format!("{}-{}", std::process::id(), self.tmp_seq))
-    }
-
     fn write_atomic(&mut self, dest: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-        let tmp = self.tmp_path();
+        let tmp = tmp_path(&self.data);
         let r = (|| {
             let mut f = OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
             f.write_all(bytes)?;
@@ -402,36 +536,8 @@ impl App {
         self.write_atomic(&self.data.join(name), &bytes, 0o600)
     }
 
-    /// Streams the body to a new temp file (mode `mode`), enforcing `limit`.
-    fn body_to_file(&mut self, rq: &mut Request, limit: u64, mode: u32) -> Result<(PathBuf, u64), Resp> {
-        if rq.body_length().is_some_and(|n| n as u64 > limit) {
-            return Err(too_large());
-        }
-        let tmp = self.tmp_path();
-        let r = (|| -> io::Result<u64> {
-            let mut f = OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
-            let n = io::copy(&mut rq.as_reader().take(limit + 1), &mut f)?;
-            f.sync_all()?;
-            Ok(n)
-        })();
-        match r {
-            Ok(n) if n <= limit => Ok((tmp, n)),
-            Ok(_) => {
-                let _ = fs::remove_file(&tmp);
-                Err(too_large())
-            }
-            Err(e) => {
-                let _ = fs::remove_file(&tmp);
-                Err(internal(format!("upload failed: {e}")))
-            }
-        }
-    }
-
     fn check_space(&self, incoming: u64) -> Result<(), Resp> {
-        if disk_free(&self.data).saturating_sub(incoming) < MIN_FREE {
-            return Err(text(507, "insufficient storage"));
-        }
-        Ok(())
+        check_space(&self.data, incoming)
     }
 
     fn auth(&mut self, rq: &Request, method: &str, url: &str, body: &[u8]) -> Result<(), Resp> {
@@ -456,25 +562,20 @@ impl App {
         Err(text(401, &err))
     }
 
-    fn handle(&mut self, mut rq: Request) {
-        let resp = self.route(&mut rq).unwrap_or_else(|e| e);
-        let _ = rq.respond(resp);
-    }
-
-    fn route(&mut self, rq: &mut Request) -> Result<Resp, Resp> {
+    fn route(&mut self, rq: &mut Request, body: &Body) -> Result<Resp, Resp> {
         let url = rq.url().to_owned();
         let path = url.split('?').next().unwrap_or("");
         let method = rq.method().as_str().to_owned();
         match (method.as_str(), path) {
             ("GET", "/api/policy") => self.get_signed(rq, self.policy_serial, "policy.json", "no policy published"),
             ("GET", "/api/server-keys") => self.get_signed(rq, self.server_keys_serial, "server-keys.json", "no server key list published"),
-            ("POST", "/api/heartbeat") => self.heartbeat(rq),
-            ("POST", "/api/audit/conn") => self.audit_post(rq, "conn"),
-            ("POST", "/api/audit/file") => self.audit_post(rq, "file"),
-            ("POST", "/api/audit/alarm") => self.audit_post(rq, "alarm"),
-            ("POST", p) if p.starts_with("/api/diag/") => self.diag_upload(rq, &p["/api/diag/".len()..]),
+            ("POST", "/api/heartbeat") => self.heartbeat(rq, body),
+            ("POST", "/api/audit/conn") => self.audit_post(rq, body, "conn"),
+            ("POST", "/api/audit/file") => self.audit_post(rq, body, "file"),
+            ("POST", "/api/audit/alarm") => self.audit_post(rq, body, "alarm"),
+            ("POST", p) if p.starts_with("/api/diag/") => self.diag_upload(body, &p["/api/diag/".len()..]),
             ("GET", p) if p.starts_with("/q/") => self.custom_download(rq, &p["/q/".len()..]),
-            (m, p) if p.starts_with("/api/admin/") => self.admin(rq, m, &url, &p["/api/admin/".len()..]),
+            (m, p) if p.starts_with("/api/admin/") => self.admin(rq, body, m, &url, &p["/api/admin/".len()..]),
             _ => Err(not_found()),
         }
     }
@@ -495,13 +596,13 @@ impl App {
             .boxed())
     }
 
-    fn heartbeat(&mut self, rq: &mut Request) -> Result<Resp, Resp> {
+    fn heartbeat(&mut self, rq: &mut Request, body: &Body) -> Result<Resp, Resp> {
         let t = now();
         if !rate_ok(&mut self.ip_hits, client_ip(rq), t, HB_IP_PER_MIN) {
             return Err(text(429, "too many requests"));
         }
-        let body = read_body(rq, LIMIT_HEARTBEAT)?;
-        let hb: Heartbeat = serde_json::from_slice(&body).map_err(|e| text(400, &e.to_string()))?;
+        let body = body.bytes(LIMIT_HEARTBEAT)?;
+        let hb: Heartbeat = serde_json::from_slice(body).map_err(|e| text(400, &e.to_string()))?;
         valid_heartbeat(&hb).map_err(|e| text(400, &e))?;
         if self.devices.get(&hb.uuid).is_some_and(|d| t < d.last_seen + HB_UUID_INTERVAL) {
             return Err(text(429, "too many requests"));
@@ -530,14 +631,14 @@ impl App {
 
     /// `POST /api/audit/<kind>` from a host (unauthenticated, see audit.rs). Success is an empty
     /// 2xx body: the client retries anything else except a 4xx other than 408/429.
-    fn audit_post(&mut self, rq: &mut Request, kind: &str) -> Result<Resp, Resp> {
+    fn audit_post(&mut self, rq: &mut Request, body: &Body, kind: &str) -> Result<Resp, Resp> {
         let t = now();
         let src = client_ip(rq);
         if !rate_ok(&mut self.audit_ip_hits, src.clone(), t, audit::IP_PER_MIN) {
             return Err(text(429, "too many requests"));
         }
-        let body = read_body(rq, audit::LIMIT)?;
-        let (uuid, nonce, mut rec) = audit::parse(kind, &body).map_err(|e| text(400, &e))?;
+        let body = body.bytes(audit::LIMIT)?;
+        let (uuid, nonce, mut rec) = audit::parse(kind, body).map_err(|e| text(400, &e))?;
         if !rate_ok(&mut self.audit_dev_hits, uuid, t, audit::DEVICE_PER_MIN) {
             return Err(text(429, "too many requests"));
         }
@@ -570,20 +671,15 @@ impl App {
         Ok(json(&self.audit.read(since, limit, &device)))
     }
 
-    fn diag_upload(&mut self, rq: &mut Request, ticket: &str) -> Result<Resp, Resp> {
+    fn diag_upload(&mut self, body: &Body, ticket: &str) -> Result<Resp, Resp> {
         let t = now();
         let idx = self
             .tickets
             .iter()
             .position(|k| k.ticket == ticket && k.uploaded.is_none() && t < k.created + TICKET_OPEN)
             .ok_or_else(not_found)?;
-        self.check_space(rq.body_length().map_or(LIMIT_DIAG, |n| n as u64))?;
-        let (tmp, size) = self.body_to_file(rq, LIMIT_DIAG, 0o600)?;
-        let dest = self.data.join("diag").join(format!("{ticket}.zip"));
-        if let Err(e) = fs::rename(&tmp, dest) {
-            let _ = fs::remove_file(&tmp);
-            return Err(internal(e));
-        }
+        let (tmp, size) = body.file()?;
+        fs::rename(tmp, self.data.join("diag").join(format!("{ticket}.zip"))).map_err(internal)?;
         self.tickets[idx].uploaded = Some(t);
         self.tickets[idx].size = Some(size);
         let tickets = self.tickets.clone();
@@ -591,17 +687,16 @@ impl App {
         Ok(empty(204))
     }
 
-    fn admin(&mut self, rq: &mut Request, method: &str, url: &str, rest: &str) -> Result<Resp, Resp> {
+    fn admin(&mut self, rq: &mut Request, body: &Body, method: &str, url: &str, rest: &str) -> Result<Resp, Resp> {
         if self.keys.is_empty() {
             return Err(text(503, "admin API disabled: ADMIN_PUB_KEY not set"));
         }
         if let Some(rel) = rest.strip_prefix("release/") {
             let dest = release_path(&self.data, rel)?;
             return match method {
-                "PUT" => self.put_release(rq, url, &dest),
+                "PUT" => self.put_release(rq, body, url, &dest),
                 "DELETE" => {
-                    let body = read_body(rq, LIMIT_SMALL)?;
-                    self.auth(rq, method, url, &body)?;
+                    self.auth(rq, method, url, body.bytes(LIMIT_SMALL)?)?;
                     self.delete_release(&dest)
                 }
                 _ => Err(not_found()),
@@ -618,19 +713,19 @@ impl App {
             ("GET", r) if r.starts_with("diag/") || r.starts_with("policy-history/") => LIMIT_SMALL,
             _ => return Err(not_found()),
         };
-        let body = read_body(rq, limit)?;
-        self.auth(rq, method, url, &body)?;
+        let body = body.bytes(limit)?;
+        self.auth(rq, method, url, body)?;
         match (method, rest) {
-            ("PUT", "policy") => self.put_policy(&body),
-            ("PUT", "server-keys") => self.put_server_keys(&body),
+            ("PUT", "policy") => self.put_policy(body),
+            ("PUT", "server-keys") => self.put_server_keys(body),
             ("PUT", "download-page") => {
                 self.check_space(body.len() as u64)?;
                 let dest = self.data.join("download/index.html");
-                self.write_atomic(&dest, &body, 0o640).map_err(internal)?;
+                self.write_atomic(&dest, body, 0o640).map_err(internal)?;
                 Ok(empty(204))
             }
-            ("POST", "diag-ticket") => self.new_ticket(&body),
-            ("PUT", r) if r.starts_with("custom/") => self.put_custom(&r["custom/".len()..], &body),
+            ("POST", "diag-ticket") => self.new_ticket(body),
+            ("PUT", r) if r.starts_with("custom/") => self.put_custom(&r["custom/".len()..], body),
             ("DELETE", r) if r.starts_with("custom/") => self.delete_custom(&r["custom/".len()..]),
             ("GET", "custom") => {
                 let list: Vec<_> = self
@@ -845,23 +940,12 @@ impl App {
         Ok(resp)
     }
 
-    fn put_release(&mut self, rq: &mut Request, url: &str, dest: &Path) -> Result<Resp, Resp> {
-        if rq.body_length().is_some_and(|n| n as u64 > LIMIT_RELEASE) {
-            return Err(too_large());
-        }
-        self.check_space(rq.body_length().map_or(LIMIT_RELEASE, |n| n as u64))?;
-        let (tmp, _) = self.body_to_file(rq, LIMIT_RELEASE, 0o640)?;
-        let r = with_mapped(&tmp, |body| self.auth(rq, "PUT", url, body))
-            .map_err(internal)
-            .and_then(|r| r)
-            .and_then(|()| {
-                mkdirs(dest.parent().expect("under download/"), 0o750).map_err(internal)?;
-                fs::rename(&tmp, dest).map_err(internal)
-            });
-        if r.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        r.map(|()| empty(204))
+    fn put_release(&mut self, rq: &mut Request, body: &Body, url: &str, dest: &Path) -> Result<Resp, Resp> {
+        let (tmp, _) = body.file()?;
+        with_mapped(tmp, |body| self.auth(rq, "PUT", url, body)).map_err(internal)??;
+        mkdirs(dest.parent().expect("under download/"), 0o750).map_err(internal)?;
+        fs::rename(tmp, dest).map_err(internal)?;
+        Ok(empty(204))
     }
 
     fn delete_release(&self, dest: &Path) -> Result<Resp, Resp> {
@@ -997,7 +1081,7 @@ fn main() {
         _ => d,
     };
     let (audit_days, audit_max) = (env_num("AUDIT_RETENTION_DAYS", 90), env_num("AUDIT_MAX_MB", 50).saturating_mul(1 << 20));
-    let mut app = App::open(data, keys, audit_days, audit_max).unwrap_or_else(|e| {
+    let mut app = App::open(data.clone(), keys, audit_days, audit_max).unwrap_or_else(|e| {
         eprintln!("data dir: {e}");
         std::process::exit(1);
     });
@@ -1014,17 +1098,35 @@ fn main() {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
     }
+    let app = Arc::new(Mutex::new(app));
+    let data = Arc::new(data);
+    let busy = Arc::new(AtomicUsize::new(0));
     let mut last_maint = now();
     while !STOP.load(Ordering::SeqCst) {
         match server.recv_timeout(Duration::from_secs(1)) {
-            Ok(Some(rq)) => app.handle(rq),
+            Ok(Some(rq)) if busy.load(Ordering::SeqCst) >= MAX_WORKERS => {
+                let _ = rq.respond(text(503, "busy"));
+            }
+            Ok(Some(rq)) => {
+                busy.fetch_add(1, Ordering::SeqCst);
+                let (app, data, busy) = (app.clone(), data.clone(), busy.clone());
+                std::thread::spawn(move || {
+                    serve(&app, &data, rq);
+                    busy.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
             Ok(None) => {}
             Err(e) => eprintln!("accept: {e}"),
         }
         if now() >= last_maint + 60 {
-            app.maintain();
+            lock(&app).maintain();
             last_maint = now();
         }
     }
-    app.flush_devices();
+    // Let running requests finish (each read and write is bounded by IO_TIMEOUT).
+    let t = Instant::now();
+    while busy.load(Ordering::SeqCst) > 0 && t.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    lock(&app).flush_devices();
 }

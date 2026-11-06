@@ -10,21 +10,25 @@
 (routes) {
   # Per-pod routing: both peers of a session must land on the same hbbr pod, a host's
   # replies on the same hbbs pod. The ordinal maps to the per-pod Service; no streaming
-  # timeout (sessions last hours), no buffering.
+  # timeout (sessions last hours), no buffering. X-Real-IP (read by hbbr) is overwritten with
+  # the peer Caddy saw; hbbs takes the last X-Forwarded-For hop, which Caddy sets the same way.
   @hbbs path_regexp hbbs ^/ws/id/([0-9]{1,3})$
   handle @hbbs {
     reverse_proxy {{ $fn }}-hbbs-{re.hbbs.1}:21118 {
+      header_up X-Real-IP {remote_host}
       flush_interval -1
     }
   }
   handle /ws/id {
     reverse_proxy {{ $fn }}-hbbs-0:21118 {
+      header_up X-Real-IP {remote_host}
       flush_interval -1
     }
   }
   @hbbr path_regexp hbbr ^/ws/relay/([0-9]{1,3})$
   handle @hbbr {
     reverse_proxy {{ $fn }}-hbbr-{re.hbbr.1}:21119 {
+      header_up X-Real-IP {remote_host}
       flush_interval -1
     }
   }
@@ -35,7 +39,10 @@
   }
   {{- if .Values.api.enabled }}
   handle /api/* {
-    reverse_proxy {{ $fn }}-api:21120
+    # Small bodies are read whole first: a slow client waits in Caddy, not in tether-api.
+    reverse_proxy {{ $fn }}-api:21120 {
+      request_buffers 512k
+    }
   }
   handle /q/* {
     reverse_proxy {{ $fn }}-api:21120
