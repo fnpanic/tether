@@ -4,59 +4,10 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
-## [Unreleased]
-
-### Fixed
-- **Host session: the app icon toggles only the connection window.** Clicking Tether on the
-  taskbar or in the Dock during a host session restored the main window together with the
-  connection window, and the next click minimized only the connection window, so the main window
-  stayed in the user's way. Windows: the main window is now minimized and taken off the taskbar
-  for the session (the connection window's button is the only Tether button), starting Tether
-  again (pinned icon, Start menu) toggles the connection window, and the main window is back on
-  the taskbar, minimized, when the last session ends. macOS: the connection window answers the
-  Dock click before its restore animation (the main process gave up after 500 ms and opened the
-  main window too), and the main process never opens the main window on a Dock click while a host
-  session is active.
-
-- **Keyboard only partly working after Alt+Tab, the Win key or Alt+Space.** A key whose release
-  the session window never saw (focus taken by the local Alt+Tab, Start menu, PowerToys Run or
-  Windows search) stayed pressed on the remote computer, and later presses of that modifier were
-  dropped. Every held key is now released on the remote side when the window loses the focus.
-- Alt+Space in a session opened PowerToys Run / Windows search on the technician's PC.
-
-
-### Added
-- **Keyboard between PC and Mac.** Towards a Mac, Ctrl works as ⌘ (Ctrl+C, Ctrl+V…), the Win key
-  as Control, Ctrl+Y as redo, Home/End as line start/end, Ctrl+arrows as word jumps, Alt+F4 as ⌘Q,
-  and AltGr characters of German and other layouts (@ € [ ] { } \ | ~) arrive as typed. From a Mac
-  the other way round (⌘ = Ctrl, ⌘←/→ = Home/End…). On by default when the platforms differ,
-  per session in the new **Keyboard** menu of the session toolbar, which also sends ⌘⌥Esc (Force
-  Quit) to a Mac. See docs/keyboard.md.
-- **System keys go to the remote computer** (Windows technician app): while a session window is
-  active, Win, Win+R, Alt+Space, Alt+Esc, Ctrl+Esc, Print… reach the remote computer instead of
-  this PC (low-level keyboard hook, only while the window has the focus and no text field is
-  active). Alt+Tab stays local unless **Keyboard → Send Alt+Tab** is on. Ctrl+Alt+Home gives the
-  keys back to this PC until the next click into the picture. Turn off with **Keyboard → Send
-  system keys**.
-- The session shows when the person at the remote computer has turned off control of mouse and
-  keyboard.
-
-- **Viewer: sharpening.** The remote picture is scaled to the window and sharpened in one WebGL2
-  pass (a luma unsharp mask with a noise gate, clamped to the neighbourhood so it cannot make
-  halos or ringing; frames are uploaded from the decoder without a CPU copy). Toolbar → Image
-  quality → **Sharpening**: **Auto** (default: only when the picture is scaled), **Strong**,
-  **Off** (the previous 2D canvas path). Remembered per user on the PC. Without WebGL2, or when the
-  GPU context is lost, the viewer falls back to the 2D canvas by itself. Measurements in
-  `docs/performance.md` ("Sharpening"); fixture `apps/desktop/e2e/sharpen-quality.mjs`, session
-  check `apps/desktop/e2e/sharpen-e2e.mjs`.
-- Statistics overlay: draw time per picture and the sharpening in use. Debug measurement mode
-  (`localStorage["tether.renderSync"] = "1"`): each draw waits for the GPU, so the draw time includes it.
-
-
 ## [0.5.17] — 2026-11-06
 
-Tether Manage 0.5.5; Tether / TetherQS client changes for the next release; hbbs and the Caddyfile
-on the relays.
+Tether / TetherQS 0.5.17 (Windows and macOS), Tether Manage 0.5.5; on the relays hbbs, tether-api and
+the Caddyfile.
 
 ### Security
 - **Tether Manage: policy serial only from signed documents.** The next policy serial came from
@@ -87,6 +38,23 @@ on the relays.
   tether-api are unchanged.
 
 ### Fixed
+- **Host session: the app icon toggles only the connection window.** Clicking Tether on the
+  taskbar or in the Dock during a host session restored the main window together with the
+  connection window, and the next click minimized only the connection window, so the main window
+  stayed in the user's way. Windows: the main window is now minimized and taken off the taskbar
+  for the session (the connection window's button is the only Tether button), starting Tether
+  again (pinned icon, Start menu) toggles the connection window, and the main window is back on
+  the taskbar, minimized, when the last session ends. macOS: the connection window answers the
+  Dock click before its restore animation (the main process gave up after 500 ms and opened the
+  main window too), and the main process never opens the main window on a Dock click while a host
+  session is active.
+
+- **Keyboard only partly working after Alt+Tab, the Win key or Alt+Space.** A key whose release
+  the session window never saw (focus taken by the local Alt+Tab, Start menu, PowerToys Run or
+  Windows search) stayed pressed on the remote computer, and later presses of that modifier were
+  dropped. Every held key is now released on the remote side when the window loses the focus.
+- Alt+Space in a session opened PowerToys Run / Windows search on the technician's PC.
+
 - **No more freezes in ~3 s steps when the screen content suddenly gets heavy** (seen on a Mac
   host with H.265: a switch to full-screen noise or photos froze the picture 4 times for ~2.7 s).
   The host's video loop now treats a frame the connection has not taken within 1 s as a full
@@ -100,6 +68,32 @@ on the relays.
   Clean links still reach 60 fps within about a second.
 
 ### Added
+- **Keyboard between PC and Mac.** Towards a Mac, Ctrl works as ⌘ (Ctrl+C, Ctrl+V…), the Win key
+  as Control, Ctrl+Y as redo, Home/End as line start/end, Ctrl+arrows as word jumps, Alt+F4 as ⌘Q,
+  and AltGr characters of German and other layouts (@ € [ ] { } \ | ~) arrive as typed. From a Mac
+  the other way round (⌘ = Ctrl, ⌘←/→ = Home/End…). On by default when the platforms differ,
+  per session in the new **Keyboard** menu of the session toolbar, which also sends ⌘⌥Esc (Force
+  Quit) to a Mac. See docs/keyboard.md.
+- **System keys go to the remote computer** (Windows technician app): while a session window is
+  active, Win, Win+R, Alt+Space, Alt+Esc, Ctrl+Esc, Print… reach the remote computer instead of
+  this PC (low-level keyboard hook, only while the window has the focus and no text field is
+  active). Alt+Tab stays local unless **Keyboard → Send Alt+Tab** is on. Ctrl+Alt+Home gives the
+  keys back to this PC until the next click into the picture. Turn off with **Keyboard → Send
+  system keys**.
+- The session shows when the person at the remote computer has turned off control of mouse and
+  keyboard.
+
+- **Viewer: sharpening.** The remote picture is scaled to the window and sharpened in one WebGL2
+  pass (a luma unsharp mask with a noise gate, clamped to the neighbourhood so it cannot make
+  halos or ringing; frames are uploaded from the decoder without a CPU copy). Toolbar → Image
+  quality → **Sharpening**: **Auto** (default: only when the picture is scaled), **Strong**,
+  **Off** (the previous 2D canvas path). Remembered per user on the PC. Without WebGL2, or when the
+  GPU context is lost, the viewer falls back to the 2D canvas by itself. Measurements in
+  `docs/performance.md` ("Sharpening"); fixture `apps/desktop/e2e/sharpen-quality.mjs`, session
+  check `apps/desktop/e2e/sharpen-e2e.mjs`.
+- Statistics overlay: draw time per picture and the sharpening in use. Debug measurement mode
+  (`localStorage["tether.renderSync"] = "1"`): each draw waits for the GPU, so the draw time includes it.
+
 - **Session audit log.** tether-api now accepts the connection, file-transfer and alarm records
   hosts post (`POST /api/audit/conn|file|alarm`; until now every session logged "Audit post
   dropped … 404") and stores them as daily JSON lines, 90 days or 50 MB (`AUDIT_RETENTION_DAYS`,
