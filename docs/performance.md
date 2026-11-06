@@ -514,6 +514,14 @@ The older host was worse, sharpening off was worse, and every run was worse than
 The VM reaches the relays only through the TLS-inspecting test proxy (`tools/bench/corp_proxy.py`,
 mitmdump), which had been running since 04:15: it kept every WebSocket message of a connection
 in memory and appended one JSON line per video frame (116 MB log). It now logs the first 20
-frames of a connection, counts the rest and keeps none. A clean rerun was cut short (Claude
-Code's low-memory reaper), so the after-number is still open; the VM end-to-end test against
-0.5.18 through the fixed proxy passed 5/5.
+frames of a connection, counts the rest and keeps none. That was not the whole story: a clean
+6-minute run against 0.5.18 through the fixed proxy still showed noise at +32.7 / +41.8 s with
+reconnects. The per-minute host line new in 0.5.18 showed where the time goes: AV1 encode avg
+4-10 ms (p95 10-55 ms), 4.8 Mbit/s, and `video backlog: frame not taken by the connection for
+1246 ms` - the host waits for the network, not for the encoder. The session runs over the
+internet relays (`wss://tether-desk2.duckdns.org/ws/relay` on both sides; the proxy stayed at 1 %
+CPU, so it was not the limit either): VM upload to the Oracle relay and back down to the viewer
+on the same home line, which that evening also carried a Teams test call and the MirrorMagic
+camera stream. Every Tether version is limited the same way on that path (the 0.5.16 host was
+no better), and the backlog cut keeps the stream alive instead of queueing. To compare versions,
+run them back to back on a quiet line; the VM end-to-end test against 0.5.18 passed 5/5.
