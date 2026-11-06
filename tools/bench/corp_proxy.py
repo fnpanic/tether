@@ -47,8 +47,19 @@ def websocket_start(flow: http.HTTPFlow):
     _log(event="websocket_open", host=flow.request.host, path=flow.request.path, tls_inspected=flow.client_conn.tls_established)
 
 
+# Frame lines only for the first frames of a connection; the rest are counted. Every frame on
+# the log, and mitmproxy keeping every message, slowed a long video session through the proxy
+# down more and more (seconds of delay after hours; an artifact of this test proxy).
+FRAMES_LOGGED = 20
+_frames: dict[str, int] = {}
+
+
 def websocket_message(flow: http.HTTPFlow):
     msg = flow.websocket.messages[-1]
+    n = _frames[flow.id] = _frames.get(flow.id, 0) + 1
+    flow.websocket.messages.clear()
+    if n > FRAMES_LOGGED:
+        return
     data = msg.content or b""
     # What the inspecting proxy can see of a Tether frame: size and a short prefix only.
     printable = sum(32 <= b < 127 for b in data[:64]) / max(1, min(64, len(data)))
@@ -62,4 +73,4 @@ def websocket_message(flow: http.HTTPFlow):
 
 
 def websocket_end(flow: http.HTTPFlow):
-    _log(event="websocket_close", path=flow.request.path, frames=len(flow.websocket.messages))
+    _log(event="websocket_close", path=flow.request.path, frames=_frames.pop(flow.id, 0))
