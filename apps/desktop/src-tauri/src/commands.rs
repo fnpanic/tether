@@ -8,7 +8,7 @@ use tauri::{
     AppHandle,
 };
 
-use crate::{app, fluxrt, security, sink};
+use crate::{app, fluxrt, keys, security, sink};
 
 type R<T> = Result<T, String>;
 
@@ -236,30 +236,40 @@ fn session_mouse(
     with_session(&key, |s| s.send_mouse(mask, x, y, alt, ctrl, shift, command))
 }
 
-/// `code` is a DOM `KeyboardEvent.code` (layout independent physical key).
+/// `code` is a DOM `KeyboardEvent.code` (layout independent physical key). Goes through the
+/// PC/Mac shortcut mapping (`keys.rs`).
 #[tauri::command]
-fn session_key(
-    key: String,
-    code: String,
-    down: bool,
-    lock_modes: i32,
-    character: Option<String>,
-    mode: Option<String>,
-) -> R<()> {
-    let usb_hid = rdev::usb_hid_keycode_from_key(rdev::chrome_key_from_code(&code)).unwrap_or(0);
-    if usb_hid == 0 {
+fn session_key(key: String, code: String, down: bool, lock_modes: i32, character: Option<String>) -> R<()> {
+    let k = rdev::chrome_key_from_code(&code);
+    if rdev::usb_hid_keycode_from_key(k).unwrap_or(0) == 0 {
         return Ok(());
     }
-    with_session(&key, |s| {
-        s.handle_flutter_key_event(
-            hbb_common::SessionID::nil(),
-            mode.as_deref().unwrap_or("map"),
-            character.as_deref().unwrap_or(""),
-            usb_hid as i32,
-            lock_modes,
-            down,
-        )
-    })
+    with_session(&key, |_| keys::webview_input(&key, k, down, character.as_deref().unwrap_or(""), lock_modes))
+}
+
+/// Keyboard settings of a session window (toolbar); every argument is optional. `pause` is set
+/// while a text field of the window has the focus (the system-key hook lets keys through).
+#[tauri::command]
+fn session_keyboard(
+    key: String,
+    shortcuts: Option<bool>,
+    system_keys: Option<bool>,
+    alt_tab_remote: Option<bool>,
+    pause: Option<bool>,
+) -> R<keys::Settings> {
+    with_session(&key, |_| keys::settings(&key, shortcuts, system_keys, alt_tab_remote, pause))
+}
+
+/// Key-ups for every key still held on the remote side.
+#[tauri::command]
+fn session_release_keys(key: String) {
+    keys::release(&key);
+}
+
+/// Cmd+Option+Esc (Force Quit Applications) on a Mac host.
+#[tauri::command]
+fn session_mac_force_quit(key: String) -> R<()> {
+    with_session(&key, |_| keys::mac_force_quit(&key))
 }
 
 #[tauri::command]
@@ -534,6 +544,9 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         session_login,
         session_mouse,
         session_key,
+        session_keyboard,
+        session_release_keys,
+        session_mac_force_quit,
         session_type_text,
         session_ctrl_alt_del,
         session_lock_screen,

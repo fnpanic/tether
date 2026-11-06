@@ -5,6 +5,7 @@ mod cli;
 mod commands;
 mod diag;
 mod fluxrt;
+mod keys;
 mod netpolicy;
 mod policy;
 mod recording;

@@ -167,6 +167,12 @@ works; Alt+Tab leaves; a lone Alt and Alt+F4 on TetherQS do not stall it).
   - message, password and value lengths are bounded;
   - connection types are an explicit enum.
 - DevTools are not compiled into release builds.
+- Keyboard hook (Windows technician app, docs/keyboard.md): a low-level keyboard hook exists only
+  while a session window has the focus with "Send system keys" on and no text field active; it is
+  removed on focus loss, minimize, close and Ctrl+Alt+Home. Keys are only forwarded to that
+  session (as typing in the window would), never stored or logged. Ctrl+Alt+Del cannot be
+  captured. `TETHER_DEV_KEYLOG` (host logs received keys instead of typing them) and the other
+  `TETHER_DEV_*` test switches exist in debug builds only.
 - Session video arrives on a per-window binary channel. One window cannot read another session's
   frames.
 
