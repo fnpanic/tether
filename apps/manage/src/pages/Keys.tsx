@@ -3,6 +3,7 @@ import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { useApp } from "../App";
 import { invoke } from "../lib/ipc";
 import { Button, Card, CopyField, ErrorText, Label, PageHeader, TextField } from "../components/ui";
+import { ServerKey } from "../components/server-key";
 
 export function Keys() {
   const { state, reload, toast } = useApp();
@@ -37,10 +38,12 @@ export function Keys() {
           <CopyField label="update public key" value={state.updater_pub ?? ""} />
         </Card>
 
+        <ServerKey />
+
         <Card>
           <h2 className="text-headline font-semibold">Backup</h2>
           <p className="mt-1 text-caption text-muted">
-            The backup is encrypted with your current passphrase. Without it, no one can use the keys and you cannot publish policies or updates. Keys are stored in {state.data_dir}.
+            The backup is encrypted with your current passphrase. Without it, no one can use the keys and you cannot publish policies or updates. It also holds server keys generated here: export it again after generating one. Keys are stored in {state.data_dir}.
           </p>
           <div className="mt-4 flex flex-wrap items-end gap-2">
             <Button

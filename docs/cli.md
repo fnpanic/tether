@@ -15,7 +15,7 @@ list). Arguments Tether does not know are passed to the RustDesk core unchanged 
 | `--get-id` | Print this device's Tether ID | the ID |
 | `--version` | Print the version | e.g. `0.3.1` |
 | `--check-update` | Check the update channel now | `update 0.3.1 available (installed 0.3.0)` or `0.3.1 is up to date` |
-| `--policy-refresh` | Fetch the organisation policy now and apply it | `policy serial 12 (defaults, profile, group:pilot)` |
+| `--policy-refresh` | Fetch the organisation policy and the server key list ([key-rotation.md](key-rotation.md)) now and apply them | `policy serial 12 (defaults, profile, group:pilot)` |
 | `--diagnostics <out.zip>` | Write a diagnostics archive ([troubleshooting.md](troubleshooting.md#export-diagnostics)) | `wrote <out.zip>` |
 | `--help`, `-h`, `/?` | Show the help | the help text |
 

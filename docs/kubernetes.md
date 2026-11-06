@@ -50,6 +50,7 @@ Use the production key pair (the same as on the VMs) or clients will not trust t
 | --- | --- | --- |
 | `publicUrl` | `wss://relay.example.com` | Base URL clients reach the proxy at; relay URLs handed out are `<publicUrl>/ws/relay/<n>`. |
 | `key.existingSecret` / `key.privateKey` | – | Secret with key `id_ed25519`, or the key itself. Required. |
+| `key.accept` | – | More public keys hbbs and hbbr accept (`KEYS_ACCEPT`, comma-separated) during a server key rotation ([key-rotation.md](key-rotation.md)). |
 | `hbbs.replicas` | 2 | Independent rendezvous servers at `/ws/id/<n>`. |
 | `hbbs.drainSeconds` | 2 | Not-ready time before a terminating hbbs exits. |
 | `hbbs.extraRelays` | `[]` | Relays outside the cluster, `<address>[\|<health URL>]` (e.g. the VMs). |

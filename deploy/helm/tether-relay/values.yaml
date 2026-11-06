@@ -17,6 +17,9 @@ key:
   existingSecret: ""
   # Or the private key itself (base64, 64 bytes); the chart then creates the Secret.
   privateKey: ""
+  # More public keys hbbs and hbbr accept (KEYS_ACCEPT, comma-separated) during a server key
+  # rotation: the old key while the new one signs (docs/key-rotation.md).
+  accept: ""
 
 hbbs:
   # Each pod is an independent rendezvous server at <publicUrl>/ws/id/<n> (/ws/id = pod 0).

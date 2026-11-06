@@ -1,9 +1,13 @@
 //! Minimal policy client for the `customer` profile (docs/api.md): fetch the signed bundle,
 //! verify it against the compiled-in admin key(s), reject older serials, cache it, resolve it and
-//! apply the core options. Heartbeat after every check.
+//! apply the core options. Heartbeat after every check. The signed server key list
+//! (docs/key-rotation.md) is fetched, cached (`server-keys.json`) and applied the same way.
 
 use std::{
-    sync::{Mutex, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, RwLock,
+    },
     time::Duration,
 };
 
@@ -11,6 +15,7 @@ use hbb_common::config::{Config, LocalConfig, DEFAULT_SETTINGS, OVERWRITE_SETTIN
 use tether_trust::{
     envelope,
     policy::{parse_servers, resolve_with, server_host, Bundle, Effective, FLOOR, PROFILE_CUSTOMER, SERVERS_LIST, DIRECT},
+    serverkeys,
     VerifyingKey,
 };
 
@@ -158,8 +163,53 @@ fn apply_core(eff: &Effective) {
     }
 }
 
+/// Serial of the applied server key list (heartbeat `server_keys_serial`; 0 = none).
+static SERVER_KEYS_SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// Cached server key list → the core's presented and trusted server keys (none: the compiled-in
+/// key only). Re-run on every check so expiries take effect.
+fn apply_server_keys(keys: &[VerifyingKey]) {
+    let list = serverkeys::load(&Config::path("server-keys.json"), keys);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let active = list.as_ref().map(|l| l.active(now)).unwrap_or_default();
+    SERVER_KEYS_SERIAL.store(list.map_or(0, |l| l.serial), Ordering::Relaxed);
+    let mut cur = hbb_common::config::POLICY_SERVER_KEYS.write().unwrap();
+    if *cur != active {
+        hbb_common::log::info!("server keys: {active:?}");
+        *cur = active;
+    }
+}
+
+/// `GET /api/server-keys` from the first server that answers; a newer list replaces the cache.
+fn fetch_server_keys(keys: &[VerifyingKey]) -> Result<(), String> {
+    let serial = SERVER_KEYS_SERIAL.load(Ordering::Relaxed);
+    let client = http()?;
+    let mut resp = Err("no server".to_owned());
+    for base in base_urls() {
+        resp = client.get(format!("{base}/api/server-keys")).header("If-None-Match", format!("\"{serial}\"")).send().map_err(|e| e.to_string());
+        if resp.is_ok() {
+            break;
+        }
+    }
+    let resp = resp?;
+    match resp.status().as_u16() {
+        304 | 404 => return Ok(()),
+        200 => {}
+        s => return Err(format!("server key list fetch: HTTP {s}")),
+    }
+    let raw = resp.bytes().map_err(|e| e.to_string())?;
+    if raw.len() > 16 * 1024 {
+        return Err("server key list too large".into());
+    }
+    if let Some(l) = serverkeys::accept(&Config::path("server-keys.json"), &raw, keys)? {
+        hbb_common::log::info!("server key list {} applied", l.serial);
+    }
+    Ok(())
+}
+
 /// Before the core starts: last verified policy (or built-in defaults).
 pub fn load_cached() {
+    apply_server_keys(&trusted_keys());
     let cached = std::fs::read(Config::path("policy.json"))
         .ok()
         .and_then(|raw| open(&raw, &trusted_keys()).ok());
@@ -201,7 +251,7 @@ fn fetch(keys: &[VerifyingKey]) -> Result<bool, String> {
 
 fn heartbeat() -> Result<(), String> {
     let base = base_url().ok_or("no server")?;
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "uuid": device_uuid(),
         "id": librustdesk::ui::api::get_id(),
         "profile": PROFILE_CUSTOMER,
@@ -209,6 +259,11 @@ fn heartbeat() -> Result<(), String> {
         "os": format!("{} {}", std::env::consts::OS, hbb_common::whoami::distro()).chars().take(64).collect::<String>(),
         "serial": current().serial,
     });
+    // Only with a list: relay APIs from before key rotation reject unknown fields.
+    let keys_serial = SERVER_KEYS_SERIAL.load(Ordering::Relaxed);
+    if keys_serial > 0 {
+        body["server_keys_serial"] = serde_json::json!(keys_serial);
+    }
     http()?
         .post(format!("{base}/api/heartbeat"))
         .json(&body)
@@ -226,6 +281,10 @@ pub fn spawn(on_change: impl Fn() + Send + 'static) {
         return;
     }
     std::thread::spawn(move || loop {
+        if let Err(e) = fetch_server_keys(&keys) {
+            hbb_common::log::warn!("server key list: {e}");
+        }
+        apply_server_keys(&keys);
         match fetch(&keys) {
             Ok(true) => on_change(),
             Ok(false) => {}

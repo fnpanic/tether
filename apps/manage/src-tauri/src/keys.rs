@@ -1,4 +1,5 @@
-//! Admin (Ed25519) and updater (minisign) keys, sealed at rest with argon2id + XChaCha20-Poly1305.
+//! Admin (Ed25519), updater (minisign) and server (Ed25519, hbbs/hbbr `id_ed25519`) keys, sealed at
+//! rest with argon2id + XChaCha20-Poly1305.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -13,6 +14,8 @@ const AAD: &[u8] = b"tether-manage-keys-v1";
 pub struct Keys {
     pub admin: SigningKey,
     pub updater: minisign::SecretKey,
+    /// Server key pairs generated here for a key rotation (docs/key-rotation.md), oldest first.
+    pub server: Vec<SigningKey>,
 }
 
 /// On-disk (and backup) format.
@@ -32,6 +35,9 @@ struct Sealed {
 struct Plain {
     admin: String,
     updater: String,
+    /// Older versions of Tether Manage ignore it (no `deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    server: Vec<String>,
 }
 
 fn derive(pass: &str, salt: &[u8], m_kib: u32, t: u32, p: u32) -> Result<[u8; 32], String> {
@@ -50,7 +56,31 @@ fn d64(s: &str) -> Result<Vec<u8>, String> {
 impl Keys {
     pub fn generate() -> Result<Self, String> {
         let kp = minisign::KeyPair::generate_unencrypted_keypair().map_err(|e| e.to_string())?;
-        Ok(Keys { admin: tether_trust::generate_key(), updater: kp.sk })
+        Ok(Keys { admin: tether_trust::generate_key(), updater: kp.sk, server: Vec::new() })
+    }
+
+    /// A new server key pair, kept in `server`. Like hbbs, no `/` in the public key (it can appear
+    /// in `id@server?key=` links).
+    pub fn add_server_key(&mut self) -> String {
+        let k = loop {
+            let k = tether_trust::generate_key();
+            if !tether_trust::key_to_b64(&k.verifying_key()).contains('/') {
+                break k;
+            }
+        };
+        self.server.push(k);
+        tether_trust::key_to_b64(&self.server.last().unwrap().verifying_key())
+    }
+
+    pub fn server_pubs(&self) -> Vec<String> {
+        self.server.iter().map(|k| tether_trust::key_to_b64(&k.verifying_key())).collect()
+    }
+
+    /// `(id_ed25519, id_ed25519.pub)` for hbbs/hbbr: base64 of the 64-byte libsodium secret key
+    /// (seed + public key) and of the public key, as hbbs writes them.
+    pub fn server_key_files(&self, public: &str) -> Option<(String, String)> {
+        let k = self.server.iter().find(|k| tether_trust::key_to_b64(&k.verifying_key()) == public)?;
+        Some((B64.encode(k.to_keypair_bytes()), public.to_owned()))
     }
 
     pub fn admin_pub(&self) -> String {
@@ -75,6 +105,7 @@ impl Keys {
         let mut plain = serde_json::to_vec(&Plain {
             admin: B64.encode(self.admin.to_bytes()),
             updater: B64.encode(self.updater.to_bytes()),
+            server: self.server.iter().map(|k| B64.encode(k.to_bytes())).collect(),
         })
         .map_err(|e| e.to_string())?;
         let ct = XChaCha20Poly1305::new((&key).into())
@@ -119,7 +150,12 @@ impl Keys {
         let p = parsed.map_err(|_| "the key file is damaged".to_owned())?;
         let admin: [u8; 32] = d64(&p.admin)?.try_into().map_err(|_| "the key file is damaged".to_owned())?;
         let updater = minisign::SecretKey::from_bytes(&d64(&p.updater)?).map_err(|_| "the key file is damaged".to_owned())?;
-        Ok(Keys { admin: SigningKey::from_bytes(&admin), updater })
+        let mut server = Vec::new();
+        for k in &p.server {
+            let b: [u8; 32] = d64(k)?.try_into().map_err(|_| "the key file is damaged".to_owned())?;
+            server.push(SigningKey::from_bytes(&b));
+        }
+        Ok(Keys { admin: SigningKey::from_bytes(&admin), updater, server })
     }
 
     /// Tauri updater signature for `data` named `file_name`: base64 of the minisign signature
@@ -153,6 +189,26 @@ mod tests {
         // Private key material never appears in the sealed file.
         let text = String::from_utf8(sealed).unwrap();
         assert!(!text.contains(&B64.encode(k.admin.to_bytes())));
+    }
+
+    #[test]
+    fn server_keys_are_sealed_and_written_as_hbbs_expects() {
+        let mut k = Keys::generate().unwrap();
+        let old_format = k.seal("correct horse").unwrap();
+        assert!(Keys::open(&old_format, "correct horse").unwrap().server.is_empty());
+        let public = k.add_server_key();
+        assert!(!public.contains('/'));
+        let sealed = k.seal("correct horse").unwrap();
+        let back = Keys::open(&sealed, "correct horse").unwrap();
+        assert_eq!(back.server_pubs(), [public.clone()]);
+        let (secret, pub_file) = back.server_key_files(&public).unwrap();
+        assert_eq!(pub_file, public);
+        // hbbs `gen_sk`: 64 bytes, the public key is the second half.
+        let raw = B64.decode(&secret).unwrap();
+        assert_eq!(raw.len(), 64);
+        assert_eq!(B64.encode(&raw[32..]), public);
+        assert!(!String::from_utf8(sealed).unwrap().contains(&secret[..20]));
+        assert!(back.server_key_files("unknown").is_none());
     }
 
     /// Mirrors tauri-plugin-updater: base64-decode pubkey and signature, parse the minisign

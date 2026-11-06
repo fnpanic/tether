@@ -7,11 +7,13 @@
 //! - [`policy`]: policy bundle, feature registry, resolution into effective settings.
 //! - [`version`]: version ordering for update enforcement.
 //! - [`custom`]: signed custom TetherQS apps (trailer appended to the exe, distribution tokens).
+//! - [`serverkeys`]: signed list of accepted server keys (server key rotation).
 
 pub mod custom;
 pub mod envelope;
 pub mod policy;
 pub mod reqauth;
+pub mod serverkeys;
 pub mod version;
 
 pub use ed25519_dalek::{SigningKey, VerifyingKey};

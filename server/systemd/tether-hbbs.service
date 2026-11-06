@@ -9,6 +9,8 @@ User=tether
 Group=tether
 WorkingDirectory=/var/lib/tether
 EnvironmentFile=-/etc/tether/server.env
+# KEYS_ACCEPT: more server public keys accepted during a key rotation (docs/key-rotation.md).
+EnvironmentFile=-/etc/tether/keys.env
 # RELAY_SERVERS (server.env): every relay hbbs may hand out, `<host>|<health URL>` (docs/relay-ha.md).
 ExecStart=/usr/local/bin/hbbs -r ${RELAY_SERVERS} -k _
 Restart=always

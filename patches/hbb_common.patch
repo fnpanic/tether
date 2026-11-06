@@ -24,10 +24,10 @@ index 54ec24b..9655e3a 100644
  
  message TestNatRequest {
 diff --git a/src/config.rs b/src/config.rs
-index 9ee5cac..6264678 100644
+index 9ee5cac..5c529d3 100644
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -113,8 +113,33 @@ const CHARS: &[char] = &[
+@@ -113,8 +113,55 @@ const CHARS: &[char] = &[
      'm', 'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
  ];
  
@@ -60,10 +60,32 @@ index 9ee5cac..6264678 100644
 +    Some(s) => s,
 +    None => "OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=",
 +};
++
++lazy_static::lazy_static! {
++    /// Tether: server keys from the admin-signed key list (docs/key-rotation.md), validated by the
++    /// app; the first one is presented. Empty: `RS_PUB_KEY` only.
++    pub static ref POLICY_SERVER_KEYS: RwLock<Vec<String>> = Default::default();
++}
++
++/// Key presented to this client's own servers (`licence_key`) when no `key` option is set.
++pub fn server_key() -> String {
++    POLICY_SERVER_KEYS.read().unwrap().first().cloned().unwrap_or_else(|| RS_PUB_KEY.to_owned())
++}
++
++/// Keys whose signatures are trusted on a server reached with `key`: the whole key list when `key`
++/// is one of this client's own keys, otherwise (a custom server) `key` alone.
++pub fn server_keys_for(key: &str) -> Vec<String> {
++    let list = POLICY_SERVER_KEYS.read().unwrap();
++    if list.iter().any(|k| k == key) {
++        list.clone()
++    } else {
++        vec![key.to_owned()]
++    }
++}
  
  pub const RENDEZVOUS_PORT: i32 = 21116;
  pub const RELAY_PORT: i32 = 21117;
-@@ -1093,7 +1118,7 @@ impl Config {
+@@ -1093,7 +1140,7 @@ impl Config {
                  return ss;
              }
          }
@@ -72,6 +94,29 @@ index 9ee5cac..6264678 100644
      }
  
      pub fn reset_online() {
+@@ -3039,6 +3086,22 @@ impl Status {
+ mod tests {
+     use super::{permanent_password::PERMANENT_PASSWORD_ENC_VERSION, *};
+ 
++    #[test]
++    fn server_key_follows_the_signed_list() {
++        let (a, b) = ("A".repeat(43) + "=", "B".repeat(43) + "=");
++        assert_eq!(server_key(), RS_PUB_KEY);
++        assert_eq!(server_keys_for(RS_PUB_KEY), [RS_PUB_KEY]);
++        *POLICY_SERVER_KEYS.write().unwrap() = vec![a.clone(), b.clone()];
++        // The first listed key is presented, every listed key is trusted on own servers.
++        assert_eq!(server_key(), a);
++        assert_eq!(server_keys_for(&a), [a.clone(), b.clone()]);
++        assert_eq!(server_keys_for(&b), [a.clone(), b.clone()]);
++        // A custom server's own key (`key` option, `id@server?key=`) never picks up the list.
++        assert_eq!(server_keys_for("custom"), ["custom"]);
++        POLICY_SERVER_KEYS.write().unwrap().clear();
++        assert_eq!(server_key(), RS_PUB_KEY);
++    }
++
+     static CONFIG_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+ 
+     struct ConfigStateTestGuard {
 diff --git a/src/stream.rs b/src/stream.rs
 index 126d08a..cc10310 100644
 --- a/src/stream.rs

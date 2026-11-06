@@ -14,7 +14,8 @@ installed clients.
 | Services | `tether-hbbs`, `tether-hbbr` (patched for WebSocket hosts), `tether-https` (Caddy, Let's Encrypt), `tether-api` (policy, heartbeats, releases, download page, diagnostics; `MemoryMax=64M`), `tether-ddns.timer` (systemd, enabled at boot) |
 | Admin key | `ADMIN_PUB_KEY` in `/etc/tether/api.env`: the public half of the Tether Manage admin key (comma-separated to trust several during a rotation). Without it the admin endpoints answer 503. |
 | Download page | `https://tether-desk.duckdns.org/` (published from Tether Manage; files under `/var/lib/tether-api/download/<channel>/…`) |
-| Data | `/var/lib/tether` (key pair `id_ed25519` + peer DB). Back up `id_ed25519`; losing it means rebuilding every client. |
+| Data | `/var/lib/tether` (key pair `id_ed25519` + peer DB). Back up `id_ed25519`; losing it means a key rotation ([key-rotation.md](key-rotation.md)). |
+| Server key rotation | `/etc/tether/keys.env` (`KEYS_ACCEPT=<old public key>` while a new key signs), read by hbbs and hbbr; `server/rotate-key.sh switch|retire|rollback`. Steps: [key-rotation.md](key-rotation.md#operator-steps). |
 
 ## Cost
 
@@ -89,7 +90,10 @@ npx tauri build --bundles nsis           # apps/desktop (technician installer)
 ```
 
 Release builds refuse to compile without the four values. They are stored as GitHub Actions
-secrets in `fnpanic/tether` for the macOS and Windows CI builds. Publish the artifacts with
+secrets in `fnpanic/tether` for the macOS and Windows CI builds. After a server key rotation
+(phase 2 of [key-rotation.md](key-rotation.md)) set `TETHER_PUB_KEY` (secret and
+`scripts/build-macos.sh`) to the new key, so new installs start with it; installed clients follow
+the signed key list and need no reinstall. Publish the artifacts with
 Tether Manage (Releases); see [updates.md](updates.md).
 
 ## Operations

@@ -54,6 +54,8 @@ export interface Device {
   version: string;
   os: string;
   serial: number;
+  /** Server key list the device applied (absent: none, or a version before key rotation). */
+  server_keys_serial?: number;
   ip: string;
   last_seen: number;
 }
@@ -62,6 +64,8 @@ export interface AppState {
   unlocked: boolean;
   admin_pub: string | null;
   updater_pub: string | null;
+  /** Public halves of the server keys generated here (key rotation), oldest first. */
+  server_keys?: string[] | null;
   settings: Record<string, any> & { server: string };
   /** The relay list parsed from settings.server (first = reads). */
   servers: string[];

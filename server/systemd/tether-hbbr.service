@@ -8,6 +8,8 @@ Type=simple
 User=tether
 Group=tether
 WorkingDirectory=/var/lib/tether
+# KEYS_ACCEPT: more server public keys accepted during a key rotation (docs/key-rotation.md).
+EnvironmentFile=-/etc/tether/keys.env
 # On stop: not ready at once (other relays' hbbs stop handing this one out within 3 s), open
 # sessions keep running for up to DRAIN_TIMEOUT s, then the rest reconnect via another relay.
 Environment=DRAIN_TIMEOUT=300

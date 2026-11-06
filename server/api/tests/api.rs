@@ -186,6 +186,46 @@ fn policy_history_keeps_last_50() {
     assert_eq!(h[49]["serial"], 3);
 }
 
+fn keys_doc(key: &SigningKey, serial: u64, keys: &[&str]) -> Vec<u8> {
+    let keys: Vec<String> = keys.iter().map(|k| format!(r#"{{"key":"{k}"}}"#)).collect();
+    policy_doc(key, &format!(r#"{{"serial":{serial},"issued_at":1,"keys":[{}]}}"#, keys.join(",")))
+}
+
+#[test]
+fn server_key_list_publish_fetch_and_heartbeat() {
+    let (s, k) = admin_server();
+    let (a, b) = (key_to_b64(&generate_key().verifying_key()), key_to_b64(&generate_key().verifying_key()));
+    assert_eq!(s.req("GET", "/api/server-keys", &[], b"").status, 404);
+    // Public endpoint is read-only; publishing needs a signed admin request.
+    assert_eq!(s.req("PUT", "/api/admin/server-keys", &[], &keys_doc(&k, 1, &[&a])).status, 401);
+    let v1 = keys_doc(&k, 1, &[&a, &b]);
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/server-keys", &v1).status, 204);
+    let r = s.req("GET", "/api/server-keys", &[], b"");
+    assert_eq!((r.status, r.header("ETag")), (200, Some("\"1\"")));
+    assert_eq!(r.body, v1, "served exactly as signed");
+    assert_eq!(s.req("GET", "/api/server-keys", &[("If-None-Match", "\"1\"")], b"").status, 304);
+    // Same or lower serial, a list signed by another key, or an invalid list: refused.
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/server-keys", &keys_doc(&k, 1, &[&b])).status, 409);
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/server-keys", &keys_doc(&generate_key(), 5, &[&b])).status, 400);
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/server-keys", &keys_doc(&k, 5, &["bogus"])).status, 400);
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/server-keys", &keys_doc(&k, 5, &[])).status, 400);
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/server-keys", &vec![b' '; (16 << 10) + 1]).status, 413);
+    // A policy document is not a key list (and the other way round).
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/server-keys", &policy_doc(&k, r#"{"serial":7,"issued_at":1}"#)).status, 400);
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/policy", &keys_doc(&k, 7, &[&a])).status, 400);
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/server-keys", &keys_doc(&k, 2, &[&b])).status, 204);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").json()["server_keys_serial"], 2);
+    assert_eq!(s.req("GET", "/api/policy", &[], b"").status, 404, "the policy is untouched");
+
+    // Heartbeats report the applied list; older clients leave the field out.
+    let new = hb("keys-0001").replace("\"serial\":12", "\"serial\":12,\"server_keys_serial\":2");
+    assert_eq!(s.req("POST", "/api/heartbeat", &[], new.as_bytes()).status, 204);
+    assert_eq!(s.req("POST", "/api/heartbeat", &[], hb("keys-0002").as_bytes()).status, 204);
+    let devs = s.admin(&k, "GET", "/api/admin/devices", b"").json();
+    let by = |u: &str| devs.as_array().unwrap().iter().find(|d| d["uuid"] == u).unwrap()["server_keys_serial"].clone();
+    assert_eq!((by("keys-0001"), by("keys-0002")), (serde_json::json!(2), serde_json::json!(0)));
+}
+
 fn hb(uuid: &str) -> String {
     format!(r#"{{"uuid":"{uuid}","id":"123456789","profile":"technician","version":"0.3.0","os":"windows 10.0.26300","serial":12}}"#)
 }
@@ -461,6 +501,8 @@ fn state_survives_restart() {
     let mut s = start(&keys);
     let doc = policy_doc(&k, r#"{"serial":4,"issued_at":1}"#);
     assert_eq!(s.admin(&k, "PUT", "/api/admin/policy", &doc).status, 204);
+    let list = keys_doc(&k, 3, &[&keys]);
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/server-keys", &list).status, 204);
     let sig = reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now());
     assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 200);
     assert_eq!(s.req("POST", "/api/heartbeat", &[], hb("persist-01").as_bytes()).status, 204);
@@ -487,4 +529,6 @@ fn state_survives_restart() {
     let st = s.admin(&k, "GET", "/api/admin/status", b"").json();
     assert_eq!(st["devices"], 1);
     assert_eq!(st["policy_serial"], 4);
+    assert_eq!(st["server_keys_serial"], 3);
+    assert_eq!(s.req("GET", "/api/server-keys", &[], b"").body, list);
 }

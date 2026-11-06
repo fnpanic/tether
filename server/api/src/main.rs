@@ -1,6 +1,7 @@
 //! Tether relay API. Wire contract: `docs/api.md`. Flat files under the data dir, no database.
 //!
-//! Layout: `policy.json`, `policy-history/<serial>.json`, `devices.json`, `nonces.json`,
+//! Layout: `policy.json`, `policy-history/<serial>.json`, `server-keys.json` (signed server key
+//! list, docs/key-rotation.md), `devices.json`, `nonces.json`,
 //! `diag/tickets.json` + `diag/<ticket>.zip`, `custom/<id>.json` (custom TetherQS apps),
 //! `download/…` (served by Caddy), `tmp/`.
 
@@ -16,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tether_trust::{custom, envelope, policy::Bundle, reqauth, VerifyingKey};
+use tether_trust::{custom, envelope, policy::Bundle, reqauth, serverkeys::KeyList, VerifyingKey};
 use tiny_http::{Header, Request, Response, Server};
 
 const DAY: u64 = 86_400;
@@ -33,6 +34,7 @@ const TICKET_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const LIMIT_SMALL: u64 = 4096;
 const LIMIT_HEARTBEAT: u64 = 2048;
 const LIMIT_POLICY: u64 = 256 << 10;
+const LIMIT_SERVER_KEYS: u64 = 16 << 10;
 const LIMIT_PAGE: u64 = 512 << 10;
 const LIMIT_DIAG: u64 = 2 << 20;
 const LIMIT_RELEASE: u64 = 200 << 20;
@@ -53,6 +55,9 @@ struct Heartbeat {
     version: String,
     os: String,
     serial: u64,
+    /// Serial of the server key list the device applied (absent: none).
+    #[serde(default)]
+    server_keys_serial: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -63,6 +68,8 @@ struct Device {
     version: String,
     os: String,
     serial: u64,
+    #[serde(default)]
+    server_keys_serial: u64,
     ip: String,
     last_seen: u64,
 }
@@ -128,6 +135,7 @@ struct App {
     nonces: HashMap<String, u64>,
     tickets: Vec<Ticket>,
     policy_serial: Option<u64>,
+    server_keys_serial: Option<u64>,
     tmp_seq: u64,
 }
 
@@ -334,6 +342,7 @@ impl App {
         }
         let devices: Vec<Device> = load_json(&data.join("devices.json"));
         let policy_serial = fs::read(data.join("policy.json")).ok().and_then(|b| stored_meta(&b)).map(|m| m.serial);
+        let server_keys_serial = fs::read(data.join("server-keys.json")).ok().and_then(|b| stored_meta(&b)).map(|m| m.serial);
         let mut custom: Vec<CustomApp> = Vec::new();
         for e in fs::read_dir(data.join("custom"))?.flatten() {
             let p = e.path();
@@ -353,6 +362,7 @@ impl App {
             nonces: load_json(&data.join("nonces.json")),
             tickets: load_json(&data.join("diag/tickets.json")),
             policy_serial,
+            server_keys_serial,
             started: now(),
             tmp_seq: 0,
             keys,
@@ -448,7 +458,8 @@ impl App {
         let path = url.split('?').next().unwrap_or("");
         let method = rq.method().as_str().to_owned();
         match (method.as_str(), path) {
-            ("GET", "/api/policy") => self.get_policy(rq),
+            ("GET", "/api/policy") => self.get_signed(rq, self.policy_serial, "policy.json", "no policy published"),
+            ("GET", "/api/server-keys") => self.get_signed(rq, self.server_keys_serial, "server-keys.json", "no server key list published"),
             ("POST", "/api/heartbeat") => self.heartbeat(rq),
             ("POST", p) if p.starts_with("/api/diag/") => self.diag_upload(rq, &p["/api/diag/".len()..]),
             ("GET", p) if p.starts_with("/q/") => self.custom_download(rq, &p["/q/".len()..]),
@@ -457,15 +468,16 @@ impl App {
         }
     }
 
-    fn get_policy(&self, rq: &Request) -> Result<Resp, Resp> {
-        let serial = self.policy_serial.ok_or_else(|| text(404, "no policy published"))?;
+    /// A stored signed document (policy, server key list) with `ETag: "<serial>"`.
+    fn get_signed(&self, rq: &Request, serial: Option<u64>, file: &str, missing: &str) -> Result<Resp, Resp> {
+        let serial = serial.ok_or_else(|| text(404, missing))?;
         let etag = format!("\"{serial}\"");
         if let Some(inm) = header(rq, "If-None-Match") {
             if inm.split(',').map(|t| t.trim().trim_start_matches("W/")).any(|t| t == etag || t == "*") {
                 return Ok(empty(304).with_header(hdr("ETag", &etag)));
             }
         }
-        let doc = fs::read(self.data.join("policy.json")).map_err(internal)?;
+        let doc = fs::read(self.data.join(file)).map_err(internal)?;
         Ok(Response::from_data(doc)
             .with_header(hdr("Content-Type", "application/json"))
             .with_header(hdr("ETag", &etag))
@@ -489,7 +501,17 @@ impl App {
             }
         }
         let ip = client_ip(rq);
-        let d = Device { uuid: hb.uuid, id: hb.id, profile: hb.profile, version: hb.version, os: hb.os, serial: hb.serial, ip, last_seen: t };
+        let d = Device {
+            uuid: hb.uuid,
+            id: hb.id,
+            profile: hb.profile,
+            version: hb.version,
+            os: hb.os,
+            serial: hb.serial,
+            server_keys_serial: hb.server_keys_serial,
+            ip,
+            last_seen: t,
+        };
         self.devices.insert(d.uuid.clone(), d);
         self.devices_dirty = true;
         Ok(empty(204))
@@ -534,6 +556,7 @@ impl App {
         }
         let limit = match (method, rest) {
             ("PUT", "policy") => LIMIT_POLICY,
+            ("PUT", "server-keys") => LIMIT_SERVER_KEYS,
             ("PUT", "download-page") => LIMIT_PAGE,
             ("POST", "diag-ticket") => LIMIT_SMALL,
             ("PUT", r) if r.starts_with("custom/") => LIMIT_CUSTOM,
@@ -546,6 +569,7 @@ impl App {
         self.auth(rq, method, url, &body)?;
         match (method, rest) {
             ("PUT", "policy") => self.put_policy(&body),
+            ("PUT", "server-keys") => self.put_server_keys(&body),
             ("PUT", "download-page") => {
                 self.check_space(body.len() as u64)?;
                 let dest = self.data.join("download/index.html");
@@ -585,6 +609,7 @@ impl App {
                 "disk_free": disk_free(&self.data),
                 "devices": self.devices.len(),
                 "policy_serial": self.policy_serial,
+                "server_keys_serial": self.server_keys_serial,
                 "uptime": now().saturating_sub(self.started),
             }))),
             (_, r) => {
@@ -614,6 +639,19 @@ impl App {
         for s in serials.iter().skip(HISTORY_KEEP) {
             let _ = fs::remove_file(hist.join(format!("{s}.json")));
         }
+        Ok(empty(204))
+    }
+
+    /// The server key list devices trust (docs/key-rotation.md). Verified and validated like a
+    /// policy; serials only go up.
+    fn put_server_keys(&mut self, body: &[u8]) -> Result<Resp, Resp> {
+        let list = KeyList::open(body, &self.keys).map_err(|e| text(400, &e))?;
+        if self.server_keys_serial.is_some_and(|s| list.serial <= s) {
+            return Err(text(409, "serial must be greater than the current server key list's"));
+        }
+        self.check_space(body.len() as u64)?;
+        self.write_atomic(&self.data.join("server-keys.json"), body, 0o600).map_err(internal)?;
+        self.server_keys_serial = Some(list.serial);
         Ok(empty(204))
     }
 

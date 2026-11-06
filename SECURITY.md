@@ -21,8 +21,8 @@ The relay operator is **not trusted with content**. The relay only forwards ciph
 | Layer | Mechanism | Enforced in |
 | --- | --- | --- |
 | Transport to the relay | TLS 1.3 WebSocket on 443 only (Let's Encrypt certificate, verified by rustls, falling back to the OS trust store for corporate TLS inspection; never an unverified fallback). With policy `network.direct = auto` and no proxy: direct paths beside it (LAN listener on the local subnet only; WebRTC/ICE for IPv6 and NAT hole punching, STUN only against our own relays, signalling only over the TLS WebSocket). Never with a proxy. | `apps/desktop/src-tauri/src/netpolicy.rs`, `docs/corporate-networks.md` |
-| Client ↔ rendezvous server | Server identity pinned by a compiled-in ed25519 public key (`TETHER_PUB_KEY`). Release builds refuse to compile without it. | `apps/desktop/src-tauri/build.rs`, `hbb_common::config::RS_PUB_KEY` |
-| Server key enforcement | `hbbs -k _` / `hbbr -k _` reject clients that do not present the matching key | `server/systemd/*.service`, `server/docker-compose.yml` |
+| Client ↔ rendezvous server | Server identity pinned by a compiled-in ed25519 public key (`TETHER_PUB_KEY`). Release builds refuse to compile without it. A server key list signed by the **admin key** can replace it (key rotation without reinstalling): clients then trust exactly the listed keys; lower serials are rejected, so a relay can neither widen nor roll back the set. | `apps/desktop/src-tauri/build.rs`, `hbb_common::config::RS_PUB_KEY` / `server_keys_for`, `tether_trust::serverkeys`, [docs/key-rotation.md](docs/key-rotation.md) |
+| Server key enforcement | `hbbs -k _` / `hbbr -k _` reject clients that do not present the matching key, or one of `KEYS_ACCEPT` during a rotation | `server/systemd/*.service`, `server/docker-compose.yml`, `vendor/rustdesk-server/src/common.rs::key_accepted` |
 | Peer ↔ peer (end-to-end) | Each device has an ed25519 identity, signed via the rendezvous server. A session key comes from an X25519 box key exchange. Traffic is encrypted with XSalsa20-Poly1305 (libsodium secretbox) on TCP/relay and inside the WebRTC data channel, whose DTLS fingerprint the host signs into its identity (`IdPk.dtls_fingerprint`); a mismatch or missing fingerprint fails closed. | RustDesk core `client.rs::secure_connection`, `server.rs::identity_handshake` |
 | **No plaintext fallback (viewer)** | Upstream asks the user whether to "continue insecurely". Tether refuses the connection outright. | `vendor/rustdesk/src/client.rs::confirm_insecure_connection` (`#[cfg(feature = "tauri")]`) |
 | **No plaintext fallback (host)** | The host aborts the handshake when the peer offers no key, sends no key exchange, uses an unsecured transport (direct IP), or this device's key pair is missing | `vendor/rustdesk/src/server.rs::identity_handshake` |
@@ -44,6 +44,7 @@ The relay operator is **not trusted with content**. The relay only forwards ciph
 | Control | Mechanism | Where |
 | --- | --- | --- |
 | Policy integrity | Policies are signed by the **admin key** (Ed25519), which never leaves the admin's PC. Clients verify against compile-time public keys, so a compromised relay cannot push or alter a policy. Lower serials are rejected (no rollback). | `crates/tether-trust`, `apps/*/src-tauri/src/policy.rs` |
+| Server key list | The admin key also signs which server keys devices trust (`GET /api/server-keys`). Whoever holds the admin key can therefore make devices trust another server key; it still needs a path into the TLS relay connection to use it. New server private keys are sealed in the vault like the other keys. | `tether_trust::serverkeys`, `apps/manage/src-tauri/src/keys.rs`, [docs/key-rotation.md](docs/key-rotation.md) |
 | Security floor | TLS verification, end-to-end encryption, 443-only networking and "no silent recording" are not policy features. The apps apply them on top of any policy. | `tether_trust::policy::FLOOR`, `security.rs`, `netpolicy.rs` |
 | Admin API | Every admin request is signed over method, path, timestamp, nonce and body hash. The server allows ±300 s clock skew and rejects replayed nonces (persisted across restarts). | `tether_trust::reqauth`, `server/api` |
 | Keys at rest | Admin and updater private keys are encrypted with argon2id + XChaCha20-Poly1305 under the admin's passphrase. | `apps/manage/src-tauri/src/keys.rs` |
@@ -154,7 +155,9 @@ works; Alt+Tab leaves; a lone Alt and Alt+F4 on TetherQS do not stall it).
   Caddy (`docs/corporate-networks.md`). hbbs/hbbr/tether-api listen on localhost behind it.
 - The server stores only its key pair and an ID → public-key/IP registry. It never sees session
   content.
-- Keep `/var/lib/tether/id_ed25519` secret and back it up. Losing it means rebuilding every client.
+- Keep `/var/lib/tether/id_ed25519` secret and back it up. Losing it, or a suspected leak, means a
+  server key rotation ([docs/key-rotation.md](docs/key-rotation.md)); clients without key-list
+  support (before this version) must be updated before that.
 
 ## Reporting
 

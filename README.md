@@ -19,7 +19,8 @@ Fast, private, self-hosted remote desktop for Windows and macOS, with a Linux re
   [docs/management.md](docs/management.md), [docs/policy.md](docs/policy.md),
   [docs/updates.md](docs/updates.md), [docs/quick-support.md](docs/quick-support.md),
   [docs/recording.md](docs/recording.md), [docs/cli.md](docs/cli.md),
-  [docs/troubleshooting.md](docs/troubleshooting.md), [docs/api.md](docs/api.md).
+  [docs/troubleshooting.md](docs/troubleshooting.md), [docs/api.md](docs/api.md),
+  [docs/key-rotation.md](docs/key-rotation.md).
 - **Scale and HA:** several relays and Kubernetes: [docs/relay-ha.md](docs/relay-ha.md),
   [docs/kubernetes.md](docs/kubernetes.md); performance: [docs/performance.md](docs/performance.md);
   macOS build: [docs/macos.md](docs/macos.md).

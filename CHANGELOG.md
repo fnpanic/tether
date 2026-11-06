@@ -6,12 +6,31 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Added
+- **Server key rotation without reinstalling clients** ([docs/key-rotation.md](docs/key-rotation.md)).
+  The admin key now also signs a **server key list** (`GET /api/server-keys`, cached as
+  `server-keys.json`): Tether and TetherQS trust exactly its keys (without a list: the built-in
+  `TETHER_PUB_KEY`), present its first key to hbbs/hbbr, and reject lists with a lower serial.
+  hbbs and hbbr accept the keys in `KEYS_ACCEPT` besides their own (`/etc/tether/keys.env`, Helm
+  `key.accept`), so relays can sign with a new key while devices still present the old one.
+  Tether Manage › Keys › **Server key**: generate the new key (sealed in the vault), publish the
+  list to every relay, count the devices that report it (heartbeat `server_keys_serial`), save the
+  key files and the relay commands (`server/rotate-key.sh switch|retire|rollback`), retire the old
+  key. Regression check: `apps/desktop/e2e/keyrot-e2e.mjs`.
+- A viewer whose server key is not trusted, or not accepted, now says "Server key mismatch: …"
+  instead of the generic "could not be end-to-end encrypted".
+
 ### Changed
 - **Auto codec picks AV1 on more hosts without a GPU.** The one-time AV1 speed test allowed 90 ms
   per key frame and 30 ms per frame; a GPU-less 1080p host failed it and stayed on VP9 for good,
   although AV1 was smoother there in every stress phase (docs/performance.md). Limits are now
   400 ms / 50 ms and every host reruns the test once (`av1-test-2`). Measured on a GPU-less
   Windows host: scrolling p95 +475 ms -> +121 ms, no more freezes under full-screen changes.
+
+### Upgrade order
+1. Relays: new hbbs, hbbr and tether-api (the heartbeat accepts `server_keys_serial`).
+2. Clients: this version on every device. Older versions cannot follow a rotation.
+3. Only then rotate.
 
 ## [0.5.15] — 2026-11-06
 

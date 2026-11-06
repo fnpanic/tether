@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "node --test src/lib/releases.test.ts src/lib/progress.test.ts src/lib/page-preview.test.ts",
+    "test": "node --test src/lib/releases.test.ts src/lib/progress.test.ts src/lib/page-preview.test.ts src/lib/serverkeys.test.ts",
     "tauri": "tauri"
   },
   "dependencies": {

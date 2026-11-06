@@ -13,7 +13,7 @@ signed requests. Nothing in it is needed by technicians or customers.
 | Download page | Generate and publish the page at `https://<relay>/` |
 | Custom apps | Branded TetherQS downloads (name, logo, colour, settings) behind private, expiring links |
 | Diagnostics | Open support tickets and read the diagnostics bundles users send |
-| Keys | Public keys to deploy, key backup |
+| Keys | Public keys to deploy, server key rotation, key backup |
 
 A bar at the top of every screen shows the policy state, for example
 **Draft has 3 changes · Live: serial 4 on 1/2 relays**, with one **Publish…** button (see
@@ -40,7 +40,8 @@ Keys, settings, the policy draft and local copies of published policies live in
 
 | File | Content |
 | --- | --- |
-| `keys.json` | Admin key and updater key, encrypted with the passphrase |
+| `keys.json` | Admin key, updater key and server keys generated for a rotation, encrypted with the passphrase |
+| `server-keys/rotation.json`, `server-keys/published/<serial>.json` | Progress of a server key rotation; every key list this PC published |
 | `settings.json` | Relay list (default `https://tether-desk.duckdns.org`), download page texts |
 | `policy/draft.json` | The policy being edited |
 | `policy/published/<serial>.json` | Every policy this PC published |
@@ -98,6 +99,38 @@ The screen shows the public halves only. Private keys never leave the PC.
 
 Release builds refuse to compile without these values; see the build commands in
 [deployment.md](deployment.md).
+
+### Server key
+
+hbbs and hbbr sign device identities with the server key (`/var/lib/tether/id_ed25519` on every
+relay). Installed apps trust the key they were built with (`TETHER_PUB_KEY`) until a **server key
+list** signed with the admin key replaces it, so the key can be replaced without reinstalling
+anything. Design, threat model and failure cases: [key-rotation.md](key-rotation.md).
+
+**Key list on the relays** shows per relay the serial and keys of the list it serves
+(`GET /api/server-keys`, verified with this admin key), which key devices present (the first),
+an expiry if set, and **Behind** for a relay with an older list. "No list published" means devices
+trust only their built-in key.
+
+**Rotate the server key** is a checklist; each step opens when the previous one is done:
+
+1. **Generate the new key.** Enter the current server public key (prefilled from a published list)
+   and the passphrase. The new key pair is sealed into `keys.json` at once. Export the backup again.
+2. **Announce it to the devices.** **Publish key list…** (review sheet, every relay) publishes
+   *current + new*: devices keep presenting the current key and start to trust the new one.
+   Optionally set a date from which devices stop trusting the old key on their own.
+3. **Switch the relays.** A counter shows how many devices active in the last 24 h report the list
+   (heartbeat `server_keys_serial`, refreshed every 30 s; versions before key rotation never do).
+   When enough do: **Save key files…** writes `id_ed25519` and `id_ed25519.pub` of the new key into
+   a folder; the commands below install them on every relay with `server/rotate-key.sh switch`
+   (Helm: the `helm upgrade` line). Then **Every relay is switched**. Build new installers with
+   the new `TETHER_PUB_KEY` from now on.
+4. **Retire the old key on the devices.** **Publish list without the old key…**.
+5. **Stop accepting the old key on the relays**, when the counter is high enough again:
+   `rotate-key.sh retire` per relay (Helm: `key.accept=""`), then **Every relay is done**.
+
+Devices that miss a step heal on their next policy check, because the list comes over HTTPS from
+the relay API. Until then they get "Server key mismatch …" when connecting.
 
 ## Status and relays
 

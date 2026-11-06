@@ -142,6 +142,12 @@ let custom: any[] = [
   { id: "p0x7n2", name: "Praxis Weber", token: "UHJheGlzLVdlYmVyLXByZXZpZXctdG9rZW4tMDAwMDAy", expires: now + 86400 * 4, channel: "stable", created: now - 86400 * 26, downloads: 1, last_download: now - 86400 * 20, local: null },
 ];
 
+// Server key rotation: relay 2 still serves the previous list.
+const SK_OLD = "fe8A7xTX72RJlJypn8aBxG3NZHHxygCLPQqCWxbeev8=";
+let skRotation: Record<string, unknown> = {};
+let skList: { serial: number; keys: { key: string; expires?: number }[] } = { serial: 1, keys: [{ key: SK_OLD }] };
+const skLive = () => servers.map((s) => ({ server: s, reachable: true, verified: true, ...(s === R2 && skList.serial > 1 ? { serial: skList.serial - 1, keys: [{ key: SK_OLD }] } : skList) }));
+
 export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
   await new Promise((r) => setTimeout(r, 120));
   const out: Record<string, () => unknown> = {
@@ -154,6 +160,13 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       data_dir: "C:\\Users\\you\\AppData\\Roaming\\Tether-Manage",
     }),
     keys_unlock: () => (unlocked = true),
+    serverkeys_live: () => ({ relays: skLive(), rotation: skRotation }),
+    serverkeys_rotation_set: () => (skRotation = a.rotation),
+    serverkeys_generate: () => "Qm9vbXRvd25OZXdTZXJ2ZXJLZXlGb3JQcmV2aWV3MDE=",
+    serverkeys_publish: () => {
+      skList = { serial: skList.serial + 1, keys: a.keys };
+      return { serial: skList.serial, relays: servers.map((s) => ok(s, { serial: skList.serial })) };
+    },
     keys_lock: () => (unlocked = false),
     settings_set: () => (servers = String(a.settings.server).split(",").map((s: string) => s.trim()).filter(Boolean)),
     admin: () => (a.path === "/api/admin/status" ? status(R1) : admin[a.path] ?? null),

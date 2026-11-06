@@ -95,6 +95,9 @@ spec:
             - { name: DRAIN_TIMEOUT, value: {{ $v.drainSeconds | quote }} }
             # hbb_common writes a config dir under HOME; the root filesystem is read-only.
             - { name: HOME, value: /tmp }
+            {{- with $.Values.key.accept }}
+            - { name: KEYS_ACCEPT, value: {{ . | quote }} }
+            {{- end }}
             {{- if eq $c "hbbs" }}
             - { name: DB_URL, value: /data/db_v2.sqlite3 }
             {{- end }}

@@ -3,7 +3,9 @@
 Tether can run any number of **independent relay nodes**. Each node is the full stack that runs
 on the production VM today (hbbs, hbbr, Caddy, tether-api, see [deployment.md](deployment.md)).
 The nodes share no state: there is no cluster protocol and no shared database. What they share is
-the server key pair, so clients' pinned `TETHER_PUB_KEY` works with all of them. Availability
+the server key pair, so clients' pinned `TETHER_PUB_KEY` (or the signed server key list) works with
+all of them. During a key rotation the nodes may sign with different keys for a while: devices with
+the list trust both, and every node accepts both ([key-rotation.md](key-rotation.md)). Availability
 comes from the clients, which register with and race across all nodes, and from each hbbs being
 able to hand out any node's relay.
 
@@ -227,7 +229,8 @@ Tether Manage (implemented in 0.4.0; the server setting is a comma-separated rel
   WebSockets per session and a small buffer; memory is not the limit.
 - Least-loaded choice spreads sessions across nodes. Load is sampled every 3 s, so a burst inside
   one interval goes to the same relay (`shortcut:` comment in `rendezvous_server.rs`).
-- Add a node: provision as in [deployment.md](deployment.md), copy the key pair, then add the node
+- Add a node: provision as in [deployment.md](deployment.md), copy the key pair (during a rotation
+  also `/etc/tether/keys.env`), then add the node
   to every node's `RELAY_SERVERS` and the client server list. Restarting hbbs to load the list
   does not interrupt relayed sessions.
 

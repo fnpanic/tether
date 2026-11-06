@@ -643,9 +643,18 @@ index 137d648..cf71fab 100644
 +    }
 +}
 diff --git a/src/client.rs b/src/client.rs
-index 597dc86..84cd39f 100644
+index 597dc86..6c1f78c 100644
 --- a/src/client.rs
 +++ b/src/client.rs
+@@ -28,7 +28,7 @@ use uuid::Uuid;
+ use crate::{
+     check_port,
+     common::input::{MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_TYPE_DOWN, MOUSE_TYPE_UP},
+-    create_symmetric_key_msg, decode_id_pk, decode_id_pk_dtls, dtls_fingerprint_bound, get_rs_pk,
++    create_symmetric_key_msg, decode_id_pk_dtls, dtls_fingerprint_bound,
+     is_keyboard_mode_supported,
+     kcp_stream::KcpStream,
+     secure_tcp, secure_tcp_required,
 @@ -114,6 +114,8 @@ const MAX_DECODE_FAIL_COUNTER: usize = 3;
  
  pub const LOGIN_MSG_PASSWORD_EMPTY: &str = "Empty Password";
@@ -942,7 +951,21 @@ index 597dc86..84cd39f 100644
          if interface.is_policy_relay() && !WebRTCStream::has_turn_server() {
              return false;
          }
-@@ -1072,6 +1302,7 @@ impl Client {
+@@ -1012,7 +1242,12 @@ impl Client {
+                                     bail!("Remote desktop is offline");
+                                 }
+                                 Ok(punch_hole_response::Failure::LICENSE_MISMATCH) => {
+-                                    bail!("Key mismatch");
++                                    #[cfg(feature = "tauri")]
++                                    bail!(crate::common::SERVER_KEY_REJECTED);
++                                    #[allow(unreachable_code)]
++                                    {
++                                        bail!("Key mismatch");
++                                    }
+                                 }
+                                 Ok(punch_hole_response::Failure::LICENSE_OVERUSE) => {
+                                     bail!("Key overuse");
+@@ -1072,6 +1307,7 @@ impl Client {
                              }
                          }
                          signed_id_pk = rr.pk().into();
@@ -950,7 +973,7 @@ index 597dc86..84cd39f 100644
                          let mut webrtc_bridge_stop = None;
                          let mut webrtc_for_connect = None;
                          if !rr.webrtc_sdp_answer.is_empty() {
-@@ -1172,20 +1403,69 @@ impl Client {
+@@ -1172,20 +1408,69 @@ impl Client {
                                  connect_futures.push(webrtc_fut);
                                  select_ok(connect_futures).await.map(|r| r.0)
                              } else {
@@ -1023,7 +1046,7 @@ index 597dc86..84cd39f 100644
                          };
                          if let Some(stop) = webrtc_bridge_stop {
                              let _ = stop.send(());
-@@ -1195,7 +1475,12 @@ impl Client {
+@@ -1195,7 +1480,12 @@ impl Client {
                          let (mut conn, kcp, mut typ, mut direct) = race_result?;
                          feedback = rr.feedback;
                          log::info!("{:?} used to establish {typ} connection", start.elapsed());
@@ -1037,7 +1060,7 @@ index 597dc86..84cd39f 100644
                              &peer,
                              signed_id_pk.clone(),
                              &key,
-@@ -1249,6 +1534,7 @@ impl Client {
+@@ -1249,6 +1539,7 @@ impl Client {
                                  pk
                              }
                              Err(e) => return Err(e),
@@ -1045,7 +1068,51 @@ index 597dc86..84cd39f 100644
                          };
                          // `direct` came from the winning future, which resolved it while the pc was
                          // definitely alive — the race needed it to pick a winner at all.
-@@ -1697,7 +1983,14 @@ impl Client {
+@@ -1656,11 +1947,8 @@ impl Client {
+         key: &str,
+         conn: &mut Stream,
+     ) -> ResultType<Option<Vec<u8>>> {
+-        let rs_pk = get_rs_pk(if key.is_empty() {
+-            config::RS_PUB_KEY
+-        } else {
+-            key
+-        });
++        let server_key = config::server_key();
++        let key = if key.is_empty() { &server_key } else { key };
+         // A WebRTC channel is peer-authenticated only once its DTLS fingerprint is bound to the
+         // verified peer identity below. Once a trusted identity IS established, every binding
+         // failure fails closed: any peer able to answer WebRTC also signs its fingerprint, so a
+@@ -1673,17 +1961,23 @@ impl Client {
+         let mut sign_pk = None;
+         let mut option_pk = None;
+         if !signed_id_pk.is_empty() {
+-            if let Some(rs_pk) = rs_pk {
+-                if let Ok((id, pk)) = decode_id_pk(&signed_id_pk, &rs_pk) {
+-                    if id == peer_id {
+-                        sign_pk = Some(sign::PublicKey(pk));
+-                        option_pk = Some(pk.to_vec());
+-                    }
++            // Tether: any key of the signed server key list (key rotation, docs/key-rotation.md).
++            let decoded = crate::common::decode_id_pk_any(&signed_id_pk, key);
++            if let Some((id, pk)) = &decoded {
++                if id == peer_id {
++                    sign_pk = Some(sign::PublicKey(*pk));
++                    option_pk = Some(pk.to_vec());
+                 }
+             }
+             if sign_pk.is_none() {
+                 log::error!("Handshake failed: invalid public key from rendezvous server");
+             }
++            // Tether: a signature by no trusted server key means the server key changed (rotation
++            // this device missed); say so instead of the generic "not encrypted" refusal.
++            #[cfg(feature = "tauri")]
++            if decoded.is_none() {
++                bail!(crate::common::SERVER_KEY_UNTRUSTED);
++            }
+         }
+         let sign_pk = match sign_pk {
+             Some(v) => v,
+@@ -1697,7 +1991,14 @@ impl Client {
                  return Ok(option_pk);
              }
          };
@@ -1061,7 +1128,7 @@ index 597dc86..84cd39f 100644
              Some(res) => {
                  let bytes = res?;
                  if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
-@@ -2851,6 +3144,8 @@ pub struct LoginConfigHandler {
+@@ -2851,6 +3152,8 @@ pub struct LoginConfigHandler {
      pub version: i64,
      features: Option<Features>,
      pub session_id: u64, // used for local <-> server communication
@@ -1070,7 +1137,7 @@ index 597dc86..84cd39f 100644
      pub supported_encoding: SupportedEncoding,
      restarting_remote_device: bool,
      // Start time of the restart grace window. On Windows the peer may briefly
-@@ -2972,6 +3267,7 @@ impl LoginConfigHandler {
+@@ -2972,6 +3275,7 @@ impl LoginConfigHandler {
              }
          }
          self.session_id = sid;
@@ -1078,7 +1145,7 @@ index 597dc86..84cd39f 100644
          self.supported_encoding = Default::default();
          self.clear_restarting_remote_device();
          // Three scopes: what was decided about this PEER, what this CLIENT is set up as (proxy),
-@@ -2980,8 +3276,10 @@ impl LoginConfigHandler {
+@@ -2980,8 +3284,10 @@ impl LoginConfigHandler {
          self.peer_relay =
              config::option2bool("force-always-relay", &self.get_option("force-always-relay"))
                  || force_relay;
@@ -1091,7 +1158,7 @@ index 597dc86..84cd39f 100644
          if let Some((real_id, server, key)) = &self.other_server {
              let other_server_key = self.get_option("other-server-key");
              if !other_server_key.is_empty() && key.is_empty() {
-@@ -3002,6 +3300,12 @@ impl LoginConfigHandler {
+@@ -3002,6 +3308,12 @@ impl LoginConfigHandler {
          self.shared_password = shared_password;
          self.record_state = false;
          self.record_permission = true;
@@ -1104,7 +1171,7 @@ index 597dc86..84cd39f 100644
  
          // `std::env::remove_var("IS_TERMINAL_ADMIN");` is called in `session_add_sync()` - `flutter_ffi.rs`.
          let is_terminal_admin = conn_type == ConnType::TERMINAL
-@@ -3854,6 +4158,7 @@ impl LoginConfigHandler {
+@@ -3854,6 +4166,7 @@ impl LoginConfigHandler {
              my_platform,
              option: self.get_option_message(true).into(),
              session_id: self.session_id,
@@ -1112,7 +1179,7 @@ index 597dc86..84cd39f 100644
              version: crate::VERSION.to_string(),
              os_login,
              hwid,
-@@ -3951,6 +4256,17 @@ impl LoginConfigHandler {
+@@ -3951,6 +4264,17 @@ impl LoginConfigHandler {
          &self.id
      }
  
@@ -1130,7 +1197,7 @@ index 597dc86..84cd39f 100644
      pub fn get_key_terminal_service_id(&self) -> &'static str {
          if self.is_terminal_admin {
              "terminal-admin-service-id"
-@@ -4510,8 +4826,22 @@ pub fn handle_login_error(
+@@ -4510,8 +4834,22 @@ pub fn handle_login_error(
          interface.msgbox("input-password", "Password Required", "", "");
          true
      } else if err == LOGIN_MSG_PASSWORD_WRONG {
@@ -1155,7 +1222,7 @@ index 597dc86..84cd39f 100644
          true
      } else if err == LOGIN_MSG_2FA_WRONG || err == REQUIRE_2FA {
          let enabled = lc.read().unwrap().get_option("trust-this-device") == "Y";
-@@ -5043,6 +5373,19 @@ pub async fn confirm_insecure_connection(
+@@ -5043,6 +5381,19 @@ pub async fn confirm_insecure_connection(
      interface: &impl Interface,
      receiver: &mut UnboundedReceiver<Data>,
  ) -> bool {
@@ -1175,7 +1242,7 @@ index 597dc86..84cd39f 100644
      interface.msgbox(
          "insecure-connection-nocancel-hasclose",
          "Insecure Connection",
-@@ -5562,6 +5905,69 @@ async fn udp_nat_connect(
+@@ -5562,6 +5913,69 @@ async fn udp_nat_connect(
      Ok((res.1, Some(res.0), typ))
  }
  
@@ -1342,7 +1409,7 @@ index 1b197a8..79dc7d5 100644
                      if !self.video_threads.contains_key(&display) {
                          self.new_video_thread(display);
 diff --git a/src/common.rs b/src/common.rs
-index 53831cc..2204e07 100644
+index 53831cc..dd83f7d 100644
 --- a/src/common.rs
 +++ b/src/common.rs
 @@ -693,6 +693,11 @@ impl Drop for CheckTestNatType {
@@ -1357,7 +1424,84 @@ index 53831cc..2204e07 100644
      test_ipv6_sync();
      use std::sync::atomic::{AtomicBool, Ordering};
      std::thread::spawn(move || {
-@@ -2786,6 +2791,10 @@ async fn test_bind_ipv6() -> ResultType<SocketAddr> {
+@@ -2141,6 +2146,13 @@ pub fn decode64<T: AsRef<[u8]>>(input: T) -> Result<Vec<u8>, base64::DecodeError
+     base64::decode(input)
+ }
+ 
++/// Tether: the server signed the peer's identity with a key this device does not trust.
++#[cfg(feature = "tauri")]
++pub const SERVER_KEY_UNTRUSTED: &str = "Server key mismatch: the server's key is not trusted by this Tether (the server key was changed and this device has not received the new key list yet). Tether fetches it automatically with the policy; try again in a few minutes, or update Tether from your download page.";
++/// Tether: hbbs refused the key this device presented (`LICENSE_MISMATCH`).
++#[cfg(feature = "tauri")]
++pub const SERVER_KEY_REJECTED: &str = "Server key mismatch: the server did not accept this Tether's server key (the server key was changed and this device has not received the new key list yet). Tether fetches it automatically with the policy; try again in a few minutes, or update Tether from your download page.";
++
+ pub async fn get_key(sync: bool) -> String {
+     #[cfg(windows)]
+     if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
+@@ -2158,7 +2170,8 @@ pub async fn get_key(sync: bool) -> String {
+         options.remove("key").unwrap_or_default()
+     };
+     if key.is_empty() {
+-        key = config::RS_PUB_KEY.to_owned();
++        // Tether: the first key of the admin-signed server key list, else RS_PUB_KEY.
++        key = config::server_key();
+     }
+     key
+ }
+@@ -2290,10 +2303,13 @@ async fn secure_tcp_impl(conn: &mut Stream, key: &str, log_on_success: bool) ->
+ /// when the server sent something else first, nothing parseable, or closed: `secure_tcp`
+ /// tolerates that for servers from before the exchange, `secure_tcp_required` does not.
+ async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> ResultType<bool> {
+-    let rs_pk = get_rs_pk(key);
+-    let Some(rs_pk) = rs_pk else {
++    // Tether: any key of the signed server key list (key rotation, docs/key-rotation.md).
++    let rs_pks: Vec<sign::PublicKey> =
++        config::server_keys_for(key).iter().filter_map(|k| get_rs_pk(k)).collect();
++    if rs_pks.is_empty() {
+         bail!("Handshake failed: invalid public key from rendezvous server");
+-    };
++    }
++    let verify = |m: &[u8]| rs_pks.iter().find_map(|pk| sign::verify(m, pk).ok());
+     match timeout(READ_TIMEOUT, conn.next()).await? {
+         Some(Ok(bytes)) => {
+             if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
+@@ -2302,16 +2318,15 @@ async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> Res
+                         if ex.keys.len() != 1 {
+                             bail!("Handshake failed: invalid key exchange message");
+                         }
+-                        let their_pk_b = sign::verify(&ex.keys[0], &rs_pk)
+-                            .map_err(|_| anyhow!("Signature mismatch in key exchange"))?;
++                        let their_pk_b = verify(&ex.keys[0])
++                            .ok_or_else(|| anyhow!("Signature mismatch in key exchange"))?;
+                         let their_pk_b = get_pk(&their_pk_b)
+                             .context("Wrong their public length in key exchange")?;
+                         // The signed X25519 high bit marks servers that sign their parameters.
+                         // X25519 ignores that bit, so old clients use the key unchanged; keep
+                         // the bytes as signed, since the transcript and KxParams carry them so.
+                         if their_pk_b[31] & 0x80 != 0 || !ex.signed_params.is_empty() {
+-                            let params = sign::verify(&ex.signed_params, &rs_pk)
+-                                .ok()
++                            let params = verify(&ex.signed_params)
+                                 .and_then(|signed| {
+                                     let params =
+                                         signed.strip_prefix(hbb_common::tcp::KX_PARAMS_DOMAIN)?;
+@@ -2402,6 +2417,15 @@ pub fn get_rs_pk(str_base64: &str) -> Option<sign::PublicKey> {
+     }
+ }
+ 
++/// Tether: `decode_id_pk` with every server key trusted on a server reached with `key` (the signed
++/// server key list during a key rotation, docs/key-rotation.md). `None`: no trusted key signed it.
++pub fn decode_id_pk_any(signed: &[u8], key: &str) -> Option<(String, [u8; 32])> {
++    config::server_keys_for(key)
++        .iter()
++        .filter_map(|k| get_rs_pk(k))
++        .find_map(|pk| decode_id_pk(signed, &pk).ok())
++}
++
+ pub fn decode_id_pk(signed: &[u8], key: &sign::PublicKey) -> ResultType<(String, [u8; 32])> {
+     let (id, pk, _, _) = decode_id_pk_dtls(signed, key)?;
+     Ok((id, pk))
+@@ -2786,6 +2810,10 @@ async fn test_bind_ipv6() -> ResultType<SocketAddr> {
  }
  
  pub async fn test_ipv6() -> Option<tokio::task::JoinHandle<()>> {
@@ -1368,6 +1512,43 @@ index 53831cc..2204e07 100644
      {
          // One look and one claim of the minute, under one lock: two connections arriving
          // together would otherwise both find it over and both probe.
+@@ -3619,4 +3647,36 @@ mod tests {
+         // non-WebRTC handshakes.
+         assert_eq!(decode_id_pk(&signed, &pk).unwrap(), (id, their_pk));
+     }
++
++    /// Server key rotation (docs/key-rotation.md): which server signatures a client accepts
++    /// and which key it presents, as the signed key list moves from [A] to [A, B] to [B].
++    #[test]
++    fn test_server_key_rotation_selection() {
++        let (pa, sa) = sign::gen_keypair();
++        let (pb, sb) = sign::gen_keypair();
++        let (a, b) = (encode64(pa), encode64(pb));
++        let id_pk = |sk: &sign::SecretKey| {
++            let m = IdPk { id: "123456789".to_owned(), pk: Bytes::from(vec![7u8; 32]), ..Default::default() };
++            sign::sign(&m.write_to_bytes().unwrap(), sk)
++        };
++        let (by_a, by_b) = (id_pk(&sa), id_pk(&sb));
++        let set = |v: &[&String]| *config::POLICY_SERVER_KEYS.write().unwrap() = v.iter().map(|k| k.to_string()).collect();
++        // Before: a client built with A only (no list) presents A and rejects B's signature.
++        set(&[]);
++        assert!(decode_id_pk_any(&by_a, &a).is_some());
++        assert!(decode_id_pk_any(&by_b, &a).is_none());
++        // Phase 1/2: list [A, B]. Still presents A, accepts either signature.
++        set(&[&a, &b]);
++        assert_eq!(config::server_key(), a);
++        assert!(decode_id_pk_any(&by_a, &config::server_key()).is_some());
++        assert_eq!(decode_id_pk_any(&by_b, &config::server_key()).unwrap().0, "123456789");
++        // Phase 3: list [B]. Presents B; a signature by the retired A is rejected.
++        set(&[&b]);
++        assert_eq!(config::server_key(), b);
++        assert!(decode_id_pk_any(&by_b, &config::server_key()).is_some());
++        assert!(decode_id_pk_any(&by_a, &config::server_key()).is_none());
++        // A custom server's own key is not widened by the list.
++        assert!(decode_id_pk_any(&by_b, &a).is_none());
++        set(&[]);
++    }
+ }
 diff --git a/src/core_main.rs b/src/core_main.rs
 index 19a2670..01fcdec 100644
 --- a/src/core_main.rs

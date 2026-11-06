@@ -4,10 +4,14 @@
 //!
 //! Every process role loads the cached bundle at startup without network (`init`); the main UI and
 //! the `--server` role keep it fresh (`start`), only the main UI sends heartbeats.
+//! The signed server key list (docs/key-rotation.md) travels the same way: `server-keys.json`.
 
 use std::{
     path::PathBuf,
-    sync::{LazyLock, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        LazyLock, RwLock,
+    },
     time::Duration,
 };
 
@@ -19,6 +23,7 @@ use serde_json::{json, Value};
 use tether_trust::{
     envelope,
     policy::{parse_servers, resolve, server_host, Bundle, Effective, Layer, FEATURES, FLOOR, PROFILE_TECHNICIAN, SERVERS_LIST, DIRECT},
+    serverkeys::{self, KeyList},
     VerifyingKey,
 };
 
@@ -187,9 +192,49 @@ pub(crate) fn write_atomic(path: &PathBuf, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Serial of the applied server key list (heartbeat `server_keys_serial`; 0 = none).
+static SERVER_KEYS_SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// The cached server key list → the core's presented and trusted server keys. Without a list the
+/// core uses the compiled-in key only. Re-run on every check so expiries take effect.
+fn apply_server_keys(keys: &[VerifyingKey]) {
+    let list = serverkeys::load(&Config::path("server-keys.json"), keys);
+    let active = list.as_ref().map(|l| l.active(api_now())).unwrap_or_default();
+    SERVER_KEYS_SERIAL.store(list.map_or(0, |l| l.serial), Ordering::Relaxed);
+    let mut cur = hbb_common::config::POLICY_SERVER_KEYS.write().unwrap();
+    if *cur != active {
+        log::info!("server keys: {active:?}");
+        *cur = active;
+    }
+}
+
+fn api_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// `GET /api/server-keys`: a newer list signed by the admin key replaces the cached one.
+fn refresh_server_keys(keys: &[VerifyingKey]) -> Result<Option<KeyList>, String> {
+    let serial = SERVER_KEYS_SERIAL.load(Ordering::Relaxed);
+    let r = api(|c, base| {
+        let rq = c.get(format!("{base}/api/server-keys"));
+        if serial > 0 { rq.header("If-None-Match", format!("\"{serial}\"")) } else { rq }
+    })?;
+    match r.status().as_u16() {
+        304 | 404 => return Ok(None), // 404: nothing published, or a relay API without the endpoint
+        200 => {}
+        s => return Err(format!("server key list: server answered {s}")),
+    }
+    let raw = r.bytes().map_err(|e| format!("offline: {e}"))?;
+    if raw.len() > 16 * 1024 {
+        return Err("server key list too large".into());
+    }
+    serverkeys::accept(&Config::path("server-keys.json"), &raw, keys)
+}
+
 /// Startup, every role, no network: cached bundle (if still valid) + machine layer.
 pub fn init() {
     let keys = trusted_keys();
+    apply_server_keys(&keys);
     let bundle = std::fs::read(Config::path("policy.json")).ok().and_then(|raw| {
         open(&raw, &keys)
             .map_err(|e| log::warn!("cached policy ignored: {e}"))
@@ -313,6 +358,12 @@ pub fn proxy_url() -> Option<String> {
 pub(crate) fn api(
     build: impl Fn(&reqwest::blocking::Client, &str) -> reqwest::blocking::RequestBuilder,
 ) -> Result<reqwest::blocking::Response, String> {
+    // Debug builds only: tests point the API at a local stand-in (http://127.0.0.1:<port>).
+    #[cfg(debug_assertions)]
+    if let Ok(base) = std::env::var("TETHER_DEV_API") {
+        let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
+        return build(&client, base.trim_end_matches('/')).send().map_err(|e| format!("offline: {e}"));
+    }
     let hosts = api_hosts();
     if hosts.is_empty() {
         return Err("offline: no server compiled into this build".into());
@@ -349,13 +400,19 @@ pub(crate) fn api(
     Err(format!("offline: {last}"))
 }
 
-/// One policy check. `Ok(true)` when a newer bundle was applied.
+/// One policy check (and server key list check). `Ok(true)` when a newer bundle was applied.
 pub fn refresh() -> Result<bool, String> {
     let keys = trusted_keys();
     if keys.is_empty() {
         // Debug builds without TETHER_ADMIN_PUB_KEY run with defaults (+ machine layer) only.
         return Ok(apply(None));
     }
+    match refresh_server_keys(&keys) {
+        Ok(Some(l)) => log::info!("server key list {} applied", l.serial),
+        Ok(None) => {}
+        Err(e) => log::info!("server key list check: {e}"),
+    }
+    apply_server_keys(&keys);
     let serial = STATE.read().unwrap().bundle.as_ref().map(|b| b.serial);
     let r = api(|c, base| {
         let rq = c.get(format!("{base}/api/policy"));
@@ -389,7 +446,7 @@ pub fn refresh() -> Result<bool, String> {
 
 /// `POST /api/heartbeat`, best effort.
 pub fn heartbeat() {
-    let body = json!({
+    let mut body = json!({
         "uuid": install_uuid(),
         "id": librustdesk::ui::api::get_id(),
         "profile": PROFILE,
@@ -397,6 +454,11 @@ pub fn heartbeat() {
         "os": hbb_common::whoami::distro(),
         "serial": effective().serial,
     });
+    // Only with a list: relay APIs from before key rotation reject unknown fields.
+    let keys_serial = SERVER_KEYS_SERIAL.load(Ordering::Relaxed);
+    if keys_serial > 0 {
+        body["server_keys_serial"] = json!(keys_serial);
+    }
     match api(|c, base| c.post(format!("{base}/api/heartbeat")).json(&body)) {
         Ok(r) if r.status().is_success() || r.status().as_u16() == 429 => {}
         Ok(r) => log::debug!("heartbeat: {}", r.status()),

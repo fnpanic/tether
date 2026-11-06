@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tether_trust::custom::{self, CustomProfile};
 use tether_trust::policy::{self, Bundle, Effective, Layer};
+use tether_trust::serverkeys::{KeyList, ServerKey};
 use tether_trust::{envelope, SigningKey, VerifyingKey};
 
 const DEFAULT_SERVER: &str = "https://tether-desk.duckdns.org";
@@ -171,6 +172,7 @@ fn state(app: State<App>) -> Value {
         "unlocked": k.is_some(),
         "admin_pub": k.as_ref().map(|k| k.admin_pub()),
         "updater_pub": k.as_ref().map(|k| k.updater_pub()),
+        "server_keys": k.as_ref().map(|k| k.server_pubs()),
         "settings": app.settings(),
         "servers": app.servers(),
         "data_dir": app.dir,
@@ -261,6 +263,100 @@ async fn devices_all(app: State<'_, App>) -> R<Value> {
         return Err(failed.join("; "));
     }
     Ok(json!({ "devices": live::merge_devices(lists), "failed": failed }))
+}
+
+// ---- server key rotation (docs/key-rotation.md) ----
+
+/// A new server key pair, sealed into `keys.json` right away. Needs the passphrase again because
+/// only the decrypted keys are kept in memory.
+#[tauri::command]
+fn serverkeys_generate(app: State<App>, passphrase: String) -> R<String> {
+    let data = fs::read(app.path("keys.json")).map_err(|_| "No keys yet.".to_owned())?;
+    let mut keys = Keys::open(&data, &passphrase)?;
+    let mut guard = app.keys.lock().unwrap();
+    let current = guard.as_ref().ok_or("Unlock the keys first.")?;
+    if keys.admin.to_bytes() != current.admin.to_bytes() {
+        return Err("The key file on disk is not the one that is unlocked. Unlock again.".into());
+    }
+    let public = keys.add_server_key();
+    app.write("keys.json", &keys.seal(&passphrase)?)?;
+    *guard = Some(keys);
+    Ok(public)
+}
+
+/// The signed key list every relay serves (`GET /api/server-keys`), verified with this admin key.
+async fn live_server_keys(server: &str, key: &VerifyingKey) -> Value {
+    match api::public(server, "/api/server-keys").await {
+        Ok(None) => json!({ "server": server, "reachable": true, "note": "No server key list published" }),
+        Ok(Some(raw)) => match KeyList::open(&raw, &[*key]) {
+            Ok(l) => json!({ "server": server, "reachable": true, "verified": true, "serial": l.serial, "issued_at": l.issued_at, "keys": l.keys }),
+            Err(e) => json!({ "server": server, "reachable": true, "verified": false, "serial": unverified_header(&raw).map(|h| h.0),
+                "note": if e.contains("untrusted") { "Signed by a different admin key".to_owned() } else { format!("Not a valid server key list: {e}") } }),
+        },
+        Err(e) => json!({ "server": server, "reachable": false, "note": e }),
+    }
+}
+
+#[tauri::command]
+async fn serverkeys_live(app: State<'_, App>) -> R<Value> {
+    let key = app.admin_key()?.verifying_key();
+    let mut relays = Vec::new();
+    for sv in app.servers() {
+        relays.push(live_server_keys(&sv, &key).await);
+    }
+    let rotation: Value = fs::read(app.path("server-keys/rotation.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+    Ok(json!({ "relays": relays, "rotation": rotation }))
+}
+
+/// Progress of a rotation (current and new public key, relays switched), kept on this PC.
+#[tauri::command]
+fn serverkeys_rotation_set(app: State<App>, rotation: Value) -> R<()> {
+    app.write("server-keys/rotation.json", &serde_json::to_vec_pretty(&rotation).unwrap())
+}
+
+/// Sign the key list and publish it to every relay, then read each one back.
+#[tauri::command]
+async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>) -> R<Value> {
+    let admin = app.admin_key()?;
+    let mut serial = 0;
+    for sv in app.servers() {
+        if let Ok(out) = app.call_on(&sv, "GET", "/api/admin/status", Vec::new(), "application/json").await {
+            let status: Value = serde_json::from_slice(&out).unwrap_or(Value::Null);
+            serial = serial.max(status["server_keys_serial"].as_u64().unwrap_or(0));
+        }
+        serial = serial.max(live_server_keys(&sv, &admin.verifying_key()).await["serial"].as_u64().unwrap_or(0));
+    }
+    let local = fs::read_dir(app.path("server-keys/published")).into_iter().flatten().flatten()
+        .filter_map(|e| e.path().file_stem()?.to_str()?.parse::<u64>().ok()).max().unwrap_or(0);
+    let list = KeyList { serial: serial.max(local) + 1, issued_at: api::now(), keys };
+    list.validate()?;
+    let payload = serde_json::to_vec(&list).unwrap();
+    let doc = serde_json::to_vec(&envelope::sign(&payload, &admin)).unwrap();
+    let mut results = Vec::new();
+    for sv in app.servers() {
+        let r = match app.call_on(&sv, "PUT", "/api/admin/server-keys", doc.clone(), "application/json").await {
+            Err(e) => Err(e),
+            Ok(_) => match live_server_keys(&sv, &admin.verifying_key()).await["serial"].as_u64() {
+                Some(s) if s == list.serial => Ok(json!({ "serial": s })),
+                s => Err(format!("Uploaded, but the relay still serves serial {}", s.map_or("none".into(), |s| s.to_string()))),
+            },
+        };
+        results.push(RelayResult::of(&sv, r));
+    }
+    if let Some(e) = none_ok(&results) {
+        return Err(e);
+    }
+    app.write(&format!("server-keys/published/{}.json", list.serial), &doc)?;
+    Ok(json!({ "serial": list.serial, "relays": results }))
+}
+
+/// `id_ed25519` and `id_ed25519.pub` of a server key generated here, for the relays.
+#[tauri::command]
+fn serverkeys_save_files(app: State<App>, public: String, folder: String) -> R<()> {
+    let (secret, public) = app.keys.lock().unwrap().as_ref().ok_or("Unlock the keys first.")?.server_key_files(&public).ok_or("This key was not generated on this PC.")?;
+    let dir = PathBuf::from(folder);
+    fs::write(dir.join("id_ed25519"), secret).map_err(err)?;
+    fs::write(dir.join("id_ed25519.pub"), public).map_err(err)
 }
 
 // ---- policy ----
@@ -1060,6 +1156,11 @@ fn main() {
             relays_check,
             devices_all,
             features,
+            serverkeys_generate,
+            serverkeys_live,
+            serverkeys_rotation_set,
+            serverkeys_publish,
+            serverkeys_save_files,
             policy_draft,
             policy_save_draft,
             policy_check,
