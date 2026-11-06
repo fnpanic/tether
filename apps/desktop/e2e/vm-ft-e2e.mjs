@@ -102,9 +102,13 @@ async function main() {
     return { toast };
   });
 
-  // 2. Chat both ways. The toolbar auto-hides: the pointer at the top edge reveals it.
+  // 2. Chat both ways. The toolbar auto-hides: its handle at the top centre reveals it.
+  const toolbarUp = async () => {
+    const handle = v.getByRole("button", { name: "Show toolbar" });
+    if (await handle.isVisible()) await handle.click();
+  };
   const techChat = async () => {
-    await v.mouse.move(400, 10);
+    await toolbarUp();
     await v.getByRole("button", { name: /^Chat/ }).click();
   };
   const techSay = async (t) => {
@@ -275,7 +279,7 @@ async function main() {
     const sw = qs.getByRole("switch", { name: "Transfer files" });
     if ((await sw.getAttribute("aria-checked")) === "true") await sw.click();
     await sleep(800);
-    await v.mouse.move(400, 20); // the toolbar hides itself after the reload above
+    await toolbarUp(); // the toolbar hides itself after the reload above
     await v.getByRole("button", { name: "Transfer files" }).click();
     await until("a new file transfer request on TetherQS", async () => (await text(qs)).includes("wants to transfer files"), 20000);
     await qs.getByRole("button", { name: "Decline" }).click();
