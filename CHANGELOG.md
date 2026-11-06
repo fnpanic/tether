@@ -4,7 +4,7 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
-## [Unreleased]
+## [0.5.17] — 2026-11-06
 
 Tether Manage 0.5.5; Tether / TetherQS client changes for the next release; hbbs and the Caddyfile
 on the relays.
