@@ -179,7 +179,9 @@ TetherQS runs its connection manager in its single process: one icon.
 
 When a session starts, the connection window and the main window minimize (to the right side of
 the Dock, never hidden; the `--cm` process tells the main process through the single-instance
-socket `/tmp/<identifier with _>_si.sock`); a chat message from the technician, a new request or
+socket `/tmp/<identifier with _>_si.sock`); whenever the connection window is minimized again during the session (yellow button, Dock
+click), the main window minimizes with it (the `--cm` process checks its window
+every 300 ms, macOS has no minimize event); a chat message from the technician, a new request or
 a click on the Tether Dock icon brings the connection window back. Verified 2026-11-05 on an Apple Silicon Mac with 0.5.9: one Tether icon with a
 screen and a file transfer session, the window stays minimized when the second session starts,
 a chat message restores it on the Chat tab, a Dock click restores it.

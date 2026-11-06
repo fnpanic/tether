@@ -131,6 +131,9 @@ pub fn run(args: Vec<String>) {
                 Mode::Cm => {
                     librustdesk::ui::cm::start();
                     cm_window(app.handle())?;
+                    // Windows hides the main window for the whole session instead (host_session_started).
+                    #[cfg(target_os = "macos")]
+                    follow_cm_minimize(app.handle().clone());
                     #[cfg(target_os = "macos")]
                     if let Some(l) = cm_show.take() {
                         let app = app.handle().clone();
@@ -430,8 +433,40 @@ fn cm_dock_click(identifier: &str) -> bool {
     std::io::Read::read_exact(&mut s, &mut r).is_ok() && r[0] == b'1'
 }
 
+/// `--cm` process, macOS: each time the connection window becomes minimized during a session
+/// (at the start, or by the user: yellow button, Dock click) the main window minimizes with it.
+/// Up to 0.5.19 only the session start told the main window, once, so a connection window
+/// minimized later left the main window on screen. There is no minimize event on macOS: polled.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn follow_cm_minimize(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut f = MinimizeFollower::default();
+        while let Some(w) = app.get_webview_window("cm") {
+            if f.step(w.is_minimized().unwrap_or(false), host_session_active()) {
+                hbb_common::log::info!("connection window minimized: minimizing the main window");
+                minimize_main(&app);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    });
+}
+
+/// Fires once per change of the connection window to minimized while a session is active.
+#[derive(Default)]
+struct MinimizeFollower {
+    was: bool,
+}
+
+impl MinimizeFollower {
+    fn step(&mut self, minimized: bool, session: bool) -> bool {
+        let fire = minimized && !self.was && session;
+        self.was = minimized;
+        fire
+    }
+}
+
 /// `--cm` process: an authorized client is connected.
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn host_session_active() -> bool {
     sink::get().is_some_and(|s| s.cm_clients().iter().any(|c| c["authorized"] == true))
 }
@@ -594,4 +629,28 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
     }
     b.build(app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MinimizeFollower;
+
+    #[test]
+    fn main_window_follows_every_minimize_of_the_connection_window() {
+        let mut f = MinimizeFollower::default();
+        // No session: the user minimizing the window decides nothing for the main window.
+        assert!(!f.step(true, false));
+        assert!(!f.step(false, false));
+        // Session starts, the connection window minimizes: once, not on every poll.
+        assert!(!f.step(false, true));
+        assert!(f.step(true, true));
+        assert!(!f.step(true, true));
+        // Restored (Dock click, chat) and minimized again by the user: again.
+        assert!(!f.step(false, true));
+        assert!(f.step(true, true));
+        // Already minimized when the session starts: no change, nothing to do.
+        let mut g = MinimizeFollower::default();
+        assert!(!g.step(true, false));
+        assert!(!g.step(true, true));
+    }
 }

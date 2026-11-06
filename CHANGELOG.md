@@ -28,6 +28,12 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   click instead of a drag. Presses and releases now go out after the pending position, and the
   toolbar no longer appears during drags. Covered in Chromium and WebKit by
   `apps/desktop/e2e/viewer-mock.e2e.mjs` (mock mode, no Tauri).
+- **macOS: minimizing the "Session active" window left the Tether main window on screen.** The
+  connection window (`--cm` process) told the main window to minimize only once, when the
+  session started. Now it does so every time the connection window becomes minimized during a
+  session (yellow button, Dock click, session start); it checks the window every 300 ms, since
+  macOS reports no minimize event. Windows is unchanged (the main window is hidden for the whole
+  session there).
 
 ### Relays
 - **Backup relays.** A `RELAY_SERVERS` entry may end in `|backup`
