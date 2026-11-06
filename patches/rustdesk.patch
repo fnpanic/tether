@@ -464,7 +464,7 @@ index 0000000..ab29c0a
 +    }
 +}
 diff --git a/libs/scrap/src/quartz/display.rs b/libs/scrap/src/quartz/display.rs
-index 137d648..c6fa75e 100644
+index 137d648..cf71fab 100644
 --- a/libs/scrap/src/quartz/display.rs
 +++ b/libs/scrap/src/quartz/display.rs
 @@ -2,6 +2,9 @@ use std::mem;
@@ -477,7 +477,33 @@ index 137d648..c6fa75e 100644
  #[derive(PartialEq, Eq, Debug, Clone, Copy)]
  #[repr(C)]
  pub struct Display(u32);
-@@ -73,7 +76,10 @@ impl Display {
+@@ -37,21 +40,15 @@ impl Display {
+     pub fn width(self) -> usize {
+         let w = unsafe { CGDisplayPixelsWide(self.0) };
+         let s = self.scale();
+-        if s > 1.0 {
+-            ((w as f64) * s).round() as usize
+-        } else {
+-            w
+-        }
++        let w = if s > 1.0 { ((w as f64) * s).round() as usize } else { w };
++        even(w)
+     }
+ 
+     pub fn height(self) -> usize {
+         let h = unsafe { CGDisplayPixelsHigh(self.0) };
+         let s = self.scale();
+-        if s > 1.0 {
+-            ((h as f64) * s).round() as usize
+-        } else {
+-            h
+-        }
++        let h = if s > 1.0 { ((h as f64) * s).round() as usize } else { h };
++        even(h)
+     }
+ 
+     pub fn is_builtin(self) -> bool {
+@@ -73,7 +70,10 @@ impl Display {
      pub fn scale(self) -> f64 {
          let s = unsafe { BackingScaleFactor(self.0) as _ };
          if s > 1. {
@@ -489,6 +515,31 @@ index 137d648..c6fa75e 100644
              if enable_retina {
                  return s;
              }
+@@ -85,3 +85,24 @@ impl Display {
+         unsafe { CGDisplayBounds(self.0) }
+     }
+ }
++
++/// Tether: capture at even dimensions. A Retina display's logical size can be odd (1728x1117 on a
++/// 14" MacBook Pro) and hardware video decoders, the viewer's WebCodecs among them, reject odd
++/// frame sizes, which pushed every Mac session onto the slow native decoding path.
++fn even(n: usize) -> usize {
++    if n > 1 {
++        n & !1
++    } else {
++        n
++    }
++}
++
++#[cfg(test)]
++mod even_tests {
++    #[test]
++    fn capture_size_is_even() {
++        assert_eq!(super::even(1117), 1116);
++        assert_eq!(super::even(1728), 1728);
++        assert_eq!(super::even(1), 1);
++    }
++}
 diff --git a/src/client.rs b/src/client.rs
 index 597dc86..84cd39f 100644
 --- a/src/client.rs
