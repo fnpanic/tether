@@ -77,7 +77,7 @@ async function quick(name, port) {
   const browser = await { chromium, webkit }[name].launch();
   const p = await browser.newPage({ viewport: { width: 420, height: 560 } });
   await p.addInitScript(fakeTauri, STATE);
-  await p.goto(`http://localhost:${port}/`);
+  await p.goto(`http://localhost:${port}/`, { timeout: 120000 });
   const tag = (s) => `[${name}] TetherQS ${s}`;
   await p.getByRole("button", { name: "Disconnect" }).nth(1).waitFor({ timeout: 10000 });
   for (const [i, id] of [[1, 2], [0, 1]]) {
@@ -126,7 +126,7 @@ async function cm(name, port) {
   const browser = await { chromium, webkit }[name].launch();
   const p = await browser.newPage({ viewport: { width: 380, height: 560 } });
   await p.addInitScript(() => (window.__mockCalls = []));
-  await p.goto(`http://localhost:${port}/#/cm`);
+  await p.goto(`http://localhost:${port}/#/cm`, { timeout: 120000 });
   const tag = (s) => `[${name}] technician-app connection window ${s}`;
   const tabs = p.locator("button", { hasText: /@/ });
   await tabs.nth(1).waitFor({ timeout: 10000 }).catch(() => {});

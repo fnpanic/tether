@@ -36,7 +36,7 @@ async function run(name) {
   const browser = await { chromium, webkit }[name].launch();
   const p = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   await p.addInitScript(() => (window.__mockCalls = []));
-  await p.goto(`http://localhost:${PORT}/#/session/mock?peer=184392571`);
+  await p.goto(`http://localhost:${PORT}/#/session/mock?peer=184392571`, { timeout: 120000 }); // first Vite transform is slow on a busy PC
   const tag = (s) => `[${name}] ${s}`;
   const bar = p.getByRole("button", { name: "Disconnect" });
   const mouse = async () => p.evaluate(() => window.__mockCalls.filter((c) => c.cmd === "session_mouse").map((c) => c.args));
