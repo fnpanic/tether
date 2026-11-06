@@ -335,7 +335,7 @@ OVH test files arrived at 170-185 Mbit/s. Layout since 22:00:
 |---|---|---|
 | `tether-desk.duckdns.org` | Hetzner CX23, Nuremberg (`tether-relay-hz1`, 46.224.17.114), AlmaLinux 9 | primary: hbbs, hbbr, tether-api, Caddy |
 | `tether-desk2.duckdns.org` | Oracle relay 2 | backup: hbbs, hbbr (`|backup`), tether-api, Caddy |
-| (none) | Oracle relay 1 (158.101.205.185) | out of service; its DuckDNS timer is off |
+| (none) | Oracle relay 1 (158.101.205.185) | retired 2026-11-06: all Tether services and the DuckDNS timer stopped and disabled; to be terminated in the OCI console with its boot volume (it still holds a copy of the server key) |
 
 `RELAY_SERVERS` on both hbbs: Hetzner first, Oracle 2 with `|backup` (see "Relay choice"). Clients
 did not change: same names, same server key (`fe8A7x…`, copied from Oracle 1), and the tether-api
