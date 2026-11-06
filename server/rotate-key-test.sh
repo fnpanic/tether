@@ -26,6 +26,9 @@ grep -q "keys.env" "$UNITS/tether-hbbs.service.d/keys.conf" || fail "no drop-in 
 grep -q "keys.env" "$UNITS/tether-hbbr.service.d/keys.conf" || fail "no drop-in for hbbr"
 [ "$(stat -c %a "$DATA/id_ed25519")" = 600 ] || fail "secret key not 0600"
 ! bash "$HERE/rotate-key.sh" switch "$T/new" 2>/dev/null || fail "switched to the same key twice"
+key "$T/third" >/dev/null
+! bash "$HERE/rotate-key.sh" switch "$T/third" 2>/dev/null || fail "second switch dropped the original key"
+[ "$(cat "$ETC/keys.env")" = "KEYS_ACCEPT=$A" ] || fail "refused second switch changed KEYS_ACCEPT"
 
 bash "$HERE/rotate-key.sh" rollback >/dev/null
 [ "$(cat "$DATA/id_ed25519.pub")" = "$A" ] || fail "rollback did not restore the old key"

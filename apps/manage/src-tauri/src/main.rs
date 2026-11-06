@@ -297,6 +297,19 @@ async fn live_server_keys(server: &str, key: &VerifyingKey) -> Value {
     }
 }
 
+fn verified_serial(live: &Value) -> Option<u64> {
+    live["verified"].as_bool().filter(|v| *v).and(live["serial"].as_u64())
+}
+
+/// An expiry that has passed (or passes within the hour) makes devices present the
+/// new key at once, to relays that do not accept it yet.
+fn check_expiry(keys: &[ServerKey], now: u64) -> Result<(), String> {
+    match keys.iter().find(|k| k.expires != 0 && k.expires < now + 3600) {
+        Some(k) => Err(format!("The expiry of {}… must be at least an hour ahead.", k.key.get(..8).unwrap_or(&k.key))),
+        None => Ok(()),
+    }
+}
+
 #[tauri::command]
 async fn serverkeys_live(app: State<'_, App>) -> R<Value> {
     let key = app.admin_key()?.verifying_key();
@@ -318,17 +331,17 @@ fn serverkeys_rotation_set(app: State<App>, rotation: Value) -> R<()> {
 #[tauri::command]
 async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>) -> R<Value> {
     let admin = app.admin_key()?;
+    // Only serials of lists signed by this admin key count: a relay can report or serve any
+    // number, and a huge one would end rotations for good (devices never accept a lower serial).
     let mut serial = 0;
     for sv in app.servers() {
-        if let Ok(out) = app.call_on(&sv, "GET", "/api/admin/status", Vec::new(), "application/json").await {
-            let status: Value = serde_json::from_slice(&out).unwrap_or(Value::Null);
-            serial = serial.max(status["server_keys_serial"].as_u64().unwrap_or(0));
-        }
-        serial = serial.max(live_server_keys(&sv, &admin.verifying_key()).await["serial"].as_u64().unwrap_or(0));
+        serial = serial.max(verified_serial(&live_server_keys(&sv, &admin.verifying_key()).await).unwrap_or(0));
     }
     let local = fs::read_dir(app.path("server-keys/published")).into_iter().flatten().flatten()
         .filter_map(|e| e.path().file_stem()?.to_str()?.parse::<u64>().ok()).max().unwrap_or(0);
-    let list = KeyList { serial: serial.max(local) + 1, issued_at: api::now(), keys };
+    let serial = serial.max(local).checked_add(1).ok_or("The server key list serial is exhausted.")?;
+    check_expiry(&keys, api::now())?;
+    let list = KeyList { serial, issued_at: api::now(), keys };
     list.validate()?;
     let payload = serde_json::to_vec(&list).unwrap();
     let doc = serde_json::to_vec(&envelope::sign(&payload, &admin)).unwrap();
@@ -336,7 +349,7 @@ async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>) -> R<Valu
     for sv in app.servers() {
         let r = match app.call_on(&sv, "PUT", "/api/admin/server-keys", doc.clone(), "application/json").await {
             Err(e) => Err(e),
-            Ok(_) => match live_server_keys(&sv, &admin.verifying_key()).await["serial"].as_u64() {
+            Ok(_) => match verified_serial(&live_server_keys(&sv, &admin.verifying_key()).await) {
                 Some(s) if s == list.serial => Ok(json!({ "serial": s })),
                 s => Err(format!("Uploaded, but the relay still serves serial {}", s.map_or("none".into(), |s| s.to_string()))),
             },
@@ -1327,5 +1340,18 @@ mod tests {
         let ok = RelayResult::of("a", Ok(Value::Null));
         assert!(none_ok(&[ok, RelayResult::of("b", Err("down".into()))]).is_none());
         assert_eq!(none_ok(&[RelayResult::of("b", Err("down".into()))]).unwrap(), "b: down");
+    }
+
+    #[test]
+    fn server_key_serial_only_from_verified_lists_and_expiry_ahead() {
+        // A relay serving or claiming a huge serial it could not get signed must not count.
+        assert_eq!(verified_serial(&json!({ "verified": false, "serial": u64::MAX })), None);
+        assert_eq!(verified_serial(&json!({ "reachable": true, "note": "none" })), None);
+        assert_eq!(verified_serial(&json!({ "verified": true, "serial": 4 })), Some(4));
+        let k = |expires| ServerKey { key: "k".repeat(44), not_before: 0, expires };
+        assert!(check_expiry(&[k(0)], 1000).is_ok());
+        assert!(check_expiry(&[k(1000 + 7200), k(0)], 1000).is_ok());
+        assert!(check_expiry(&[k(999), k(0)], 1000).is_err(), "already passed");
+        assert!(check_expiry(&[k(1000 + 60), k(0)], 1000).is_err(), "too soon");
     }
 }

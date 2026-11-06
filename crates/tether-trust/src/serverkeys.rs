@@ -47,7 +47,11 @@ impl KeyList {
             return Err(format!("a server key list needs 1-{MAX_KEYS} keys"));
         }
         for (i, k) in self.keys.iter().enumerate() {
-            crate::key_from_b64(&k.key).map_err(|e| format!("server key {}: {e}", i + 1))?;
+            let parsed = crate::key_from_b64(&k.key).map_err(|e| format!("server key {}: {e}", i + 1))?;
+            // The string itself is presented to hbbs/hbbr and compared there: canonical form only.
+            if crate::key_to_b64(&parsed) != k.key {
+                return Err(format!("server key {} is not in canonical base64 form", i + 1));
+            }
             if self.keys[..i].iter().any(|o| o.key == k.key) {
                 return Err(format!("server key {} is listed twice", i + 1));
             }
@@ -104,7 +108,8 @@ pub fn accept(path: &Path, raw: &[u8], admin: &[VerifyingKey]) -> Result<Option<
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_extension("tmp");
+    // Per process: several process roles may store the same list at once.
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&tmp, raw).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("cannot cache server key list: {e}"))?;
     Ok(Some(list))
 }
@@ -143,6 +148,7 @@ mod tests {
             vec![],
             vec![k("not a key", 0, 0)],
             vec![k(&a, 0, 0), k(&a, 0, 0)],
+            vec![k(&a, 0, 0), k(&format!(" {a}\n"), 0, 0)],
             vec![k(&a, 0, 10)],
             vec![k(&a, 20, 10), k(&b, 0, 0)],
             (0..9).map(|_| k(&key(), 0, 0)).collect(),

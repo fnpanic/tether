@@ -45,6 +45,9 @@ case "${1:-}" in
     newpub="$(pub_of "$new")"
     cur="$(pub_of "$DATA/id_ed25519")"
     [ "$newpub" != "$cur" ] || die "$new is already the signing key"
+    # A second switch would drop the key devices may still present from KEYS_ACCEPT.
+    [ ! -f "$DATA/id_ed25519.old" ] || [ "$(pub_of "$DATA/id_ed25519.old")" = "$cur" ] ||
+      die "a switch is in progress (id_ed25519.old): run retire or rollback first"
     cp -p "$DATA/id_ed25519" "$DATA/id_ed25519.old"
     cp -p "$DATA/id_ed25519.pub" "$DATA/id_ed25519.old.pub"
     install -m 0600 "$new" "$DATA/id_ed25519"

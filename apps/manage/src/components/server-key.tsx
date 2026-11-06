@@ -193,7 +193,7 @@ export function ServerKey() {
                   </p>
                   <CopyField label="new server public key" value={rot.to ?? ""} />
                   <Label text="Old key stops being trusted on (optional)" hint="Devices then drop it at that time even if they miss the last step. Switch the relays before this date.">
-                    <TextField type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)} className="max-w-[220px]" />
+                    <TextField type="date" min={new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)} value={expiry} onChange={(e) => setExpiry(e.target.value)} className="max-w-[220px]" />
                   </Label>
                   <div>
                     <Button variant="primary" onClick={() => setSheet("announce")}>

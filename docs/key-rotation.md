@@ -32,8 +32,8 @@ key list.
 
 Rules (`tether_trust::serverkeys`, unit-tested there):
 
-- The list is valid only if signed by a compiled-in admin key, 1–8 distinct Ed25519 keys, and at
-  least one key has no `expires` (so no device clock can leave a device without any key).
+- The list is valid only if signed by a compiled-in admin key, 1–8 distinct Ed25519 keys (canonical
+  base64, the exact string hbbs/hbbr compare), and at least one key has no `expires` (so no device clock can leave a device without any key).
 - **Monotonic serial:** a list with a lower serial than the cached one is rejected; the same
   serial changes nothing. A relay can withhold a newer list but never roll a device back or
   widen its key set.
@@ -79,7 +79,8 @@ device only stays broken if it cannot fetch the list at all (versions from befor
 a device offline for the whole window that is then too old). `tether --policy-refresh` on a device
 fetches policy and key list at once.
 
-Optional: in phase 1 Manage can give A an expiry date. Devices then stop trusting A at that time
+Optional: in phase 1 Manage can give A an expiry date (at least an hour ahead; Manage refuses
+anything sooner). Devices then stop trusting A at that time
 on their own (useful after a suspected key compromise, see below), so phase 3a is only needed
 for devices whose clock is wrong. Relays must have switched (phase 2) before that date, otherwise
 devices present B to relays that do not accept it yet.
@@ -90,6 +91,7 @@ devices present B to relays that do not accept it yet.
 | --- | --- |
 | Compromised or malicious relay / API serves a forged list | Rejected: not signed by the admin key. |
 | Relay serves an older list (rollback to a retired key) | Rejected: serial lower than the cached one. |
+| Relay reports or serves a huge serial (to exhaust the serial space) | Manage takes the next serial only from lists that verify with its admin key and from its own published lists. |
 | Relay withholds the newest list | Devices keep the last list (they keep trusting what was trusted). Mitigation: the expiry on the old key; Manage shows per relay which serial it serves. |
 | Stolen old server key (e.g. a relay was compromised) | With it an attacker who also gets into the path (a relay, or DNS plus a certificate for the relay name) can forge device identities for devices that still trust it. Rotate: phase 1 with an expiry on A, phase 2 at once, phase 3a. |
 | Stolen admin key | It could already push any policy; now it can also make devices trust another server key. Still needs the path into the relay connection (TLS) to MITM. Admin key stays offline in the passphrase-sealed vault. |
@@ -110,6 +112,7 @@ The server key never protects session content: that is end-to-end encrypted betw
 | A relay was skipped in phase 2 | Devices trust A and B, so both relays work | Switch it later |
 | Rollback of phase 2 | `sudo bash rotate-key.sh rollback` puts A back as signer; devices with [A, B] keep working | – |
 | Old hbbs/hbbr without `KEYS_ACCEPT` | `rotate-key.sh` refuses to switch | Update the binaries first (phase 0) |
+| `switch` again while a switch is in progress (`id_ed25519.old` is another key) | `rotate-key.sh` refuses: it would drop the key devices still present from `KEYS_ACCEPT` | `retire` or `rollback` first |
 | Relay API without the endpoint | Manage shows the error per relay; devices get 404 and keep their list | Update tether-api |
 
 ## Operator steps
