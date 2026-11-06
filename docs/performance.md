@@ -497,3 +497,23 @@ waits for the GPU with a 1-pixel readback, so the time includes the GPU work; fo
   the 2D canvas as before.
 - GPU-less viewers (WARP/SwiftShader): not measured; the shader reads 5 texels per pixel.
 - Sessions longer than the ~12 min of the e2e run; GPU memory was not read directly.
+
+### "Regression" in the VM on 2026-11-06 evening: the test proxy, not Tether
+
+An 8-minute Auto run against TetherQS 0.5.17 in the Hyper-V VM showed full-screen noise at
++4120 / +9838 ms (median / p95 over idle) and 17 stalls, against +349 / +1324 ms and none for
+0.5.16 that afternoon. The A/B runs right after pointed away from Tether:
+
+| Run (same VM, same viewer) | noise median / p95 over idle | stalls |
+|---|---|---|
+| 0.5.17 host, sharpening Auto | +4120 / +9838 ms | 17 |
+| A: 0.5.16 host, sharpening Auto | +18402 / +42572 ms | 51 |
+| B: 0.5.16 host, sharpening Off | +39275 / +65472 ms | 169 |
+
+The older host was worse, sharpening off was worse, and every run was worse than the one before.
+The VM reaches the relays only through the TLS-inspecting test proxy (`tools/bench/corp_proxy.py`,
+mitmdump), which had been running since 04:15: it kept every WebSocket message of a connection
+in memory and appended one JSON line per video frame (116 MB log). It now logs the first 20
+frames of a connection, counts the rest and keeps none. A clean rerun was cut short (Claude
+Code's low-memory reaper), so the after-number is still open; the VM end-to-end test against
+0.5.18 through the fixed proxy passed 5/5.
