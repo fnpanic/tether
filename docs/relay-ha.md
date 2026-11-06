@@ -282,3 +282,18 @@ through the corporate proxy OK.
 
 The `Audit post dropped … 404` lines in client logs are unrelated: the upstream client posts to
 `/api/audit/…`, an endpoint only RustDesk Pro has; tether-api does not implement it.
+
+## Server update 0.5.17 (2026-11-06)
+
+Both relays run hbbs `daead622`, hbbr `6e4caaa6` and tether-api `730e728e` (static musl from main,
+`scripts/build-relay.sh` + `scripts/test-relay.sh` green) and the Caddyfile with
+`/rendezvous/pubkey`. New on the relays: hbbs reports the key it signs with (Tether Manage's check
+before "Every relay is switched"), and tether-api stores the session audit log
+(`/api/audit/conn|file|alarm`, Tether Manage › Sessions). Order: relay 2, then relay 1; hbbr
+drained the one open session (2.5 and 5 min). Backups on each node: `/usr/local/bin/<name>.bak-0516`
+and `/etc/tether/Caddyfile.bak-0516`; `/tmp/relay-0517/rollback.sh` restores them.
+
+Two things learned: `caddy validate` needs `RELAY_HOST` from `server.env` (the Caddyfile reads
+`{$RELAY_HOST}`; sourcing the whole file in a shell fails on the `|` in `RELAY_SERVERS`), and
+Caddy runs with the admin API off, so a new Caddyfile needs `systemctl restart tether-https`
+(about a second without HTTPS), not `caddy reload`.
