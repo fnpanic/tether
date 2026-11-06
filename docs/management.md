@@ -69,6 +69,13 @@ On first start Tether Manage offers **Create keys** or **Import a backup instead
 Both are sealed in `keys.json` with your passphrase (argon2id, 64 MiB, 3 passes, then
 XChaCha20-Poly1305). The passphrase must be at least 8 characters. There is no recovery.
 
+`keys.json` has a format version (`v`). A vault that also holds server keys is written as format 2
+(Tether Manage 0.5.5 and later), which older versions refuse to open instead of opening it and
+dropping the server keys when they save it again. A vault without server keys stays format 1.
+Fields a newer version adds are kept unchanged when this version saves the vault; a vault of a
+newer format than this version knows can be unlocked and used, but this version refuses to save
+it ("written by a newer version of Tether Manage … update Tether Manage first").
+
 After creating the keys, immediately:
 
 1. **Keys → Export backup…** writes `tether-manage-keys.tmkeys`. It is the sealed key
@@ -123,8 +130,15 @@ trust only their built-in key.
    (heartbeat `server_keys_serial`, refreshed every 30 s; versions before key rotation never do).
    When enough do: **Save key files…** writes `id_ed25519` and `id_ed25519.pub` of the new key into
    a folder; the commands below install them on every relay with `server/rotate-key.sh switch`
-   (Helm: the `helm upgrade` line). Then **Every relay is switched**. Build new installers with
-   the new `TETHER_PUB_KEY` from now on.
+   (Helm: the `helm upgrade` line). `id_ed25519` is the server's **private** key: it is created
+   so that only the current Windows user can open it (a protected ACL with that user's SID only,
+   nothing inherited; 0600 on macOS/Linux), and a warning with **Delete key files** stays in this
+   step and the next one until you delete it (the button removes only `id_ed25519` and
+   `id_ed25519.pub` from that folder). **Every relay is switched** opens only when every relay's
+   hbbs reports that it signs with the new key (`https://<relay>/rendezvous/pubkey`, see
+   [key-rotation.md](key-rotation.md#checking-the-switch)); the list shows which relay still signs
+   with the old key or cannot tell (hbbs or Caddyfile without the route: update them first), and
+   **Check again** reloads it. Build new installers with the new `TETHER_PUB_KEY` from now on.
 4. **Retire the old key on the devices.** **Publish list without the old key…**.
 5. **Stop accepting the old key on the relays**, when the counter is high enough again:
    `rotate-key.sh retire` per relay (Helm: `key.accept=""`), then **Every relay is done**.
@@ -221,8 +235,12 @@ through. The machine policy layer is not part of the preview.
 check, and a warning if the policy names a relay that is not in the relay list. **Publish** then:
 
 1. validates the draft and signs it with the admin key;
-2. gives it a new serial: the highest of every reachable relay's serial and every serial published
-   from this PC, plus one (devices reject a serial lower than the last one they accepted);
+2. gives it a new serial: the highest serial of every policy a relay serves that verifies with this
+   app's admin key and every serial published from this PC, plus one (devices reject a serial lower
+   than the last one they accepted). What a relay merely reports (`/api/admin/status`
+   `policy_serial`) or serves unsigned or signed by another key does not count, so a malicious
+   relay cannot push the serial to its maximum and end publishing for good. A serial that would
+   overflow is refused with an error;
 3. uploads it to every relay (`PUT /api/admin/policy`) and reads each relay's `GET /api/policy`
    back: a relay shows ✓ only when it serves the new serial.
 

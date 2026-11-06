@@ -3989,7 +3989,7 @@ dependencies = [
 
 [[package]]
 name = "tether-manage"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -4004,6 +4004,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tether-trust",
+ "windows-sys 0.61.2",
  "zeroize",
  "zip",
 ]

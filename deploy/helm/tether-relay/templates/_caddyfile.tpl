@@ -28,6 +28,11 @@
       flush_interval -1
     }
   }
+  # Public key hbbs signs with (all hbbs pods share the key), for Tether Manage's rotation check.
+  handle /rendezvous/pubkey {
+    rewrite * /pubkey
+    reverse_proxy {{ $fn }}-hbbs-0:21122
+  }
   {{- if .Values.api.enabled }}
   handle /api/* {
     reverse_proxy {{ $fn }}-api:21120

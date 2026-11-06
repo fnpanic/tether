@@ -37,6 +37,29 @@ pub fn generate_key() -> SigningKey {
     SigningKey::generate(&mut rand_core::OsRng)
 }
 
+/// Read a response body of at most `limit` bytes: stops after `limit + 1` bytes and fails, so an
+/// oversized (or endless) answer never ends up in memory as a whole.
+pub fn read_limited(r: impl std::io::Read, limit: usize) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    r.take(limit as u64 + 1).read_to_end(&mut out).map_err(|e| format!("offline: {e}"))?;
+    if out.len() > limit {
+        return Err(format!("the answer is larger than {limit} bytes"));
+    }
+    Ok(out)
+}
+
 pub(crate) fn b64() -> &'static base64::engine::GeneralPurpose {
     &B64
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn read_limited_stops_after_the_limit() {
+        assert_eq!(super::read_limited(&b"abcd"[..], 4).unwrap(), b"abcd");
+        assert!(super::read_limited(&b"abcde"[..], 4).is_err());
+        // An endless body: only limit + 1 bytes are read before the error.
+        assert!(super::read_limited(std::io::repeat(b'x'), 16 * 1024).is_err());
+    }
 }

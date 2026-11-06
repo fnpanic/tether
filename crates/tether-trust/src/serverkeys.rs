@@ -10,7 +10,7 @@
 use crate::envelope;
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Most keys one list may name.
 pub const MAX_KEYS: usize = 8;
@@ -88,29 +88,54 @@ impl KeyList {
     }
 }
 
-/// Last verified list cached at `path` (the signed document as fetched), if still valid.
+/// Last verified list cached at `path` (the signed document as fetched), if still valid and not
+/// below the rollback floor.
 pub fn load(path: &Path, admin: &[VerifyingKey]) -> Option<KeyList> {
-    KeyList::open(&std::fs::read(path).ok()?, admin).ok()
+    KeyList::open(&std::fs::read(path).ok()?, admin).ok().filter(|l| l.serial >= floor(path, admin))
+}
+
+/// The rollback floor beside the cache (`server-keys.serial`, "<serial> <signing admin key>"): the
+/// highest serial ever accepted, so deleting or replacing `server-keys.json` does not let an
+/// older list back in. It counts only while the admin key that signed that list is trusted.
+fn floor_path(path: &Path) -> PathBuf {
+    path.with_extension("serial")
+}
+
+fn floor(path: &Path, admin: &[VerifyingKey]) -> u64 {
+    let s = std::fs::read_to_string(floor_path(path)).unwrap_or_default();
+    let Some((serial, key)) = s.trim().split_once(' ') else { return 0 };
+    match crate::key_from_b64(key) {
+        Ok(k) if admin.contains(&k) => serial.parse().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Per process: several process roles may store the same list at once.
+fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("cannot cache server key list: {e}"))
 }
 
 /// A fetched document: verified, validated and stored at `path` when its serial is higher than the
-/// cached one. `Ok(None)`: same serial as the cache, nothing changed. A lower serial is an error.
+/// cached one. `Ok(None)`: same serial as the cache, nothing changed. A serial below the cached
+/// one or the rollback floor is an error.
 pub fn accept(path: &Path, raw: &[u8], admin: &[VerifyingKey]) -> Result<Option<KeyList>, String> {
     let list = KeyList::open(raw, admin)?;
-    if let Some(cached) = load(path, admin).map(|c| c.serial) {
-        if list.serial < cached {
-            return Err(format!("server key list serial {} is older than the cached {cached}", list.serial));
-        }
-        if list.serial == cached {
-            return Ok(None);
-        }
+    let cached = load(path, admin).map(|c| c.serial);
+    let floor = floor(path, admin).max(cached.unwrap_or(0));
+    if list.serial < floor {
+        return Err(format!("server key list serial {} is older than the accepted {floor}", list.serial));
+    }
+    if cached == Some(list.serial) {
+        return Ok(None);
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    // Per process: several process roles may store the same list at once.
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&tmp, raw).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("cannot cache server key list: {e}"))?;
+    let signer = serde_json::from_slice::<envelope::Signed>(raw).map_err(|e| e.to_string())?.key;
+    write_atomic(path, raw)?;
+    write_atomic(&floor_path(path), format!("{} {signer}", list.serial).as_bytes())?;
     Ok(Some(list))
 }
 
@@ -200,6 +225,32 @@ mod tests {
         // Cached under a different admin key (new build): ignored, so the next fetch starts over.
         std::fs::write(&path, doc(7, vec![k(&a, 0, 0)], &other)).unwrap();
         assert!(load(&path, &trusted).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rollback_floor_survives_a_deleted_cache() {
+        let admin = crate::generate_key();
+        let trusted = [admin.verifying_key()];
+        let dir = std::env::temp_dir().join(format!("tether-serverkeys-floor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("server-keys.json");
+        let (a, b) = (key(), key());
+        accept(&path, &doc(5, vec![k(&b, 0, 0)], &admin), &trusted).unwrap().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // No cache, but the floor stays: the old list that still trusted a retired key is refused.
+        assert!(accept(&path, &doc(4, vec![k(&a, 0, 0), k(&b, 0, 0)], &admin), &trusted).is_err());
+        assert!(load(&path, &trusted).is_none());
+        // The same serial comes back into the cache, a newer one replaces it.
+        assert_eq!(accept(&path, &doc(5, vec![k(&b, 0, 0)], &admin), &trusted).unwrap().unwrap().serial, 5);
+        accept(&path, &doc(6, vec![k(&b, 0, 0)], &admin), &trusted).unwrap().unwrap();
+        // An older, validly signed list copied over the cache is not loaded either.
+        std::fs::write(&path, doc(4, vec![k(&a, 0, 0)], &admin)).unwrap();
+        assert!(load(&path, &trusted).is_none());
+        // A floor written for an admin key this build no longer trusts does not count.
+        let new_admin = crate::generate_key();
+        let new_trusted = [new_admin.verifying_key()];
+        assert_eq!(accept(&path, &doc(1, vec![k(&b, 0, 0)], &new_admin), &new_trusted).unwrap().unwrap().serial, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

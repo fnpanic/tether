@@ -3,6 +3,7 @@
 mod api;
 mod keys;
 mod live;
+mod private;
 mod release;
 
 use keys::Keys;
@@ -297,6 +298,13 @@ async fn live_server_keys(server: &str, key: &VerifyingKey) -> Value {
     }
 }
 
+/// One above the highest known serial. Callers pass only serials of documents that verify with
+/// this admin key and of this PC's own published copies: a relay can report or serve any number,
+/// and a huge one would end publishing for good (devices never accept a lower serial).
+fn next_serial(known: impl IntoIterator<Item = u64>, what: &str) -> R<u64> {
+    known.into_iter().max().unwrap_or(0).checked_add(1).ok_or_else(|| format!("The {what} serial is exhausted (a document signed with this admin key has the highest possible serial)."))
+}
+
 fn verified_serial(live: &Value) -> Option<u64> {
     live["verified"].as_bool().filter(|v| *v).and(live["serial"].as_u64())
 }
@@ -310,12 +318,31 @@ fn check_expiry(keys: &[ServerKey], now: u64) -> Result<(), String> {
     }
 }
 
+/// Public key the relay's hbbs signs device identities with: hbbs `/pubkey` on its health port,
+/// public through Caddy as `/rendezvous/pubkey`. Older hbbs or Caddyfile: an error.
+async fn signing_key(server: &str) -> R<String> {
+    const OLD: &str = "This relay does not report the key hbbs signs with (update hbbs and the Caddyfile)";
+    let raw = api::public(server, "/rendezvous/pubkey").await?.ok_or(OLD)?;
+    parse_signing_key(&raw).ok_or_else(|| OLD.to_owned())
+}
+
+/// One canonical base64 Ed25519 key (an older Caddyfile answers "Tether relay" instead).
+fn parse_signing_key(raw: &[u8]) -> Option<String> {
+    let k = std::str::from_utf8(raw).ok()?.trim();
+    tether_trust::key_from_b64(k).ok().filter(|p| tether_trust::key_to_b64(p) == k).map(|_| k.to_owned())
+}
+
 #[tauri::command]
 async fn serverkeys_live(app: State<'_, App>) -> R<Value> {
     let key = app.admin_key()?.verifying_key();
     let mut relays = Vec::new();
     for sv in app.servers() {
-        relays.push(live_server_keys(&sv, &key).await);
+        let mut r = live_server_keys(&sv, &key).await;
+        match signing_key(&sv).await {
+            Ok(k) => r["signing"] = json!(k),
+            Err(e) => r["signing_note"] = json!(e),
+        }
+        relays.push(r);
     }
     let rotation: Value = fs::read(app.path("server-keys/rotation.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
     Ok(json!({ "relays": relays, "rotation": rotation }))
@@ -333,13 +360,13 @@ async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>) -> R<Valu
     let admin = app.admin_key()?;
     // Only serials of lists signed by this admin key count: a relay can report or serve any
     // number, and a huge one would end rotations for good (devices never accept a lower serial).
-    let mut serial = 0;
+    let mut live = Vec::new();
     for sv in app.servers() {
-        serial = serial.max(verified_serial(&live_server_keys(&sv, &admin.verifying_key()).await).unwrap_or(0));
+        live.extend(verified_serial(&live_server_keys(&sv, &admin.verifying_key()).await));
     }
     let local = fs::read_dir(app.path("server-keys/published")).into_iter().flatten().flatten()
-        .filter_map(|e| e.path().file_stem()?.to_str()?.parse::<u64>().ok()).max().unwrap_or(0);
-    let serial = serial.max(local).checked_add(1).ok_or("The server key list serial is exhausted.")?;
+        .filter_map(|e| e.path().file_stem()?.to_str()?.parse::<u64>().ok());
+    let serial = next_serial(live.into_iter().chain(local), "server key list")?;
     check_expiry(&keys, api::now())?;
     let list = KeyList { serial, issued_at: api::now(), keys };
     list.validate()?;
@@ -363,13 +390,26 @@ async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>) -> R<Valu
     Ok(json!({ "serial": list.serial, "relays": results }))
 }
 
-/// `id_ed25519` and `id_ed25519.pub` of a server key generated here, for the relays.
+/// `id_ed25519` and `id_ed25519.pub` of a server key generated here, for the relays. The private
+/// key file can be opened by the current user only (private.rs); delete it after installing.
 #[tauri::command]
 fn serverkeys_save_files(app: State<App>, public: String, folder: String) -> R<()> {
     let (secret, public) = app.keys.lock().unwrap().as_ref().ok_or("Unlock the keys first.")?.server_key_files(&public).ok_or("This key was not generated on this PC.")?;
     let dir = PathBuf::from(folder);
-    fs::write(dir.join("id_ed25519"), secret).map_err(err)?;
+    private::write(&dir.join("id_ed25519"), secret.as_bytes())?;
     fs::write(dir.join("id_ed25519.pub"), public).map_err(err)
+}
+
+/// Delete the key files "Save key files…" wrote into `folder` (only those two names).
+#[tauri::command]
+fn serverkeys_delete_files(folder: String) -> R<()> {
+    for name in ["id_ed25519", "id_ed25519.pub"] {
+        match fs::remove_file(PathBuf::from(&folder).join(name)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("{name}: {e}")),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 // ---- policy ----
@@ -424,12 +464,16 @@ fn unverified_header(raw: &[u8]) -> Option<(u64, u64)> {
     Some((v["serial"].as_u64()?, v["issued_at"].as_u64().unwrap_or(0)))
 }
 
+fn verified_policy(raw: &[u8], key: &VerifyingKey) -> R<Bundle> {
+    envelope::open_json(raw, &[*key]).and_then(|p| Bundle::from_json(&p))
+}
+
 async fn live_doc(server: &str, key: &VerifyingKey) -> LiveDoc {
     let mut d = LiveDoc { raw: None, bundle: None, serial: None, issued_at: None, note: None };
     match api::public(server, "/api/policy").await {
         Ok(None) => d.note = Some("No policy published".into()),
         Ok(Some(raw)) => {
-            match envelope::open_json(&raw, &[*key]).and_then(|p| Bundle::from_json(&p)) {
+            match verified_policy(&raw, key) {
                 Ok(b) => {
                     (d.serial, d.issued_at) = (Some(b.serial), Some(b.issued_at));
                     d.bundle = Some(b);
@@ -506,17 +550,14 @@ async fn policy_publish(app: State<'_, App>, bundle: Bundle) -> R<Value> {
     let mut b = bundle;
     b.validate()?;
     let key = app.admin_key()?;
-    let mut server = 0;
+    // An unreachable relay gets the document later (policy_sync); the serial only has to be above
+    // every policy this admin key signed that a relay serves, and this PC's own published ones.
+    // Not `/api/admin/status` policy_serial: that is whatever the relay claims (see next_serial).
+    let mut live = Vec::new();
     for sv in app.servers() {
-        // An unreachable relay gets the document later (policy_sync); the serial only has to be
-        // above what every reachable relay has.
-        if let Ok(out) = app.call_on(&sv, "GET", "/api/admin/status", Vec::new(), "application/json").await {
-            let status: Value = serde_json::from_slice(&out).unwrap_or(Value::Null);
-            server = server.max(status["policy_serial"].as_u64().unwrap_or(0));
-        }
+        live.extend(live_doc(&sv, &key.verifying_key()).await.bundle.map(|b| b.serial));
     }
-    let local = app.published().keys().next_back().copied().unwrap_or(0);
-    b.serial = server.max(local) + 1;
+    b.serial = next_serial(live.into_iter().chain(app.published().into_keys()), "policy")?;
     b.issued_at = api::now();
     let payload = serde_json::to_vec(&b).unwrap();
     let doc = serde_json::to_vec(&envelope::sign(&payload, &key)).unwrap();
@@ -1174,6 +1215,7 @@ fn main() {
             serverkeys_rotation_set,
             serverkeys_publish,
             serverkeys_save_files,
+            serverkeys_delete_files,
             policy_draft,
             policy_save_draft,
             policy_check,
@@ -1336,6 +1378,33 @@ mod tests {
     }
 
     #[test]
+    fn policy_serial_ignores_what_a_relay_claims() {
+        let admin = tether_trust::generate_key();
+        let key = admin.verifying_key();
+        let signed = |serial: u64, k: &SigningKey| serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&Bundle { serial, ..Default::default() }).unwrap(), k)).unwrap();
+        // What a malicious relay can do: report u64::MAX in /api/admin/status (no longer read),
+        // serve it unsigned, or signed with its own key. None of it counts.
+        let unsigned = serde_json::to_vec(&Bundle { serial: u64::MAX, ..Default::default() }).unwrap();
+        let foreign = signed(u64::MAX, &tether_trust::generate_key());
+        let ours = signed(4, &admin);
+        let live: Vec<u64> = [unsigned, foreign, ours].iter().filter_map(|raw| verified_policy(raw, &key).ok().map(|b| b.serial)).collect();
+        assert_eq!(live, [4]);
+        // This PC published up to 6: the next serial is 7.
+        assert_eq!(next_serial(live.into_iter().chain([2, 6]), "policy").unwrap(), 7);
+        // Only a document this admin key really signed with u64::MAX can exhaust it, with a clear error.
+        assert!(verified_policy(&signed(u64::MAX, &admin), &key).is_ok());
+        assert!(next_serial([u64::MAX], "policy").unwrap_err().contains("policy serial is exhausted"));
+    }
+
+    #[test]
+    fn signing_key_answer_must_be_one_key() {
+        let k = tether_trust::key_to_b64(&tether_trust::generate_key().verifying_key());
+        assert_eq!(parse_signing_key(format!("{k}\n").as_bytes()), Some(k.clone()));
+        assert_eq!(parse_signing_key(b"Tether relay"), None);
+        assert_eq!(parse_signing_key(format!("{k}{k}").as_bytes()), None);
+    }
+
+    #[test]
     fn none_ok_only_when_every_relay_failed() {
         let ok = RelayResult::of("a", Ok(Value::Null));
         assert!(none_ok(&[ok, RelayResult::of("b", Err("down".into()))]).is_none());
@@ -1348,6 +1417,9 @@ mod tests {
         assert_eq!(verified_serial(&json!({ "verified": false, "serial": u64::MAX })), None);
         assert_eq!(verified_serial(&json!({ "reachable": true, "note": "none" })), None);
         assert_eq!(verified_serial(&json!({ "verified": true, "serial": 4 })), Some(4));
+        assert_eq!(next_serial([3, 9, 4], "x").unwrap(), 10);
+        assert_eq!(next_serial([], "x").unwrap(), 1);
+        assert!(next_serial([u64::MAX], "x").unwrap_err().contains("exhausted"));
         let k = |expires| ServerKey { key: "k".repeat(44), not_before: 0, expires };
         assert!(check_expiry(&[k(0)], 1000).is_ok());
         assert!(check_expiry(&[k(1000 + 7200), k(0)], 1000).is_ok());

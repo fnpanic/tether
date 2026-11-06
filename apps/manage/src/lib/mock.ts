@@ -146,7 +146,8 @@ let custom: any[] = [
 const SK_OLD = "fe8A7xTX72RJlJypn8aBxG3NZHHxygCLPQqCWxbeev8=";
 let skRotation: Record<string, unknown> = {};
 let skList: { serial: number; keys: { key: string; expires?: number }[] } = { serial: 1, keys: [{ key: SK_OLD }] };
-const skLive = () => servers.map((s) => ({ server: s, reachable: true, verified: true, ...(s === R2 && skList.serial > 1 ? { serial: skList.serial - 1, keys: [{ key: SK_OLD }] } : skList) }));
+// hbbs signs with the new key on R1 once its list was announced; R2 stays on the old key.
+const skLive = () => servers.map((s) => ({ server: s, reachable: true, verified: true, signing: s === R1 && skList.keys.length > 1 ? skList.keys[1].key : SK_OLD, ...(s === R2 && skList.serial > 1 ? { serial: skList.serial - 1, keys: [{ key: SK_OLD }] } : skList) }));
 
 export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
   await new Promise((r) => setTimeout(r, 120));
@@ -162,6 +163,8 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
     keys_unlock: () => (unlocked = true),
     serverkeys_live: () => ({ relays: skLive(), rotation: skRotation }),
     serverkeys_rotation_set: () => (skRotation = a.rotation),
+    serverkeys_save_files: () => null,
+    serverkeys_delete_files: () => null,
     serverkeys_generate: () => "Qm9vbXRvd25OZXdTZXJ2ZXJLZXlGb3JQcmV2aWV3MDE=",
     serverkeys_publish: () => {
       skList = { serial: skList.serial + 1, keys: a.keys };

@@ -224,10 +224,7 @@ fn refresh_server_keys(keys: &[VerifyingKey]) -> Result<Option<KeyList>, String>
         200 => {}
         s => return Err(format!("server key list: server answered {s}")),
     }
-    let raw = r.bytes().map_err(|e| format!("offline: {e}"))?;
-    if raw.len() > 16 * 1024 {
-        return Err("server key list too large".into());
-    }
+    let raw = tether_trust::read_limited(r, 16 * 1024).map_err(|e| format!("server key list: {e}"))?;
     serverkeys::accept(&Config::path("server-keys.json"), &raw, keys)
 }
 
@@ -427,10 +424,7 @@ pub fn refresh() -> Result<bool, String> {
         200 => {}
         s => return Err(format!("policy server answered {s}")),
     }
-    let raw = r.bytes().map_err(|e| format!("offline: {e}"))?;
-    if raw.len() > 512 * 1024 {
-        return Err("policy document too large".into());
-    }
+    let raw = tether_trust::read_limited(r, 512 * 1024).map_err(|e| format!("policy document: {e}"))?;
     let bundle = open(&raw, &keys)?;
     if bundle.serial < last_serial() {
         return Err(format!("policy serial {} is older than the last accepted {}", bundle.serial, last_serial()));
@@ -556,6 +550,31 @@ mod tests {
         let doc = serde_json::to_vec(&envelope::sign(&payload, &k)).unwrap();
         assert_eq!(open(&doc, &[k.verifying_key()]).unwrap().serial, 3);
         assert!(open(&doc, &[tether_trust::generate_key().verifying_key()]).is_err());
+    }
+
+    /// An oversized answer is cut off after limit + 1 bytes and refused, whatever its length header says.
+    #[test]
+    fn oversized_response_is_refused_while_reading() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut s, _) = listener.accept().unwrap();
+                let _ = s.read(&mut [0u8; 4096]);
+                // Chunked: no Content-Length, so only the reader can stop it.
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+                let chunk = vec![b'x'; 4096];
+                for _ in 0..1024 {
+                    if s.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).and_then(|_| s.write_all(&chunk)).and_then(|_| s.write_all(b"\r\n")).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let get = || reqwest::blocking::Client::builder().no_proxy().build().unwrap().get(format!("http://{addr}/")).send().unwrap();
+        assert!(tether_trust::read_limited(get(), 16 * 1024).unwrap_err().contains("larger than 16384"));
+        assert_eq!(tether_trust::read_limited(get().take(100), 16 * 1024).unwrap().len(), 100);
     }
 
     /// docs/policy.md lists every feature. `TETHER_WRITE_POLICY_DOC=1 cargo test policy_doc`

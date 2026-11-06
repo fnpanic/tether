@@ -44,8 +44,10 @@ Response header `ETag: "<serial>"`; clients send `If-None-Match` and get `304` w
 ### `GET /api/server-keys`
 The signed server key list (`404` if none was published), served and cached like the policy:
 `ETag: "<serial>"`, `If-None-Match` → `304`. Clients verify it with the admin keys
-(`serverkeys::KeyList::open`), reject a serial lower than the cached one (`serverkeys::accept`),
-fetch it before every policy check and cache it as `server-keys.json`. See
+(`serverkeys::KeyList::open`), reject a serial lower than the cached one or the stored floor
+(`serverkeys::accept`, `server-keys.serial`), fetch it before every policy check and cache it as
+`server-keys.json`. Clients stop reading after 16 KiB + 1 byte (`tether_trust::read_limited`); the
+policy is read the same way with its own limit. See
 [key-rotation.md](key-rotation.md).
 
 ### `POST /api/heartbeat`

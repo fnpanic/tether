@@ -36,7 +36,11 @@ Rules (`tether_trust::serverkeys`, unit-tested there):
   base64, the exact string hbbs/hbbr compare), and at least one key has no `expires` (so no device clock can leave a device without any key).
 - **Monotonic serial:** a list with a lower serial than the cached one is rejected; the same
   serial changes nothing. A relay can withhold a newer list but never roll a device back or
-  widen its key set.
+  widen its key set. The highest accepted serial is also kept in `server-keys.serial` beside the
+  cache (`<serial> <signing admin key>`), so a device whose `server-keys.json` was deleted or
+  replaced still refuses older lists (and does not load an older cached one). That floor counts
+  only while the admin key that signed it is trusted, so a build with another admin key starts
+  over.
 - A key is **active** when `not_before <= now < expires` (0 = no limit). `expires` is strict;
   `not_before` is soft: if no key is active at the device's clock, the keys that have not expired
   are used.
@@ -90,12 +94,15 @@ devices present B to relays that do not accept it yet.
 | Threat | Result |
 | --- | --- |
 | Compromised or malicious relay / API serves a forged list | Rejected: not signed by the admin key. |
-| Relay serves an older list (rollback to a retired key) | Rejected: serial lower than the cached one. |
-| Relay reports or serves a huge serial (to exhaust the serial space) | Manage takes the next serial only from lists that verify with its admin key and from its own published lists. |
+| Relay serves an older list (rollback to a retired key) | Rejected: serial lower than the cached one, or than the floor in `server-keys.serial` when the cache is gone. |
+| Relay reports or serves a huge serial (to exhaust the serial space) | Manage takes the next serial (key list and policy) only from documents that verify with its admin key and from its own published ones, with an overflow check. |
+| Relay sends an endless or huge answer | Clients read at most 16 KiB (key list) / 512 KiB, in TetherQS 256 KiB (policy) plus one byte, then fail. |
+| Operator marks the switch done while a relay still signs with the old key | Manage enables "Every relay is switched" only when every relay's hbbs reports the new key (`/rendezvous/pubkey`). |
+| Saved `id_ed25519` read by another user of the admin PC | Created with an ACL for the current user only (0600 on unix); Manage keeps warning until **Delete key files**. |
 | Relay withholds the newest list | Devices keep the last list (they keep trusting what was trusted). Mitigation: the expiry on the old key; Manage shows per relay which serial it serves. |
 | Stolen old server key (e.g. a relay was compromised) | With it an attacker who also gets into the path (a relay, or DNS plus a certificate for the relay name) can forge device identities for devices that still trust it. Rotate: phase 1 with an expiry on A, phase 2 at once, phase 3a. |
 | Stolen admin key | It could already push any policy; now it can also make devices trust another server key. Still needs the path into the relay connection (TLS) to MITM. Admin key stays offline in the passphrase-sealed vault. |
-| Local attacker writes `server-keys.json` | Must be signed by the admin key; deleting it falls back to the compiled-in key. Local admin is out of scope (endpoint security). |
+| Local attacker writes `server-keys.json` | Must be signed by the admin key and not below the floor; deleting it falls back to the compiled-in key until the next fetch, which cannot bring back an older list. Deleting the floor too, or anything else a local admin does, is out of scope (endpoint security). |
 | Device clock wrong | Far ahead: expired keys drop out, but one key never expires. Behind: `not_before` is ignored when nothing else is active. |
 
 The server key never protects session content: that is end-to-end encrypted between the devices
@@ -115,6 +122,23 @@ The server key never protects session content: that is end-to-end encrypted betw
 | `switch` again while a switch is in progress (`id_ed25519.old` is another key) | `rotate-key.sh` refuses: it would drop the key devices still present from `KEYS_ACCEPT` | `retire` or `rollback` first |
 | Relay API without the endpoint | Manage shows the error per relay; devices get 404 and keep their list | Update tether-api |
 
+## Checking the switch
+
+hbbs reports the public key it signs with on its health port: `GET /pubkey` on `:21122` (one
+base64 line; `404` when hbbs runs without a private key). Caddy exposes it as
+`https://<relay>/rendezvous/pubkey` (Helm: the proxy routes it to `hbbs-0`; all hbbs pods share the
+key). The key is public (clients get it with every signed identity), so the route needs no
+authentication. It shows what the running hbbs uses, not what is on disk, so a relay whose
+restart failed still shows the old key. Tether Manage reads it for every relay and enables
+**Every relay is switched** only when all of them report the new key; a relay with an older hbbs
+or Caddyfile reports nothing (Caddy's catch-all answers "Tether relay") and keeps the step closed
+until it is updated. The check trusts the relay's answer: it guards against a forgotten relay, not
+against a malicious one.
+
+```bash
+curl -s https://tether-desk.duckdns.org/rendezvous/pubkey   # -> the key in id_ed25519.pub
+```
+
 ## Operator steps
 
 ### VM relays (`dist/linux-relay`)
@@ -126,7 +150,8 @@ one relay at a time.
 
 ```bash
 # phase 2, per relay: Tether Manage › Keys › Rotate server key › "Save key files…" wrote
-# id_ed25519 and id_ed25519.pub (the new key B) into a folder on this PC
+# id_ed25519 and id_ed25519.pub (the new key B) into a folder on this PC (id_ed25519 readable by
+# your user only; "Delete key files" in Manage removes both once every relay is switched)
 scp -i ~/.ssh/tether_oracle id_ed25519 id_ed25519.pub server/rotate-key.sh opc@<relay>:/tmp/
 ssh -i ~/.ssh/tether_oracle opc@<relay> 'sudo bash /tmp/rotate-key.sh switch /tmp/id_ed25519 && rm /tmp/id_ed25519 /tmp/id_ed25519.pub'
 #   -> B signs, A is accepted (KEYS_ACCEPT in /etc/tether/keys.env), A kept as id_ed25519.old
@@ -164,7 +189,8 @@ relays accept it, and picks up the list on its first policy check.
   `server_keys_for()`; `vendor/rustdesk/src/common.rs` (`get_key`, `key_exchange`),
   `vendor/rustdesk/src/client.rs` (`secure_connection`, `LICENSE_MISMATCH`) → `patches/hbb_common.patch`, `patches/rustdesk.patch`.
 - `vendor/rustdesk-server/src/common.rs` `key_accepted` (hbbs `handle_punch_hole_request`, hbbr
-  `make_pair_`) → `patches/rustdesk-server.patch`.
+  `make_pair_`), `SIGNING_PUB_KEY` / `/pubkey` on the health endpoint → `patches/rustdesk-server.patch`;
+  `server/caddy/Caddyfile` and `deploy/helm/tether-relay/templates/_caddyfile.tpl` (`/rendezvous/pubkey`).
 - `server/api`: `GET /api/server-keys`, `PUT /api/admin/server-keys`, heartbeat
   `server_keys_serial` ([api.md](api.md)).
 - Apps: `apps/desktop/src-tauri/src/policy.rs`, `apps/quick/src-tauri/src/policy.rs`.

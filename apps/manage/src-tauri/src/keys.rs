@@ -11,11 +11,21 @@ use zeroize::Zeroize;
 
 const AAD: &[u8] = b"tether-manage-keys-v1";
 
+/// Vault format (`Sealed.v`): 1 = admin + updater key; 2 = may also hold server keys and fields
+/// this version does not know (kept as they are). Tether Manage before 0.5.5 opens only 1 and
+/// would drop the server keys when it seals again, so a vault with server keys is written as 2.
+/// The encryption is the same in every format so far.
+pub const FORMAT: u32 = 2;
+
 pub struct Keys {
     pub admin: SigningKey,
     pub updater: minisign::SecretKey,
     /// Server key pairs generated here for a key rotation (docs/key-rotation.md), oldest first.
     pub server: Vec<SigningKey>,
+    /// `Sealed.v` the vault was read with; `seal` refuses one newer than `FORMAT`.
+    format: u32,
+    /// Fields of `Plain` this version does not know, written back unchanged.
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// On-disk (and backup) format.
@@ -38,6 +48,9 @@ struct Plain {
     /// Older versions of Tether Manage ignore it (no `deny_unknown_fields`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     server: Vec<String>,
+    /// Written by a newer Tether Manage: kept and sealed again unchanged.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 fn derive(pass: &str, salt: &[u8], m_kib: u32, t: u32, p: u32) -> Result<[u8; 32], String> {
@@ -56,7 +69,7 @@ fn d64(s: &str) -> Result<Vec<u8>, String> {
 impl Keys {
     pub fn generate() -> Result<Self, String> {
         let kp = minisign::KeyPair::generate_unencrypted_keypair().map_err(|e| e.to_string())?;
-        Ok(Keys { admin: tether_trust::generate_key(), updater: kp.sk, server: Vec::new() })
+        Ok(Keys { admin: tether_trust::generate_key(), updater: kp.sk, server: Vec::new(), format: 1, extra: Default::default() })
     }
 
     /// A new server key pair, kept in `server`. Like hbbs, no `/` in the public key (it can appear
@@ -94,6 +107,12 @@ impl Keys {
     }
 
     pub fn seal(&self, pass: &str) -> Result<Vec<u8>, String> {
+        if self.format > FORMAT {
+            return Err(format!(
+                "This key file was written by a newer version of Tether Manage (format {}, this version knows up to {FORMAT}). Saving it here could lose keys: update Tether Manage first.",
+                self.format
+            ));
+        }
         if pass.chars().count() < 8 {
             return Err("Use a passphrase of at least 8 characters.".into());
         }
@@ -106,6 +125,7 @@ impl Keys {
             admin: B64.encode(self.admin.to_bytes()),
             updater: B64.encode(self.updater.to_bytes()),
             server: self.server.iter().map(|k| B64.encode(k.to_bytes())).collect(),
+            extra: self.extra.clone(),
         })
         .map_err(|e| e.to_string())?;
         let ct = XChaCha20Poly1305::new((&key).into())
@@ -113,8 +133,10 @@ impl Keys {
             .map_err(|_| "encryption failed".to_owned());
         plain.zeroize();
         key.zeroize();
+        // 1 while an older Tether Manage loses nothing by opening it.
+        let v = if self.server.is_empty() && self.extra.is_empty() && self.format < 2 { 1 } else { FORMAT };
         let sealed = Sealed {
-            v: 1,
+            v,
             kdf: "argon2id".into(),
             m_kib,
             t,
@@ -128,7 +150,8 @@ impl Keys {
 
     pub fn open(data: &[u8], pass: &str) -> Result<Self, String> {
         let s: Sealed = serde_json::from_slice(data).map_err(|_| "This is not a Tether Manage key file.".to_owned())?;
-        if s.v != 1 || s.kdf != "argon2id" {
+        // A newer format is opened (same encryption) so its keys can be used, but never sealed again.
+        if s.v == 0 || s.kdf != "argon2id" {
             return Err("This key file was written by a newer version of Tether Manage.".into());
         }
         // Bound attacker-controlled KDF cost so a crafted backup cannot exhaust memory.
@@ -142,12 +165,12 @@ impl Keys {
         let mut key = derive(pass, &d64(&s.salt)?, s.m_kib, s.t, s.p)?;
         let plain = XChaCha20Poly1305::new((&key).into())
             .decrypt(XNonce::from_slice(&nonce), Payload { msg: &d64(&s.ct)?, aad: AAD })
-            .map_err(|_| "Wrong passphrase.".to_owned());
+            .map_err(|_| if s.v > FORMAT { "Wrong passphrase, or a key file of a newer version of Tether Manage.".to_owned() } else { "Wrong passphrase.".to_owned() });
         key.zeroize();
         let mut plain = plain?;
         let parsed: Result<Plain, _> = serde_json::from_slice(&plain);
         plain.zeroize();
-        let p = parsed.map_err(|_| "the key file is damaged".to_owned())?;
+        let mut p = parsed.map_err(|_| "the key file is damaged".to_owned())?;
         let admin: [u8; 32] = d64(&p.admin)?.try_into().map_err(|_| "the key file is damaged".to_owned())?;
         let updater = minisign::SecretKey::from_bytes(&d64(&p.updater)?).map_err(|_| "the key file is damaged".to_owned())?;
         let mut server = Vec::new();
@@ -155,7 +178,7 @@ impl Keys {
             let b: [u8; 32] = d64(k)?.try_into().map_err(|_| "the key file is damaged".to_owned())?;
             server.push(SigningKey::from_bytes(&b));
         }
-        Ok(Keys { admin: SigningKey::from_bytes(&admin), updater, server })
+        Ok(Keys { admin: SigningKey::from_bytes(&admin), updater, server, format: s.v, extra: std::mem::take(&mut p.extra) })
     }
 
     /// Tauri updater signature for `data` named `file_name`: base64 of the minisign signature
@@ -209,6 +232,46 @@ mod tests {
         assert_eq!(B64.encode(&raw[32..]), public);
         assert!(!String::from_utf8(sealed).unwrap().contains(&secret[..20]));
         assert!(back.server_key_files("unknown").is_none());
+    }
+
+    /// Seal `plain` as format `v` the way some other version would.
+    fn sealed_as(v: u32, plain: &serde_json::Value, pass: &str) -> Vec<u8> {
+        let mut salt = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+        let key = derive(pass, &salt, 64 * 1024, 3, 1).unwrap();
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let ct = XChaCha20Poly1305::new((&key).into()).encrypt(&nonce, Payload { msg: &serde_json::to_vec(plain).unwrap(), aad: AAD }).unwrap();
+        let s = Sealed { v, kdf: "argon2id".into(), m_kib: 64 * 1024, t: 3, p: 1, salt: B64.encode(salt), nonce: B64.encode(nonce), ct: B64.encode(ct) };
+        serde_json::to_vec(&s).unwrap()
+    }
+
+    fn version_of(sealed: &[u8]) -> u32 {
+        serde_json::from_slice::<Sealed>(sealed).unwrap().v
+    }
+
+    #[test]
+    fn format_version_and_unknown_fields() {
+        let pass = "correct horse";
+        let mut k = Keys::generate().unwrap();
+        // Nothing an older version would drop: still format 1, so it can open it.
+        assert_eq!(version_of(&k.seal(pass).unwrap()), 1);
+        // Server keys: format 2, which Tether Manage before 0.5.5 refuses to open (instead of
+        // dropping them when it seals again).
+        k.add_server_key();
+        assert_eq!(version_of(&k.seal(pass).unwrap()), FORMAT);
+
+        // Fields a newer version added within format 2 are kept, and the format stays 2.
+        let plain = serde_json::json!({ "admin": B64.encode(k.admin.to_bytes()), "updater": B64.encode(k.updater.to_bytes()), "future": { "a": 1 } });
+        let opened = Keys::open(&sealed_as(2, &plain, pass), pass).unwrap();
+        let resealed = opened.seal(pass).unwrap();
+        assert_eq!(version_of(&resealed), 2);
+        assert_eq!(Keys::open(&resealed, pass).unwrap().extra["future"], serde_json::json!({ "a": 1 }));
+
+        // A newer format: its keys can be used, but this version refuses to write it.
+        let newer = Keys::open(&sealed_as(FORMAT + 1, &plain, pass), pass).unwrap();
+        assert_eq!(newer.admin.to_bytes(), k.admin.to_bytes());
+        assert!(newer.seal(pass).unwrap_err().contains("newer version of Tether Manage"));
+        assert!(Keys::open(&sealed_as(FORMAT + 1, &plain, pass), "wrong horse").err().unwrap().contains("newer version"));
     }
 
     /// Mirrors tauri-plugin-updater: base64-decode pubkey and signature, parse the minisign

@@ -15,6 +15,9 @@ export interface LiveKeys {
   serial?: number | null;
   keys?: KeyEntry[];
   note?: string;
+  /** Public key the relay's hbbs signs with (`/rendezvous/pubkey`); absent when it cannot tell. */
+  signing?: string;
+  signing_note?: string;
 }
 /** Kept on this PC (server-keys/rotation.json). */
 export interface Rotation {
@@ -24,6 +27,8 @@ export interface Rotation {
   to?: string;
   switched?: boolean;
   retired?: boolean;
+  /** Folder "Save key files…" wrote id_ed25519 into, until "Delete key files". */
+  files?: string;
 }
 
 export type Step = "generate" | "announce" | "switch" | "retire" | "relays" | "done";
@@ -44,6 +49,10 @@ export function step(r: Rotation, live: { keys: string[] } | null): Step {
   if (k[0] === r.from && k.includes(r.to)) return r.switched ? "retire" : "switch";
   return "announce";
 }
+
+/** Relays whose hbbs does not sign with `key` yet, or does not tell: phase 2 is done only when
+ * this is empty. */
+export const notSwitched = (relays: LiveKeys[], key?: string): LiveKeys[] => relays.filter((r) => !key || r.signing !== key);
 
 /** Phase 1: devices keep presenting the current key and also trust the new one. */
 export function announceList(r: Rotation, expires?: number): KeyEntry[] {
