@@ -45,11 +45,19 @@ impl Reply {
 }
 
 fn start(admin_keys: &str) -> Srv {
+    start_env(admin_keys, &[], |_| {})
+}
+
+/// With extra environment, after `prep` populated the fresh data dir.
+fn start_env(admin_keys: &str, env: &[(&str, &str)], prep: impl FnOnce(&std::path::Path)) -> Srv {
     let dir = std::env::temp_dir().join(format!("tether-api-test-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
     let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    prep(&dir);
     let mut child = Command::new(env!("CARGO_BIN_EXE_tether-api"))
         .args(["--data", dir.to_str().unwrap(), "--listen", "127.0.0.1:0"])
         .env("ADMIN_PUB_KEY", admin_keys)
+        .envs(env.iter().copied())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -531,4 +539,142 @@ fn state_survives_restart() {
     assert_eq!(st["policy_serial"], 4);
     assert_eq!(st["server_keys_serial"], 3);
     assert_eq!(s.req("GET", "/api/server-keys", &[], b"").body, list);
+}
+
+// ---- session audit log (POST /api/audit/*, GET /api/admin/audit) ----
+
+/// The records vendor/rustdesk/src/server/connection.rs posts, as it builds them.
+fn conn_new(conn: i64, nonce: &str) -> String {
+    format!(r#"{{"action":"new","conn_id":{conn},"id":"111222333","ip":"198.51.100.20","nonce":"{nonce}","session_id":0,"uuid":"QUJDLTEyMw=="}}"#)
+}
+fn conn_login(conn: i64, nonce: &str) -> String {
+    format!(r#"{{"conn_id":{conn},"id":"111222333","nonce":"{nonce}","peer":["987654321","Tech Anna"],"primary_auth":3,"session_id":18446744073709551615,"type":0,"uuid":"QUJDLTEyMw=="}}"#)
+}
+fn conn_close(conn: i64, nonce: &str) -> String {
+    format!(r#"{{"action":"close","conn_id":{conn},"id":"111222333","nonce":"{nonce}","session_id":42,"uuid":"QUJDLTEyMw=="}}"#)
+}
+fn file_post(conn: i64, nonce: &str) -> String {
+    let info = serde_json::json!({"ip": "198.51.100.20", "name": "Tech Anna", "num": 12, "files": [["report.pdf", 1234], ["b.txt", 5]]}).to_string();
+    serde_json::json!({"id": "111222333", "uuid": "QUJDLTEyMw==", "peer_id": "987654321", "conn_id": conn, "type": 1,
+        "path": r"C:\Users\x\Desktop", "is_file": false, "info": info, "nonce": nonce})
+    .to_string()
+}
+
+#[test]
+fn audit_log() {
+    let (s, k) = admin_server();
+    let ip = [("X-Forwarded-For", "203.0.113.50")];
+    let post = |kind: &str, body: &str| s.req("POST", &format!("/api/audit/{kind}"), &ip, body.as_bytes());
+    for (kind, body) in [("conn", conn_new(7, "n-1")), ("conn", conn_login(7, "n-2")), ("file", file_post(7, "n-3")), ("conn", conn_close(7, "n-4"))] {
+        let r = post(kind, &body);
+        assert_eq!((r.status, r.body.len()), (204, 0), "{kind} {body}");
+    }
+    let alarm = r#"{"conn_id":8,"id":"111222333","info":"{\"ip\":\"192.0.2.1\"}","nonce":"n-5","typ":0,"uuid":"QUJDLTEyMw=="}"#;
+    assert_eq!(post("alarm", alarm).status, 204);
+    // A retry of a stored record (same nonce) is accepted and not stored twice.
+    assert_eq!(post("conn", &conn_close(7, "n-4")).status, 204);
+
+    // Rejected: unknown field, wrong action, bad ip, bad id, oversized, bad type, unknown kind, GET.
+    assert_eq!(post("conn", &conn_new(9, "x-1").replace(r#""action""#, r#""x":1,"action""#)).status, 400);
+    assert_eq!(post("conn", &conn_new(9, "x-2").replace(r#""new""#, r#""delete""#)).status, 400);
+    assert_eq!(post("conn", &conn_new(9, "x-3").replace("198.51.100.20", "not-an-ip")).status, 400);
+    assert_eq!(post("conn", &conn_new(9, "x-4").replace("111222333", "1 2")).status, 400);
+    assert_eq!(post("file", &file_post(9, "x-5").replace("report.pdf", &"r".repeat(9000))).status, 413);
+    assert_eq!(post("file", &file_post(9, "x-6").replace(r#""type":1"#, r#""type":5"#)).status, 400);
+    assert_eq!(post("nope", &conn_new(9, "x-7")).status, 404);
+    assert_eq!(s.req("GET", "/api/audit/conn", &ip, b"").status, 404);
+
+    // Newest first, server timestamps, poster IP from X-Forwarded-For.
+    assert_eq!(s.req("GET", "/api/admin/audit", &[], b"").status, 401);
+    let all = s.admin(&k, "GET", "/api/admin/audit", b"").json();
+    let all = all.as_array().unwrap();
+    let actions: Vec<_> = all.iter().map(|r| r["action"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["alarm", "disconnect", "receive", "login", "connect"]);
+    let (close, file, login, open) = (&all[1], &all[2], &all[3], &all[4]);
+    assert!(all.iter().all(|r| r["ts"].as_u64().unwrap() >= now() - 10 && r["src"] == "203.0.113.50" && r["id"] == "111222333"));
+    assert_eq!((open["kind"].as_str(), open["ip"].as_str(), open["conn_id"].as_i64()), (Some("conn"), Some("198.51.100.20"), Some(7)));
+    assert_eq!((login["peer_id"].as_str(), login["peer_name"].as_str(), login["conn_type"].as_str()), (Some("987654321"), Some("Tech Anna"), Some("remote")));
+    assert_eq!((login["primary_auth"].as_str(), login["session_id"].as_str()), (Some("permanent_password"), Some("18446744073709551615")));
+    assert_eq!((file["kind"].as_str(), file["path"].as_str(), file["num"].as_u64()), (Some("file"), Some(r"C:\Users\x\Desktop"), Some(12)));
+    assert_eq!(file["files"], serde_json::json!([["report.pdf", 1234], ["b.txt", 5]]));
+    assert_eq!(close["uuid"], "QUJDLTEyMw==");
+
+    // Filters.
+    let q = |p: &str| s.admin(&k, "GET", &format!("/api/admin/audit?{p}"), b"").json().as_array().unwrap().len();
+    assert_eq!(q("limit=2"), 2);
+    assert_eq!(q("device=111222333"), 5);
+    assert_eq!(q("device=QUJDLTEyMw%3D%3D"), 5);
+    assert_eq!(q("device=000"), 0);
+    assert_eq!(q(&format!("since={}", now() + 60)), 0);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/audit?limit=0", b"").status, 400);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/audit?limit=5001", b"").status, 400);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/audit?x=1", b"").status, 400);
+
+    // One JSON line per record under audit/<UTC day>.jsonl, private to the service.
+    let files: Vec<_> = std::fs::read_dir(s.dir.join("audit")).unwrap().flatten().collect();
+    assert_eq!(files.len(), 1);
+    assert!(files[0].file_name().to_str().unwrap().ends_with(".jsonl"));
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(files[0].metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read_to_string(files[0].path()).unwrap().lines().count(), 5);
+
+    // Devices are not touched.
+    assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").json()["devices"], 0);
+}
+
+#[test]
+fn audit_rate_limits() {
+    let (s, k) = admin_server();
+    // 60 per minute per device, then 429 (the client retries 429 later).
+    let ip = [("X-Forwarded-For", "203.0.113.60")];
+    for i in 0..60 {
+        assert_eq!(s.req("POST", "/api/audit/conn", &ip, conn_close(i, &format!("d-{i}")).as_bytes()).status, 204, "post {i}");
+    }
+    assert_eq!(s.req("POST", "/api/audit/conn", &ip, conn_close(99, "d-x").as_bytes()).status, 429);
+    // 120 per minute per IP across devices (the 61 above count too).
+    let ip2 = [("X-Forwarded-For", "203.0.113.61")];
+    for i in 0..120 {
+        let body = conn_close(i, &format!("e-{i}")).replace("QUJDLTEyMw==", &format!("dev{i}"));
+        assert_eq!(s.req("POST", "/api/audit/conn", &ip2, body.as_bytes()).status, 204, "post {i}");
+    }
+    assert_eq!(s.req("POST", "/api/audit/conn", &ip2, conn_close(1, "e-x").replace("QUJDLTEyMw==", "other").as_bytes()).status, 429);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/audit?limit=5000", b"").json().as_array().unwrap().len(), 180);
+}
+
+/// UTC `YYYY-MM-DD` of `now - days`.
+fn utc_day(days: u64) -> String {
+    let out = Command::new("date").args(["-u", "-d", &format!("@{}", now() - days * 86_400), "+%F"]).output().unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn audit_retention_and_cap() {
+    let k = generate_key();
+    let keys = key_to_b64(&k.verifying_key());
+    let (old, recent) = (utc_day(40), utc_day(3));
+    let line = |days: u64| format!("{{\"ts\":{},\"id\":\"1\",\"action\":\"connect\"}}\n", now() - days * 86_400);
+    let s = start_env(&keys, &[("AUDIT_RETENTION_DAYS", "30")], |dir| {
+        std::fs::create_dir_all(dir.join("audit")).unwrap();
+        std::fs::write(dir.join(format!("audit/{old}.jsonl")), line(40)).unwrap();
+        std::fs::write(dir.join(format!("audit/{recent}.jsonl")), line(3)).unwrap();
+    });
+    // Startup housekeeping drops the day past retention, keeps the other.
+    assert!(!s.dir.join(format!("audit/{old}.jsonl")).exists());
+    assert!(s.dir.join(format!("audit/{recent}.jsonl")).exists());
+    assert_eq!(s.admin(&k, "GET", "/api/admin/audit", b"").json().as_array().unwrap().len(), 1);
+    let since = s.admin(&k, "GET", &format!("/api/admin/audit?since={}", now() - 86_400), b"").json();
+    assert_eq!(since.as_array().unwrap().len(), 0);
+
+    // Size cap: older days go first; today alone over the cap is refused (507) rather than grown.
+    let s = start_env(&keys, &[("AUDIT_MAX_MB", "0")], |dir| {
+        std::fs::create_dir_all(dir.join("audit")).unwrap();
+        std::fs::write(dir.join(format!("audit/{recent}.jsonl")), line(3)).unwrap();
+    });
+    assert_eq!(s.req("POST", "/api/audit/conn", &[], conn_close(1, "c-1").as_bytes()).status, 507);
+    assert!(!s.dir.join(format!("audit/{recent}.jsonl")).exists());
+
+    // Retention 0: accepted (no client noise) but not stored.
+    let s = start_env(&keys, &[("AUDIT_RETENTION_DAYS", "0")], |_| {});
+    assert_eq!(s.req("POST", "/api/audit/conn", &[], conn_close(1, "z-1").as_bytes()).status, 204);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/audit", b"").json().as_array().unwrap().len(), 0);
 }
