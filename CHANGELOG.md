@@ -4,6 +4,20 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Fixed
+- **Host session: the app icon toggles only the connection window.** Clicking Tether on the
+  taskbar or in the Dock during a host session restored the main window together with the
+  connection window, and the next click minimized only the connection window, so the main window
+  stayed in the user's way. Windows: the main window is now minimized and taken off the taskbar
+  for the session (the connection window's button is the only Tether button), starting Tether
+  again (pinned icon, Start menu) toggles the connection window, and the main window is back on
+  the taskbar, minimized, when the last session ends. macOS: the connection window answers the
+  Dock click before its restore animation (the main process gave up after 500 ms and opened the
+  main window too), and the main process never opens the main window on a Dock click while a host
+  session is active.
+
 ## [0.5.17] — 2026-11-06
 
 Tether Manage 0.5.5; Tether / TetherQS client changes for the next release; hbbs and the Caddyfile

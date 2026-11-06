@@ -124,7 +124,7 @@ impl UiSink for TauriSink {
 
     fn cm_event(&self, name: &str, payload: Value) {
         let id = payload.get("id").cloned();
-        let action = {
+        let (action, ended) = {
             let mut c = self.cm_clients.lock().unwrap();
             let was_authorized = c.iter().any(|x| x.get("id") == id.as_ref() && x["authorized"] == true);
             let action = window_action(name, was_authorized, &payload);
@@ -136,7 +136,7 @@ impl UiSink for TauriSink {
                 "remove_connection" => c.retain(|x| x.get("id") != id.as_ref()),
                 _ => {}
             }
-            action
+            (action, was_authorized && name == "remove_connection" && !c.iter().any(|x| x["authorized"] == true))
         };
         let _ = self
             .app
@@ -150,6 +150,9 @@ impl UiSink for TauriSink {
         // Like the connection window, the main window (another process) gets out of the way.
         if action == WindowAction::Minimize {
             crate::app::minimize_main(&self.app);
+        }
+        if ended {
+            crate::app::host_session_ended_in_cm(&self.app);
         }
     }
 }

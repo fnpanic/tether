@@ -2,6 +2,10 @@
 // starts (with the main window), minimizable again any number of times (title-bar button and
 // taskbar WM_SYSCOMMAND), restored with the Chat tab open when the technician writes, restored
 // for a new request. `--cm` is started like the installed service does (SW_HIDE startup info).
+// During the session the main window is minimized and off the taskbar (hidden), so the only
+// Tether taskbar button is the connection window's; starting Tether again (pinned taskbar icon,
+// Start menu) toggles the connection window, never the main one; it is back on the taskbar
+// (minimized) when the session ends.
 //
 //   node e2e/cm-window-e2e.mjs --exe C:\cargo-target\cmwin\debug\tether.exe   (debug build: TETHER_DEV_PASSWORD)
 //
@@ -87,7 +91,7 @@ public static class W {
   public static int Restored(IntPtr h, int ms) { int n = 0; for (int t = 0; t < ms; t += 100) { if (!IsIconic(h)) n++; Thread.Sleep(100); } return n; }
 }
 '@
-$p = Get-CimInstance Win32_Process -Filter "Name='tether.exe'" | Where-Object { $_.ExecutablePath -eq '${opt.exe}' ${filter} } | Select-Object -First 1
+$p = Get-CimInstance Win32_Process -Filter "Name='tether.exe'" | Where-Object { $_.ExecutablePath -eq '${opt.exe}' ${filter} } | Sort-Object CreationDate | Select-Object -First 1
 $h = if ($p) { [W]::Find('${DESK}', [int]$p.ProcessId) } else { [IntPtr]::Zero }
 if ($h -eq [IntPtr]::Zero) { 'null' }
 elseif ('${op}' -eq 'restored') { [W]::Restored($h, ${arg}) }
@@ -147,7 +151,8 @@ async function main() {
   // Own taskbar button that toggles: minimize box, no tool window (WS_EX_TOOLWINDOW 0x80).
   check(`cm on the taskbar, minimizable ${JSON.stringify(s.win32)}`, (s.win32?.style & 0x20000) !== 0 && (s.win32?.ex & 0x80) === 0);
   const m = await until("main minimized", async () => ((await ipc(main, "plugin:window|is_minimized", { label: "main" })) ? win32(MAIN) : null), 10000).catch(() => win32(MAIN));
-  check(`main window minimized with the session ${JSON.stringify(m)}`, m?.iconic && m?.visible);
+  // Hidden = no taskbar button: no click on a Tether button can reach the main window.
+  check(`main window minimized and off the taskbar ${JSON.stringify(m)}`, m?.iconic && m?.visible === false);
   check("main window stays minimized", staysMinimized(MAIN));
 
   // 1b. The user restores and minimizes it again (title-bar button = window API), three times:
@@ -171,7 +176,25 @@ async function main() {
     await sleep(500);
     check(`round ${i}: taskbar minimize stays minimized`, staysMinimized());
   }
-  check("main window still minimized", win32(MAIN)?.iconic);
+  const mainOff = (x) => x?.iconic && x?.visible === false;
+  check(`main window still minimized and off the taskbar ${JSON.stringify(win32(MAIN))}`, mainOff(win32(MAIN)));
+
+  // 1d. The pinned taskbar icon / Start menu: Tether started again (single instance) toggles only
+  // the connection window, three times; the main window stays minimized and off the taskbar.
+  const again = () => hidden("", { TETHER_PROFILE: "cmw-host" });
+  for (let i = 1; i <= 3; i++) {
+    again();
+    const r = await until("cm restored by a second start", () => {
+      const x = win32Cm();
+      return x && !x.iconic ? x : null;
+    }, 20000).catch(() => win32Cm());
+    check(`round ${i}: app icon restores the connection window ${JSON.stringify(r)}`, r && !r.iconic && r.visible);
+    check(`round ${i}: main window not restored ${JSON.stringify(win32(MAIN))}`, mainOff(win32(MAIN)));
+    again();
+    await until("cm minimized by a second start", () => win32Cm()?.iconic, 20000).catch(() => null);
+    check(`round ${i}: app icon minimizes the connection window`, staysMinimized());
+    check(`round ${i}: main window stays minimized`, staysMinimized(MAIN) && mainOff(win32(MAIN)));
+  }
 
   // 2. The user restores it: it stays restored.
   await ipc(cm, "plugin:window|unminimize", { label: "cm" });
@@ -197,6 +220,11 @@ async function main() {
   await ipc(cm, "plugin:window|minimize", { label: "cm" });
   killAll("-and $_.CommandLine -like '*--connect*'");
   await until("session gone", async () => !(await text(cm)).includes("Session active"), 30000);
+  const back = await until("main back on the taskbar", () => {
+    const x = win32(MAIN);
+    return x?.visible ? x : null;
+  }, 15000).catch(() => win32(MAIN));
+  check(`session ended: main window back on the taskbar, still minimized ${JSON.stringify(back)}`, back?.visible && back?.iconic);
   hidden(`--connect ${st.id}`, { TETHER_PROFILE: "cmw-view", WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9252" });
   const accepted = await until("Accept prompt", async () => {
     const b = await cdp(9251);

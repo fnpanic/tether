@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::OnceLock;
 
 use serde::Serialize;
@@ -11,6 +12,14 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use crate::{cli, commands, policy, sink, update};
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
+
+/// Main process: a host session is active (the `--cm` process said so): the connection window's
+/// HWND on Windows, else 1; 0 without one. While set, a click on the app icon is for the
+/// connection window only and the main window stays minimized (docs/quick-support.md, macos.md).
+static HOST_SESSION: AtomicIsize = AtomicIsize::new(0);
+/// Windows: the main window was hidden for the host session (minimized and off the taskbar).
+#[cfg(windows)]
+static MAIN_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Broadcast an event to every window (no-op before the UI is up or in headless roles).
 pub fn emit<S: Serialize + Clone>(event: &str, payload: S) {
@@ -127,8 +136,14 @@ pub fn run(args: Vec<String>) {
                         let app = app.handle().clone();
                         std::thread::spawn(move || {
                             for mut s in l.incoming().flatten() {
-                                let toggled = app.get_webview_window("cm").is_some_and(|w| dock_click(&w));
-                                let _ = std::io::Write::write_all(&mut s, if toggled { b"1" } else { b"0" });
+                                // Answer first: the restore animation outlasts the main process's
+                                // 500 ms wait, which then also showed the main window.
+                                let session = host_session_active();
+                                let _ = std::io::Write::write_all(&mut s, if session { b"1" } else { b"0" });
+                                drop(s);
+                                if let Some(w) = app.get_webview_window("cm") {
+                                    dock_click(&w, session);
+                                }
                             }
                         });
                     }
@@ -162,7 +177,8 @@ pub fn run(args: Vec<String>) {
         // Dock icon of its own; otherwise the main window if nothing is shown (docs/macos.md).
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { has_visible_windows, .. } if is_main => {
-            if !cm_dock_click(&app.config().identifier) && !has_visible_windows {
+            // The cm's answer can miss the timeout: during a session the main window stays as is.
+            if !cm_dock_click(&app.config().identifier) && !has_visible_windows && HOST_SESSION.load(Ordering::Relaxed) == 0 {
                 let _ = main_window(app);
             }
         }
@@ -173,17 +189,18 @@ pub fn run(args: Vec<String>) {
 /// Runs in the first instance when Tether is started again: a forwarded session request opens a
 /// session window, anything else brings the main window to the front.
 fn second_instance(app: &AppHandle, argv: &[String]) {
-    if argv.get(1).map(String::as_str) == Some(MINIMIZE_MAIN_ARG) {
-        // Not a hidden one: minimize would show it.
-        if let Some(w) = app.get_webview_window("main").filter(|w| w.is_visible().unwrap_or(false)) {
-            hbb_common::log::info!("host session started: minimizing the main window");
-            let _ = w.minimize();
+    match argv.get(1).map(String::as_str) {
+        Some(MINIMIZE_MAIN_ARG) => return host_session_started(app, argv.get(2)),
+        Some(SESSION_ENDED_ARG) => return host_session_ended(app),
+        Some(cli::FORWARD_ARG) => {}
+        _ => {
+            #[cfg(windows)]
+            if toggle_cm() {
+                return;
+            }
+            let _ = main_window(app);
+            return;
         }
-        return;
-    }
-    if argv.get(1).map(String::as_str) != Some(cli::FORWARD_ARG) {
-        let _ = main_window(app);
-        return;
     }
     let req = argv.get(2).ok_or_else(|| "empty request".to_owned()).and_then(|h| cli::decode_forward(h));
     let (c, pw) = match req.and_then(|r| policy::check_outgoing().map(|_| r)) {
@@ -210,20 +227,95 @@ fn forward_to_running(identifier: &str, payload: &str) -> bool {
     send_to_running(identifier, &format!("{}|{payload}", cli::FORWARD_ARG))
 }
 
-/// argv[1] the `--cm` process sends to the main window's process when a host session starts.
+/// argv[1] the `--cm` process sends to the main window's process when a host session starts
+/// (argv[2]: the connection window's HWND on Windows) and when the last one has ended.
 const MINIMIZE_MAIN_ARG: &str = "--minimize-main";
+const SESSION_ENDED_ARG: &str = "--host-session-ended";
 
 /// A host session started (`sink.rs`): the main window's process, if running, minimizes it.
 pub fn minimize_main(app: &AppHandle) {
+    #[cfg(windows)]
+    let cm = app.get_webview_window("cm").and_then(|w| w.hwnd().ok()).map_or(0, |h| h.0 as isize);
+    #[cfg(not(windows))]
+    let cm = 1;
+    tell_main(app, &[MINIMIZE_MAIN_ARG, &cm.to_string()]);
+}
+
+/// The last host session ended (`sink.rs`): the main window's process stops guarding it.
+pub fn host_session_ended_in_cm(app: &AppHandle) {
+    tell_main(app, &[SESSION_ENDED_ARG]);
+}
+
+fn tell_main(app: &AppHandle, args: &[&str]) {
     let identifier = &app.config().identifier;
     #[cfg(windows)]
-    send_to_running(identifier, MINIMIZE_MAIN_ARG);
+    send_to_running(identifier, &args.join("|"));
     // The single-instance plugin's socket and wire format (its macos.rs): "cwd\0\0argv0\0argv1".
     #[cfg(target_os = "macos")]
     if let Ok(mut s) = std::os::unix::net::UnixStream::connect(format!("/tmp/{}_si.sock", identifier.replace(['.', '-'], "_"))) {
-        let _ = std::io::Write::write_all(&mut s, format!("\0\0tether\0{MINIMIZE_MAIN_ARG}").as_bytes());
+        let _ = std::io::Write::write_all(&mut s, format!("\0\0tether\0{}", args.join("\0")).as_bytes());
     }
-    let _ = identifier;
+    let _ = (identifier, args);
+}
+
+/// Main process, `--minimize-main`: the main window gets out of the way for the whole session.
+fn host_session_started(app: &AppHandle, cm: Option<&String>) {
+    let cm = cm.and_then(|c| c.parse::<isize>().ok()).filter(|&c| c != 0).unwrap_or(1);
+    HOST_SESSION.store(cm, Ordering::Relaxed);
+    // Not a hidden one: minimize would show it.
+    if let Some(w) = app.get_webview_window("main").filter(|w| w.is_visible().unwrap_or(false)) {
+        hbb_common::log::info!("host session started: minimizing the main window");
+        let _ = w.minimize();
+        // Windows: off the taskbar too, so the only Tether button is the connection window's and
+        // no click on the app icon can bring the main window up (docs/quick-support.md).
+        #[cfg(windows)]
+        {
+            let _ = w.hide();
+            MAIN_HIDDEN.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Main process, `--host-session-ended`: on Windows the main window is back on the taskbar,
+/// still minimized.
+fn host_session_ended(app: &AppHandle) {
+    hbb_common::log::info!("host session ended");
+    HOST_SESSION.store(0, Ordering::Relaxed);
+    #[cfg(windows)]
+    if MAIN_HIDDEN.swap(false, Ordering::Relaxed) {
+        if let Some(h) = app.get_webview_window("main").and_then(|w| w.hwnd().ok()) {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWMINNOACTIVE};
+            unsafe { ShowWindow(h.0 as _, SW_SHOWMINNOACTIVE) };
+        }
+    }
+    let _ = app;
+}
+
+/// Windows, Tether started again (pinned taskbar icon, Start menu) during a host session: toggles
+/// the connection window like its own taskbar button; the main window stays minimized. False
+/// without a live connection window.
+#[cfg(windows)]
+fn toggle_cm() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow, SetForegroundWindow, ShowWindow, SW_MINIMIZE, SW_RESTORE};
+    let h = HOST_SESSION.load(Ordering::Relaxed) as windows_sys::Win32::Foundation::HWND;
+    if h.is_null() {
+        return false;
+    }
+    // The cm process ended without telling (crash): back to normal.
+    if unsafe { IsWindow(h) } == 0 {
+        HOST_SESSION.store(0, Ordering::Relaxed);
+        return false;
+    }
+    hbb_common::log::info!("started again during a host session: toggling the connection window");
+    unsafe {
+        if IsIconic(h) != 0 {
+            ShowWindow(h, SW_RESTORE);
+            SetForegroundWindow(h);
+        } else {
+            ShowWindow(h, SW_MINIMIZE);
+        }
+    }
+    true
 }
 
 /// Its own taskbar button for this process's windows (an explicit AppUserModelID).
@@ -283,6 +375,9 @@ fn base<'a>(app: &'a AppHandle, label: &str, route: &str) -> tauri::Result<Webvi
 }
 
 pub fn main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    // Opened on purpose (tray) during a host session: left as it is when the session ends.
+    #[cfg(windows)]
+    MAIN_HIDDEN.store(false, Ordering::Relaxed);
     if let Some(w) = app.get_webview_window("main") {
         w.unminimize()?;
         w.show()?;
@@ -333,11 +428,16 @@ fn cm_dock_click(identifier: &str) -> bool {
     std::io::Read::read_exact(&mut s, &mut r).is_ok() && r[0] == b'1'
 }
 
+/// `--cm` process: an authorized client is connected.
+#[cfg(target_os = "macos")]
+fn host_session_active() -> bool {
+    sink::get().is_some_and(|s| s.cm_clients().iter().any(|c| c["authorized"] == true))
+}
+
 /// `--cm` process, Dock icon clicked: during a session the connection window toggles like a
 /// single-window app (minimize when shown, else bring back); without one it is just shown.
 #[cfg(target_os = "macos")]
-fn dock_click(w: &WebviewWindow) -> bool {
-    let session = sink::get().is_some_and(|s| s.cm_clients().iter().any(|c| c["authorized"] == true));
+fn dock_click(w: &WebviewWindow, session: bool) {
     let shown = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
     hbb_common::log::info!("dock click: session {session}, cm shown {shown}");
     if session && shown {
@@ -361,7 +461,6 @@ fn dock_click(w: &WebviewWindow) -> bool {
         let _ = w.show();
         let _ = w.set_focus();
     }
-    session
 }
 
 /// The Accessory-policy `--cm` window has no Dock icon: a click on the main Dock icon connects

@@ -158,7 +158,11 @@ no Dock icon and no menu bar of its own when the main Tether runs (activation po
 process signals it through `$TMPDIR/<identifier>-cm.sock` and gets one byte back):
 
 - **during a session** it toggles only the connection window, like a single-window app: shown →
-  minimized, minimized → back in front, as often as you like. The main window stays as it is.
+  minimized, minimized → back in front, as often as you like. The main window stays as it is:
+  the `--cm` process answers before it toggles (up to 0.5.17 it answered after the restore
+  animation, the main process stopped waiting after 500 ms and restored the main window too), and
+  the main process does not open the main window while a host session is active (it learns that
+  from `--minimize-main` and `--host-session-ended` on its single-instance socket).
 - **without a session** the connection window is shown, and the main window opens if no Tether
   window is shown (as up to 0.5.11).
 
