@@ -218,3 +218,14 @@ the vcpkg x86_64 cross build on Apple silicon (and arm64 on Intel), the Tauri un
 dmg (the dmg step drives Finder via AppleScript and may ask for permission to control Finder),
 ad-hoc signing with the entitlements, the RustDesk core's macOS screen capture and input in
 Tether's Tauri shell, the permission prompts, and both update paths.
+
+### Checked on a Mac with 0.5.20 (2026-11-06)
+
+- Host session, Tether Dock icon clicked four times (one click at a time, the icon's position
+  re-read from a screenshot each time, since a minimized window adds a Dock thumbnail and shifts
+  the icons): the connection window was shown, minimized, shown, minimized; the main window never
+  appeared.
+- PC technician → Mac: Ctrl+N arrived as ⌘N (a new Terminal window opened).
+- Accept with one click could not be checked from a session, by design: the host drops remote
+  clicks on Tether's own windows (`own_ui_guard`), so the request ignored both remote clicks. It
+  needs a person at the Mac: make another app active, then click Accept once.
