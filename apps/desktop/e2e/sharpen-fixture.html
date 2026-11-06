@@ -1,0 +1,169 @@
+<!doctype html>
+<!--
+  Deterministic fixture for the viewer's sharpening (src/lib/sharpen.ts), driven by sharpen-quality.mjs.
+  A 1920×1080 test picture (small text, fine lines, a photo-like area, a flat noisy area) is encoded
+  and decoded with WebCodecs like a session frame, drawn at several scales through the 2D path (Off)
+  and the WebGL path at several strengths, and compared with the picture scaled from the original.
+-->
+<html>
+<head><meta charset="utf-8" /><title>sharpen fixture</title></head>
+<body style="margin:0;background:#222">
+<script type="module">
+  import { GlRenderer, AMOUNT, sharpenAmount } from "/src/lib/sharpen.ts";
+
+  const W = 1920, H = 1080;
+  // Regions (source pixels): text, lines, photo, noise.
+  const R = { text: [0, 0, 960, 540], lines: [960, 0, 960, 540], photo: [0, 540, 960, 540], noise: [960, 540, 960, 540] };
+
+  function fixture() {
+    const c = new OffscreenCanvas(W, H), g = c.getContext("2d");
+    let seed = 12345; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    g.fillStyle = "#fff"; g.fillRect(0, 0, W, H);
+    // Text: UI sizes, black and grey on white, white on blue, coloured.
+    const words = "The quick brown fox jumps over the lazy dog 0123456789 Settings File Edit View Window Help".split(" ");
+    let y = 16;
+    for (const [px, fg, bg] of [[9, "#000", "#fff"], [10, "#000", "#fff"], [11, "#333", "#fff"], [12, "#000", "#fff"], [13, "#666", "#fff"], [14, "#fff", "#1f5fbf"], [12, "#c00", "#fff"], [16, "#000", "#fff"]]) {
+      for (let line = 0; line < 3; line++) {
+        g.fillStyle = bg; g.fillRect(8, y - 2, 944, px + 6);
+        g.fillStyle = fg; g.font = `${px}px "Segoe UI", Arial, sans-serif`; g.textBaseline = "top";
+        g.fillText(Array.from({ length: 16 }, () => words[Math.floor(rnd() * words.length)]).join(" "), 12, y);
+        y += px + 9;
+      }
+    }
+    // Fine lines: 1 px lines with 1-4 px gaps, a grid, diagonals, a star.
+    g.fillStyle = "#000";
+    for (let gap = 1, x = 980; gap <= 4; gap++) for (let i = 0; i < 20; i++, x += 1 + gap) g.fillRect(x, 20, 1, 200);
+    for (let gap = 1, yy = 240; gap <= 4; gap++) for (let i = 0; i < 12; i++, yy += 1 + gap) g.fillRect(980, yy, 400, 1);
+    g.strokeStyle = "#000"; g.lineWidth = 1;
+    for (let a = 0; a < 72; a++) { const t = (a * Math.PI) / 72; g.beginPath(); g.moveTo(1700, 270); g.lineTo(1700 + Math.cos(t) * 200, 270 + Math.sin(t) * 200); g.moveTo(1700, 270); g.lineTo(1700 - Math.cos(t) * 200, 270 - Math.sin(t) * 200); g.stroke(); }
+    g.strokeStyle = "#888"; for (let x = 1400; x < 1500; x += 6) { g.strokeRect(x + 0.5, 30.5, 4, 180); }
+    // Photo: soft gradients and blurred blobs.
+    const gr = g.createLinearGradient(0, 540, 960, 1080); gr.addColorStop(0, "#3a6ea5"); gr.addColorStop(0.5, "#e8c07a"); gr.addColorStop(1, "#2e4a2a");
+    g.fillStyle = gr; g.fillRect(0, 540, 960, 540);
+    g.filter = "blur(1.5px)";
+    for (let i = 0; i < 900; i++) { g.fillStyle = `hsla(${rnd() * 360},${30 + rnd() * 50}%,${25 + rnd() * 60}%,${0.3 + rnd() * 0.5})`; g.beginPath(); g.arc(rnd() * 960, 540 + rnd() * 540, 2 + rnd() * 22, 0, 7); g.fill(); }
+    g.filter = "none";
+    // Flat noisy area: mid grey ± 6 levels plus a smooth ramp (shows amplified compression noise/blocking).
+    const d = g.createImageData(960, 540);
+    for (let j = 0; j < 540; j++) for (let i = 0; i < 960; i++) { const v = 110 + (i / 960) * 40 + (rnd() - 0.5) * 12; const k = (j * 960 + i) * 4; d.data[k] = d.data[k + 1] = d.data[k + 2] = v; d.data[k + 3] = 255; }
+    g.putImageData(d, 960, 540);
+    return c;
+  }
+
+  async function codecRoundTrip(src, codec, bitrate, frames) {
+    const chunks = [];
+    const enc = new VideoEncoder({ output: (c) => chunks.push(c), error: (e) => { throw e; } });
+    enc.configure({ codec, width: W, height: H, bitrate, framerate: 30, latencyMode: "realtime", ...(codec.startsWith("avc") ? { avc: { format: "annexb" } } : {}) });
+    // A static screen: one key frame, then deltas refine it (as a session does).
+    for (let i = 0; i < frames; i++) { const f = new VideoFrame(src, { timestamp: i * 33333 }); enc.encode(f, { keyFrame: i === 0 }); f.close(); }
+    await enc.flush(); enc.close();
+    let last = null;
+    const dec = new VideoDecoder({ output: (f) => { last?.close(); last = f; }, error: (e) => { throw e; } });
+    dec.configure({ codec, optimizeForLatency: true });
+    for (const c of chunks) dec.decode(c);
+    await dec.flush(); dec.close();
+    return { frame: last, bytes: chunks.reduce((s, c) => s + c.byteLength, 0) };
+  }
+
+  function pixels(src, w, h, quality) {
+    const c = new OffscreenCanvas(w, h), g = c.getContext("2d", { willReadFrequently: true });
+    if (quality) g.imageSmoothingQuality = quality;
+    g.drawImage(src, 0, 0, w, h);
+    return g.getImageData(0, 0, w, h);
+  }
+
+  const luma = (img) => { const d = img.data, y = new Float32Array(img.width * img.height); for (let i = 0; i < y.length; i++) y[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2]; return y; };
+
+  // Per region: error vs the reference, sharpness (mean |Laplacian|) and overshoot past the reference's 3×3 range.
+  function metrics(out, ref, w, h, s) {
+    const a = luma(out), b = luma(ref), res = {};
+    for (const [name, r] of Object.entries(R)) {
+      const x0 = Math.max(1, Math.round(r[0] * s)), y0 = Math.max(1, Math.round(r[1] * s));
+      const x1 = Math.min(w - 1, Math.round((r[0] + r[2]) * s)), y1 = Math.min(h - 1, Math.round((r[1] + r[3]) * s));
+      let n = 0, err = 0, lap = 0, lapRef = 0, over = 0, overN = 0;
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+        const i = y * w + x;
+        err += Math.abs(a[i] - b[i]);
+        lap += Math.abs(4 * a[i] - a[i - 1] - a[i + 1] - a[i - w] - a[i + w]);
+        lapRef += Math.abs(4 * b[i] - b[i - 1] - b[i + 1] - b[i - w] - b[i + w]);
+        let mn = 255, mx = 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const v = b[i + dy * w + dx]; if (v < mn) mn = v; if (v > mx) mx = v; }
+        const o = Math.max(0, a[i] - mx, mn - a[i]);
+        over += o; if (o > 8) overN++;
+        n++;
+      }
+      res[name] = { mae: +(err / n).toFixed(2), sharp: +(lap / lapRef).toFixed(3), over: +(over / n).toFixed(3), overPct: +((100 * overN) / n).toFixed(3) };
+    }
+    return res;
+  }
+
+  // One PNG: the same zoomed crop of each picture side by side, labelled.
+  function strip(panels, x, y, cw, ch, zoom) {
+    const pw = cw * zoom, c = new OffscreenCanvas(pw * panels.length + 6 * (panels.length - 1), ch * zoom + 22), g = c.getContext("2d");
+    g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+    panels.forEach(([label, img], n) => {
+      const t = new OffscreenCanvas(img.width, img.height); t.getContext("2d").putImageData(img, 0, 0);
+      g.imageSmoothingEnabled = false;
+      g.drawImage(t, x, y, cw, ch, n * (pw + 6), 22, pw, ch * zoom);
+      g.fillStyle = "#000"; g.font = "600 14px Arial, sans-serif"; g.textBaseline = "top"; g.fillText(label, n * (pw + 6) + 4, 3);
+    });
+    return c.convertToBlob().then((b) => new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(b); }));
+  }
+
+  window.run = async ({ codec = "vp09.00.10.08", bitrate = 3_000_000, frames = 12, scales = [1, 0.75, 1.5], ks = [0, 0.2, 0.35, 0.5, 0.8], crops = true }) => {
+    const src = fixture();
+    const { frame, bytes } = await codecRoundTrip(src, codec, bitrate, frames);
+    const out = { codec, bitrate, frames, bytes, renderer: "", cases: [], crops: {} };
+    const K = { ...AMOUNT }; // the shipped strengths (the sweep below changes AMOUNT.strong)
+    const glc = document.createElement("canvas");
+    const gl = GlRenderer.create(glc, () => {}, false);
+    if (!gl) throw new Error("no WebGL2");
+    const dbg = gl.gl.getExtension("WEBGL_debug_renderer_info");
+    out.renderer = dbg ? gl.gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : "?";
+    gl.mode = "strong";
+    for (const s of scales) {
+      const w = Math.round(W * s), h = Math.round(H * s);
+      const ref = pixels(src, w, h, "high");
+      const off = pixels(frame, w, h); // 2D path: bilinear scaling, as the compositor scales the Off canvas
+      out.cases.push({ scale: s, path: "off (2D)", k: null, auto: sharpenAmount("auto", { w: W, h: H }, { w, h }), m: metrics(off, ref, w, h, s) });
+      gl.setOutput(w, h);
+      const auto = sharpenAmount("auto", { w: W, h: H }, { w, h });
+      const shots = {};
+      for (const k of new Set([...ks, auto, K.strong])) {
+        AMOUNT.strong = k; // sweep the shader strength through the Strong mode
+        gl.frame(frame, W, H);
+        const img = pixels(glc, w, h); // read like the stress sampler does (drawImage of the canvas)
+        if (ks.includes(k)) out.cases.push({ scale: s, path: "webgl", k, m: metrics(img, ref, w, h, s) });
+        shots[k] = img;
+      }
+      if (crops) {
+        const zoom = s < 1 ? 4 : 3, cw = Math.round(150 * s), ch = Math.round(60 * s);
+        const panels = [["original", ref], ["Off", off], [`Auto (k ${auto})`, shots[auto]], [`Strong (k ${K.strong})`, shots[K.strong]]];
+        out.crops[`s${s}-text`] = await strip(panels, Math.round(10 * s), Math.round(14 * s), cw, ch, zoom);
+        out.crops[`s${s}-lines`] = await strip(panels, Math.round(1380 * s), Math.round(20 * s), cw, ch, zoom);
+        out.crops[`s${s}-photo`] = await strip(panels, Math.round(300 * s), Math.round(700 * s), cw, ch, zoom);
+      }
+    }
+    // Draw cost in this browser (GPU waited for with a 1-pixel readback; same for both paths).
+    const perf = {};
+    for (const [label, sw, sh, dw, dh] of [["1080p→1080p", W, H, W, H], ["1080p→1440×810", W, H, 1440, 810]]) {
+      gl.setOutput(dw, dh);
+      const c2 = document.createElement("canvas"); c2.width = sw; c2.height = sh;
+      const g2 = c2.getContext("2d", { alpha: false, desynchronized: true });
+      const time = (fn) => { for (let i = 0; i < 20; i++) fn(); const t = performance.now(); for (let i = 0; i < 200; i++) fn(); return +((performance.now() - t) / 200).toFixed(3); };
+      AMOUNT.strong = K.scaled;
+      perf[label] = {
+        off2d: time(() => { g2.drawImage(frame, 0, 0, sw, sh); g2.getImageData(0, 0, 1, 1); }),
+        webglK0: (gl.mode = "off", time(() => { gl.frame(frame, sw, sh); gl.sync(); })),
+        webglAuto: (gl.mode = "strong", time(() => { gl.frame(frame, sw, sh); gl.sync(); })),
+      };
+    }
+    out.perf = perf;
+    gl.dispose();
+    frame.close();
+    return out;
+  };
+  window.ready = true;
+</script>
+</body>
+</html>

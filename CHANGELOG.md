@@ -4,6 +4,20 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Added
+- **Viewer: sharpening.** The remote picture is scaled to the window and sharpened in one WebGL2
+  pass (a luma unsharp mask with a noise gate, clamped to the neighbourhood so it cannot make
+  halos or ringing; frames are uploaded from the decoder without a CPU copy). Toolbar → Image
+  quality → **Sharpening**: **Auto** (default: only when the picture is scaled), **Strong**,
+  **Off** (the previous 2D canvas path). Remembered per user on the PC. Without WebGL2, or when the
+  GPU context is lost, the viewer falls back to the 2D canvas by itself. Measurements in
+  `docs/performance.md` ("Sharpening"); fixture `apps/desktop/e2e/sharpen-quality.mjs`, session
+  check `apps/desktop/e2e/sharpen-e2e.mjs`.
+- Statistics overlay: draw time per picture and the sharpening in use. Debug measurement mode
+  (`localStorage["tether.renderSync"] = "1"`): each draw waits for the GPU, so the draw time includes it.
+
 ## [0.5.17] — 2026-11-06
 
 Tether Manage 0.5.5; Tether / TetherQS client changes for the next release; hbbs and the Caddyfile
