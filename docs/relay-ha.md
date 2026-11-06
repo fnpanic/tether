@@ -45,7 +45,7 @@ flowchart LR
    wins. That hbbs picks a relay and sends `PunchHole{relay_server}` to the host over the host's
    registration.
 3. **Relay choice (hbbs, server side).** Each hbbs has a relay list (`-r`, systemd
-   `RELAY_SERVERS`). An entry has the form `<address>[|<health URL>]`:
+   `RELAY_SERVERS`). An entry has the form `<address>[|<health URL>][|backup]`:
    - Every 3 s hbbs fetches every health URL. hbbr's `/readyz` answers `200 ready sessions=N`, or
      `503 draining sessions=N` while it drains. A failed fetch (2.5 s timeout) or a non-200 status
      removes the relay from the healthy set until a later check passes.
@@ -53,6 +53,22 @@ flowchart LR
      does not matter: the relay path is client to relay, whichever hbbs answered.
    - Entries without a health URL keep the old TCP connect check on port 21117. `ws://`/`wss://`
      entries without one are always treated as healthy.
+   - **Backup relays.** A trailing `|backup` (with or without a health URL, e.g.
+     `relay.example|backup`) marks a backup. hbbs picks among healthy primaries (least loaded,
+     ties rotate) even when a backup carries less load; only when no primary is healthy does it
+     pick among healthy backups by the same rule. Failover takes one to two checks: a dead primary
+     leaves the healthy set after its check fails (every 3 s, 2.5 s timeout), so new sessions move
+     to a backup within about 3–6 s, and back to the primary on the first check it passes again.
+     Running sessions stay on their relay. hbbs logs each switch once at INFO:
+     `relay failover: no healthy primary relay, using backups` and
+     `relay failover: primary relay healthy again`.
+   - When **no** relay passes a check, hbbs keeps the last set that did (unchanged behaviour), so
+     it keeps handing out the relay(s) that were healthy last. Before the first check (start or
+     reload) every entry counts as healthy with load 0, so primaries come first. With a single
+     entry hbbs does no checks at all.
+   - hbbs's `/readyz` (port 21122) does not list relays: its `ready sessions=N` format is read by
+     probes. The admin command `rs` (hbbs TCP 21115 on localhost) lists the healthy set as
+     `<address> sessions=N primary|backup`.
 4. The host connects to the relay and returns `RelayResponse` **to the same hbbs**
    (`rendezvous_mediator` sends it to the server the PunchHole came from). That hbbs forwards it
    to the viewer, which connects to the same relay. hbbr pairs the two connections by uuid.
@@ -62,6 +78,14 @@ Production relay lists:
 ```
 relay 1: tether-desk.duckdns.org|http://127.0.0.1:21121/readyz,tether-desk2.duckdns.org|https://tether-desk2.duckdns.org/readyz/relay
 relay 2: tether-desk2.duckdns.org|http://127.0.0.1:21121/readyz,tether-desk.duckdns.org|https://tether-desk.duckdns.org/readyz/relay
+```
+
+One primary with backups (e.g. Hetzner primary, Oracle nodes only when it is down), the same
+line on every node's hbbs; on the primary itself its own entry may use
+`http://127.0.0.1:21121/readyz` instead:
+
+```
+RELAY_SERVERS='<hetzner host>|https://<hetzner host>/readyz/relay,<oracle 1>|https://<oracle 1>/readyz/relay|backup,<oracle 2>|https://<oracle 2>/readyz/relay|backup'
 ```
 
 The node checks its own hbbr directly and the other node through Caddy's `/readyz/relay` route.
@@ -239,15 +263,18 @@ Tether Manage (implemented in 0.4.0; the server setting is a comma-separated rel
 - `vendor/rustdesk-server/src/common.rs`: `listen_signal_and_drain`, `serve_health`.
 - `vendor/rustdesk-server/src/relay_server.rs`: session count, refuse new pairings while
   draining, health server, drain on SIGTERM.
-- `vendor/rustdesk-server/src/rendezvous_server.rs`: `<address>|<health URL>` entries, HTTP(S)
-  checks, `pick_relay` (least loaded, then rotation), hbbs drain and health.
+- `vendor/rustdesk-server/src/rendezvous_server.rs`: `<address>|<health URL>|backup` entries
+  (`relay_entry`), HTTP(S) checks, `pick_relay` (primaries before backups, least loaded, then
+  rotation), hbbs drain and health.
 - `vendor/rustdesk-server/src/rendezvous_server.rs`: WebRTC/IPv6 fields forwarded in
   `PunchHole`/`FetchLocalAddr`/`PunchHoleResponse`, `send_to_tcp_keep`, `relay_ice_candidate`;
   `common.rs`: `stun_binding_response` (unit test `stun_tests`).
 - Patches: `patches/rustdesk-server.patch`, `patches/rustdesk-server-hbb_common.patch` (the
   rendezvous.proto of the client, without `IdPk`, which message.proto defines; regenerate with
   `scripts/make-patches.sh`).
-- Builds and tests: `scripts/build-relay.sh`, `scripts/test-relay.sh` (WSL, static musl).
+- Builds and tests: `scripts/build-relay.sh`, `scripts/test-relay.sh` (WSL, static musl; also
+  runs `scripts/test-relay-backup.sh`: hbbs + primary and backup hbbr on localhost, primary
+  stopped and restarted, checked with `relay-harness`).
 
 ## Enabling HA on relay 1 (applied for 0.4.0)
 

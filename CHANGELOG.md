@@ -4,6 +4,18 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Relays
+- **Backup relays.** A `RELAY_SERVERS` entry may end in `|backup`
+  (`<address>[|<health URL>][|backup]`). hbbs hands out healthy primary relays only, even when a
+  backup is less loaded, and switches new sessions to the healthy backups only while no primary
+  passes its health check (checked every 3 s, 2.5 s timeout; back to the primary on the first
+  check it passes). Each switch is logged once at INFO (`relay failover: ...`); the hbbs admin
+  command `rs` marks relays `primary`/`backup`. Existing entries are unchanged. Use:
+  `RELAY_SERVERS='<hetzner>|https://<hetzner>/readyz/relay,<oracle>|https://<oracle>/readyz/relay|backup'`.
+  See [docs/relay-ha.md](docs/relay-ha.md).
+
 ## [0.5.19] — 2026-11-06
 
 ### Fixed
