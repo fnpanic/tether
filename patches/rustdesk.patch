@@ -2127,7 +2127,7 @@ index 8e4c56c..9fb08df 100644
      let licence_key = crate::get_key(true).await;
      msg_out.set_request_relay(RequestRelay {
 diff --git a/src/server/connection.rs b/src/server/connection.rs
-index e9ea313..3234e63 100644
+index e9ea313..5828f97 100644
 --- a/src/server/connection.rs
 +++ b/src/server/connection.rs
 @@ -194,6 +194,10 @@ lazy_static::lazy_static! {
@@ -2290,7 +2290,30 @@ index e9ea313..3234e63 100644
                  || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()
              {
                  #[cfg(not(any(target_os = "android", target_os = "ios")))]
-@@ -3639,6 +3727,51 @@ impl Connection {
+@@ -3202,6 +3290,10 @@ impl Connection {
+                     if self.is_authed_view_camera_conn() {
+                         return true;
+                     }
++                    #[cfg(debug_assertions)]
++                    if std::env::var_os("TETHER_DEV_KEYLOG").is_some() {
++                        return true; // e2e: never moves the real pointer
++                    }
+                     #[cfg(any(target_os = "android", target_os = "ios"))]
+                     if let Err(e) = call_main_service_pointer_input("mouse", me.mask, me.x, me.y) {
+                         log::debug!("call_main_service_pointer_input fail:{}", e);
+@@ -3338,6 +3430,11 @@ impl Connection {
+                     if self.is_authed_view_camera_conn() {
+                         return true;
+                     }
++                    #[cfg(debug_assertions)]
++                    if let Some(path) = std::env::var_os("TETHER_DEV_KEYLOG") {
++                        dev_keylog(&path, &me);
++                        return true; // e2e: logged instead of typed on the real desktop
++                    }
+                     if self.peer_keyboard_enabled() {
+                         if is_enter(&me) {
+                             CLICK_TIME.store(get_time(), Ordering::SeqCst);
+@@ -3639,6 +3736,51 @@ impl Connection {
                                  }
                              }
                          }
@@ -2342,7 +2365,7 @@ index e9ea313..3234e63 100644
                          match fa.union {
                              Some(file_action::Union::ReadEmptyDirs(rd)) => {
                                  self.read_empty_dirs(&rd.path, rd.include_hidden);
-@@ -4032,10 +4165,19 @@ impl Connection {
+@@ -4032,10 +4174,19 @@ impl Connection {
                          .lock()
                          .unwrap()
                          .user_auto_adjust_fps(self.inner.id(), fps),
@@ -2366,7 +2389,7 @@ index e9ea313..3234e63 100644
                      #[cfg(windows)]
                      Some(misc::Union::SelectedSid(sid)) => {
                          if let Some(current_process_sid) =
-@@ -5310,6 +5452,7 @@ impl Connection {
+@@ -5310,6 +5461,7 @@ impl Connection {
              return;
          }
          self.closed = true;
@@ -2374,7 +2397,7 @@ index e9ea313..3234e63 100644
          // If voice A,B -> C, and A,B has voice call
          // B disconnects, C will reset the voice call input.
          //
-@@ -5356,6 +5499,10 @@ impl Connection {
+@@ -5356,6 +5508,10 @@ impl Connection {
          msg_out.set_misc(misc);
          self.send(msg_out).await;
          raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
@@ -2385,7 +2408,7 @@ index e9ea313..3234e63 100644
      }
  
      async fn handle_read_job_init_result(
-@@ -5813,6 +5960,44 @@ impl Connection {
+@@ -5813,6 +5969,44 @@ impl Connection {
          }
      }
  
@@ -2430,7 +2453,7 @@ index e9ea313..3234e63 100644
      fn is_authed_remote_conn(&self) -> bool {
          if let Some(id) = self.authed_conn_id.as_ref() {
              return id.conn_type() == AuthConnType::Remote;
-@@ -7874,3 +8059,86 @@ mod test {
+@@ -7874,3 +8068,104 @@ mod test {
          assert!(!replaced_by(&conn(3, remote, key(7, "other")), 2, &mine));
      }
  }
@@ -2515,6 +2538,24 @@ index e9ea313..3234e63 100644
 +        assert!(recent.admits(&s, false));
 +        let old = ResumeTicket { ended: Instant::now().checked_sub(RESUME_WINDOW + Duration::from_secs(1)), ..recent };
 +        assert!(old.ended.is_some() && !old.admits(&s, false), "window over");
++    }
++}
++
++/// Debug builds, `TETHER_DEV_KEYLOG=<file>`: received key events are appended as JSON lines and
++/// not injected (keyboard e2e, apps/desktop/e2e/keyboard-e2e.mjs).
++#[cfg(debug_assertions)]
++fn dev_keylog(path: &std::ffi::OsStr, me: &KeyEvent) {
++    use std::io::Write;
++    let (kind, v) = match &me.union {
++        Some(key_event::Union::ControlKey(c)) => ("control", format!("{:?}", c.enum_value())),
++        Some(key_event::Union::Chr(c)) => ("chr", c.to_string()),
++        Some(key_event::Union::Unicode(c)) => ("unicode", c.to_string()),
++        Some(key_event::Union::Seq(s)) => ("seq", s.clone()),
++        _ => ("none", String::new()),
++    };
++    let line = serde_json::json!({ "mode": me.mode.value(), "kind": kind, "v": v, "down": me.down, "press": me.press });
++    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
++        let _ = writeln!(f, "{line}");
 +    }
 +}
 diff --git a/src/server/input_service.rs b/src/server/input_service.rs

@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { routeLabel } from "../lib/route";
 import {
   Activity,
+  Check,
   ChevronDown,
   Expand,
   FolderSync,
   Gauge,
+  Keyboard,
   Maximize,
   MessageSquare,
   Minimize,
@@ -123,6 +125,9 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   const [pinned, setPinned] = useState(false);
   const [chat, setChat] = useState<{ open: boolean; unread: number; msgs: { me: boolean; text: string }[] }>({ open: false, unread: 0, msgs: [] });
   const [cursor, setCursor] = useState("default");
+  const [kbd, setKbd] = useState<KbdSettings | null>(null);
+  // The person at the remote computer turned "Control mouse and keyboard" off.
+  const [controlOff, setControlOff] = useState(false);
   const [imageQuality, setImageQuality] = useState("balanced");
   const [fullscreen, setFullscreen] = useState(false);
   const cursors = useRef(new Map<string, string>());
@@ -184,6 +189,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           break;
         case "peer_info":
           setInfo(p);
+          setControlOff(false); // new connection: the host resends it if control is off
           setWindowTitle(`${p.hostname || formatId(peer)} — Tether`);
           invoke("session_apply_fluxrt", { key });
           if (p.displays?.length) {
@@ -210,6 +216,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           } else recordingStopped();
           break;
         case "permission":
+          if (p.name === "keyboard") setControlOff(!p.value);
           if (p.name !== "recording" || recRef.current.state !== "pending") break;
           // The host user answered our request (see cm_record_consent).
           if (p.value) invoke("session_record", { key, start: true });
@@ -379,6 +386,8 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
     const down = (e: PointerEvent) => {
       c.setPointerCapture(e.pointerId);
       c.focus();
+      // A click into the picture always gives the session the keyboard (ends a local escape).
+      invoke("session_keyboard", { key, pause: false }).catch(() => {});
       send(mouseMask(MOUSE.DOWN, e.button), e);
     };
     const up = (e: PointerEvent) => send(mouseMask(MOUSE.UP, e.button), e);
@@ -396,6 +405,16 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
     };
     const kd = key_(true);
     const ku = key_(false);
+    // Text fields (chat) get the keys: the system-key hook pauses and held keys are released.
+    const isText = (t: EventTarget | null) => t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement;
+    const fin = (e: FocusEvent) => {
+      if (isText(e.target)) invoke("session_keyboard", { key, pause: true }).catch(() => {});
+    };
+    const fout = (e: FocusEvent) => {
+      if (isText(e.target) && !isText(e.relatedTarget)) invoke("session_keyboard", { key, pause: false }).catch(() => {});
+    };
+    document.addEventListener("focusin", fin);
+    document.addEventListener("focusout", fout);
     c.addEventListener("pointermove", move);
     c.addEventListener("pointerdown", down);
     c.addEventListener("pointerup", up);
@@ -412,8 +431,18 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       c.removeEventListener("contextmenu", ctx);
       window.removeEventListener("keydown", kd);
       window.removeEventListener("keyup", ku);
+      document.removeEventListener("focusin", fin);
+      document.removeEventListener("focusout", fout);
     };
   }, [phase.kind, key, toRemote, chat.open]);
+
+  // Keyboard settings; asked again once the peer's platform is known (PC/Mac mapping).
+  useEffect(() => {
+    if (phase.kind !== "connected") return;
+    invoke<KbdSettings>("session_keyboard", { key }).then(setKbd).catch(() => {});
+  }, [phase.kind, key, info?.platform]);
+  const setKeyboard = (v: Partial<Record<"shortcuts" | "systemKeys" | "altTabRemote", boolean>>) =>
+    act(invoke<KbdSettings>("session_keyboard", { key, ...v }).then(setKbd));
 
   // Auto-hide the toolbar unless pinned; reveal at the top edge.
   useEffect(() => {
@@ -526,6 +555,11 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
           <Overlay phase={phase} name={name} peer={peer} sessionKey={key} hostMissing={hostMissing} onLogin={() => (typed.current = true)} />
         ) : null}
         {rec.state === "on" && connected && <RecPill since={rec.since} />}
+        {controlOff && connected && (
+          <div role="status" className="pointer-events-none absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full border border-white/10 bg-black/75 px-4 py-2 text-footnote text-white/85 backdrop-blur">
+            View only: the person at the remote computer has turned off control of mouse and keyboard.
+          </div>
+        )}
         {toast.node}
         <RecordingSaved />
       </div>
@@ -586,6 +620,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
               <Video size={17} className={rec.state === "on" ? "text-danger" : rec.state === "pending" ? "animate-pulse" : ""} />
             </TB>
           )}
+          {kbd && <KeyboardMenu kbd={kbd} mac={/mac/i.test(info?.platform ?? "")} onChange={setKeyboard} onForceQuit={() => act(invoke("session_mac_force_quit", { key }))} />}
           <ActionsMenu
             windows={(info?.platform ?? "").toLowerCase().startsWith("windows")}
             service={!!info?.sas_enabled}
@@ -696,6 +731,47 @@ export function fitSize(f: { w: number; h: number }, stage: { w: number; h: numb
   if (!f.w || !f.h || !stage.w || !stage.h) return { maxWidth: "100%", maxHeight: "100%" };
   const s = Math.min(stage.w / f.w, stage.h / f.h);
   return { width: Math.floor(f.w * s), height: Math.floor(f.h * s) };
+}
+
+type KbdSettings = { dir: "pc-mac" | "mac-pc" | ""; shortcuts: boolean; system_keys: boolean; alt_tab_remote: boolean; hook: boolean };
+
+/** Keyboard: PC/Mac shortcut mapping, system keys (hook) and Alt+Tab. See docs/keyboard.md. */
+function KeyboardMenu({ kbd, mac, onChange, onForceQuit }: { kbd: KbdSettings; mac: boolean; onChange: (v: Partial<Record<"shortcuts" | "systemKeys" | "altTabRemote", boolean>>) => void; onForceQuit: () => void }) {
+  const [open, setOpen] = useState(false);
+  const item = (label: string, hint: string, on: boolean | null, run: () => void) => (
+    <button
+      key={label}
+      role={on == null ? "menuitem" : "menuitemcheckbox"}
+      aria-checked={on ?? undefined}
+      onClick={() => {
+        setOpen(false);
+        run();
+      }}
+      className="flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left transition hover:bg-white/10"
+    >
+      <span className="mt-0.5 w-4 shrink-0">{on && <Check size={15} />}</span>
+      <span className="flex flex-col">
+        <span className="text-caption font-normal">{label}</span>
+        <span className="text-footnote text-white/50">{hint}</span>
+      </span>
+    </button>
+  );
+  return (
+    <div className="no-drag relative">
+      <TB label="Keyboard" active={open} onClick={() => setOpen(!open)}>
+        <Keyboard size={17} />
+      </TB>
+      {open && (
+        <div role="menu" className="animate-fade absolute right-0 top-11 z-30 w-80 overflow-hidden rounded-xl border border-white/10 bg-[#272729] p-1 shadow-float" onMouseLeave={() => setOpen(false)}>
+          {kbd.dir === "pc-mac" && item("Windows shortcuts on the Mac", "Ctrl works as ⌘ (Ctrl+C, Ctrl+V…), the Win key as Control, Home/End, Ctrl+arrows like on Windows. Off: keys as on a Mac keyboard (e.g. for a terminal).", kbd.shortcuts, () => onChange({ shortcuts: !kbd.shortcuts }))}
+          {kbd.dir === "mac-pc" && item("Mac shortcuts on the PC", "⌘ works as Ctrl (⌘C, ⌘V…), Control as the Windows key, ⌘/⌥+arrows like on a Mac.", kbd.shortcuts, () => onChange({ shortcuts: !kbd.shortcuts }))}
+          {kbd.hook && item("Send system keys", "Win, Win+R, Alt+Space, Alt+Esc, Ctrl+Esc, Print go to the remote computer while this window is active. Ctrl+Alt+Home gives them back to this PC until you click into the picture.", kbd.system_keys, () => onChange({ systemKeys: !kbd.system_keys }))}
+          {kbd.hook && kbd.system_keys && item("Send Alt+Tab", "Off: Alt+Tab switches windows on this PC.", kbd.alt_tab_remote, () => onChange({ altTabRemote: !kbd.alt_tab_remote }))}
+          {mac && item("Send ⌘⌥Esc", "Force Quit Applications on the Mac (instead of Ctrl+Alt+Del)", null, onForceQuit)}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** Ctrl+Alt+Del, lock and restart: disruptive, so grouped, explained and (lock, restart) confirmed. */

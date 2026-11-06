@@ -4,6 +4,31 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Added
+- **Keyboard between PC and Mac.** Towards a Mac, Ctrl works as ⌘ (Ctrl+C, Ctrl+V…), the Win key
+  as Control, Ctrl+Y as redo, Home/End as line start/end, Ctrl+arrows as word jumps, Alt+F4 as ⌘Q,
+  and AltGr characters of German and other layouts (@ € [ ] { } \ | ~) arrive as typed. From a Mac
+  the other way round (⌘ = Ctrl, ⌘←/→ = Home/End…). On by default when the platforms differ,
+  per session in the new **Keyboard** menu of the session toolbar, which also sends ⌘⌥Esc (Force
+  Quit) to a Mac. See docs/keyboard.md.
+- **System keys go to the remote computer** (Windows technician app): while a session window is
+  active, Win, Win+R, Alt+Space, Alt+Esc, Ctrl+Esc, Print… reach the remote computer instead of
+  this PC (low-level keyboard hook, only while the window has the focus and no text field is
+  active). Alt+Tab stays local unless **Keyboard → Send Alt+Tab** is on. Ctrl+Alt+Home gives the
+  keys back to this PC until the next click into the picture. Turn off with **Keyboard → Send
+  system keys**.
+- The session shows when the person at the remote computer has turned off control of mouse and
+  keyboard.
+
+### Fixed
+- **Keyboard only partly working after Alt+Tab, the Win key or Alt+Space.** A key whose release
+  the session window never saw (focus taken by the local Alt+Tab, Start menu, PowerToys Run or
+  Windows search) stayed pressed on the remote computer, and later presses of that modifier were
+  dropped. Every held key is now released on the remote side when the window loses the focus.
+- Alt+Space in a session opened PowerToys Run / Windows search on the technician's PC.
+
 ## [0.5.17] — 2026-11-06
 
 Tether Manage 0.5.5; Tether / TetherQS client changes for the next release; hbbs and the Caddyfile

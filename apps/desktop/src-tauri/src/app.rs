@@ -452,9 +452,13 @@ pub fn open_session_with(app: &AppHandle, c: &cli::Connect) -> tauri::Result<Str
             if let Some(s) = sink::get() {
                 s.detach_video(&k);
             }
+            crate::keys::forget(&k);
             librustdesk::ui::session_close(&k);
-        } else if let WindowEvent::Focused(true) = e {
-            librustdesk::ui::session_focus(&k);
+        } else if let WindowEvent::Focused(f) = e {
+            if *f {
+                librustdesk::ui::session_focus(&k);
+            }
+            crate::keys::focus(&k, *f);
         }
     });
     Ok(key)
