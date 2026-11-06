@@ -199,7 +199,23 @@ Causes, both fixed in 0.5.15:
 
 Fixes: the Mac host captures at even dimensions (`even()` in `libs/scrap/src/quartz/display.rs`);
 the native path sends a picture only after the window drew the previous one (`TauriSink::video`,
-`session_frame_drawn`). The Mac build with the first fix was not run yet (the Mac was locked).
+`session_frame_drawn`).
+
+## Mac host after the fixes (2026-11-06 morning, same Mac and stress page)
+
+Extra delay over idle, median / p95 (ms). The viewer decoded with WebCodecs in every run (no
+`webcodecs failed` line); the stream is 1728x1116.
+
+| Build | Codec | scroll | photo | noise | stalls >= 0.5 s |
+| --- | --- | --- | --- | --- | --- |
+| host 0.5.13, viewer 0.5.15 (bounded native path) | Auto | +68 / +329 | -3 / +222 | +167 / +354 | 5 (max 0.8 s) |
+| host 0.5.15, viewer 0.5.15 | Auto (H.265) | +4 / +18 | +158 / +5519 | +10 / +24 | 3 (~2.8 s) |
+| | H.265 | +3 / +19 | +1 / +78 | +12 / +4898 | 4 (~2.7 s) |
+| | VP9 | +5 / +18 | -4 / +12 | +182 / +331 | 0 |
+
+Before the fixes the same test reached 67 s median and the viewer quit. Open: the rare ~2.7 s
+freezes with H.265 (the hardware path Auto picks on a Mac) when a whole new picture arrives;
+VP9 shows none on this Mac.
 
 ## Windows host (GPU-less 1080p Hyper-V VM, TetherQS, corporate proxy path)
 
