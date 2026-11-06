@@ -266,3 +266,19 @@ curl -s https://tether-desk.duckdns.org/readyz/relay     # -> ready sessions=0
 The installer restarts hbbr, hbbs and Caddy, so sessions open on relay 1 at that moment
 reconnect (through relay 2 once clients know it). Do it at a quiet time. Later restarts of the
 new hbbr drain.
+
+## Server update for key rotation (2026-11-06)
+
+Both relays run hbbs/hbbr/tether-api from main 2e969d1 (static musl, `scripts/build-relay.sh`,
+`scripts/test-relay.sh` green): hbbs `9055beb7`, hbbr `df8df398`, tether-api `a741296a`. Only the
+binaries were swapped (relay 2 first, then relay 1; both had 0 relayed sessions, so no drain
+wait) and hbbs/hbbr got a systemd drop-in `/etc/systemd/system/tether-hbb{s,r}.service.d/keys.conf`
+with `EnvironmentFile=-/etc/tether/keys.env` (KEYS_ACCEPT, [key-rotation.md](key-rotation.md));
+`server.env`, `api.env`, Caddy and DuckDNS were left alone. The previous binaries are kept as
+`/usr/local/bin/<name>.bak-0515`; `/tmp/relay-0516/rollback.sh` on each node restores them.
+Checks after each node: services active, `/api/policy` 200, `/api/server-keys` "no server key
+list published" (new endpoint, no list yet), manifests and download page served, VM connection
+through the corporate proxy OK.
+
+The `Audit post dropped … 404` lines in client logs are unrelated: the upstream client posts to
+`/api/audit/…`, an endpoint only RustDesk Pro has; tether-api does not implement it.
