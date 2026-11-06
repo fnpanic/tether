@@ -133,6 +133,8 @@ interface Callbacks {
   /** Need a key frame (after reset or a dropped delta). */
   onNeedKey: (display: number) => void;
   onSize: (w: number, h: number) => void;
+  /** A natively decoded picture is on screen: the backend sends the next one only after this. */
+  onRgbaDrawn?: () => void;
 }
 
 export class VideoPipeline {
@@ -285,6 +287,7 @@ export class VideoPipeline {
       }
     }
     this.ctx.putImageData(new ImageData(px, p.width, p.height), 0, 0);
+    this.cb.onRgbaDrawn?.();
     this.stats.codec = "native";
     this.tick();
   }

@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use librustdesk::ui::UiSink;
@@ -27,6 +28,8 @@ pub struct TauriSink {
     pending_passwords: Mutex<HashMap<String, String>>,
     /// New session key -> live session key whose login it reuses, consumed by `session_start`.
     pending_logins: Mutex<HashMap<String, String>>,
+    /// Session key -> when the last natively decoded (RGBA) picture was sent and not yet drawn.
+    rgba_in_flight: Mutex<HashMap<String, Instant>>,
 }
 
 static SINK: OnceLock<Arc<TauriSink>> = OnceLock::new();
@@ -40,6 +43,7 @@ pub fn install(app: AppHandle) -> Arc<TauriSink> {
                 cm_clients: Default::default(),
                 pending_passwords: Default::default(),
                 pending_logins: Default::default(),
+                rgba_in_flight: Default::default(),
             })
         })
         .clone();
@@ -62,6 +66,12 @@ impl TauriSink {
 
     pub fn detach_video(&self, key: &str) {
         self.video.lock().unwrap().remove(key);
+        self.rgba_in_flight.lock().unwrap().remove(key);
+    }
+
+    /// The webview drew the last RGBA picture of this session: the next one may be sent.
+    pub fn rgba_drawn(&self, key: &str) {
+        self.rgba_in_flight.lock().unwrap().remove(key);
     }
 
     pub fn set_pending_password(&self, key: &str, pw: String) {
@@ -95,6 +105,17 @@ impl UiSink for TauriSink {
     }
 
     fn video(&self, session: &str, packet: Vec<u8>) {
+        // A native picture is several MB and the IPC channel has no backpressure: send it only
+        // when the webview drew the previous one, else the queue (and the delay) grows without
+        // bound. Encoded packets always pass: the decoder needs every one of them.
+        if packet.first() == Some(&librustdesk::ui::PKT_RGBA) {
+            let mut f = self.rgba_in_flight.lock().unwrap();
+            let now = Instant::now();
+            if !admit_rgba(f.get(session).copied(), now) {
+                return;
+            }
+            f.insert(session.to_owned(), now);
+        }
         let ch = self.video.lock().unwrap().get(session).cloned();
         if let Some(ch) = ch {
             let _ = ch.send(InvokeResponseBody::Raw(packet));
@@ -216,5 +237,26 @@ mod tests {
         assert_eq!(window_action("record_consent_request", true, &json!({ "conn_id": 1 })), WindowAction::Prompt);
         assert_eq!(window_action("chat", true, &json!({ "id": 1, "text": "hi" })), WindowAction::Notify);
         assert_eq!(window_action("remove_connection", true, &json!({ "id": 1 })), WindowAction::None);
+    }
+}
+
+/// Longest wait for the webview's "drawn" before the next native picture is sent anyway (a lost
+/// acknowledgement must not freeze the picture).
+const RGBA_ACK_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn admit_rgba(in_flight_since: Option<Instant>, now: Instant) -> bool {
+    in_flight_since.map_or(true, |t| now.duration_since(t) >= RGBA_ACK_TIMEOUT)
+}
+
+#[cfg(test)]
+mod rgba_tests {
+    use super::*;
+
+    #[test]
+    fn native_pictures_wait_for_the_previous_one() {
+        let t = Instant::now();
+        assert!(admit_rgba(None, t));
+        assert!(!admit_rgba(Some(t), t + Duration::from_millis(200)));
+        assert!(admit_rgba(Some(t), t + RGBA_ACK_TIMEOUT));
     }
 }

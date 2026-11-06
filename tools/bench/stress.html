@@ -1,0 +1,83 @@
+<!doctype html>
+<!--
+  Tether stress probe (host screen). The same Date.now() barcode as probe.html at the top left, and
+  a workload below it that cycles by wall-clock time, so a recording can tell the phase from the
+  barcode alone: phase = floor(ms / 60000) % 4
+    0 idle   static page
+    1 scroll continuously scrolling text
+    2 photo  a new full-screen, detailed "photo" every 2 s (like opening a picture)
+    3 noise  every frame differs completely (worst case for any encoder)
+  ?phase=N pins one phase.
+-->
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Tether stress</title>
+<style>
+  html, body { margin: 0; background: #fff; overflow: hidden; font: 15px/1.5 -apple-system, "Segoe UI", sans-serif; color: #1d1d1f; }
+  #c { display: block; position: relative; z-index: 2; }
+  #w { position: absolute; left: 0; top: 0; z-index: 1; }
+  #ph { position: absolute; left: 12px; top: 92px; z-index: 2; font: 600 22px ui-monospace, Consolas, monospace; background: #fff; padding: 2px 8px; }
+  #scroll { position: absolute; left: 0; right: 0; top: 130px; bottom: 0; overflow: hidden; padding: 0 24px; z-index: 1; display: none; }
+  #scroll p { margin: 0 0 10px; }
+</style>
+</head>
+<body>
+<canvas id="c" width="860" height="80"></canvas>
+<canvas id="w"></canvas>
+<div id="ph"></div>
+<div id="scroll"></div>
+<script>
+  const CELL = 20, H = 64, PAD = 8, BITS = 40;
+  const c = document.getElementById("c"), g = c.getContext("2d", { alpha: false });
+  const w = document.getElementById("w"), wg = w.getContext("2d", { alpha: false });
+  const s = document.getElementById("scroll"), ph = document.getElementById("ph");
+  const NAMES = ["idle", "scroll", "photo", "noise"];
+  const pinned = new URLSearchParams(location.search).get("phase");
+  function encode(ms) {
+    const v = ms >>> 0;
+    const bytes = [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+    const sum = (bytes[0] + bytes[1] + bytes[2] + bytes[3] + 0x5a) & 255;
+    const bits = [];
+    for (let i = 31; i >= 0; i--) bits.push((v >>> i) & 1);
+    for (let i = 7; i >= 0; i--) bits.push((sum >>> i) & 1);
+    return bits;
+  }
+  function size() { w.width = innerWidth; w.height = innerHeight; }
+  addEventListener("resize", size); size();
+  const words = "remote desktop latency frame encoder decoder relay network packet pixel cursor keyboard window screen motion text sharp scroll".split(" ");
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 400; i++) { const p = document.createElement("p"); p.textContent = Array.from({ length: 24 }, () => words[Math.floor(rnd() * words.length)]).join(" "); s.appendChild(p); }
+  let y = 0, lastPhoto = -1, noise = [], ni = 0;
+  function photo() {
+    // Detailed, photo-like content: soft gradients plus many small shapes (high entropy, like a JPEG).
+    const W = w.width, Hh = w.height;
+    const gr = wg.createLinearGradient(0, 0, W, Hh);
+    gr.addColorStop(0, `hsl(${rnd() * 360},60%,${30 + rnd() * 40}%)`); gr.addColorStop(1, `hsl(${rnd() * 360},60%,${30 + rnd() * 40}%)`);
+    wg.fillStyle = gr; wg.fillRect(0, 0, W, Hh);
+    for (let i = 0; i < 6000; i++) { wg.fillStyle = `hsla(${rnd() * 360},${40 + rnd() * 60}%,${20 + rnd() * 70}%,${0.2 + rnd() * 0.6})`; wg.beginPath(); wg.arc(rnd() * W, rnd() * Hh, 1 + rnd() * 18, 0, 7); wg.fill(); }
+  }
+  function makeNoise() {
+    noise = [];
+    for (let k = 0; k < 6; k++) { const d = wg.createImageData(w.width, w.height); const a = new Uint32Array(d.data.buffer); for (let i = 0; i < a.length; i++) a[i] = (Math.random() * 0xffffffff) | 0xff000000; noise.push(d); }
+  }
+  function draw() {
+    const now = Date.now();
+    const bits = encode(now);
+    g.fillStyle = "#808080"; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = "#ff0000"; g.fillRect(PAD, PAD, CELL, H);
+    bits.forEach((b, i) => { g.fillStyle = b ? "#000" : "#fff"; g.fillRect(PAD + CELL * (i + 1), PAD, CELL, H); });
+    g.fillStyle = "#00ff00"; g.fillRect(PAD + CELL * (BITS + 1), PAD, CELL, H);
+    const p = pinned !== null ? Number(pinned) : Math.floor(now / 60000) % 4;
+    ph.textContent = NAMES[p];
+    s.style.display = p === 1 ? "block" : "none";
+    if (p === 0 || p === 1) { wg.fillStyle = "#fff"; wg.fillRect(0, 0, w.width, w.height); lastPhoto = -1; }
+    if (p === 1) { y = (y + 3) % Math.max(1, s.scrollHeight - s.clientHeight); s.scrollTop = y; }
+    if (p === 2) { const k = Math.floor(now / 2000); if (k !== lastPhoto) { lastPhoto = k; photo(); } }
+    if (p === 3) { if (noise.length === 0 || noise[0].width !== w.width) makeNoise(); wg.putImageData(noise[ni++ % noise.length], 0, 0); }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+</script>
+</body>
+</html>

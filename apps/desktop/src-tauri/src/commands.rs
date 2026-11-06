@@ -334,6 +334,14 @@ fn session_restart_remote(key: String) -> R<()> {
     with_session(&key, |s| s.restart_remote_device())
 }
 
+/// The webview drew a natively decoded picture (see `TauriSink::video`).
+#[tauri::command]
+fn session_frame_drawn(key: String) {
+    if let Some(s) = sink::get() {
+        s.rgba_drawn(&key);
+    }
+}
+
 #[tauri::command]
 fn session_webcodecs_failed(key: String, codec: u8, display: i32) {
     core::session_webcodecs_failed(&key, codec, display);
@@ -539,6 +547,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         session_chat,
         session_restart_remote,
         session_webcodecs_failed,
+        session_frame_drawn,
         session_codec,
         fs_local_dir,
         fs_home_dir,

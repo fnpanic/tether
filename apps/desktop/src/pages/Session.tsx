@@ -173,6 +173,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       onFail: (codec, d) => invoke("session_webcodecs_failed", { key, codec, display: d }),
       onNeedKey: (d) => invoke("session_refresh", { key, display: d }).catch(() => {}),
       onSize: (w, h) => setFrameSize({ w, h }),
+      onRgbaDrawn: () => invoke("session_frame_drawn", { key }).catch(() => {}),
     });
     pipeRef.current = pipe;
     const sub = subscribe("session", (e) => {
