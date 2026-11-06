@@ -263,3 +263,8 @@ Mac with real content (host and viewer 0.5.15, stress page cycling all phases, A
 until the run was stopped for low memory on the test PC (other applications): 486 samples, all
 decoded, no stall, no error; every phase within +34 ms (p95) of idle; viewer 67 MB + WebView
 153 MB, flat.
+
+Second Mac run with real content (09:23-10:09, Auto, Safari windowed next to other apps): 46 min
+until it was stopped for low memory on the test PC (other applications). The barcode was covered
+for the first 24 min; the 22 min it was visible: 648 samples, no stall, no error, every phase
+within +35 ms (p95) of idle; viewer 64-66 MB + WebView 142-144 MB, flat over the whole run.
