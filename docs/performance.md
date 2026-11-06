@@ -258,3 +258,8 @@ hour, though:
 Open: the cause of the second-hour slowdown (no memory growth on either side; next step is
 encoder time per frame and relay load over time). AV1, smoother on this host in every phase, would
 likely change the picture; see [Unreleased] in the CHANGELOG.
+
+Mac with real content (host and viewer 0.5.15, stress page cycling all phases, Auto): 16 min
+until the run was stopped for low memory on the test PC (other applications): 486 samples, all
+decoded, no stall, no error; every phase within +34 ms (p95) of idle; viewer 67 MB + WebView
+153 MB, flat.
