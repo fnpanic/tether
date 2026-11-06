@@ -30,8 +30,14 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    connection manager of a Tether that is being connected to) behaves the same, and its main
    window minimizes with it. On Windows the Tether connection window has its own taskbar button
    (own AppUserModelID `<identifier>.cm`), so a click on it restores or minimizes it like
-   TetherQS's single window; the main window keeps its own button and stays minimized. (Up to
-   0.5.11 both windows shared one grouped button, whose click only showed thumbnails.) On macOS
+   TetherQS's single window. (Up to 0.5.11 both windows shared one grouped button, whose click
+   only showed thumbnails.) After 0.5.17 the main window is also taken off the taskbar for the
+   session (minimized and hidden), so the connection window's is the only Tether button; starting
+   Tether again (pinned taskbar icon, Start menu) toggles the connection window too, never the
+   main one (the `--cm` process passes its window handle along with `--minimize-main`). When the
+   last session ends (`--host-session-ended`) the main window is back on the taskbar, still
+   minimized; the tray's **Open Tether** opens it at any time. (In 0.5.12 to 0.5.17 a click on
+   the main window's own button restored it during the session.) On macOS
    see [macos.md](macos.md#windows-and-the-dock).
 4. During the session the card shows the technician, elapsed time, indicators (Control,
    Transferring files, REC) and a red **Disconnect** button. Permissions can be revoked at any
