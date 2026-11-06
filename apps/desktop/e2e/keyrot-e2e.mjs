@@ -6,7 +6,8 @@
 //   (debug build: TETHER_DEV_API points its API at the local tether-api), as host "kr-host",
 //   viewer "kr-view" (gets the lists), "kr-stale" (cannot reach the API, never gets a list) and
 //   "kr-new" (a fresh install of the old build after the rotation).
-// Every app runs on an invisible desktop and is driven over DevTools only. Only processes started
+// Every app runs on an invisible desktop, with its own WebView2 data folder (a Tether or Tether
+// Manage already running on this PC keeps the default one locked), and is driven over DevTools only. Only processes started
 // here are stopped (by PID).
 //
 //   node e2e/keyrot-e2e.mjs
@@ -136,7 +137,7 @@ async function startManage() {
   mkdirSync(dir);
   copyFileSync(join(VAULT, "keys.json"), join(dir, "keys.json"));
   writeFileSync(join(dir, "settings.json"), JSON.stringify({ server: API }));
-  hidden(MANAGE, "", { TETHER_MANAGE_DIR: dir, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9381" });
+  hidden(MANAGE, "", { TETHER_MANAGE_DIR: dir, WEBVIEW2_USER_DATA_FOLDER: join(dir, "wv2"), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9381" });
   const b = await until("manage devtools", () => chromium.connectOverCDP("http://127.0.0.1:9381"), 60000, 500);
   const p = await until("manage page", () => pages(b).find((x) => !x.url().startsWith("devtools")), 30000);
   await until("manage ready", () => p.evaluate(() => !!window.__TAURI_INTERNALS__), 30000);
@@ -164,7 +165,7 @@ let cdpPort = 9390;
 /** One viewer session to the host: "connected" (first video frame) or the error text shown. */
 async function connect(env, id) {
   const port = cdpPort++;
-  const pid = hidden(TECH, `--connect ${id} --password-env TETHER_E2E_PW`, { ...env, TETHER_E2E_PW: PW, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` });
+  const pid = hidden(TECH, `--connect ${id} --password-env TETHER_E2E_PW`, { ...env, TETHER_E2E_PW: PW, WEBVIEW2_USER_DATA_FOLDER: join(work, `wv2-${port}`), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` });
   try {
     const b = await until("viewer devtools", () => chromium.connectOverCDP(`http://127.0.0.1:${port}`), 60000, 500);
     const s = await until("session page", () => pages(b).find((p) => p.url().includes("/session/")), 30000);
@@ -201,7 +202,7 @@ async function main() {
 
   const hostId = String(700000000 + Math.floor(Math.random() * 99999999));
   for (const p of ["kr-host", "kr-view", "kr-stale", "kr-new"]) freshProfile(p, p === "kr-host" ? hostId : null);
-  hidden(TECH, "", { ...withApi("kr-host"), TETHER_DEV_PASSWORD: PW, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9382" });
+  hidden(TECH, "", { ...withApi("kr-host"), TETHER_DEV_PASSWORD: PW, WEBVIEW2_USER_DATA_FOLDER: join(work, "wv2-host"), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9382" });
   const hb = await until("host devtools", () => chromium.connectOverCDP("http://127.0.0.1:9382"), 60000, 500);
   const h = await until("host page", () => pages(hb).find((p) => p.url().includes("index.html") || p.url().startsWith("tauri") || p.url().startsWith("http://tauri")), 30000);
   await until("host online", async () => {
