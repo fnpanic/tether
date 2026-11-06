@@ -4,6 +4,19 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [0.5.15] — 2026-11-06
+
+### Fixed
+- **Mac hosts: smooth picture under heavy screen changes.** A Retina display is streamed at its
+  logical size, which can be odd (1728x1117 on a 14" MacBook Pro). The viewer's hardware video
+  decoders (WebCodecs) reject odd frame sizes, so every Mac session fell back to decoding in the
+  app and shipping raw pictures (about 8 MB each) to the window. The Mac host now captures at even
+  dimensions (1728x1116), so WebCodecs decodes Mac sessions again.
+- **No more minute-long delay or viewer crash when the native decoder is used.** The fallback
+  path sent every decoded picture to the window without waiting; under heavy changes the queue
+  grew without bound (measured on a Mac: 67 s median delay, then the viewer quit). It now sends a
+  picture only after the window drew the previous one (newest picture wins).
+
 ## [0.5.14] — 2026-11-05
 
 Windows only (Tether and TetherQS); macOS stays on 0.5.13.
