@@ -140,7 +140,7 @@ export function ago(unix?: number | null): string {
 }
 
 /** Host of a relay address, for compact labels. */
-export const host = (server: string) => server.replace(/^https:\/\//, "").replace(/\/.*$/, "");
+export const host = (server: string) => server.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
 
 /** Unix seconds of the last local midnight ("active today"). */
 export function midnight(): number {
