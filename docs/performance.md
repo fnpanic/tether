@@ -353,6 +353,18 @@ max, kbit/s, largest frame, key frames, encode calls without output, frames the 
 not take within 1 s / 3 s and the longest wait, and the QoS state (fps, ratio, target kbit/s).
 A backlog cut is logged as `video backlog: ...` (at most every 10 s).
 
+## Start-up fast path
+
+The tauri-only fast path in `user_network_delay` set the frame rate to the viewer's cap on any
+clean reply. Two `video_qos` tests failed with it (they were also written for 30 fps; they now
+derive their values from `FPS`): at a 120 fps cap with a fixed-rate encoder the start-up queue
+reached 4.0 s on a 2.5 Mbit/s path (15 -> 120 fps at once), and after a restore that congested
+the jump returned to the failed level at once. It now doubles per clean reply and only during
+start-up (until a reply shows queue growth, a reduction or the cap). Simulation: start-up queue
+peak at most 1.16 s for every cap (was 4.0 s at 120); clean relay reaches 60 fps in 1.1 s; the
+jittery Wi-Fi scenario takes 8.1 s to 90 % of 60 fps (was 0.1 s) with the same mean target
+(58.3 fps).
+
 ## How to check on real hosts
 
 Mac (host with this build, viewer on the PC, direct LAN): `tools/bench/stress-exp.sh <label> h265 0 4`

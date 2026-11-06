@@ -13,6 +13,12 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   link and halves the bitrate at once (without adjustable bitrate: the frame rate), instead of
   waiting seconds for the delay probes to confirm it (docs/performance.md).
 
+- The host's start-up fast path doubles the frame rate per clean delay reply (up to the viewer's
+  cap) instead of jumping straight to it, and only during start-up: a jump to 120 fps offered 8x
+  the bytes to an unmeasured path (4 s of queue in the simulation, now 1.2 s), and a jump at any
+  time undid the guard that keeps a frame rate which just congested from coming back at once.
+  Clean links still reach 60 fps within about a second.
+
 ### Added
 - Host log: one `fluxrt video/min` line per minute while video is sent (encode time avg / p95,
   fps, kbit/s, largest frame, key frames, frames not taken within 1 s / 3 s, QoS fps / ratio /

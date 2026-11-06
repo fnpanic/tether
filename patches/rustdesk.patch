@@ -3295,7 +3295,7 @@ index 0000000..a8fcbb1
 +    }
 +}
 diff --git a/src/server/video_qos.rs b/src/server/video_qos.rs
-index 96ffa63..d85d8af 100644
+index 96ffa63..bbb6a6c 100644
 --- a/src/server/video_qos.rs
 +++ b/src/server/video_qos.rs
 @@ -48,7 +48,11 @@ delay:
@@ -3343,23 +3343,40 @@ index 96ffa63..d85d8af 100644
              #[cfg(test)]
              test_now: None,
          }
-@@ -566,6 +580,15 @@ impl VideoQoS {
+@@ -557,6 +571,11 @@ impl VideoQoS {
+                 fps = fps.max(min_fps);
+             }
+             fps = fps.max(MIN_AUTO_FPS.min(user_cap));
++            // The fast path below is a start-up accelerator: once a reply showed queue growth,
++            // a reduction happened or the cap was reached, the controller owns the frame rate
++            // (its restore returns to the level held before a congestion within two replies).
++            #[cfg(feature = "tauri")]
++            let starting = user.delay.startup_good_samples != u8::MAX;
+             fps = user
+                 .delay
+                 .limit_fps_change(current_fps, fps, delay, bitrate_first, braked);
+@@ -566,6 +585,20 @@ impl VideoQoS {
              reduce_bitrate = bitrate_first
                  && user.delay.needs_bitrate_reduction()
                  && user.delay.replies_after_bitrate_reduction.is_none();
-+            // FluxRT fast path: on a clean low-latency link go straight to the viewer's cap instead
-+            // of ramping from INIT_FPS; any queue growth falls back to the controller above.
++            // FluxRT fast path: during start-up on a clean low-latency link, double the frame rate
++            // on every clean reply (up to the viewer's cap) instead of the controller's two clean
++            // replies per step; any queue growth ends it. Doubling, not a jump to the cap:
++            // 15 -> 120 fps at once offered 8x the bytes to a path nobody had measured yet
++            // (fixed-rate encoders: 4 s of queue in `constrained_startup_does_not_leave_a_large_queue`),
++            // and a jump at any time defeated the restore guard (`restore_aims_lower_...`).
 +            #[cfg(feature = "tauri")]
 +            if !braked
++                && starting
 +                && avg_delay < 50
 +                && delay.saturating_sub(user.delay.rtt_calculator.get_rtt().unwrap_or(delay)) < 15
 +            {
-+                fps = user_cap;
++                fps = fps.max(current_fps.saturating_mul(2)).min(user_cap);
 +            }
              fps = fps.clamp(MIN_FPS, user_cap);
              // first network delay message
              adjust_ratio = user.delay.fps.is_none();
-@@ -633,6 +656,49 @@ impl VideoQoS {
+@@ -633,6 +666,49 @@ impl VideoQoS {
      }
  }
  
@@ -3409,7 +3426,7 @@ index 96ffa63..d85d8af 100644
  // Common adjust functions
  impl VideoQoS {
      pub fn new_display(&mut self, video_service_name: String) {
-@@ -685,11 +751,11 @@ impl VideoQoS {
+@@ -685,11 +761,11 @@ impl VideoQoS {
              .1
      }
  
@@ -3423,6 +3440,51 @@ index 96ffa63..d85d8af 100644
          } else {
              None
          };
+@@ -886,6 +962,11 @@ impl RttCalculator {
+ mod tests {
+     use super::*;
+ 
++    /// One halving step of `limit_fps_change` (a second of excess cannot wait).
++    pub(super) fn halved(fps: u32) -> u32 {
++        fps - fps / 2
++    }
++
+     fn stable_qos() -> VideoQoS {
+         let mut qos = VideoQoS::default();
+         qos.advance_ms(2000);
+@@ -919,18 +1000,20 @@ mod tests {
+     fn response_timeout_recovers_in_two_good_replies() {
+         let mut qos = stable_qos();
+         qos.user_delay_response_elapsed(1, 3000);
+-        assert_eq!(qos.fps(), 7);
++        // Three seconds out: the third second quarters the frame rate.
++        let braked = FPS / 4;
++        assert_eq!(qos.fps(), braked);
+         qos.user_network_delay(1, 3200);
+         assert_eq!(
+             qos.fps(),
+-            7,
++            braked,
+             "the late reply belongs to the stall that was braked"
+         );
+         qos.user_delay_response_elapsed(1, 0);
+         qos.user_network_delay(1, 10);
+         assert_eq!(
+             qos.fps(),
+-            8,
++            braked + (braked / 10).max(1),
+             "one good reply must not restore the full frame rate"
+         );
+         qos.user_network_delay(1, 10);
+@@ -949,7 +1032,7 @@ mod tests {
+         for _ in 0..2 {
+             qos.user_network_delay(1, 1200);
+         }
+-        assert_eq!(qos.fps(), 8);
++        assert_eq!(qos.fps(), halved(halved(FPS)));
+         qos.user_network_delay(1, 10);
+         qos.user_network_delay(1, 10);
+         assert_eq!(qos.fps(), FPS);
 diff --git a/src/server/video_qos/tests/adaptation.rs b/src/server/video_qos/tests/adaptation.rs
 index 7a49a2d..9d258d5 100644
 --- a/src/server/video_qos/tests/adaptation.rs
@@ -3486,6 +3548,32 @@ index 7a49a2d..9d258d5 100644
 +    }
 +    assert_eq!(qos.fps(), FPS, "recovers to the cap");
 +}
+diff --git a/src/server/video_qos/tests/jitter.rs b/src/server/video_qos/tests/jitter.rs
+index bd0913f..bc05656 100644
+--- a/src/server/video_qos/tests/jitter.rs
++++ b/src/server/video_qos/tests/jitter.rs
+@@ -49,9 +49,10 @@ fn severe_delay_and_timeout_bypass_bitrate_cooldown() {
+     let mut qos = abr_session();
+     qos.adjust_ratio_instant = qos.now();
+     qos.user_network_delay(1, 1200);
+-    assert_eq!(qos.fps(), 15);
++    assert_eq!(qos.fps(), halved(FPS));
++    // Two seconds out halve the level the stall started from.
+     qos.user_delay_response_elapsed(1, 2500);
+-    assert_eq!(qos.fps(), 7);
++    assert_eq!(qos.fps(), halved(FPS) / 2);
+ }
+ 
+ #[test]
+@@ -115,7 +116,7 @@ fn a_congested_viewer_does_not_lower_another_viewers_target() {
+     for _ in 0..2 {
+         qos.user_network_delay(1, 1200);
+     }
+-    assert_eq!(qos.fps(), 8);
++    assert_eq!(qos.fps(), halved(halved(FPS)));
+     // Viewer 2 is fine and keeps its own target rather than inheriting viewer 1's.
+     qos.user_network_delay(2, 10);
+     assert_eq!(qos.users[&2].delay.fps, Some(FPS));
 diff --git a/src/server/video_qos/tests/sim.rs b/src/server/video_qos/tests/sim.rs
 index 790f23b..e1b3490 100644
 --- a/src/server/video_qos/tests/sim.rs
