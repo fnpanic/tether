@@ -23,7 +23,8 @@ Fast, private, self-hosted remote desktop for Windows and macOS, with a Linux re
   [docs/key-rotation.md](docs/key-rotation.md).
 - **Scale and HA:** several relays and Kubernetes: [docs/relay-ha.md](docs/relay-ha.md),
   [docs/kubernetes.md](docs/kubernetes.md); performance: [docs/performance.md](docs/performance.md);
-  macOS build: [docs/macos.md](docs/macos.md).
+  macOS build: [docs/macos.md](docs/macos.md); Mac builds from the PC while the Mac is locked (signed
+  jobs, several projects): [docs/mac-build-runner.md](docs/mac-build-runner.md).
 - **Changes:** [CHANGELOG.md](CHANGELOG.md).
 - **HTML documentation:** [docs/site/index.html](docs/site/index.html) (user guide for technicians,
   customers and admins) and [docs/site/architecture.html](docs/site/architecture.html) (architecture with

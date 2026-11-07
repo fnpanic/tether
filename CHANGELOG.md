@@ -4,6 +4,23 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Added
+- **Mac build runner** ([docs/mac-build-runner.md](docs/mac-build-runner.md)): builds on the Mac
+  start from the PC through Tether file transfer alone, also while the Mac's screen is locked, for
+  several projects at once. A user LaunchAgent (`tools/macbuild/mac/runner.py`, no sudo) runs only
+  jobs signed with a registered sender's ed25519 key (`ssh-keygen -Y`, per-user and admin
+  namespaces), refuses replays and expired jobs, and runs one job at a time, fairly across
+  senders, with a log, status file, timeout, cancel, disk quota, retention, `caffeinate` and a
+  per-job `sandbox-exec` profile that keeps senders out of each other's folders. Secrets (such as
+  the signing p12) travel per job and are deleted when it ends. A step that must wait for an
+  unlocked screen (replacing the running app) is deferred until the session is unlocked. PC client
+  `tools/macbuild/macbuild.py` (keygen, register, submit, wait, log, fetch, cancel,
+  update-runner); Tether's own Mac build as a job: `tools/macbuild/jobs/tether/submit.sh`
+  (temporary keychain, designated-requirement check, dmg without the Finder AppleScript, app swap
+  after unlock with rollback). Unit tests: `tools/macbuild/test_macbuild.py`.
+
 ## [0.5.21] — 2026-11-07
 
 Clients: picture quality (colours, still-picture sharpening for AV1). Relays: the security fixes below,
