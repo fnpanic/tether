@@ -3,11 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use tether_trust::release::{self as rel, Entry, Index, Packed, Rollout};
-
-pub const WINDOWS: &str = "windows-x86_64";
-/// macOS builds are universal (Apple silicon + Intel); the technician app asks for this target.
-pub const MAC: &str = "darwin-universal";
+use tether_trust::release::{self as rel, Entry, Index, Packed, Rollout, NAMES};
+// The name table is shared with tether-api (prune): tether_trust::release.
+pub use tether_trust::release::{build_of, dmg_name, wants_packed, MAC, WINDOWS};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Platform {
@@ -32,14 +30,6 @@ pub struct Manifest {
     pub forced: bool,
 }
 
-/// File name pattern of each release: `<prefix><version><suffix>` (kind, platform, prefix, suffix).
-const NAMES: &[(&str, &str, &str, &str)] = &[
-    ("technician", WINDOWS, "Tether_", "_x64-setup.exe"),
-    ("customer", WINDOWS, "TetherQS-", ".exe"),
-    ("technician", MAC, "Tether_", "_universal.app.tar.gz"),
-    ("customer", MAC, "TetherQS-", "-universal.zip"),
-];
-
 /// Remote directory and file name of a release. Versioned names: an upload never replaces the
 /// file the current latest.json points to.
 pub fn target(kind: &str, platform: &str, version: &str) -> Result<(String, String), String> {
@@ -59,14 +49,6 @@ pub fn version_of(path: &str) -> Option<(&'static str, &'static str, String)> {
         return None;
     }
     build_of(file).filter(|b| (b.0, b.1) == (kind, platform))
-}
-
-/// Kind, platform and version of a release artifact from its file name (`TetherQS-0.5.1.exe`).
-pub fn build_of(file: &str) -> Option<(&'static str, &'static str, String)> {
-    NAMES.iter().find_map(|&(k, p, pre, suf)| {
-        let v = file.strip_prefix(pre)?.strip_suffix(suf)?;
-        valid_version(v).then(|| (k, p, v.to_owned()))
-    })
 }
 
 /// Highest version per (kind, platform) among local build files: `(kind, platform) -> (version, path)`.
@@ -96,11 +78,6 @@ pub fn latest_versions<'a>(files: impl IntoIterator<Item = (&'a str, &'a str)>) 
         }
     }
     out
-}
-
-/// The technician app's manual-download disk image, stored next to the updater archive.
-pub fn dmg_name(version: &str) -> String {
-    format!("Tether_{version}_universal.dmg")
 }
 
 /// Manifest keys a release is listed under. A universal mac build also answers the per-arch keys,
@@ -135,12 +112,6 @@ pub fn index_key(kind: &str, platform: &str) -> String {
 pub fn rollout(preset: &str, start: u64) -> Result<Rollout, String> {
     let steps = rel::preset(if preset.is_empty() { "standard" } else { preset }).ok_or_else(|| format!("unknown rollout preset {preset:?}"))?;
     Ok(Rollout { start, steps: steps.to_vec() })
-}
-
-/// The gzip copy of TetherQS.exe (CDN files may not exceed 25 MiB; the relays serve it as
-/// `precompressed`). Only the Windows exe: the other artifacts are compressed already.
-pub fn wants_packed(kind: &str, platform: &str) -> bool {
-    (kind, platform) == ("customer", WINDOWS)
 }
 
 pub fn gzip(data: &[u8]) -> Vec<u8> {

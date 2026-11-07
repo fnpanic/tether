@@ -277,6 +277,20 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       ],
     }),
     release_control: () => servers.map((s) => ok(s)),
+    release_prune_plan: () => {
+      // Canned plan: what the relays held on 2026-11-07, shortened; R2 still publishes 0.5.22.
+      const rel = (dir: string, v: string, why: string[], r2: "drop" | "keep" | null, n = 3, size = 34_898_944) => ({
+        version: v, files: Array.from({ length: n }, (_, i) => `${dir.startsWith("customer") ? "TetherQS" : "Tether"}-${v}.${i}`), bytes: size,
+        why, relays: Object.fromEntries(servers.map((s) => [s, s === R2 ? r2 : why.length ? "keep" : "drop"]).filter(([, x]) => x)), offer: !why.length && r2 !== "keep",
+      });
+      const keep = a.keep ?? 2;
+      const vs = (dir: string) => ["0.5.24", "0.5.23", "0.5.22", "0.5.21", "0.5.20", "0.5.19"].map((v, i) =>
+        i === 0 ? rel(dir, v, ["index", "latest.json", "download page"], "keep") : i <= keep ? rel(dir, v, i === 1 ? ["previous", "pinned"] : ["previous"], "keep") : v === "0.5.22" && dir.startsWith("technician") ? rel(dir, v, [], "keep") : rel(dir, v, [], "drop"));
+      const groups = ["customer/windows-x86_64", "technician/windows-x86_64", "technician/darwin-universal"].map((dir) => ({ channel: "stable", dir, published: servers.map((s) => ({ server: s, version: "0.5.24" })), versions: vs(dir) }));
+      const offer = groups.flatMap((g) => g.versions.filter((v) => v.offer));
+      return { keep, relays: servers, index_differs: false, groups, offer: { versions: offer.length, files: offer.reduce((n, v) => n + v.files.length, 0), bytes: offer.reduce((n, v) => n + v.bytes, 0) }, kept_versions: groups.flatMap((g) => g.versions).length - offer.length };
+    },
+    release_prune: () => servers.map((s) => ok(s, { deleted: a.delete, kept: [], gone: [], failed: [], freed_bytes: a.delete.length * 34_898_944 })),
     release_index_refresh: () => [],
     cdn_state: () => ({ enabled: false, base: "https://tether-dl.thomas-schend.workers.dev", worker: "tether-dl", credentials: null }),
     cdn_configure: () => null,

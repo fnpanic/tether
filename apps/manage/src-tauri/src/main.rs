@@ -948,6 +948,7 @@ async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, r
         return Err(e);
     }
     out.extend(extra);
+    out.extend(auto_prune(app).await);
     Ok(out)
 }
 
@@ -1314,6 +1315,172 @@ async fn release_sync(app: State<'_, App>, ui: AppHandle, channel: String, kind:
         out.push(RelayResult::of(sv, r));
     }
     Ok(out)
+}
+
+// ---- release clean-up (docs/release-cleanup.md) ----
+
+/// One version of one release folder, as the prune endpoint names it.
+#[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]
+struct PruneVer {
+    channel: String,
+    /// `<app>/<platform>`
+    dir: String,
+    version: String,
+}
+
+/// Older versions kept besides the published one (Releases › Clean up; decision 2026-11-07: 2).
+fn prune_keep(app: &App, keep: Option<usize>) -> usize {
+    keep.or_else(|| app.settings()["prune"]["keep"].as_u64().map(|k| k as usize)).unwrap_or(tether_trust::release::PRUNE_KEEP).min(tether_trust::release::PRUNE_KEEP_MAX)
+}
+
+/// Every version the CDN holds (`cdn-assets.json`): the next CDN deploy re-reads them from a relay.
+fn cdn_pins(assets: &cdn::Assets) -> Vec<PruneVer> {
+    let mut out: Vec<PruneVer> = Vec::new();
+    for a in assets.values() {
+        let Some((channel, dir)) = a.group.split_once('/') else { continue };
+        let v = PruneVer { channel: channel.into(), dir: dir.into(), version: a.version.clone() };
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+fn prune_error(e: String) -> String {
+    if e.contains("HTTP 404") {
+        "This relay cannot clean up releases yet: update its tether-api first.".into()
+    } else {
+        e
+    }
+}
+
+/// The relays' plans merged per channel/folder/version. A version is offered for deletion only
+/// when every relay that has it would drop it (one relay's protection wins).
+fn merge_plans(keep: usize, plans: &[(String, Value)]) -> Value {
+    let mut groups: BTreeMap<(String, String), (BTreeMap<String, Value>, Vec<Value>)> = BTreeMap::new();
+    let mut serials: BTreeMap<String, Vec<Option<u64>>> = BTreeMap::new();
+    for (server, plan) in plans {
+        for g in plan["groups"].as_array().into_iter().flatten() {
+            let (Some(ch), Some(dir)) = (g["channel"].as_str(), g["dir"].as_str()) else { continue };
+            serials.entry(ch.to_owned()).or_default().push(g["index_serial"].as_u64());
+            let (versions, published) = groups.entry((ch.into(), dir.into())).or_default();
+            published.push(json!({ "server": server, "version": g["published"] }));
+            for state in ["keep", "drop"] {
+                for v in g[state].as_array().into_iter().flatten() {
+                    let Some(ver) = v["version"].as_str() else { continue };
+                    let e = versions.entry(ver.to_owned()).or_insert_with(|| json!({ "version": ver, "files": v["files"], "bytes": v["bytes"], "why": [], "relays": {} }));
+                    e["relays"][server] = json!(state);
+                    for w in v["why"].as_array().into_iter().flatten() {
+                        let why = e["why"].as_array_mut().expect("array");
+                        if !why.contains(w) {
+                            why.push(w.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let (mut n, mut files, mut bytes, mut kept) = (0u64, 0u64, 0u64, 0u64);
+    let groups: Vec<Value> = groups
+        .into_iter()
+        .map(|((channel, dir), (versions, published))| {
+            let mut vs: Vec<Value> = versions.into_values().collect();
+            for v in &mut vs {
+                let offer = v["relays"].as_object().is_some_and(|r| r.values().all(|s| s == "drop"));
+                v["offer"] = json!(offer);
+                if offer {
+                    n += 1;
+                    files += v["files"].as_array().map_or(0, |f| f.len() as u64);
+                    bytes += v["bytes"].as_u64().unwrap_or(0);
+                } else {
+                    kept += 1;
+                }
+            }
+            vs.sort_by(|a, b| tether_trust::version::compare(b["version"].as_str().unwrap_or(""), a["version"].as_str().unwrap_or("")).unwrap_or(std::cmp::Ordering::Equal));
+            json!({ "channel": channel, "dir": dir, "published": published, "versions": vs })
+        })
+        .collect();
+    let index_differs = serials.values().any(|s| s.iter().any(|x| *x != s[0]));
+    json!({ "keep": keep, "relays": plans.iter().map(|p| &p.0).collect::<Vec<_>>(), "index_differs": index_differs, "groups": groups,
+        "offer": { "versions": n, "files": files, "bytes": bytes }, "kept_versions": kept })
+}
+
+/// Dry run on every relay (pins: every CDN version), merged. A relay that does not answer stops it.
+async fn prune_plan(app: &App, keep: usize) -> R<(Value, Vec<PruneVer>)> {
+    let assets: cdn::Assets = fs::read(app.path("cdn-assets.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let pin = cdn_pins(&assets);
+    let body = serde_json::to_vec(&json!({ "dry_run": true, "keep": keep, "pin": pin })).unwrap();
+    let mut plans = Vec::new();
+    for sv in app.servers() {
+        let out = app.call_on(&sv, "POST", "/api/admin/releases/prune", body.clone(), "application/json").await.map_err(|e| format!("{sv}: {}", prune_error(e)))?;
+        plans.push((sv, serde_json::from_slice::<Value>(&out).map_err(err)?));
+    }
+    Ok((merge_plans(keep, &plans), pin))
+}
+
+/// The versions a merged plan offers.
+fn offered(plan: &Value) -> Vec<PruneVer> {
+    let mut out = Vec::new();
+    for g in plan["groups"].as_array().into_iter().flatten() {
+        for v in g["versions"].as_array().into_iter().flatten().filter(|v| v["offer"] == true) {
+            out.push(PruneVer { channel: g["channel"].as_str().unwrap_or("").into(), dir: g["dir"].as_str().unwrap_or("").into(), version: v["version"].as_str().unwrap_or("").into() });
+        }
+    }
+    out
+}
+
+/// Execute on every relay: each recomputes its plan and deletes only what it still would drop.
+async fn prune_execute(app: &App, keep: usize, pin: &[PruneVer], delete: &[PruneVer]) -> Vec<RelayResult> {
+    let body = serde_json::to_vec(&json!({ "dry_run": false, "keep": keep, "pin": pin, "delete": delete })).unwrap();
+    let mut out = Vec::new();
+    for sv in app.servers() {
+        let r = app.call_on(&sv, "POST", "/api/admin/releases/prune", body.clone(), "application/json").await.map_err(prune_error);
+        out.push(RelayResult::of(&sv, r.and_then(|b| serde_json::from_slice::<Value>(&b).map_err(err))));
+    }
+    out
+}
+
+#[tauri::command]
+async fn release_prune_plan(app: State<'_, App>, keep: Option<usize>) -> R<Value> {
+    app.admin_key()?;
+    Ok(prune_plan(&app, prune_keep(&app, keep)).await?.0)
+}
+
+/// Deletes the reviewed versions (`delete`, ticked in the sheet) on every relay.
+#[tauri::command]
+async fn release_prune(app: State<'_, App>, keep: Option<usize>, delete: Vec<PruneVer>) -> R<Vec<RelayResult>> {
+    let keep = prune_keep(&app, keep);
+    let (_, pin) = prune_plan(&app, keep).await?;
+    let out = prune_execute(&app, keep, &pin, &delete).await;
+    if let Some(e) = none_ok(&out) {
+        return Err(e);
+    }
+    Ok(out)
+}
+
+/// Setting "Clean up after each publish": the merged plan's offer, executed without a prompt.
+/// One result line "Cleanup" for the publish sheet.
+async fn auto_prune(app: &App) -> Option<RelayResult> {
+    if app.settings()["prune"]["auto"].as_bool() != Some(true) {
+        return None;
+    }
+    let keep = prune_keep(app, None);
+    let r: R<Value> = async {
+        let (plan, pin) = prune_plan(app, keep).await?;
+        let delete = offered(&plan);
+        if delete.is_empty() {
+            return Ok(json!({ "published": ["Cleanup: nothing to delete"] }));
+        }
+        let out = prune_execute(app, keep, &pin, &delete).await;
+        let failed: Vec<String> = out.iter().filter(|r| !r.ok).map(|r| format!("{}: {}", r.server, r.error.as_deref().unwrap_or(""))).collect();
+        if !failed.is_empty() {
+            return Err(failed.join("; "));
+        }
+        let freed = out.iter().filter_map(|r| r.detail["freed_bytes"].as_u64()).max().unwrap_or(0);
+        Ok(json!({ "published": [format!("Cleanup: {} old versions deleted, {:.1} MB freed per relay (keep {keep})", delete.len(), freed as f64 / 1e6)] }))
+    }
+    .await;
+    Some(RelayResult::of("Cleanup", r))
 }
 
 // ---- download page ----
@@ -1741,6 +1908,8 @@ fn main() {
             cdn_configure,
             releases_overview,
             release_sync,
+            release_prune_plan,
+            release_prune,
             release_scan,
             page_render,
             page_publish,
@@ -1941,6 +2110,44 @@ mod tests {
         assert_eq!(parse_signing_key(format!("{k}\n").as_bytes()), Some(k.clone()));
         assert_eq!(parse_signing_key(b"Tether relay"), None);
         assert_eq!(parse_signing_key(format!("{k}{k}").as_bytes()), None);
+    }
+
+    #[test]
+    fn prune_plans_merge_one_relay_protects() {
+        let v = |ver: &str, why: &[&str]| json!({ "version": ver, "files": [format!("TetherQS-{ver}.exe"), format!("TetherQS-{ver}.exe.sig")], "bytes": 20, "why": why });
+        let plan = |serial: u64, keep: Vec<Value>, drop: Vec<Value>| json!({ "groups": [{ "channel": "stable", "dir": "customer/windows-x86_64", "published": "0.5.24", "index_serial": serial, "keep": keep, "drop": drop }] });
+        let a = plan(8, vec![v("0.5.24", &["index"])], vec![v("0.5.21", &[]), v("0.5.22", &[]), v("0.5.9", &[])]);
+        // Relay b still publishes 0.5.22 (lagging) and never had 0.5.9.
+        let b = plan(7, vec![v("0.5.24", &["newer"]), v("0.5.22", &["index"])], vec![v("0.5.21", &[])]);
+        let m = merge_plans(2, &[("https://a".into(), a), ("https://b".into(), b)]);
+        let vs = m["groups"][0]["versions"].as_array().unwrap();
+        assert_eq!(vs.iter().map(|v| (v["version"].as_str().unwrap(), v["offer"] == true)).collect::<Vec<_>>(), [("0.5.24", false), ("0.5.22", false), ("0.5.21", true), ("0.5.9", true)]);
+        assert_eq!(vs[0]["why"], json!(["index", "newer"]));
+        assert_eq!(vs[1]["relays"], json!({ "https://a": "drop", "https://b": "keep" }));
+        assert_eq!((m["offer"]["versions"].as_u64(), m["offer"]["files"].as_u64(), m["offer"]["bytes"].as_u64(), m["kept_versions"].as_u64()), (Some(2), Some(4), Some(40), Some(2)));
+        assert_eq!(m["index_differs"], true);
+        let d = |v: &str| PruneVer { channel: "stable".into(), dir: "customer/windows-x86_64".into(), version: v.into() };
+        assert_eq!(offered(&m), vec![d("0.5.21"), d("0.5.9")]);
+        // Same serials: no "sync first".
+        let same = merge_plans(2, &[("https://a".into(), plan(8, vec![], vec![])), ("https://b".into(), plan(8, vec![], vec![]))]);
+        assert_eq!(same["index_differs"], false);
+    }
+
+    #[test]
+    fn cdn_assets_pin_their_versions() {
+        let a = |g: &str, v: &str| cdn::Asset { hash: "h".into(), size: 1, group: g.into(), version: v.into() };
+        let assets: cdn::Assets = [
+            ("/stable/customer/windows-x86_64/TetherQS-0.5.24.exe.gz".to_owned(), a("stable/customer/windows-x86_64", "0.5.24")),
+            ("/stable/customer/windows-x86_64/TetherQS-0.5.23.exe.gz".to_owned(), a("stable/customer/windows-x86_64", "0.5.23")),
+            ("/stable/customer/windows-x86_64/TetherQS-0.5.23.exe.sig".to_owned(), a("stable/customer/windows-x86_64", "0.5.23")),
+            ("/stable/technician/windows-x86_64/Tether_0.5.24_x64-setup.exe".to_owned(), a("stable/technician/windows-x86_64", "0.5.24")),
+        ]
+        .into_iter()
+        .collect();
+        let pins = cdn_pins(&assets);
+        assert_eq!(pins.len(), 3);
+        assert!(pins.contains(&PruneVer { channel: "stable".into(), dir: "customer/windows-x86_64".into(), version: "0.5.23".into() }));
+        assert!(prune_error("Not found on the server. (HTTP 404: not found)".into()).contains("update its tether-api"));
     }
 
     #[test]

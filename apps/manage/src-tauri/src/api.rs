@@ -32,6 +32,7 @@ fn explain(status: u16, body: &str) -> String {
     let hint = match status {
         401 => "The server did not accept this app's admin signature. Check that the server's ADMIN_PUB_KEY contains this app's admin public key and that the PC clock is correct.",
         404 => "Not found on the server.",
+        409 if reason.starts_with("published release") => "The relay keeps the published release.",
         409 => "The server already has a newer version. Reload and try again.",
         413 => "The upload is larger than the server allows.",
         429 => "Too many requests. Wait a minute and try again.",
@@ -170,5 +171,7 @@ mod tests {
     fn errors_are_explained() {
         let e = explain(401, "signature does not match");
         assert!(e.contains("ADMIN_PUB_KEY") && e.contains("HTTP 401: signature does not match"));
+        assert!(explain(409, "published release: stable/x 1.0 is in latest.json").starts_with("The relay keeps the published release."));
+        assert!(explain(409, "serial must be greater").contains("newer version"));
     }
 }

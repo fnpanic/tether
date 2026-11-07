@@ -441,6 +441,13 @@ dashboard("tether-api", "Tether · API", "tether-api requests, latency, errors, 
   ts("Update states (devices, 24 h)", [[`sum by (state) (${api("tether_api_devices_update_state")})`, "{{state}}"]], { w: 8, stack: true });
   ts("Devices by version (24 h)", [[`sum by (profile, version) (${api("tether_api_devices_by_version")})`, "{{profile}} {{version}}"]], { w: 12, stack: true });
   ts("Downloads by version / h", [[`sum by (profile, version) (increase(${api("tether_api_release_downloads_total")}[1h]))`, "{{profile}} {{version}}"]], { w: 12, bars: true });
+  // Release clean-up (docs/release-cleanup.md); "or … * 0": a relay without releases shows 0.
+  ts("Release files on disk", [[`sum by (node) (${api("tether_api_release_bytes")}) or max by (node) (${api("tether_api_data_bytes")}) * 0`, "{{node}} releases"], [`max by (node) (${api("tether_api_data_bytes")})`, "{{node}} data dir"]], { unit: "bytes", w: 12 });
+  stat("Versions in the largest release folder", [[`max by (node) (${api("tether_api_release_versions")}) or max by (node) (${api("tether_api_data_bytes")}) * 0`, "{{node}}"]], {
+    color: C.teal,
+    w: 12,
+    desc: "Versions kept per channel/app/platform on disk. Tether Manage › Releases › Clean up old releases… deletes the old ones (it keeps the published one and two older by default).",
+  });
   row("Workers and storage");
   ts("Workers", [[`max by (node) (${api("tether_api_workers_active")})`, "{{node}} active"], [`max(${api("tether_api_workers_max")})`, "cap"]], { w: 8, colors: [["cap", C.red]] });
   ts("Data dir size", [[`max by (node) (${api("tether_api_data_bytes")})`, "{{node}}"]], { unit: "bytes", w: 8 });

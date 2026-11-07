@@ -29,6 +29,25 @@ test("one group per release, manifest separate, newest first", () => {
   assert.equal(g[2].size, 32);
 });
 
+test("the TetherQS gzip copy belongs to its release, not a row of its own", () => {
+  const f = (path: string) => ({ channel: "stable", path, size: 1, modified: 1 });
+  const g = groupReleases([
+    f("customer/windows-x86_64/TetherQS-0.5.24.exe"),
+    f("customer/windows-x86_64/TetherQS-0.5.24.exe.sig"),
+    f("customer/windows-x86_64/TetherQS-0.5.24.exe.gz"),
+    f("customer/windows-x86_64/TetherQS-0.5.4-qa.exe.gz"),
+    f("customer/windows-x86_64/latest.json"),
+  ]);
+  assert.deepEqual(
+    g.map((x) => [x.version, x.files.length]),
+    [
+      [null, 1],
+      ["0.5.24", 3],
+      ["0.5.4-qa", 1],
+    ],
+  );
+});
+
 test("ramp presets read as steps", () => {
   assert.equal(describeRamp(rampPresets.standard), "1 % at once → 10 % after 1 h → 50 % after 6 h → 100 % after 1 d");
   assert.equal(describeRamp(rampPresets.fast), "10 % at once → 100 % after 1 h");

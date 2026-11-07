@@ -399,11 +399,38 @@ macOS builds: [macos.md](macos.md).
 
 **Releases on the first relay** lists what is under `download/`, one line per release (channel,
 app, platform, version, number of files, size). Open a line for its files: installer or archive,
-`.sig`, and for the macOS technician app the `.dmg` with its `.sig`. Each folder's `latest.json`
-has its own line. **Delete release** removes all of a release's files on every relay after a
-warning (devices that still get that version from `latest.json` can no longer download it); a
-single file can be deleted from the opened line. The server refuses uploads that would leave
-less than 2 GiB free.
+`.sig`, the TetherQS `.exe.gz`, and for the macOS technician app the `.dmg` with its `.sig`. Each
+folder's `latest.json` has its own line. **Delete release** removes all of a release's files on
+every relay after a warning; a single file can be deleted from the opened line. The relays refuse
+to delete the published release (the version in the release index or `latest.json`),
+`latest.json` and `releases.json`: Tether Manage then asks a second time (**Delete anyway**) and
+only then sends the forced delete. The server refuses uploads that would leave less than 2 GiB
+free.
+
+### Cleaning up old releases
+
+Every publish adds a version to every relay; nothing removes them by itself. Above the list:
+
+- **Keep [2] older version(s) besides the published one** (0-20, saved in the settings).
+- **Clean up after each publish** (off by default): after a successful publish Tether Manage runs
+  the clean-up below with that number, without asking, and adds a **Cleanup** line to the
+  publish results ("Cleanup: 3 old versions deleted, 104.7 MB freed per relay").
+- **Clean up old releases…** opens the review sheet. Every relay computes its own plan
+  ([api.md](api.md#release-clean-up-post-apiadminreleasesprune)); the sheet merges them by channel ›
+  app › platform. A version is offered (ticked) only when **every** relay that has it would delete
+  it; kept versions are greyed with the reason: in the release index (also a halted rollout),
+  published (`latest.json`), newer than published, kept as an older version, download page, on the
+  CDN (every version in this PC's `cdn-assets.json` is kept, the next CDN deploy needs it), or
+  uploaded in the last 24 h. A version only one relay protects says on which. The top line shows
+  what the ticked versions free per relay; **Select all / none** for the sheet and per folder.
+  **Delete N versions** asks once, then each relay checks again and deletes only what it would
+  still delete (a version published in between is kept). The results show per relay what was
+  deleted, kept or already gone. If the relays hold different release indexes the sheet says so:
+  a lagging relay keeps its older version, so publish to the missing relays first.
+
+Only whole versions are deleted; `latest.json`, `releases.json`, the download page and unknown
+files are never touched. A relay without the clean-up (tether-api before it) answers "update its
+tether-api first". Each relay logs every run in `/var/lib/tether-api/release-prune.jsonl`.
 
 How clients handle these flags: [updates.md](updates.md).
 

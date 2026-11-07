@@ -122,6 +122,11 @@ Answered to loopback peers only; Caddy forwards only `/api/*` and `/q/*`, so it 
 | `tether_api_devices_update_state` | gauge | `state` | devices (24 h) by reported update state (`idle`, `waiting-rollout`, `downloading`, `staged`, `waiting-idle`, `failed`, `stale`, `halted`, `unknown` = older clients) |
 | `tether_api_release_downloads_total` | counter | `profile`, `version` | devices that reported a newly downloaded and verified update since start (downloads by version, wherever they came from: relay or CDN; at most 64 series) |
 | `tether_api_data_bytes` | gauge | | size of `/var/lib/tether-api` (releases, audit, diagnostics, state) |
+| `tether_api_release_bytes` | gauge | `channel` | bytes of the release files below `download/<channel>/` |
+| `tether_api_release_versions` | gauge | `channel`, `app`, `platform` | release versions on disk per folder ([release-cleanup.md](release-cleanup.md)) |
+| `tether_api_release_prune_runs_total` | counter | | executed release clean-ups since start |
+| `tether_api_release_prune_freed_bytes_total` | counter | | bytes they deleted since start |
+| `tether_api_release_prune_last_timestamp` | gauge | | unix time of the last executed clean-up (from `release-prune.jsonl`; 0: none) |
 | `tether_api_data_fs_free_bytes`, `tether_api_data_fs_size_bytes` | gauge | | its filesystem |
 
 Heartbeats/s, audit posts, policy and server-key fetches and custom-app downloads are
@@ -183,7 +188,7 @@ Every dashboard has a `Node` selector and marks process restarts.
 | Overview | node up, relay ready from outside, relay choice (primary / FAILOVER), firing alerts, certificate expiry; sessions, online hosts, active devices, bandwidth, TURN now; trends; relay health timeline; alert list |
 | Relay (hbbr) | sessions by transport, pairs, waiting, draining, traffic and hourly volume, timeouts / refusals / downgrades / blocks, hbbr CPU, memory, fds |
 | Signalling (hbbs) | online hosts by path, connections, registrations, RegisterPk results, punch holes by result, brute-force refusals, relay health timeline, relay hand-outs and load, failover state and transitions, TURN allocations, traffic, requests and drops, hbbs process |
-| API | request rate, 5xx share, p95, workers gauge, devices, data dir; by endpoint and status, latency p50/p95, errors and limits; heartbeats, devices, fetches and posts; **Releases**: release generation (tether-api and hbbs), index serial and days left per channel, hosts notified, hints sent, index fetches, update states, devices by version, downloads by version; workers, data size, free space; Caddy requests, latency, memory, in-flight |
+| API | request rate, 5xx share, p95, workers gauge, devices, data dir; by endpoint and status, latency p50/p95, errors and limits; heartbeats, devices, fetches and posts; **Releases**: release generation (tether-api and hbbs), index serial and days left per channel, hosts notified, hints sent, index fetches, update states, devices by version, downloads by version, release files on disk and versions in the largest folder; workers, data size, free space; Caddy requests, latency, memory, in-flight |
 | Hosts | CPU, memory, root disk gauges, uptime; CPU by mode, load, memory, swap; filesystems, disk I/O; network, conntrack, TCP, drops and retransmits; open files; systemd unit states |
 | Probes | every endpoint up/down, history, durations, TLS and processing time, status codes, certificate days left |
 
@@ -332,7 +337,7 @@ to the pod name). tether-api's `/metrics` is loopback-only and not scraped in th
 | ProbeFailed `ws_*` / `tcp_*` | Caddy (`systemctl status tether-https`), firewalld/cloud firewall, hbbs/hbbr up? |
 | RelayUnhealthy / RelayFailover | Signalling dashboard › Relay health: which relay, seen by whom. `printf rs \| nc -q1 127.0.0.1 21115` on the node lists what hbbs hands out. Sessions move to the backup by themselves; fix the primary's hbbr / network. |
 | CertificateExpiringSoon | `journalctl -u tether-https \| grep -i -E 'acme\|certificate'`; TLS-ALPN-01 needs 443 reachable and DNS pointing at the node |
-| DiskAlmostFull | `du -sh /var/lib/* \| sort -h`; Prometheus caps itself at 4 GB; tether-api releases in `/var/lib/tether-api/download` |
+| DiskAlmostFull | `du -sh /var/lib/* \| sort -h`; Prometheus caps itself at 4 GB; tether-api releases in `/var/lib/tether-api/download`: Tether Manage › Releases › **Clean up old releases…** |
 | ReleaseGenerationMismatch | `ls -l /var/lib/tether-api/release-generation` (group `tether-api`, mode 0640+), `id tether` (member of `tether-api`), restart hbbs after `usermod`. Devices still get the heartbeat hint. |
 | ReleaseIndexMismatch / ReleaseIndexExpiringSoon / UpdateStale | Tether Manage › Releases › Rollouts (serial per relay; unlocking re-signs indexes that expire within 15 days); Publish to missing relays |
 | UpdateFailuresHigh | API dashboard › Releases (states, downloads); a client log shows `update download …: <reason>`. Halt the rollout in Tether Manage if a release is bad. |

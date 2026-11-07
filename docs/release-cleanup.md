@@ -1,6 +1,9 @@
 # Cleaning up old releases on the relays (design)
 
-Status: **design, not built**. Problem: every publish adds a version to every relay and nothing
+Status: **built** (branch `prune`, 2026-11-07; not deployed yet): relay endpoint, `DELETE` guard,
+prune log and metrics in tether-api; the Clean up sheet, settings and auto clean-up in Tether
+Manage. Decisions: §9 ("Decided 2026-11-07"); where they differ from the first design, the text
+below is updated. Problem: every publish adds a version to every relay and nothing
 ever removes one. Today the only way to remove them is the trash button per release on
 Releases › "Releases on the first relay", one confirmation per version per click. That is 86
 versions on each of two relays, and 91 % of the release bytes are versions no device can be offered any
@@ -125,10 +128,10 @@ A **version** is the set of files `release_files` lists for it (artifact, `.sig`
 
 | # | Keep | Why |
 | --- | --- | --- |
-| K1 | the version of this group in the channel's `releases.json` (verified with the relay's admin keys), halted or not, at any rollout percent | what index clients download now |
+| K1 | the version of this group in the channel's `releases.json` (verified with the key it names, as on startup: an index from a rotated-out key still protects), halted or not, at any rollout percent; an unreadable `releases.json` or `latest.json` keeps the whole folder | what index clients download now |
 | K2 | the version in the folder's `latest.json` | legacy clients, `/q/` custom apps, `page_render` |
 | K3 | every version **above** K1/K2 | a publish in progress (files are uploaded before the index), or a failed publish the admin wants to retry or `release_sync` |
-| K4 | the newest `keep` versions below the published one (default **1**, so current + previous) | a device that read the old index a second before a publish, manual reinstall, the CDN's "previous" |
+| K4 | the newest `keep` versions below the published one (default **2**, 0-20; decided 2026-11-07) | a device that read the old index a second before a publish, manual reinstall, the CDN's "previous" |
 | K5 | versions linked from `download/index.html` | a download page that was not re-rendered after a publish |
 | K6 | versions the request names in `pin` | Manage adds every version in `cdn-assets.json` and the versions the admin unticked |
 | K7 | files modified in the last 24 h | belt and braces against races with a parallel publish from another admin PC |
@@ -185,14 +188,14 @@ suffix (fixes the stray row) and a test.
 Plan (dry run):
 
 ```json
-{"dry_run": true, "keep": 1, "pin": [{"channel":"stable","dir":"customer/windows-x86_64","version":"0.5.23"}]}
+{"dry_run": true, "keep": 2, "pin": [{"channel":"stable","dir":"customer/windows-x86_64","version":"0.5.23"}]}
 ```
 
 Answer:
 
 ```json
-{"groups":[{"channel":"stable","dir":"customer/windows-x86_64","published":"0.5.24","index_serial":8,
-  "keep":[{"version":"0.5.24","why":["index","latest.json","download page"]},{"version":"0.5.23","why":["previous"]}],
+{"keep_older":2,"groups":[{"channel":"stable","dir":"customer/windows-x86_64","published":"0.5.24","index_serial":8,
+  "keep":[{"version":"0.5.24","files":[…],"bytes":69797888,"why":["index","latest.json","download page"]},{"version":"0.5.23","files":[…],"bytes":…,"why":["previous"]}],
   "drop":[{"version":"0.5.22","files":["TetherQS-0.5.22.exe","TetherQS-0.5.22.exe.sig"],"bytes":34898944}]}],
  "drop_bytes":2054613901,"drop_files":190,"kept_bytes":204116694}
 ```
@@ -200,7 +203,7 @@ Answer:
 Execute:
 
 ```json
-{"dry_run": false, "keep": 1, "pin": [...], "delete": [{"channel":"stable","dir":"customer/windows-x86_64","version":"0.5.22"}]}
+{"dry_run": false, "keep": 2, "pin": [...], "delete": [{"channel":"stable","dir":"customer/windows-x86_64","version":"0.5.22"}]}
 ```
 
 - The relay **recomputes** the plan under the app lock and deletes only versions that are both in
@@ -208,20 +211,24 @@ Execute:
   `{"version":…, "result":"kept", "why":[…]}` (protected now, e.g. a publish happened in between)
   or `"gone"` (already deleted: idempotent, safe to repeat). Answer: `deleted`, `kept`, `gone`,
   `failed` lists and `freed_bytes`.
-- `keep` must be ≥ 1 (400 otherwise); `delete` must be explicit (no "delete everything in the
+- `keep` 0-20, default 2 when absent (400 otherwise; decided 2026-11-07); `delete` must be explicit (no "delete everything in the
   plan" shortcut), so an execute without a reviewed plan deletes nothing.
 - Files are removed with the same code as `delete_release` (empty folders go, `bump_generation`
   is not needed: neither `latest.json` nor `releases.json` changes).
-- One journal line per run (`release prune: 190 files, 2054613901 bytes, by key <hint>`), and a
-  JSON record in `data/release-prune.jsonl` (last 100 runs) with the deleted versions, so "what
-  went when" survives log rotation. `GET /api/admin/status` gains `last_prune {time, files, bytes}`.
+- One journal line per run (`release prune: 78 versions, 190 files, 2054613901 bytes deleted; 0
+  kept, 0 gone, 0 failed (keep 2)`; the signing key is not named, `auth` does not return it), and a
+  JSON record in `data/release-prune.jsonl` (last 100 records: executes and forced deletes; dry runs
+  are not logged) with the deleted versions, so "what went when" survives log rotation.
+  `GET /api/admin/status` gains `last_prune {time, files, bytes}`.
 - Signed request as every admin call (`auth`, `main.rs:633-653`): replay-safe, admin key only.
 
 ### 4.3 Guard on the existing `DELETE`
 
 `delete_release` refuses (`409 "published release: …"`) to delete a file of the K1 or K2 version,
-or `releases.json`, unless the query has `?force=1` (which Manage's per-file button sends only
-after a second, explicit warning). This closes the footgun in §1.2 for every caller.
+`releases.json` or any `latest.json`, unless the query has `?force=1` (which Manage's per-release
+and per-file buttons send only after a second, explicit warning, "Delete anyway"). Forced deletes
+get a journal line and a `release-prune.jsonl` record. This closes the footgun in §1.2 for every
+caller. (Built in `server/api/src/prune.rs`, `delete_guarded`.)
 
 ### 4.4 Manage
 
@@ -240,7 +247,7 @@ UI on the Releases page, header of "Releases on the first relay" (`Releases.tsx:
 button **Clean up old releases…** opens a sheet (same component family as the publish review):
 
 - Top line: "Frees 2.05 GB on each of 2 relays (190 files, 78 versions). Keeps 8 versions."
-- "Keep [1] older version(s) besides the published one" (number field, 1-10), re-runs the plan.
+- "Keep [2] older version(s) besides the published one" (number field, 0-20), re-runs the plan.
 - Grouped by channel › app › platform: kept versions greyed with their reasons
   ("published", "in the release index, rollout 10 %", "on the CDN", "download page", "newer
   than published", "uploaded in the last 24 h"); versions to delete with a checkbox (ticked),
@@ -248,9 +255,11 @@ button **Clean up old releases…** opens a sheet (same component family as the 
 - Per relay column when the relays differ ("only on Hetzner").
 - **Delete 78 versions** (destructive button, one confirmation). Results per relay, as the
   publish sheet shows them; the list refreshes.
-- Settings (Releases › Download CDN area or Settings): "Clean up after each publish, keep [1]
-  older version(s)" (off by default). When on, `publish_upload` runs the prune (execute with the
-  plan's own drop list) after a successful publish and adds a "Cleanup" line to the results.
+- Settings (Releases, above "Releases on the first relay", `settings.prune {keep, auto}`): "Keep
+  [2] older version(s)" and "Clean up after each publish" (off by default). When on,
+  `publish_upload` runs the prune (execute with the merged plan's offer) after a successful publish
+  and adds a "Cleanup" line to the results. A relay that does not answer the dry run stops the
+  clean-up (nothing is deleted anywhere).
 
 The mock (`lib/mock.ts`) gets a canned plan so the sheet works in the browser preview.
 
@@ -267,9 +276,13 @@ asset set instead of failing the publish (`main.rs:978-981`).
   (computed in the existing `dir_bytes` walk), `tether_api_release_prune_last_timestamp`,
   `tether_api_release_prune_freed_bytes_total`.
 - Grafana "Releases" row: release bytes per relay next to data size.
+- Built: `tether_api_release_versions{channel,app,platform}` (per folder rather than per channel),
+  `tether_api_release_bytes{channel}`, `tether_api_release_prune_runs_total`,
+  `tether_api_release_prune_freed_bytes_total`, `tether_api_release_prune_last_timestamp`; Grafana
+  API › Releases: "Release files on disk" and "Versions in the largest release folder".
 - Alert `ReleasesPileUp` (info): `tether_api_release_versions > 40` for 1 day, "Clean up old
-  releases in Manage". `DiskAlmostFull` stays as is; its runbook (`docs/monitoring.md:335`)
-  points at the new button.
+  releases in Manage": **not built** (optional). `DiskAlmostFull` stays as is; its runbook
+  (`docs/monitoring.md`) points at the new button.
 
 ## 6. Tests
 
@@ -310,13 +323,36 @@ asset set instead of failing the publish (`main.rs:978-981`).
 | e2e, docs (`api.md`, `updates.md`, `monitoring.md`), Grafana panel, alert | 0.5 |
 | **Total** | **~3** |
 
-## 9. Decisions needed
+## 9. Decided 2026-11-07
 
-| # | Question | Options | Proposal |
-| --- | --- | --- | --- |
-| C1 | Executor | A bulk delete in Manage / B relay endpoint / C relay timer | B |
-| C2 | Older versions kept besides the published one | 1 / 2 / more | 1 (frees 2.05 GB now; 2 would keep 0.5.22 too, ~100 MB more) |
-| C3 | Clean up automatically after each publish | off / on | off by default, switch in Manage |
-| C4 | Guard the existing `DELETE` against the published version | yes, with `force` / no | yes |
-| C5 | Grace period for recent uploads (K7) | 24 h / none | 24 h |
-| C6 | Prune log on the relay | `release-prune.jsonl` + journal / journal only | file + journal |
+| # | Question | Decision |
+| --- | --- | --- |
+| C1 | Executor | **B**: the signed relay command `POST /api/admin/releases/prune` (dry run returns the plan; execute with the explicit list; the relay recomputes and deletes only what is still unprotected; idempotent) **plus** the Tether Manage sheet "Clean up old releases…" (grouped by channel/app/platform, kept versions greyed with reason, checkbox per version, select all, totals, one confirmation, results per relay; a version is offered only if every relay that has it would drop it; Manage pins every version in its `cdn-assets.json`) |
+| C2 | Older versions kept besides the published one | default **2**, configurable on Manage's Releases page, sent as `keep`; the relay accepts 0-20 and uses 2 when absent |
+| C3 | Clean up automatically after each publish | possible, a switch in Manage, **off** by default (same prune with the configured `keep`, no prompt, result in the publish results) |
+| C4 | Guard the existing `DELETE` | yes: `409` for the published artifact (in `latest.json` or the signed index), `latest.json` and `releases.json`, unless `?force=1`; Manage asks for an explicit confirmation before sending force |
+| C5 | Keep files uploaded in the last 24 h (K7) | yes |
+| C6 | Prune log on the relay | `release-prune.jsonl` (also forced deletes) in the data dir plus a journal line per action |
+
+Also fixed: `lib/releases.ts` showed `TetherQS-<v>.exe.gz` as a row of its own; it now belongs to
+its version.
+
+### Notes for parallel work
+
+- **Download page templates** (Manage › Download page): K5 keeps every version whose file path
+  `/<channel>/<app>/<platform>/<file>` appears anywhere in `download/index.html`. Templates that
+  keep linking release files with that path (relative or absolute, relay or CDN host) need nothing
+  else; a template that links files some other way should still contain that path, or the linked
+  version is protected only by K1/K2/K4.
+- **Custom apps** (`/q/`): use the `latest.json` exe (K2), which is never deleted; `qcache/` is
+  outside `download/` and untouched.
+
+### Deploy
+
+1. Relays (each): build with `scripts/build-relay.sh`, install the new `tether-api`, restart it.
+   Old Manage keeps working (it never calls the endpoint; its per-file delete of a published file
+   now gets the 409).
+2. Tether Manage: the new build. Against a relay without the endpoint the sheet says "update its
+   tether-api first" and deletes nothing.
+3. First production run: open the sheet, compare with §1.1 (keep 2 also keeps 0.5.22, so about
+   100 MB less than the 2.05 GB per relay of keep 1), then delete; add a line to `relay-ha.md`.

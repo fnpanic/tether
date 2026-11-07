@@ -7,6 +7,7 @@ import { api, bytes, host, inTauri, invoke, target, when, type RelayResult } fro
 import { idle, percent, track, type Progress } from "../lib/progress";
 import { pageHtml } from "../lib/page-template";
 import { PublishSheet } from "../components/publish";
+import { CleanupSheet } from "../components/cleanup";
 import { describeRamp, groupReleases, rampPresets, rolloutState, type IndexView, type ReleaseGroup } from "../lib/releases";
 import { Badge, Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Table, TextArea, TextField, Toggle } from "../components/ui";
 
@@ -353,8 +354,55 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
   );
 }
 
+/** A DELETE the relay refused because the file is published (409, docs/release-cleanup.md §4.3). */
+const published409 = (e: any) => /published release/.test(e?.message ?? "");
+
+/** Clean-up settings (settings.prune): older versions kept, and the automatic run after each publish. */
+function CleanupSettings({ onOpen }: { onOpen: () => void }) {
+  const { state, reload, toast } = useApp();
+  const s = state.settings;
+  const [keep, setKeep] = useState<number>(s.prune?.keep ?? 2);
+  const save = async (prune: { keep: number; auto: boolean }) => {
+    await api.saveSettings({ ...s, prune });
+    await reload();
+    toast(prune.auto ? `Clean-up after each publish is on, keeping ${prune.keep} older version(s)` : "Clean-up settings saved");
+  };
+  const auto = !!s.prune?.auto;
+  return (
+    <Card className="mb-3">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-2 text-caption">
+          Keep
+          <TextField
+            className="w-16"
+            type="number"
+            min={0}
+            max={20}
+            value={keep}
+            aria-label="Older versions kept besides the published one"
+            onChange={(e) => setKeep(Math.max(0, Math.min(20, Number(e.target.value) || 0)))}
+            onBlur={() => keep !== (s.prune?.keep ?? 2) && save({ keep, auto })}
+          />
+          older version(s) besides the published one
+        </div>
+        <div className="flex items-center gap-3 text-caption">
+          Clean up after each publish
+          <Toggle label="Clean up after each publish" checked={auto} onChange={(v) => save({ keep, auto: v })} />
+          <Button size="sm" variant="secondary" onClick={onOpen}>
+            Clean up old releases…
+          </Button>
+        </div>
+      </div>
+      <p className="mt-2 text-footnote text-muted">
+        Always kept: the version in the release index (also halted), the one in latest.json, newer ones, the older ones above, versions on the download page or the CDN, and files uploaded in the last 24 h.
+      </p>
+    </Card>
+  );
+}
+
 export function Releases() {
-  const { toast } = useApp();
+  const { toast, state } = useApp();
+  const [cleanup, setCleanup] = useState(false);
   const [file, setFile] = useState("");
   const [kind, setKind] = useState<Kind>("technician");
   const [platform, setPlatform] = useState<Platform>("windows-x86_64");
@@ -401,15 +449,28 @@ export function Releases() {
     if (!(await ask(`Delete ${what} from every relay? Devices that still get this version from latest.json can no longer download it.`, { title: "Delete release", kind: "warning" }))) return;
     // Every file is tried; a failure does not leave the rest of the release behind.
     const failed: string[] = [];
-    for (const f of g.files) await api.admin("DELETE", `/api/admin/release/${f.channel}/${f.path}`).catch((e: any) => failed.push(`${f.path}: ${e.message}`));
+    const guarded: string[] = [];
+    const del = (path: string, force = false) => api.admin("DELETE", `/api/admin/release/${path}${force ? "?force=1" : ""}`);
+    for (const f of g.files)
+      await del(`${f.channel}/${f.path}`).catch((e: any) => {
+        if (published409(e)) guarded.push(`${f.channel}/${f.path}`);
+        else failed.push(`${f.path}: ${e.message}`);
+      });
+    if (guarded.length && (await ask(`${g.version} is the published release (in the release index or latest.json). Devices that update or reinstall now get a missing file until you publish again. Delete it anyway?`, { title: "Delete the published release", kind: "warning", okLabel: "Delete anyway" })))
+      for (const p of guarded) await del(p, true).catch((e: any) => failed.push(`${p}: ${e.message}`));
     setListError(failed.length ? `Not deleted: ${failed.join("; ")}` : null);
     load();
   };
 
   const remove = async (r: Release) => {
     if (!(await ask(`Delete ${r.channel}/${r.path} from every relay?`, { title: "Delete file", kind: "warning" }))) return;
+    const path = `/api/admin/release/${r.channel}/${r.path}`;
     try {
-      await api.admin("DELETE", `/api/admin/release/${r.channel}/${r.path}`);
+      await api.admin("DELETE", path).catch(async (e: any) => {
+        if (!published409(e)) throw e;
+        if (!(await ask(`${r.path.split("/").pop()} is what devices get now (the published release, latest.json or the release index). Deleting it breaks updates until you publish again. Delete it anyway?`, { title: "Delete a published file", kind: "warning", okLabel: "Delete anyway" }))) return;
+        await api.admin("DELETE", `${path}?force=1`);
+      });
       load();
     } catch (e: any) {
       setListError(e.message);
@@ -542,6 +603,17 @@ export function Releases() {
           <RefreshCw size={16} />
         </IconButton>
       </div>
+      <CleanupSettings onOpen={() => setCleanup(true)} />
+      {cleanup && (
+        <CleanupSheet
+          keepDefault={state.settings.prune?.keep ?? 2}
+          onClose={() => {
+            setCleanup(false);
+            setRound((r) => r + 1);
+            load();
+          }}
+        />
+      )}
       <div className="mb-3">
         <ErrorText error={listError} />
       </div>

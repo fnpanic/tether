@@ -527,6 +527,154 @@ impl Candidate {
     }
 }
 
+// ----------------------------------------------------------------------------- file names and retention
+
+pub const WINDOWS: &str = "windows-x86_64";
+/// macOS builds are universal (Apple silicon + Intel).
+pub const MAC: &str = "darwin-universal";
+
+/// File name pattern of each release artifact: `<prefix><version><suffix>` (app, platform, prefix,
+/// suffix). Shared by Tether Manage (upload names) and tether-api (prune).
+pub const NAMES: &[(&str, &str, &str, &str)] = &[
+    ("technician", WINDOWS, "Tether_", "_x64-setup.exe"),
+    ("customer", WINDOWS, "TetherQS-", ".exe"),
+    ("technician", MAC, "Tether_", "_universal.app.tar.gz"),
+    ("customer", MAC, "TetherQS-", "-universal.zip"),
+];
+
+/// App, platform and version of a release artifact from its file name (`TetherQS-0.5.1.exe`).
+pub fn build_of(file: &str) -> Option<(&'static str, &'static str, String)> {
+    NAMES.iter().find_map(|&(k, p, pre, suf)| {
+        let v = file.strip_prefix(pre)?.strip_suffix(suf)?;
+        valid_version(v).then(|| (k, p, v.to_owned()))
+    })
+}
+
+/// The technician app's manual-download disk image, stored next to the updater archive.
+pub fn dmg_name(version: &str) -> String {
+    format!("Tether_{version}_universal.dmg")
+}
+
+/// The gzip copy `<artifact>.gz` exists only for TetherQS.exe (CDN file size limit).
+pub fn wants_packed(app: &str, platform: &str) -> bool {
+    (app, platform) == ("customer", WINDOWS)
+}
+
+/// The version a file in `<app>/<platform>/` belongs to: the artifact, `<artifact>.sig`,
+/// `<artifact>.gz` (customer Windows), and for the mac technician app `<dmg>` and `<dmg>.sig`.
+/// `None` for `latest.json` and anything else.
+pub fn file_version(app: &str, platform: &str, file: &str) -> Option<String> {
+    let base = file.strip_suffix(".sig").or_else(|| file.strip_suffix(".gz").filter(|_| wants_packed(app, platform))).unwrap_or(file);
+    if (app, platform) == ("technician", MAC) && !file.ends_with(".gz") {
+        if let Some(v) = base.strip_prefix("Tether_").and_then(|r| r.strip_suffix("_universal.dmg")).filter(|v| valid_version(v)) {
+            return Some(v.to_owned());
+        }
+    }
+    build_of(base).filter(|b| (b.0, b.1) == (app, platform)).map(|b| b.2)
+}
+
+/// Default for "older versions kept besides the published one" (decision 2026-11-07: 2).
+pub const PRUNE_KEEP: usize = 2;
+/// Largest `keep` a prune accepts.
+pub const PRUNE_KEEP_MAX: usize = 20;
+/// Files modified this recently keep their version (a parallel publish from another PC).
+pub const PRUNE_RECENT_SECS: u64 = 86_400;
+
+/// One file of a release folder (`download/<channel>/<app>/<platform>/`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirFile {
+    pub name: String,
+    pub size: u64,
+    pub modified: u64,
+}
+
+/// What protects a folder's versions besides age (docs/release-cleanup.md §2).
+#[derive(Debug, Clone, Default)]
+pub struct Protect {
+    /// The version of this app/platform in the channel's verified signed index (halted or not).
+    pub index: Option<String>,
+    /// The version in the folder's `latest.json`.
+    pub latest: Option<String>,
+    /// Versions the download page links.
+    pub page: Vec<String>,
+    /// Versions the request pins (Manage: CDN assets, unticked versions).
+    pub pins: Vec<String>,
+}
+
+/// One version of a folder in a prune plan.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlanVersion {
+    pub version: String,
+    pub files: Vec<String>,
+    pub bytes: u64,
+    /// Why it is kept (empty: it is dropped): `index`, `latest.json`, `newer`, `previous`,
+    /// `download page`, `pinned`, `recent`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub why: Vec<&'static str>,
+}
+
+fn by_version(a: &str, b: &str) -> std::cmp::Ordering {
+    crate::version::compare(a, b).unwrap_or_else(|| a.cmp(b))
+}
+
+/// The retention rule for one folder: `(kept, dropped)`, each newest first. Only whole versions
+/// are dropped; files no release name matches are in neither list. With nothing published (no
+/// index entry, no `latest.json`) every version counts as `newer` and is kept.
+pub fn prune_plan(app: &str, platform: &str, files: &[DirFile], p: &Protect, keep: usize, now: u64) -> (Vec<PlanVersion>, Vec<PlanVersion>) {
+    let mut versions: BTreeMap<String, PlanVersion> = BTreeMap::new();
+    let mut recent: Vec<String> = Vec::new();
+    for f in files {
+        let Some(v) = file_version(app, platform, &f.name) else { continue };
+        if f.modified + PRUNE_RECENT_SECS > now {
+            recent.push(v.clone());
+        }
+        let e = versions.entry(v.clone()).or_insert_with(|| PlanVersion { version: v, files: vec![], bytes: 0, why: vec![] });
+        e.files.push(f.name.clone());
+        e.bytes += f.size;
+    }
+    let mut list: Vec<PlanVersion> = versions.into_values().collect();
+    list.sort_by(|a, b| by_version(&b.version, &a.version));
+    let published = [&p.index, &p.latest].into_iter().flatten().max_by(|a, b| by_version(a, b)).cloned();
+    let mut older = 0;
+    for v in &mut list {
+        let is = |o: &Option<String>| o.as_deref() == Some(v.version.as_str());
+        let mut why = vec![];
+        if is(&p.index) {
+            why.push("index");
+        }
+        if is(&p.latest) {
+            why.push("latest.json");
+        }
+        match &published {
+            None => why.push("newer"),
+            Some(pv) => match by_version(&v.version, pv) {
+                std::cmp::Ordering::Greater => why.push("newer"),
+                std::cmp::Ordering::Less => {
+                    if older < keep {
+                        why.push("previous");
+                    }
+                    older += 1;
+                }
+                // Same order, other spelling (`1.0` / `1.0.0`): protected like the published one.
+                std::cmp::Ordering::Equal if why.is_empty() => why.push("newer"),
+                std::cmp::Ordering::Equal => {}
+            },
+        }
+        if p.page.contains(&v.version) {
+            why.push("download page");
+        }
+        if p.pins.contains(&v.version) {
+            why.push("pinned");
+        }
+        if recent.contains(&v.version) {
+            why.push("recent");
+        }
+        v.files.sort();
+        v.why = why;
+    }
+    list.into_iter().partition(|v| !v.why.is_empty())
+}
+
 // ----------------------------------------------------------------------------- hints and timing
 
 /// Uniform random seconds in `0..=max`.
@@ -838,6 +986,107 @@ mod tests {
         let mut e3 = e.clone();
         e3.packed = None;
         assert!(!serde_json::to_string(&e3).unwrap().contains("packed"));
+    }
+
+    #[test]
+    fn file_names_map_to_versions() {
+        let fv = |a, p, f| file_version(a, p, f);
+        assert_eq!(fv("technician", WINDOWS, "Tether_0.5.24_x64-setup.exe").as_deref(), Some("0.5.24"));
+        assert_eq!(fv("technician", WINDOWS, "Tether_0.5.24_x64-setup.exe.sig").as_deref(), Some("0.5.24"));
+        assert_eq!(fv("customer", WINDOWS, "TetherQS-0.5.24.exe.gz").as_deref(), Some("0.5.24"));
+        assert_eq!(fv("customer", WINDOWS, "TetherQS-0.5.4-qa.exe.sig").as_deref(), Some("0.5.4-qa"));
+        assert_eq!(fv("customer", MAC, "TetherQS-0.5.24-universal.zip").as_deref(), Some("0.5.24"));
+        for f in ["Tether_0.5.24_universal.app.tar.gz", "Tether_0.5.24_universal.app.tar.gz.sig", "Tether_0.5.24_universal.dmg", "Tether_0.5.24_universal.dmg.sig"] {
+            assert_eq!(fv("technician", MAC, f).as_deref(), Some("0.5.24"), "{f}");
+        }
+        for (a, p, f) in [
+            ("technician", WINDOWS, "latest.json"),
+            ("technician", WINDOWS, "Tether_0.5.24_x64-setup.exe.gz"),
+            ("customer", WINDOWS, "TetherQS-x.exe"),
+            ("customer", WINDOWS, "TetherQS.exe"),
+            ("technician", WINDOWS, "TetherQS-0.5.24.exe"),
+            ("customer", MAC, "Tether_0.5.24_universal.dmg"),
+            ("technician", MAC, "Tether_0.5.24_universal.dmg.gz"),
+            ("technician", WINDOWS, "notes.txt"),
+        ] {
+            assert_eq!(fv(a, p, f), None, "{a}/{p}/{f}");
+        }
+    }
+
+    fn files(dir: &[(&str, u64)]) -> Vec<DirFile> {
+        dir.iter().map(|(n, m)| DirFile { name: (*n).into(), size: 10, modified: *m }).collect()
+    }
+
+    fn versions(l: &[PlanVersion]) -> Vec<(&str, Vec<&str>)> {
+        l.iter().map(|v| (v.version.as_str(), v.why.clone())).collect()
+    }
+
+    #[test]
+    fn prune_plan_keep_reasons() {
+        let now = 10 * PRUNE_RECENT_SECS;
+        let old = 0;
+        let qs = |v: &str| [format!("TetherQS-{v}.exe"), format!("TetherQS-{v}.exe.sig"), format!("TetherQS-{v}.exe.gz")];
+        let names: Vec<String> = ["0.5.10", "0.5.9", "0.5.8", "0.5.7", "0.5.6", "0.5.5", "0.5.4-qa", "0.5.4", "0.5.3", "0.5.11"].iter().flat_map(|v| qs(v)).collect();
+        let mut dir: Vec<(&str, u64)> = names.iter().map(|n| (n.as_str(), old)).collect();
+        dir.push(("latest.json", old));
+        dir.push(("README.txt", old));
+        // 0.5.3 was touched within 24 h (a parallel publish).
+        for d in dir.iter_mut().filter(|d| d.0.starts_with("TetherQS-0.5.3.")) {
+            d.1 = now - 60;
+        }
+        let p = Protect { index: Some("0.5.10".into()), latest: Some("0.5.9".into()), page: vec!["0.5.8".into()], pins: vec!["0.5.5".into()] };
+        let (kept, dropped) = prune_plan("customer", WINDOWS, &files(&dir), &p, 2, now);
+        assert_eq!(
+            versions(&kept),
+            [
+                ("0.5.11", vec!["newer"]),
+                ("0.5.10", vec!["index"]),
+                ("0.5.9", vec!["latest.json", "previous"]),
+                ("0.5.8", vec!["previous", "download page"]),
+                ("0.5.5", vec!["pinned"]),
+                ("0.5.3", vec!["recent"]),
+            ]
+        );
+        // Pre-release sorts below its release; whole versions with all three files; unknown files untouched.
+        assert_eq!(dropped.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["0.5.7", "0.5.6", "0.5.4", "0.5.4-qa"]);
+        assert_eq!(dropped[0].files, ["TetherQS-0.5.7.exe", "TetherQS-0.5.7.exe.gz", "TetherQS-0.5.7.exe.sig"]);
+        assert_eq!(dropped[0].bytes, 30);
+        assert!(kept.iter().chain(&dropped).all(|v| v.files.iter().all(|f| f.starts_with("TetherQS-"))));
+    }
+
+    #[test]
+    fn prune_plan_keep_counts_and_edge_cases() {
+        let dir: Vec<(String, u64)> = (1..=25).map(|i| (format!("Tether_1.{i}.0_x64-setup.exe"), 0)).collect();
+        let dir: Vec<(&str, u64)> = dir.iter().map(|(n, m)| (n.as_str(), *m)).collect();
+        let f = files(&dir);
+        let now = 10 * PRUNE_RECENT_SECS;
+        let p = Protect { index: Some("1.25.0".into()), ..Default::default() };
+        for (keep, kept) in [(0, 1), (2, 3), (20, 21)] {
+            let (k, d) = prune_plan("technician", WINDOWS, &f, &p, keep, now);
+            assert_eq!((k.len(), d.len()), (kept, 25 - kept), "keep {keep}");
+            assert_eq!(k[0].version, "1.25.0");
+        }
+        // keep 2: the two directly below the published one, not the oldest.
+        let (k, _) = prune_plan("technician", WINDOWS, &f, &p, 2, now);
+        assert_eq!(versions(&k), [("1.25.0", vec!["index"]), ("1.24.0", vec!["previous"]), ("1.23.0", vec!["previous"])]);
+        // Legacy channel: only latest.json. Index and latest.json disagree: both kept, newer above the higher.
+        let only_latest = Protect { latest: Some("1.10.0".into()), ..Default::default() };
+        let (k, d) = prune_plan("technician", WINDOWS, &f, &only_latest, 0, now);
+        assert_eq!(k.iter().filter(|v| v.why == ["newer"]).count(), 15);
+        assert!(k.iter().any(|v| v.version == "1.10.0" && v.why == ["latest.json"]) && d.len() == 9);
+        let split = Protect { index: Some("1.20.0".into()), latest: Some("1.18.0".into()), ..Default::default() };
+        let (k, _) = prune_plan("technician", WINDOWS, &f, &split, 1, now);
+        assert_eq!(k.iter().find(|v| v.version == "1.18.0").unwrap().why, ["latest.json"]);
+        assert_eq!(k.iter().find(|v| v.version == "1.19.0").unwrap().why, ["previous"]);
+        assert_eq!(k.len(), 5 + 1 + 1 + 1);
+        // Nothing published: nothing goes. Nothing to delete: empty drop list.
+        let (k, d) = prune_plan("technician", WINDOWS, &f, &Protect::default(), 0, now);
+        assert_eq!((k.len(), d.len()), (25, 0));
+        let (k, d) = prune_plan("technician", WINDOWS, &f[..1], &Protect { index: Some("1.1.0".into()), ..Default::default() }, 2, now);
+        assert_eq!((k.len(), d.len()), (1, 0));
+        // An index naming a version whose files are gone still protects the versions below it.
+        let (k, _) = prune_plan("technician", WINDOWS, &f, &Protect { index: Some("9.0.0".into()), ..Default::default() }, 2, now);
+        assert_eq!(versions(&k), [("1.25.0", vec!["previous"]), ("1.24.0", vec!["previous"])]);
     }
 
     #[test]

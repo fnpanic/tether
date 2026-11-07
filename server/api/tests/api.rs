@@ -356,9 +356,12 @@ fn releases() {
     assert_eq!(list[0]["path"], "technician/windows-x86_64/Tether_0.3.1_x64-setup.exe");
     assert_eq!(list[0]["size"], 300_000);
 
-    assert_eq!(s.admin(&k, "DELETE", p, b"").status, 204);
+    // latest.json is what devices read: only with force (docs/release-cleanup.md §4.3).
+    assert_eq!(s.admin(&k, "DELETE", p, b"").status, 409);
+    let forced = format!("{p}?force=1");
+    assert_eq!(s.admin(&k, "DELETE", &forced, b"").status, 204);
     assert!(!f.exists());
-    assert_eq!(s.admin(&k, "DELETE", p, b"").status, 404);
+    assert_eq!(s.admin(&k, "DELETE", &forced, b"").status, 404);
 
     assert_eq!(s.admin(&k, "PUT", "/api/admin/download-page", b"<h1>Tether</h1>").status, 204);
     assert_eq!(std::fs::read(s.dir.join("download/index.html")).unwrap(), b"<h1>Tether</h1>");
@@ -797,7 +800,8 @@ fn release_generation_heartbeat_hint_and_index() {
     assert_eq!((status["release_generation"].as_u64(), status["release_indexes"]["stable"]["serial"].as_u64()), (Some(4), Some(6)));
 
     // Deleting the index bumps G and stops serving it.
-    assert_eq!(s.admin(&k, "DELETE", p, b"").status, 204);
+    assert_eq!(s.admin(&k, "DELETE", p, b"").status, 409, "the index only with force");
+    assert_eq!(s.admin(&k, "DELETE", &format!("{p}?force=1"), b"").status, 204);
     assert_eq!(s.req("GET", "/download/stable/releases.json", &[], b"").status, 404);
     assert_eq!(generation(&s, "gen-0006"), 5);
     let m = s.req("GET", "/metrics", &[], b"");

@@ -1793,13 +1793,162 @@
       }
     },
     {
-      "type": "row",
-      "title": "Workers and storage",
+      "type": "timeseries",
+      "title": "Release files on disk",
       "id": 27,
-      "collapsed": false,
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "gridPos": {
         "x": 0,
         "y": 54,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (node) (tether_api_release_bytes{job=\"api\",node=~\"$node\"}) or max by (node) (tether_api_data_bytes{job=\"api\",node=~\"$node\"}) * 0",
+          "legendFormat": "{{node}} releases",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (node) (tether_api_data_bytes{job=\"api\",node=~\"$node\"})",
+          "legendFormat": "{{node}} data dir",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 18,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#56A64B",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Versions in the largest release folder",
+      "id": 28,
+      "description": "Versions kept per channel/app/platform on disk. Tether Manage › Releases › Clean up old releases… deletes the old ones (it keeps the published one and two older by default).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 54,
+        "w": 12,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (node) (tether_api_release_versions{job=\"api\",node=~\"$node\"}) or max by (node) (tether_api_data_bytes{job=\"api\",node=~\"$node\"}) * 0",
+          "legendFormat": "{{node}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#4ECDC4",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "noValue": "–"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true
+      }
+    },
+    {
+      "type": "row",
+      "title": "Workers and storage",
+      "id": 29,
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 62,
         "w": 24,
         "h": 1
       },
@@ -1808,7 +1957,7 @@
     {
       "type": "timeseries",
       "title": "Workers",
-      "id": 28,
+      "id": 30,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1816,7 +1965,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 55,
+        "y": 63,
         "w": 8,
         "h": 8
       },
@@ -1910,7 +2059,7 @@
     {
       "type": "timeseries",
       "title": "Data dir size",
-      "id": 29,
+      "id": 31,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1918,7 +2067,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 55,
+        "y": 63,
         "w": 8,
         "h": 8
       },
@@ -1987,7 +2136,7 @@
     {
       "type": "timeseries",
       "title": "Free space (data filesystem)",
-      "id": 30,
+      "id": 32,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1995,7 +2144,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 55,
+        "y": 63,
         "w": 8,
         "h": 8
       },
@@ -2064,11 +2213,11 @@
     {
       "type": "row",
       "title": "Caddy (HTTPS front end)",
-      "id": 31,
+      "id": 33,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 63,
+        "y": 71,
         "w": 24,
         "h": 1
       },
@@ -2077,7 +2226,7 @@
     {
       "type": "timeseries",
       "title": "Caddy requests / s by status",
-      "id": 32,
+      "id": 34,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -2085,7 +2234,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 64,
+        "y": 72,
         "w": 12,
         "h": 8
       },
@@ -2154,7 +2303,7 @@
     {
       "type": "timeseries",
       "title": "Caddy p95 response time",
-      "id": 33,
+      "id": 35,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -2162,7 +2311,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 64,
+        "y": 72,
         "w": 12,
         "h": 8
       },
@@ -2231,7 +2380,7 @@
     {
       "type": "timeseries",
       "title": "tether-api memory (RSS)",
-      "id": 34,
+      "id": 36,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -2239,7 +2388,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 72,
+        "y": 80,
         "w": 12,
         "h": 8
       },
@@ -2317,7 +2466,7 @@
     {
       "type": "timeseries",
       "title": "Caddy in-flight requests",
-      "id": 35,
+      "id": 37,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -2325,7 +2474,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 72,
+        "y": 80,
         "w": 12,
         "h": 8
       },
@@ -2394,11 +2543,11 @@
     {
       "type": "row",
       "title": "nginx (HTTPS front end, PROXY=nginx)",
-      "id": 36,
+      "id": 38,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 80,
+        "y": 88,
         "w": 24,
         "h": 1
       },
@@ -2407,7 +2556,7 @@
     {
       "type": "timeseries",
       "title": "nginx connections",
-      "id": 37,
+      "id": 39,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -2415,7 +2564,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 81,
+        "y": 89,
         "w": 8,
         "h": 8
       },
@@ -2493,7 +2642,7 @@
     {
       "type": "timeseries",
       "title": "nginx requests and accepts / s",
-      "id": 38,
+      "id": 40,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -2501,7 +2650,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 81,
+        "y": 89,
         "w": 8,
         "h": 8
       },
@@ -2579,7 +2728,7 @@
     {
       "type": "timeseries",
       "title": "nginx dropped connections / min",
-      "id": 39,
+      "id": 41,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -2587,7 +2736,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 81,
+        "y": 89,
         "w": 8,
         "h": 8
       },

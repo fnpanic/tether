@@ -20,6 +20,28 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   reference with copy buttons, and a downloadable starter template
   ([docs/examples/download-template.html](docs/examples/download-template.html)). A stable release
   publish rebuilds the page with the chosen design. No relay change.
+- **Clean up old releases** (docs/release-cleanup.md): tether-api `POST /api/admin/releases/prune`
+  (signed; dry run returns the plan, execute deletes only the listed versions the relay itself
+  would still drop, recomputed under its lock; idempotent). Kept per channel/app/platform: the
+  version in the signed index (halted or not) and in `latest.json`, newer ones, `keep` older ones
+  (default 2, 0-20), versions on the download page, pinned versions, files from the last 24 h;
+  only whole versions go, `latest.json`, `releases.json`, `index.html` and unknown files never.
+  Log `release-prune.jsonl` and a journal line per run; `last_prune` in `/api/admin/status`;
+  metrics `tether_api_release_bytes`, `tether_api_release_versions`,
+  `tether_api_release_prune_*`, and two panels in the API dashboard's Releases row.
+- Tether Manage › Releases: **Clean up old releases…** sheet (the relays' plans merged: a version
+  is offered only if every relay would delete it; every CDN version is pinned), the "Keep N older
+  versions" setting and the **Clean up after each publish** switch (off by default; the publish
+  results get a Cleanup line).
+
+### Changed
+- tether-api refuses (`409`) to `DELETE` the published release's files, any `latest.json` and
+  `releases.json` unless `?force=1`; Tether Manage asks a second time before forcing. Forced
+  deletes are logged.
+
+### Fixed
+- Tether Manage › Releases listed `TetherQS-<v>.exe.gz` as a separate row labelled "latest.json"
+  without a delete button; it is now part of its release.
 
 ## [0.5.24] — 2026-11-07
 Tether / TetherQS 0.5.24 (Windows and macOS), Tether Manage 0.5.7; relays: tether-api, hbbs, Caddy/nginx config (deployed 2026-11-07).
