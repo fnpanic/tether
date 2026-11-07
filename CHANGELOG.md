@@ -6,6 +6,9 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+## [0.5.26] — 2026-11-08
+Tether / TetherQS 0.5.26 (Windows and macOS), Tether Manage 0.5.9 (built with TETHER_ADMIN_PUB_KEY); relays: tether-api and hbbs (deployed 2026-11-08). Audit fixes (client and relay) and the shortcut ledger.
+
 ### Fixed
 - **Sessions started together no longer slow each other down**: the extra 800 ms a session waits for
   WebRTC over TURN before taking the relay now depends on that session's own peer offering a TURN
