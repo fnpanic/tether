@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Check, ChevronRight, RefreshCw, Trash2, X } from "lucide-react";
 import { useApp } from "../App";
-import { api, bytes, host, inTauri, invoke, when, type RelayResult } from "../lib/ipc";
+import { api, bytes, host, inTauri, invoke, target, when, type RelayResult } from "../lib/ipc";
 import { idle, percent, track, type Progress } from "../lib/progress";
 import { PublishSheet } from "../components/publish";
 import { describeRamp, groupReleases, rampPresets, rolloutState, type IndexView, type ReleaseGroup } from "../lib/releases";
@@ -66,7 +66,9 @@ function UploadProgress() {
           <p className="mt-1 text-caption text-muted">
             {!c.server
               ? `Signing ${c.file}…`
-              : `Relay ${state.servers.indexOf(c.server) + 1} of ${n} · ${host(c.server)} · ${c.file === "latest.json" ? "writing latest.json" : `uploading ${c.file}`}`}
+              : c.server === "CDN"
+                ? `Cloudflare CDN · ${c.file || "working"}…`
+                : `Relay ${state.servers.indexOf(c.server) + 1} of ${n} · ${host(c.server)} · ${c.file === "latest.json" ? "writing latest.json" : `uploading ${c.file}`}`}
           </p>
           {c.server && c.total > 0 && (
             <>
@@ -86,7 +88,7 @@ function UploadProgress() {
             <li key={i} className="flex items-start gap-2 text-caption">
               {f.error ? <X size={16} className="mt-0.5 shrink-0 text-danger" aria-label="Failed" /> : <Check size={16} className="mt-0.5 shrink-0 text-ok" aria-label="Done" />}
               <span>
-                {release(f)} · <span className="font-semibold">{host(f.server)}</span>
+                {release(f)} · <span className="font-semibold">{target(f.server)}</span>
               </span>
               {f.error && <span className="min-w-0 flex-1 select-text text-danger">{f.error}</span>}
             </li>
@@ -323,6 +325,7 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
           title="Publish the latest builds"
           action="Sign and publish"
           progress={<UploadProgress />}
+          cdn
           onClose={() => {
             setReviewing(false);
             scan();
@@ -497,6 +500,7 @@ export function Releases() {
           title="Sign and publish release"
           action="Sign and publish"
           progress={<UploadProgress />}
+          cdn
           onClose={() => {
             setReviewing(false);
             setRound((r) => r + 1);

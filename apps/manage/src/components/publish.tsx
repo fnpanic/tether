@@ -3,7 +3,7 @@
 // 3. show the result per relay.
 import { type ReactNode, useEffect, useState } from "react";
 import { Check, X } from "lucide-react";
-import { api, host, type Change, type RelayResult } from "../lib/ipc";
+import { api, host, invoke, target, type Change, type RelayResult } from "../lib/ipc";
 import { Badge, Button, ErrorText, Modal, StatusDot } from "./ui";
 
 export function RelayResults({ results, ok = describe }: { results: RelayResult[]; ok?: (r: RelayResult) => string }) {
@@ -12,7 +12,7 @@ export function RelayResults({ results, ok = describe }: { results: RelayResult[
       {results.map((r) => (
         <li key={r.server} className="flex items-start gap-2 text-caption">
           {r.ok ? <Check size={16} className="mt-0.5 shrink-0 text-ok" aria-label="Done" /> : <X size={16} className="mt-0.5 shrink-0 text-danger" aria-label="Failed" />}
-          <span className="font-semibold">{host(r.server)}</span>
+          <span className="font-semibold">{target(r.server)}</span>
           <span className={`min-w-0 flex-1 select-text ${r.ok ? "text-muted" : "text-danger"}`}>{r.ok ? ok(r) : r.error}</span>
         </li>
       ))}
@@ -21,6 +21,7 @@ export function RelayResults({ results, ok = describe }: { results: RelayResult[
 }
 
 function describe(r: RelayResult) {
+  if (r.detail?.base) return `Update files live on ${host(r.detail.base)}`;
   if (r.detail?.already) return "Already up to date";
   if (r.detail?.published?.length) return r.detail.published.join(" · ");
   if (r.detail?.serial != null) return `Serial ${r.detail.serial} is live`;
@@ -64,6 +65,7 @@ export function PublishSheet({
   onClose,
   warning,
   progress,
+  cdn: withCdn,
 }: {
   title: string;
   children?: ReactNode;
@@ -75,6 +77,8 @@ export function PublishSheet({
   warning?: ReactNode;
   /** Shown while publishing (e.g. upload progress); mounted, hidden, while reviewing. */
   progress?: ReactNode;
+  /** Release uploads: also list the Cloudflare CDN when it is switched on. */
+  cdn?: boolean;
 }) {
   const [check, setCheck] = useState<RelayResult[] | null>(null);
   const [anyway, setAnyway] = useState(false);
@@ -82,9 +86,12 @@ export function PublishSheet({
   const [results, setResults] = useState<RelayResult[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  const [cdn, setCdn] = useState<{ enabled: boolean; base: string } | null>(null);
   useEffect(() => {
     api.relays().then(setCheck, (e) => setError(e.message));
-  }, []);
+    if (withCdn) invoke<{ enabled: boolean; base: string }>("cdn_state").then(setCdn, () => {});
+  }, [withCdn]);
+  const toCdn = !!cdn?.enabled;
 
   const down = check?.filter((r) => !r.ok) ?? [];
   const go = async () => {
@@ -106,7 +113,7 @@ export function PublishSheet({
         <>
           <div className="mt-4 max-h-[40vh] overflow-auto">{children}</div>
           {warning && <div className="mt-4">{warning}</div>}
-          <h3 className="mb-2 mt-5 text-caption font-semibold">Publishes to every relay</h3>
+          <h3 className="mb-2 mt-5 text-caption font-semibold">{toCdn ? "Publishes to every relay and the Cloudflare CDN" : "Publishes to every relay"}</h3>
           {!check ? (
             <p className="text-caption text-muted">Checking the relays…</p>
           ) : (
@@ -120,6 +127,13 @@ export function PublishSheet({
                   </span>
                 </li>
               ))}
+              {toCdn && (
+                <li className="flex items-center gap-2 text-caption">
+                  <StatusDot tone="ok" />
+                  <span className="font-semibold">Cloudflare CDN</span>
+                  <span className="min-w-0 flex-1 truncate text-muted">On · {host(cdn!.base)} · update files, devices fall back to the relays</span>
+                </li>
+              )}
             </ul>
           )}
           {down.length > 0 && (
@@ -140,7 +154,7 @@ export function PublishSheet({
               Cancel
             </Button>
             <Button variant="primary" disabled={!check || phase === "busy" || (down.length > 0 && !anyway)} onClick={go}>
-              {phase === "busy" ? "Publishing…" : `${action} · ${check ? check.length - (anyway ? down.length : 0) : "…"} relay${check?.length === 1 ? "" : "s"}`}
+              {phase === "busy" ? "Publishing…" : `${action} · ${check ? check.length - (anyway ? down.length : 0) : "…"} relay${check?.length === 1 ? "" : "s"}${toCdn ? " + CDN" : ""}`}
             </Button>
           </div>
         </>

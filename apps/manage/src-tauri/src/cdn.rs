@@ -146,35 +146,58 @@ async fn call(req: reqwest::RequestBuilder) -> Result<Value, String> {
     Ok(v)
 }
 
+/// Progress of a deploy: `(step, sent, total)`; bytes only while uploading (else 0, 0).
+pub type OnProgress = std::sync::Arc<dyn Fn(&str, u64, u64) + Send + Sync>;
+
 /// Deploy a version with `assets`; `content(path)` gives the bytes of any file Cloudflare asks for.
-pub async fn deploy<F, Fut>(client: &reqwest::Client, api: &str, c: &Creds, assets: &Assets, content: F) -> Result<(), String>
+pub async fn deploy<F, Fut>(client: &reqwest::Client, api: &str, c: &Creds, assets: &Assets, content: F, on: OnProgress) -> Result<(), String>
 where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
 {
     let acct = format!("{api}/accounts/{}", c.account_id);
+    on("preparing the upload", 0, 0);
     let manifest: serde_json::Map<String, Value> = assets.iter().map(|(p, a)| (p.clone(), json!({ "hash": a.hash, "size": a.size }))).collect();
     let session = call(client.post(format!("{acct}/workers/scripts/{}/assets-upload-session", c.worker)).bearer_auth(&c.token).header("Content-Type", "application/json").body(serde_json::to_vec(&json!({ "manifest": manifest })).unwrap())).await?;
     let mut jwt = session["result"]["jwt"].as_str().ok_or("Cloudflare sent no upload token")?.to_owned();
     let buckets: Vec<Vec<String>> = serde_json::from_value(session["result"]["buckets"].clone()).unwrap_or_default();
     let by_hash: BTreeMap<&str, &str> = assets.iter().map(|(p, a)| (a.hash.as_str(), p.as_str())).collect();
+    if buckets.is_empty() {
+        on("files already on Cloudflare", 0, 0);
+    }
     for bucket in &buckets {
         let mut files = Vec::new();
+        let mut names = Vec::new();
         for h in bucket {
             let path = by_hash.get(h.as_str()).ok_or_else(|| format!("Cloudflare asked for an unknown file {h}"))?;
+            let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+            on(&format!("reading {name}"), 0, 0);
             let bytes = content(path.to_string()).await?;
             if asset_hash(&bytes, path) != *h {
                 return Err(format!("{path} changed since it was published; publish the release again"));
             }
             files.push((h.clone(), content_type(path), B64.encode(bytes)));
+            names.push(name);
         }
         let parts: Vec<(&str, Option<&str>, &str, &[u8])> = files.iter().map(|(h, ct, b)| (h.as_str(), Some(h.as_str()), *ct, b.as_bytes())).collect();
         let (ct, body) = multipart(&parts);
-        let r = call(client.post(format!("{acct}/workers/assets/upload?base64=true")).bearer_auth(&jwt).header("Content-Type", ct).body(body)).await?;
+        let (len, step) = (body.len() as u64, format!("uploading {}", names.join(", ")));
+        on(&step, 0, len);
+        // Streamed like api::admin_upload: a chunk is counted when the connection pulls it.
+        let chunks: Vec<Vec<u8>> = body.chunks(256 * 1024).map(<[u8]>::to_vec).collect();
+        let (on2, mut done) = (on.clone(), 0u64);
+        let stream = futures_util::stream::iter(chunks.into_iter().map(move |c| {
+            done += c.len() as u64;
+            on2(&step, done, len);
+            Ok::<_, std::io::Error>(c)
+        }));
+        let req = client.post(format!("{acct}/workers/assets/upload?base64=true")).bearer_auth(&jwt).header("Content-Type", ct).header("Content-Length", len).body(reqwest::Body::wrap_stream(stream));
+        let r = call(req).await?;
         if let Some(t) = r["result"]["jwt"].as_str() {
             jwt = t.to_owned(); // the completion token, after the last bucket
         }
     }
+    on("activating the new version", 0, 0);
     let meta = json!({
         "main_module": "index.js",
         "compatibility_date": COMPAT_DATE,
@@ -284,11 +307,21 @@ mod tests {
         let creds = Creds { account_id: "acc".into(), token: "tok".into(), worker: "tether-dl".into() };
         let client = reqwest::Client::new();
         let nf = new_file.clone();
+        let steps = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, u64, u64)>::new()));
+        let rec = steps.clone();
+        let on: OnProgress = std::sync::Arc::new(move |s: &str, a, b| rec.lock().unwrap().push((s.to_owned(), a, b)));
         tauri::async_runtime::block_on(deploy(&client, &api, &creds, &assets, move |p| {
             let nf = nf.clone();
             async move { if p.ends_with("n.exe.gz") { Ok(nf) } else { Err(format!("not asked for {p}")) } }
-        }))
+        }, on))
         .unwrap();
+        // Progress: prepare, read, upload with bytes up to the body length, activate.
+        let steps = steps.lock().unwrap().clone();
+        assert_eq!(steps.first().unwrap().0, "preparing the upload");
+        assert!(steps.iter().any(|s| s.0 == "reading n.exe.gz"));
+        let up: Vec<_> = steps.iter().filter(|s| s.0 == "uploading n.exe.gz").collect();
+        assert!(up.len() >= 2 && up[0].1 == 0 && up.last().unwrap().1 == up.last().unwrap().2 && up.last().unwrap().2 > 0, "{up:?}");
+        assert_eq!(steps.last().unwrap().0, "activating the new version");
         let seen = server.join().unwrap();
         assert!(seen[0].0.starts_with("POST /accounts/acc/workers/scripts/tether-dl/assets-upload-session"));
         assert_eq!(seen[0].1, "Bearer tok");

@@ -902,7 +902,7 @@ async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, r
         return Err(servers.iter().zip(&errs).map(|(s, e)| format!("{s}: {}", e.as_deref().unwrap_or(""))).collect::<Vec<_>>().join("; "));
     }
     let mut extra = Vec::new();
-    let cdn_base = match cdn_publish(app, u).await {
+    let cdn_base = match cdn_publish(app, ui, u).await {
         Ok(b) => {
             if let Some(b) = &b {
                 extra.push(RelayResult::of("CDN", Ok(json!({ "base": b }))));
@@ -953,14 +953,23 @@ async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, r
 
 /// The CDN's next version: the release's update file plus what the CDN already holds. `Ok(None)`:
 /// no CDN configured.
-async fn cdn_publish(app: &App, u: &Upload) -> R<Option<String>> {
+async fn cdn_publish(app: &App, ui: &AppHandle, u: &Upload) -> R<Option<String>> {
     let Some((creds, base)) = app.cdn_config() else { return Ok(None) };
+    let r = cdn_deploy(app, ui, u, creds).await;
+    // Same events as a relay, target "CDN": the progress view and its finished list show it.
+    emit(ui, Progress { done: true, error: r.as_ref().err().cloned(), ..Progress::new(u, "CDN", "") });
+    r.map(|()| Some(base))
+}
+
+async fn cdn_deploy(app: &App, ui: &AppHandle, u: &Upload, creds: cdn::Creds) -> R<()> {
     let (file, bytes) = cdn_file(u);
     let path = format!("/{}/{}/{}", u.channel, u.dir, file);
     let current: cdn::Assets = fs::read(app.path("cdn-assets.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let next = cdn::next_assets(&current, &format!("{}/{}", u.channel, u.dir), &u.version, &[(path.clone(), bytes)])?;
     let new = std::sync::Arc::new((path, bytes.to_vec()));
     let relay = app.server();
+    let (ui2, base) = (ui.clone(), Progress::new(u, "CDN", ""));
+    let on: cdn::OnProgress = std::sync::Arc::new(move |step: &str, sent, total| emit(&ui2, Progress { file: step.to_owned(), sent, total, ..base.clone() }));
     cdn::deploy(api::shared(), cdn::API, &creds, &next, move |p: String| {
         let (new, relay) = (new.clone(), relay.clone());
         async move {
@@ -970,10 +979,9 @@ async fn cdn_publish(app: &App, u: &Upload) -> R<Option<String>> {
             // An older file Cloudflare no longer has: the relays keep every release file.
             api::public(&relay, &format!("/download{p}")).await?.ok_or_else(|| format!("{p} is missing on {relay}"))
         }
-    })
+    }, on)
     .await?;
-    app.write("cdn-assets.json", &serde_json::to_vec_pretty(&next).unwrap())?;
-    Ok(Some(base))
+    app.write("cdn-assets.json", &serde_json::to_vec_pretty(&next).unwrap())
 }
 
 /// Every relay's release index for `channel` that this admin key signed: `(server, index, raw)`.
