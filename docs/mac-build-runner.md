@@ -274,3 +274,16 @@ signatures (tampered, wrong key, moved between inboxes, admin namespace), replay
 bundle entries, partial uploads, fair scheduling with one job at a time, timeouts killing the whole
 process group, cancel, disk quota, retention, secret deletion, artifacts, the on-unlock step,
 restart recovery, registration through an admin job, and the CLI end to end with a fake transfer.
+
+## Checked on the Mac (2026-11-07)
+
+Installed with the one-time command; then from the PC, Tether file transfer only:
+hello job while the screen was locked (`locked`, caffeinate assertion), tampered job rejected
+(`signature not valid … incorrect signature`), job filed in another user's inbox rejected,
+sandbox (`Operation not permitted` for another user's folder and `keys/`), timeout (failed after
+33 s, `timeout`), cancel of a running job (`cancelled`). Tether 0.5.22 for macOS was then built as a
+job (job 20261107T123043Z-f9ccb9560f99bd58, about 11 minutes): `BUILD OK`, temporary keychain
+deleted, app swapped (`on_unlock: ok`), artifacts fetched with `macbuild.py fetch`.
+Not covered yet: replay (e2e step 5), fairness across users (step 9). The runner does not run
+while the Mac sleeps (lid closed, no external display); a 12 MB job upload failed twice while
+the Mac was asleep or offline and succeeded once it was awake.
