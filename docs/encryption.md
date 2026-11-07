@@ -14,8 +14,12 @@ Short version:
   per-direction keys. On the WebRTC paths it is DTLS, bound to the host's signed identity.
 - Session keys are fresh per connection and come from ephemeral X25519 keys on both sides, so a
   later leak of a long-term key does not decrypt recorded traffic (forward secrecy).
-- hbbr (relay), a network observer and a TLS-inspecting proxy see metadata but not content.
-  None of them can take the session to plaintext, because Tether refuses unencrypted sessions.
+- hbbr (relay), a network observer and a TLS-inspecting proxy see metadata (including keystroke
+  timing) but not content. None of them can take a Tether-to-Tether session to plaintext, because
+  Tether refuses unencrypted sessions.
+- There are cases where the inner encryption is broken or absent: key exchange version 0 with
+  non-Tether peers, legacy TCP tunnels, connecting by IP address. They are listed with their status
+  under [Known weaknesses](#11-known-weaknesses).
 - **The viewer learns the host's public key from hbbs, signed with the server key.** Nothing else
   authenticates the host: there is no key pinning and no host-side display of its own key. Whoever
   holds the server private key **and** can answer the viewer's rendezvous requests (control of an
@@ -27,10 +31,10 @@ Short version:
 
 | Key | Algorithm | Generated / stored | Used for |
 | --- | --- | --- | --- |
-| Device identity | Ed25519 (`sign::gen_keypair`, 32-byte public key, 64-byte secret key) | Created on first use by `Config::get_key_pair` (`hbb_common/src/config.rs:1302-1323`). Stored in the `key_pair` field (`config.rs:267`) of `<config dir>/Tether.toml`: `%APPDATA%\Tether\config\` per user; for the Windows service `C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\Tether\config\` (path patched in `config.rs:516-524`); macOS `~/Library/Preferences/app.tether.Tether/` (`config.rs:526`). TetherQS uses `Tether-QS.toml` (`apps/quick/src-tauri/src/main.rs:22,31`), `TETHER_PROFILE=x` gives `Tether-x.toml` (`apps/desktop/src-tauri/src/main.rs:33-38`). | Signing the host's ephemeral key in each handshake; registered with hbbs |
-| Server key | Ed25519 | `id_ed25519` (base64 secret key) and `id_ed25519.pub` in the working directory of hbbs/hbbr, `/var/lib/tether` (`server/systemd/tether-hbbs.service`). hbbs creates it on first start if missing (`vendor/rustdesk-server/src/common.rs:107-150`). The same pair is copied to every relay node ([relay-ha.md](relay-ha.md), [kubernetes.md](kubernetes.md)). | hbbs signs `IdPk{id, device public key}` for viewers (`rendezvous_server.rs:1506-1528`); its public half is the `licence_key` clients present |
+| Device identity | Ed25519 (`sign::gen_keypair`, 32-byte public key, 64-byte secret key) | Created on first use by `Config::get_key_pair` (`hbb_common/src/config.rs:1302-1323`). Stored in the `key_pair` field (`config.rs:267`) of `<config dir>/Tether.toml`: `%APPDATA%\Tether\config\` per user; for the Windows service `C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\Tether\config\` (upstream `patch()`, `config.rs:516-524`); macOS `~/Library/Preferences/app.tether.Tether/` (`config.rs:526`). TetherQS uses `Tether-QS.toml` (`apps/quick/src-tauri/src/main.rs:22,31`), `TETHER_PROFILE=x` gives `Tether-x.toml` (`apps/desktop/src-tauri/src/main.rs:33-38`). | Signing the host's ephemeral key in each handshake; registered with hbbs |
+| Server key | Ed25519 | `id_ed25519` (base64 secret key) and `id_ed25519.pub` in the working directory of hbbs/hbbr, `/var/lib/tether` (`server/systemd/tether-hbbs.service`). hbbs creates it on first start if missing (`vendor/rustdesk-server/src/common.rs:107-150`); hbbr runs the same code after a 300 ms wait (`relay_server.rs:612-613`), so on a fresh node hbbr can be the one that creates it. The same pair is copied to every relay node ([relay-ha.md](relay-ha.md), [kubernetes.md](kubernetes.md)). | hbbs signs `IdPk{id, device public key}` for viewers (`rendezvous_server.rs:1506-1528`); its public half is the `licence_key` clients present |
 | Compiled-in server public key | Ed25519 public | `TETHER_PUB_KEY` at build time (`hbb_common/src/config.rs:139-142`); release builds refuse to compile without it (`apps/desktop/src-tauri/build.rs:4-14`). | Trust anchor for the signed `IdPk` when no server key list is cached |
-| Signed server key list | Ed25519-signed JSON (admin key) | `server-keys.json` + rollback floor `server-keys.serial` in the config folder (`crates/tether-trust/src/serverkeys.rs`, applied by `apps/desktop/src-tauri/src/policy.rs:197-208` into `hbb_common::config::POLICY_SERVER_KEYS`). | Replaces the compiled-in key: clients trust exactly the active listed keys (`config.rs:155-164` `server_keys_for`). See [key-rotation.md](key-rotation.md). |
+| Signed server key list | Ed25519-signed JSON (admin key) | `server-keys.json` + rollback floor `server-keys.serial` in the config folder (`crates/tether-trust/src/serverkeys.rs`, applied by `apps/desktop/src-tauri/src/policy.rs:197-208` into `hbb_common::config::POLICY_SERVER_KEYS`). | Replaces the compiled-in key for Tether's own servers. Rule (`config.rs:155-164` `server_keys_for`): when the server key in use (the `key` option if set, else the first active listed key) is one of the listed keys, every active listed key is trusted; for any other `key` value, that value alone is trusted. Without a valid cached list the compiled-in key is used. See [key-rotation.md](key-rotation.md) and [W3](#w3-the-trust-anchor-can-be-changed-locally). |
 | Host ephemeral box key | X25519 (`box_::gen_keypair`) | Per incoming connection, memory only (`vendor/rustdesk/src/server.rs:281`) | Receiving the sealed session key |
 | Viewer ephemeral box key | X25519 | Per connection attempt, memory only (`vendor/rustdesk/src/common.rs:2466`) | Sealing the session key |
 | Session key | 32 random bytes (`secretbox::gen_key`, `common.rs:2467`) | Memory only | Derives the two stream keys |
@@ -71,11 +75,15 @@ sequenceDiagram
   `apps/desktop/src-tauri/src/netpolicy.rs:121-127`), so `use_ws()` is true
   (`config.rs:2985-2988`). On that transport the client skips the rendezvous key exchange
   (`common.rs:2296-2305` `secure_tcp_impl`): **the client-to-hbbs channel is protected by TLS
-  only.** The server key is not used to authenticate hbbs itself on this path.
+  only.** The server key is not used to authenticate hbbs itself on this path. TLS (`wss://`) is
+  chosen only for a domain name with an `https` `api-server`, which Tether forces for its own
+  servers; an endpoint given as an IP address gets plain `ws://` (`hbb_common/src/websocket.rs:628-649`,
+  [W4](#w4-plain-ws-for-ip-endpoints)).
 - hbbs accepts the first `RegisterPk` for an ID, then refuses a different `uuid`, and refuses a
   different `pk` only when it also comes from a different IP (`rendezvous_server.rs:693-723`).
 - hbbs stores per peer: `id`, `uuid`, `pk`, creation time and an `info` JSON with the IP
-  (`vendor/rustdesk-server/src/database.rs:74-84`, `peer.rs:93-111`). It sees every registration,
+  (`vendor/rustdesk-server/src/database.rs:74-84`, `peer.rs:93-111`), and logs id, address,
+  uuid and key at info level on every key update (`peer.rs:102`). It sees every registration,
   heartbeat, the source IP of every client and which ID asks for which.
 
 ## 3. Rendezvous and handshake (relay path)
@@ -128,18 +136,25 @@ Step by step, with the code:
    `hbb_common/src/tcp.rs:404-424`).
 5. **Key exchange version.** The host advertises `KX_VERSION_LATEST = 1` inside its signed
    `IdPk` (`server.rs:294-298`, `tcp.rs:31`); the viewer picks `min(advertised, 1)`
-   (`tcp.rs:40-42`, `client.rs:2022-2028`); the host refuses a pick above what it offered
-   (`server.rs:327-333`).
+   (`tcp.rs:40-42`, `client.rs:2022-2028`); the host refuses a pick above what it offered and
+   accepts any pick at or below it, including 0 (`server.rs:327-333`).
    - **Version 1** (every Tether build): two stream keys, one per direction,
      `BLAKE2b-256(key = K, "rdkx-spl" ‖ direction ‖ advertised ‖ picked ‖ eph_V ‖ eph_H)`
      (`tcp.rs:348-380`). The viewer, which sent the sealed key, sends with the "initiator" key.
      Changing the advertised or picked version, or either ephemeral key, gives different keys and
      the first frame fails to decrypt (unit tests `test_split_binds_the_transcript`,
      `test_split_directions_use_different_keys` in `tcp.rs`).
-   - **Version 0** (a peer from before versions, e.g. an old stock RustDesk): one key for both
-     directions (`stream.rs:98-117`). Both directions then start their counters at 1 under the
-     same key, so the same nonce is used once in each direction. That is a weakness of the old
-     scheme (`test_v0_shares_one_key_across_directions`); Tether-to-Tether sessions never run it.
+   - **Version 0** (the original scheme): one key for both directions (`stream.rs:104-108`),
+     and both directions count nonces from 1 (`test_v0_shares_one_key_across_directions`), so
+     every nonce is used twice under the same key. Against anyone in the path this is broken, not
+     just weak: the XSalsa20 keystream repeats (the XOR of two plaintexts leaks), the Poly1305
+     one-time key repeats (forgery becomes possible), and a frame can be reflected back to its
+     sender, which accepts it as the peer's. Two Tether builds never pick it, but it is reachable:
+     a Tether host accepts version 0 from a viewer that picks it, and a Tether viewer runs it
+     against a host that advertises no version (a stock RustDesk host, which Tether's hbbs also
+     serves on 21115-21117). Such a session still counts as encrypted and shows the shield.
+     Changing the unauthenticated `PublicKey.kx_version` in transit does not force it: the two
+     sides then derive different keys and the first frame fails. See [W1](#w1-key-exchange-version-0).
 6. **Record encryption.** Every frame after the exchange is `secretbox` (XSalsa20-Poly1305,
    256-bit key, 128-bit tag) with a 24-byte nonce whose first 8 bytes are a per-direction
    little-endian counter starting at 1 (`tcp.rs:248-252, 382-402`). The receiver increments its
@@ -151,8 +166,15 @@ Step by step, with the code:
    (`tcp.rs:383-385`): they cannot carry a message, so a relay can inject only empty frames.
 7. **What is inside.** The session is one stream of protobuf `Message`s: video and audio frames,
    keyboard and mouse, clipboard, file transfer, chat, permissions, all sent with `send` on the
-   same `Stream`, so all of it is encrypted. File transfer and port forwarding opened as their
-   own connection run the same handshake. Message sizes and timing are not hidden (no padding).
+   same `Stream`, so all of it is encrypted. File transfer opened as its own connection runs the
+   same handshake. **Exception: legacy TCP tunnels.** A port forward that is not multiplexed
+   switches the stream to raw mode after login on both ends (`set_raw()`: host
+   `connection.rs:1373-1380`, viewer `port_forward.rs:261, 532`; raw mode drops the cipher,
+   `tcp.rs:178-181`, `websocket.rs:416-418`), so the tunnelled bytes cross the relay without the
+   inner encryption ([W2](#w2-legacy-tcp-tunnels-are-not-end-to-end-encrypted)). Multiplexed
+   forwards (`pf.multiplex`, `connection.rs:1838-1847`) stay encrypted. Message sizes and timing
+   are not hidden (no padding): each key press is its own small `KeyEvent` frame, so the relay,
+   TURN and an inspecting proxy see typing rhythm and key counts ([W11](#w11-traffic-analysis)).
 8. **Login.** Only after the exchange does the host send `Hash{salt, challenge}`, the challenge
    being 6 random characters per connection (`connection.rs:549-553`). See section 6.
 
@@ -173,15 +195,17 @@ including every reconnect.
 | Host: transport not flagged secure, device key missing, peer sends no key or no key exchange | Host aborts | `server.rs:267-275, 344-356` |
 | LAN direct path without signed key or not encrypted | Refused | `client.rs:297-307` |
 | Direct listener (21118) | Same key exchange as the relay | `rendezvous_mediator.rs:1488-1494` |
-| Relay or proxy strips the key or the version | Fails closed (refusal or decryption error): denial of service, not a downgrade | as above, `server.rs:327-333` |
-| **Viewer connects by IP address or `host:port`** | No rendezvous, no handshake (`client.rs:609-636`), and the insecure-session refusal is skipped for direct IP access (`io_loop.rs:247`). A Tether host refuses such a connection (step 3 above), but **a stock RustDesk host with direct IP access enabled would get an unencrypted session without a warning.** The ID field accepts IPs (`apps/desktop/src-tauri/src/security.rs:81-92`). | gap |
+| Relay or proxy strips the key or the version | Fails closed (refusal or decryption error): denial of service, not a downgrade | as above, `server.rs:327-333`, `tcp.rs:358-380` |
+| Peer that speaks only version 0 | Runs version 0, reported as encrypted | [W1](#w1-key-exchange-version-0) |
+| Legacy (non-multiplexed) TCP tunnel | Raw after login, no inner encryption | [W2](#w2-legacy-tcp-tunnels-are-not-end-to-end-encrypted) |
+| **Viewer connects by IP address or `host:port`** | No rendezvous, no handshake (`client.rs:609-636`), and the insecure-session refusal is skipped for direct IP access (`io_loop.rs:247`). A Tether host refuses such a connection (step 3 above), but **a stock RustDesk host with direct IP access enabled would get an unencrypted session without a warning.** The ID field, `tether://` links and the CLI accept IPs (`apps/desktop/src-tauri/src/security.rs:81-92`). The session window then shows no shield, but no dialog; the challenge response also crosses unencrypted. | [W7](#w7-connecting-by-ip-address) |
 
 ## 5. Transport paths
 
 | Path | Wire | Inner protection | Who is in the middle |
 | --- | --- | --- | --- |
-| Relay (default, and always with a proxy) | WSS `/ws/relay` on 443 (fallback route: TLS on port 80, `websocket.rs:655, 740-782`) to Caddy/nginx, then plain WebSocket on localhost to hbbr (`server/caddy/Caddyfile:27-37`) | Section 3 (secretbox, version 1) | Proxy (if any), Caddy, hbbr |
-| LAN direct | TCP 21118 on the local subnet, found by a UDP broadcast lookup | Section 3; refused unless secured (`client.rs:297-307`) | none |
+| Relay (default, and always with a proxy) | WSS `/ws/relay` on 443 (fallback route for Tether's own servers: TLS on port 80, `websocket.rs:655, 740-782`; a relay named by IP address is plain `ws://`, [W4](#w4-plain-ws-for-ip-endpoints)) to Caddy/nginx, then plain WebSocket on localhost to hbbr (`server/caddy/Caddyfile:27-37`) | Section 3 (secretbox, version 1) | Proxy (if any), Caddy, hbbr |
+| LAN direct | TCP 21118, found by a UDP broadcast lookup that names the target ID in clear (`tether-find <id>`, `src/lan.rs:129-150`). On Windows the firewall rule limits the listener to the local subnet (`apps/desktop/src-tauri/windows/hooks.nsh:37-38`); on macOS it listens whenever the application firewall is off, with no subnet limit ([W10](#w10-macos-direct-listener-not-subnet-limited)) | Section 3; refused unless secured (`client.rs:297-307`) | none; LAN observers see the looked-up ID |
 | WebRTC (IPv6 direct, NAT punch, TURN) | ICE over UDP; offer/answer travel inside the hbbs WebSocket. STUN/TURN only on hbbs UDP 21116 of Tether's own relays (`netpolicy.rs:71-82`); behind a proxy ICE is LAN-only ([corporate-networks.md](corporate-networks.md)) | DTLS (webrtc-rs) only. The handshake of section 3 still runs, but the version is forced to 0 and `WebRTCStream::set_key` ignores the key: "WebRTC traffic is DTLS-encrypted regardless; the secretbox key is unused" (`hbb_common/src/webrtc.rs:1384-1390`, `client.rs:2022-2028`, `server.rs:291-298`). | TURN on hbbs relays DTLS records |
 | Plain TCP/UDP rendezvous and relay (21115-21117, 21116/udp) | not used by Tether (`disable-udp`, `allow-websocket` forced); open on the server for stock RustDesk clients | – | – |
 
@@ -222,14 +246,14 @@ sequenceDiagram
   viewer sends `SHA256(SHA256(password ‖ salt) ‖ challenge)` (`client.rs:5084-5093`). The host
   recomputes and compares in constant time (`connection.rs:2603-2624`).
 - **Stored form on the host.** The permanent password is stored as `h1 = SHA256(password ‖ salt)`
-  (`hbb_common/src/config/permanent_password.rs:177`), which `verify_h1` uses directly
+  (`compute_permanent_password_h1`, `hbb_common/src/config/permanent_password.rs:23-33`), which `verify_h1` uses directly
   (`connection.rs:2603-2611`). `h1` is password-equivalent: whoever reads it from the config can
   answer any challenge. It is wrapped with `symmetric_crypt`, whose key is the machine uid padded
   to 32 bytes (`password_security.rs:212-219`). That uid is not secret (local users can read it,
   and the host sends it to hbbs in `RegisterPk`), so treat this as obfuscation, not encryption.
 - **One-time password.** 10 characters by default (`apps/desktop/src-tauri/src/security.rs:26-29`)
-  from a 32-character alphabet (`config.rs:111-114`), i.e. 50 bits. Admin policy may set 6 or 8
-  ([policy.md](policy.md)). It rotates after 10 consecutive wrong attempts from any address
+  from a 32-character alphabet (`config.rs:111-114`), i.e. 50 bits. The user (Settings) or admin
+  policy may set 6 or 8 ([policy.md](policy.md)). It rotates after 10 consecutive wrong attempts from any address
   (`connection.rs:2656-2700`).
 - **Brute-force limits** (`connection.rs:4661-4745`), per source address as the host sees it
   (for relayed sessions: the address hbbs reports, `rendezvous_mediator.rs:772`): more than 6
@@ -243,8 +267,31 @@ sequenceDiagram
 - **Unauthenticated connections** are closed after 180 s and limited to 64 at a time
   (`connection.rs:87-92`).
 
+**Ways in without the password, 2FA or Accept.** All are bearer secrets the viewer presents, not
+a viewer identity:
+
+- **Resume ticket:** a reconnect of an accepted remote session within 120 s that presents the
+  same session key and the 128-bit `companion_secret` of its `LoginRequest` is admitted without
+  password, 2FA or Accept (`is_resume_of_authed_session`, `connection.rs:5998-6008`;
+  `RESUME_WINDOW`, `connection.rs:8096-8114`; the branch at `connection.rs:3131-3136`).
+- **File-transfer companion:** a file-transfer connection with the same session key and
+  `companion_secret` as a running authorised remote session is admitted the same way
+  (`connection.rs:3127-3136, 5975-5996, 8073-8080`).
+- **Trusted-device token:** after a correct permanent password, a valid token skips 2FA
+  (`src/server/connection/trusted_devices.rs:9-35`).
+- **Recent session (upstream):** within 30 s of the last activity of an authenticated session with
+  the same session key, the one-time password that was valid for it is accepted again
+  (`is_recent_session`, `connection.rs:2749-2775`; `SESSION_TIMEOUT`, `connection.rs:514`).
+
+**Offline guessing.** Whoever obtains one challenge response together with its salt and challenge
+(the host sends both) can test password guesses offline, two SHA-256 computations per guess; the
+6-character challenge (about 30 bits) only prevents replay. Inside an encrypted session only the
+endpoints see it. Others can get it through a server-key MITM or a host impersonation (section 8),
+or from a direct-IP session to a non-Tether host
+([W12](#w12-offline-guessing-from-a-captured-challenge-response)).
+
 None of this stops a relayed man-in-the-middle (section 8): the challenge response, the 2FA code
-and the Accept click are all things a MITM can pass through.
+and the Accept click are all things a MITM can pass through, and it learns the `companion_secret`.
 
 ## 7. What each side knows about the other
 
@@ -254,7 +301,7 @@ and the Accept click are all things a MITM can pass through.
   `LoginRequest.my_id` / `my_name` are self-reported (`connection.rs:1496-1498` says so for the ID
   whitelist). The ID whitelist, the name in the Accept prompt and the audit log entries show what
   the viewer claims, not a proven identity. Access is granted by the password, 2FA and/or the
-  Accept click.
+  Accept click, or by one of the bearer secrets in section 6.
 - **No key pinning.** The viewer does not remember a host's key between sessions. It shows the
   host key's fingerprint (hex of the 32-byte public key, `common.rs:2184-2196`;
   `io_loop.rs:259-260`; tooltip and stats in `apps/desktop/src/pages/Session.tsx:653, 761`), but
@@ -316,9 +363,14 @@ What the attacker needs, both at once:
    a TLS man-in-the-middle on the viewer's WSS to hbbs, which needs a certificate the viewer's
    machine trusts (a corporate inspection CA in the OS store qualifies, `verifier.rs:165-180`).
 
+A shortcut needs neither: whoever can set the `key` and server options on the viewer's machine
+(a local administrator, or any user where policy allows `settings.server`) chooses the trusted key
+without stealing anything ([W3](#w3-the-trust-anchor-can-be-changed-locally)).
+
 Weak signals a victim might notice: the viewer's peer fingerprint differs from earlier sessions;
 a trusted device is asked for 2FA again because its token is not offered to the new key; the
-host's audit record shows the attacker's address.
+host's audit record shows the attacker's address (audit posts are unauthenticated, so the log is
+a hint, not evidence: [W13](#w13-audit-records-can-be-forged)).
 
 What Tether does to reduce the risk:
 
@@ -327,8 +379,14 @@ What Tether does to reduce the risk:
 - Key rotation without reinstalling, via a list signed by the admin key, which never leaves the
   admin's PC; the list has a monotonic serial and a persisted floor, so a relay cannot add keys
   or roll back ([key-rotation.md](key-rotation.md), `serverkeys.rs`).
-- All client traffic to hbbs is TLS on 443 with certificate verification and no unverified
-  fallback (`allow-insecure-tls-fallback = N`, `security.rs:14`; `tls.rs:84-87`).
+- Client traffic to Tether's own hbbs is TLS on 443 with certificate verification and no
+  unverified fallback (`allow-insecure-tls-fallback = N`, `security.rs:14`; `tls.rs:84-87`). Not
+  so for endpoints given as IP addresses ([W4](#w4-plain-ws-for-ip-endpoints)). The native-tls
+  retry (`websocket.rs:337-351`) uses native-tls's default protocol range and the OS stack's; the
+  certificate is still verified, and Caddy/nginx accept TLS 1.2 or later only.
+- The trusted server key cannot be changed from the UI unless policy allows `settings.server`
+  (default off, `apps/desktop/src-tauri/src/policy.rs:127-135`); see
+  [W3](#w3-the-trust-anchor-can-be-changed-locally).
 - Server hardening, front-end rules and monitoring ([SECURITY.md](../SECURITY.md#server-hardening),
   [monitoring.md](monitoring.md)).
 
@@ -341,23 +399,27 @@ keys are ephemeral), and recorded past sessions stay safe (forward secrecy).
 hbbs accepts a `RegisterPk` that changes the key of an ID when it carries the ID's registered
 `uuid` and comes from the same IP as the current registration (`rendezvous_server.rs:693-723`,
 upstream rule). The `uuid` is the machine uid: hbbs, a TLS-inspecting proxy (it travels in
-`RegisterPk`) and readers of the audit log (`docs/api.md`, audit records carry it) can learn it, and
-all clients behind one NAT or one proxy share an IP as hbbs sees it. Such a party can make hbbs
-sign its own key for that ID. It cannot read the real host's sessions this way (the real host's
-signature no longer matches, so those sessions fail), but a viewer reaching the attacker's machine
-talks to the attacker: it would see the attacker's screen and hand over a challenge response that
-can be attacked offline. Not verified with a live test.
+`RegisterPk`) and readers of the audit log (`docs/api.md`, audit records carry it) can learn it,
+including a team member with the `audit` flag (the team device list itself carries the heartbeat's
+install uuid, not the machine uuid; [api.md](api.md)) and anyone who reads hbbs's log
+(`peer.rs:102`). All clients behind one NAT or one proxy share an IP as hbbs sees it. From the
+code, such a party can make hbbs sign its own key for that ID: the real host's sessions then fail
+(its signature no longer matches), and a viewer that reaches the attacker's machine talks to the
+attacker, sees the attacker's screen and hands over a challenge response that can be attacked
+offline. **Untested, and probably short-lived:** the real host sends `RegisterPk` again on each
+WebSocket reconnect (comment at `rendezvous_server.rs:686-687`), from the same IP, which puts its
+own key back. See [W8](#w8-key-replacement-at-hbbs-via-registerpk).
 
 ## 9. Who sees what
 
 | | Session content (screen, input, clipboard, files, audio, chat) | Passwords | Device IDs | IP addresses | Timing and sizes | Other |
 | --- | --- | --- | --- | --- | --- | --- |
 | hbbs operator | No (but see section 8 with the server key) | No | Yes: every registration and who asks for whom | Yes, all clients (X-Forwarded-For) | Connection times; not session volume | machine uuid, device public keys, connection type (remote, file transfer, terminal, …), WebRTC SDP incl. ICE candidates, TURN credentials it issued |
-| hbbr operator | No | No | The host's ID (inside the clear `SignedId` at the start of the stream) | Both ends (X-Real-IP) | Yes: every frame's size and time | relay uuid, presented server public key |
+| hbbr operator | No (except legacy tunnels, W2, and version 0, W1) | No | The host's ID (inside the clear `SignedId` at the start of the stream) | Both ends (X-Real-IP) | Yes: every frame's size and time, including keystroke timing | relay uuid, presented server public key, the host's ephemeral key and version, the viewer's `PublicKey` message |
 | TURN on hbbs | No (DTLS) | No | – | Both ends | Yes | – |
-| Network observer | No | No | No (TLS) | Yes | Yes (TLS record sizes) | relay host name (SNI) |
-| TLS-inspecting proxy | No | No | Yes | Yes | Yes | everything hbbs sees from the clients behind it, and hbbr's view of their streams |
-| Tether Manage admin | No | No | Yes | Yes (heartbeats, audit) | No | audit log: time, host ID and machine uuid, technician's claimed ID and name, technician IP, approval method, file paths and up to 10 file names with sizes per transfer ([api.md](api.md), [SECURITY.md](../SECURITY.md#session-audit-log)). Holds the admin and updater keys, so can change trusted server keys and ship signed code: the admin is fully trusted. |
+| Network observer | No | No | No (TLS); on the LAN, the ID being looked up (`tether-find`) | Yes | Yes (TLS record sizes) | relay host name (SNI) |
+| TLS-inspecting proxy | No (except W1, W2) | No | Yes | Yes | Yes | everything hbbs sees from the clients behind it (machine uuids included), and hbbr's view of their streams |
+| Tether Manage admin | No | No | Yes | Yes (heartbeats, audit) | No | audit log: time, host ID and machine uuid, technician's claimed ID and name, technician IP, approval method, session id, alarms, file paths and up to 10 file names with sizes per transfer ([api.md](api.md), [SECURITY.md](../SECURITY.md#session-audit-log)); records are unauthenticated and can be forged. Holds the admin and updater keys, so can change trusted server keys and ship signed code: the admin is fully trusted. |
 | Team member | No | No | Yes | No in the device list; yes in audit records with the `audit` flag | No | [SECURITY.md](../SECURITY.md#team-access) |
 
 ## 10. Verifying these claims
@@ -371,3 +433,118 @@ can be attacked offline. Not verified with a live test.
 - Empirical: the inspecting-proxy test in [corporate-networks.md](corporate-networks.md).
 - Not covered by tests here: a live man-in-the-middle with the server key (section 8) and the
   `RegisterPk` key replacement; both follow from reading the code.
+
+## 11. Known weaknesses
+
+Each entry has one status line; update only that line when the code changes. "Open" means the
+code behaves as described today.
+
+### W1. Key exchange version 0
+
+A Tether host accepts version 0 and a Tether viewer runs it against a host that advertises no
+version (`server.rs:327-333`, `tcp.rs:40-42`). Version 0 reuses one key and the same nonces in
+both directions (`stream.rs:104-108`, `tcp.rs:248-252, 382-402`): keystream and Poly1305 key
+reuse, reflection of frames. Only reachable with a non-Tether peer; the shield still shows.
+Section 3, step 5.
+
+Status: open — tracked.
+
+### W2. Legacy TCP tunnels are not end-to-end encrypted
+
+A non-multiplexed port forward switches both ends to raw mode after login
+(`connection.rs:1373-1380`, `port_forward.rs:261, 532`), so the tunnelled bytes are protected only
+by the TLS to Caddy: hbbr and a TLS-inspecting proxy see them. The host allows it when
+`enable-tunnel` is on (policy `permission.tunnel`, default N, `crates/tether-trust/src/policy.rs:122`).
+The Tether viewer does not start port forwards; other RustDesk viewers can. Section 3, step 7.
+
+Status: open — tracked.
+
+### W3. The trust anchor can be changed locally
+
+`server_keys_for` trusts any configured `key` on its own (`config.rs:157-164`), and
+`custom-rendezvous-server`, `relay-server` and `key` are UI options (`security.rs:57-71`). The UI
+refuses to write them unless policy allows `settings.server` (default N,
+`apps/desktop/src-tauri/src/policy.rs:35, 127-135`); an administrator of the machine can still set
+them with `--option` (`src/core_main.rs:515-534`). Whoever sets them decides which key vouches for
+hosts.
+
+Status: open — tracked.
+
+### W4. Plain `ws://` for IP endpoints
+
+A rendezvous or relay endpoint that is an IP address (an `id@1.2.3.4` peer, an IP as custom
+server, or a relay name hbbs hands out) gets `ws://` without TLS (`hbb_common/src/websocket.rs:628-649`).
+End-to-end encryption is unaffected; the signalling (IDs, uuids, keys, SDP) is then in clear.
+
+Status: open — tracked.
+
+### W5. hbbs/hbbr WebSocket ports reachable directly
+
+hbbs and hbbr bind their WebSocket ports 21118/21119 on all interfaces (`listen_any`,
+`rendezvous_server.rs:1693-1697`, `relay_server.rs:95`). `install.sh` does not open them, but it
+configures a firewall only where firewalld, ufw or a REJECT iptables chain is active
+(`server/install.sh:163-189`). Reached directly, they take the client IP from headers the client
+sends: hbbs the last `X-Forwarded-For` hop (`rendezvous_server.rs:1750-1754`), hbbr `X-Real-IP`
+or `X-Forwarded-For` (`relay_server.rs:415-426`). That defeats per-IP limits and the IP check of
+the `RegisterPk` rule (W8), and the connection has no TLS.
+
+Status: open — tracked.
+
+### W6. Host authenticity rests on hbbs and the server key
+
+No host-key pinning, no own-fingerprint display, no viewer identity key. Whoever holds the server
+key and can answer rendezvous requests can impersonate hosts and run a MITM. Section 8.
+
+Status: open — by design today.
+
+### W7. Connecting by IP address
+
+No rendezvous, no handshake, no refusal (`client.rs:609-636`, `io_loop.rs:247`). Fails against a
+Tether host; runs unencrypted against a stock RustDesk host with direct IP access. Section 4.
+
+Status: open.
+
+### W8. Key replacement at hbbs via RegisterPk
+
+Same uuid from the same IP may replace an ID's key (`rendezvous_server.rs:693-723`). The uuid is
+not secret. Impact untested; the real host's next `RegisterPk` restores its key. Section 8.
+
+Status: open (upstream rule).
+
+### W9. Unsigned update manifest
+
+`latest.json` is not signed: a compromised relay can offer an older signed build under a higher
+version or block sessions with a high `minimum_version` (`apps/desktop/src-tauri/src/update.rs:77-96`,
+`apps/quick/src-tauri/src/update.rs:79-83`). Unsigned code is still refused.
+
+Status: open.
+
+### W10. macOS direct listener not subnet-limited
+
+Windows limits the direct listener to the local subnet by firewall rule (`hooks.nsh:37-38`).
+macOS listens whenever the application firewall is off (`netpolicy.rs:86-112`, `may_listen`), on every
+network the Mac is on. The key exchange and login checks still apply.
+
+Status: open.
+
+### W11. Traffic analysis
+
+No padding: frame sizes and timing are visible to hbbr, TURN and an inspecting proxy, including
+one small frame per key press (typing rhythm, password length typed in the remote session).
+
+Status: open.
+
+### W12. Offline guessing from a captured challenge response
+
+One challenge response plus the salt and challenge allows offline password guessing at
+two SHA-256 per guess (`client.rs:5084-5093`, `connection.rs:2603-2624`). Only relevant where a
+third party gets the response (W6, W7, W8). Section 6.
+
+Status: open.
+
+### W13. Audit records can be forged
+
+Audit posts are unauthenticated device telemetry ([SECURITY.md](../SECURITY.md#session-audit-log)):
+anyone who reaches a relay can add records under any ID. Use them as a hint, not as evidence.
+
+Status: open — by design today.

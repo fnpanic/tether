@@ -24,6 +24,16 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   unsigned (rollback to an older signed build, blocking via `minimum_version`).
 - README, user guide FAQ and architecture page: security wording matched to the code, with a
   pointer to docs/encryption.md.
+- After an independent review: a "Known weaknesses" list (W1-W13, one status line each) in
+  docs/encryption.md and SECURITY.md. Added or corrected: key exchange version 0 is reachable with
+  non-Tether peers and broken (same key and nonces both ways); legacy port-forward tunnels run
+  without the inner encryption; the exact trusted-key rule (`server_keys_for`) and that `key` /
+  custom server are local options; plain `ws://` for IP endpoints; hbbs/hbbr WebSocket ports bound
+  to all interfaces with client-chosen IP headers when reached directly; password-less ways in
+  (resume ticket, file-transfer companion, trusted-device token, recent session); recording consent
+  binds honest viewers only; offline guessing from a captured challenge response; keystroke timing;
+  LAN lookup reveals the target ID; macOS direct listener not subnet-limited; machine uuid in hbbs
+  logs; hbbr may create the server key; native-tls TLS versions; the h1 citation.
 
 ## [0.5.22] — 2026-11-07
 

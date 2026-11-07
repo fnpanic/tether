@@ -12,8 +12,9 @@ Fast, private, self-hosted remote desktop for Windows and macOS, with a Linux re
   XSalsa20-Poly1305 or DTLS, forward secrecy) and Tether refuses unencrypted sessions. The relay
   forwards ciphertext; host keys are vouched for by the relay's server key, so that key must stay
   secret (whoever holds it and controls hbbs could impersonate hosts). 2FA, strong passwords and
-  brute-force limits are built in. See [docs/encryption.md](docs/encryption.md) and the threat
-  model in [SECURITY.md](SECURITY.md).
+  brute-force limits are built in. Known exceptions (old key exchange with non-Tether peers, legacy
+  TCP tunnels, connecting by IP address) and their status are listed in
+  [docs/encryption.md](docs/encryption.md#11-known-weaknesses); threat model in [SECURITY.md](SECURITY.md).
 - **Design:** [DESIGN.md](DESIGN.md).
 - **Networks:** only TCP 443 (port 80 as fallback), works behind proxies and TLS inspection. See
   [docs/corporate-networks.md](docs/corporate-networks.md) and
