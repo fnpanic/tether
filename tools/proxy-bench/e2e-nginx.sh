@@ -135,7 +135,7 @@ done
 hb='{"uuid":"e2e00001-0000-4000-8000-000000000000","id":"123456789","profile":"customer","version":"0.5.21","os":"windows 11","serial":1}'
 st=$("${C[@]}" --interface 127.0.0.9 -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 6.6.6.6' -H 'X-Real-IP: 6.6.6.6' -H 'Content-Type: application/json' --data "$hb" https://localhost:28443/api/heartbeat)
 sleep 0.3
-check "heartbeat through nginx ($st)" [ "$st" = 204 ] || [ "$st" = 200 ]
+check "heartbeat through nginx ($st)" bash -c '[ "$1" = 204 ] || [ "$1" = 200 ]' _ "$st"
 check "/api/policy reaches tether-api (404 no policy)" [ "$("${C[@]}" -o /dev/null -w '%{http_code}' https://localhost:28443/api/policy)" = 404 ]
 TK=e2eticket0123456789
 echo "[{\"ticket\":\"$TK\",\"note\":\"e2e\",\"created\":$(date +%s),\"uploaded\":null,\"size\":null}]" > "$W/api/diag/tickets.json"
@@ -161,6 +161,14 @@ check "/q/: 200, exe with trailer" bash -c "grep -qE '^HTTP/[0-9.]+ 200' <<< \"\
 check "/q/: sent by nginx from qcache (X-Accel-Redirect not leaked)" bash -c "ls '$W/api/qcache/' | grep -q acme-- && ! grep -qi '^x-accel' <<< \"\$1\"" _ "$h"
 check "/q/: content type, disposition, no-store, nosniff, HSTS" bash -c "grep -qi '^content-type: application/vnd.microsoft.portable-executable' <<< \"\$1\" && grep -qi '^content-disposition: attachment' <<< \"\$1\" && grep -qi '^cache-control: no-store' <<< \"\$1\" && grep -qi '^x-content-type-options: nosniff' <<< \"\$1\" && grep -qi '^strict-transport-security' <<< \"\$1\"" _ "$h"
 check "/q/ bad token 404" [ "$("${C[@]}" -o /dev/null -w '%{http_code}' https://localhost:28443/q/wrongtokenwrongtokenwrongtokenwrongtoken123)" = 404 ]
+# macOS: the zip with the renamed .app, also from qcache, as application/zip; the profile by mac id.
+m="$W/api/download/stable/customer/darwin-universal"; mkdir -p "$m"
+cp "$REPO/server/api/tests/fixtures/TetherQS-mini.zip" "$m/TetherQS-9.9.9-universal.zip"
+echo '{"version":"9.9.9","platforms":{"darwin-universal":{"signature":"x","url":"https://r/TetherQS-9.9.9-universal.zip"}}}' > "$m/latest.json"
+MID=$(printf 'tetherqs-mac-id\0%s' "$TOK" | sha256sum | cut -c1-16)
+h=$("${C[@]}" -D - -o "$W/q.zip" "https://localhost:28443/q/$TOK/mac" | tr -d '\r')
+check "/q/<token>/mac: application/zip from qcache, .app renamed" bash -c "grep -qi '^content-type: application/zip' <<< \"\$1\" && grep -qi 'filename=\"ACME-Support.zip\"' <<< \"\$1\" && ! grep -qi '^x-accel' <<< \"\$1\" && grep -qa 'ACME-Support \[$MID\].app/Contents/' '$W/q.zip' && ls '$W/api/qcache/' | grep -q 'acme--.*zip'" _ "$h"
+check "/q/m/<mac id>: the profile" [ "$("${C[@]}" "https://localhost:28443/q/m/$MID")" = '{"x":1}' ]
 q=$(ls "$W/api/qcache/" | head -1)
 for u in "/qcache/$q" "/download/../qcache/$q" "/download/%2e%2e/qcache/$q"; do
   check "qcache not reachable by URL: $u" [ "$("${C[@]}" --path-as-is -o /dev/null -w '%{http_code}' "https://localhost:28443$u")" = 404 ]

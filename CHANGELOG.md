@@ -6,6 +6,17 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Added
+- **Custom apps for macOS**: the private link `/q/<token>` serves a Mac browser the TetherQS zip
+  with the `.app` folder renamed to `<Name>-Support [<mac id>].app` (the folder name is not part of
+  the code signature: codesign and the Gatekeeper verdict unchanged, checked on the Mac); everything
+  else gets the exe as before, `/q/<token>/mac` and `/windows` choose. TetherQS on macOS reads the
+  mac id (SHA-256 of the token, 16 hex; never the token) from its folder name, fetches the signed
+  profile from the new `/q/m/<mac id>`, verifies it with the admin keys, caches it and applies it
+  like the Windows trailer; survives self-updates. `--print-custom-profile` diagnostic. Relays:
+  tether-api, Caddyfile / nginx.conf / Helm (Content-Type of the prepared file from tether-api).
+  Tether Manage: text only.
+
 ## [0.5.24] — 2026-11-07
 Tether / TetherQS 0.5.24 (Windows and macOS), Tether Manage 0.5.7; relays: tether-api, hbbs, Caddy/nginx config (deployed 2026-11-07).
 
