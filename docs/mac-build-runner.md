@@ -70,7 +70,9 @@ uses, cannot watch per-user subfolders). Per pass it:
    `on_unlock: pending`; the runner starts it once the user's session is unlocked (output
    `on-unlock.log`, 15 min limit, then `ok` / `failed: exit N`). A cancel for the job id drops it.
 7. **Housekeeping**: finished jobs and refusal notes older than 7 days are deleted. After a runner
-   restart, jobs that were running are marked `failed: runner restarted` and their secrets deleted.
+   restart, jobs that were running are marked `failed: runner restarted` and their secrets deleted;
+   their process group is killed only if its leader (`ps -o lstart`) started within 5 s of the
+   job, so a pid reused after a reboot or wrap is left alone.
    When `runner.py` was replaced (update job) the runner exits as soon as nothing runs, and launchd
    (`KeepAlive`) starts the new version.
 

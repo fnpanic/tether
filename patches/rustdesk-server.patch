@@ -2737,7 +2737,7 @@ index 0ec190a..ad44169 100644
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..9a5cd65 100644
+index dff45eb..764cd66 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,14 @@ use std::{
@@ -3786,7 +3786,7 @@ index dff45eb..9a5cd65 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1754,420 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1754,421 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
@@ -3829,8 +3829,9 @@ index dff45eb..9a5cd65 100644
 +
 +/// The least loaded healthy primary relay, or backup relay when no primary is healthy;
 +/// `rotation` spreads new sessions over equally loaded ones.
-+// shortcut: load is sampled every 3 s, so a burst inside one interval goes to the same relay;
-+// count handed-out sessions locally if bursts matter.
++// shortcut: load is sampled every 3 s, so a burst inside one interval goes to the same relay
++// (moot with one primary, today's setup). Count handed-out sessions locally once two or more
++// primaries run (docs/scaling.md) and a burst can reach a relay's headroom.
 +fn pick_relay(relays: &[(String, usize, bool)], rotation: usize) -> String {
 +    let backup = !has_primary(relays);
 +    let pool: Vec<_> = relays.iter().filter(|r| r.2 == backup).collect();

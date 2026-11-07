@@ -214,7 +214,8 @@ fn platform_proxy(target: &str) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn platform_proxy(_target: &str) -> Option<String> {
-    // shortcut: static HTTPS proxy only; PAC on macOS needs CFNetwork, add when a customer needs it.
+    // shortcut: static HTTPS proxy only (a PAC/WPAD-only network goes direct); PAC needs
+    // CFNetwork. Upgrade when a customer's Macs show `ProxyAutoConfigEnable : 1` in `scutil --proxy`.
     let out = std::process::Command::new("/usr/sbin/scutil").arg("--proxy").output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let get = |k: &str| {
