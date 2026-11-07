@@ -11,8 +11,14 @@ WorkingDirectory=/var/lib/tether
 EnvironmentFile=-/etc/tether/server.env
 # KEYS_ACCEPT: more server public keys accepted during a key rotation (docs/key-rotation.md).
 EnvironmentFile=-/etc/tether/keys.env
+# RegisterPk per source IP (upstream: 30/min, 300 new ids/day). A whole office behind one NAT is
+# one IP; known hosts re-registering after a restart are not limited (docs/scaling.md).
+# server.env may override both.
+Environment=IP_BLOCK_PER_MIN=300 IP_BLOCK_IDS_PER_DAY=5000
 # RELAY_SERVERS (server.env): every relay hbbs may hand out, `<host>|<health URL>` (docs/relay-ha.md).
-ExecStart=/usr/local/bin/hbbs -r ${RELAY_SERVERS} -k _
+# -M: UDP receive buffer for registrations, STUN and TURN media (capped by net.core.rmem_max,
+# server/sysctl/90-tether.conf).
+ExecStart=/usr/local/bin/hbbs -r ${RELAY_SERVERS} -k _ -M 8388608
 Restart=always
 RestartSec=3
 LimitNOFILE=1000000

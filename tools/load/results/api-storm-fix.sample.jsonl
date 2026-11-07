@@ -1,0 +1,7 @@
+{"t":5,"api":{"cpu":87.6,"rss_mb":3.6,"fds":134,"thr":66}}
+{"t":10,"api":{"cpu":83.2,"rss_mb":4.9,"fds":134,"thr":68}}
+{"t":18,"api":{"cpu":73.8,"rss_mb":5.1,"fds":136,"thr":68}}
+{"t":23,"api":{"cpu":89.2,"rss_mb":4.8,"fds":6,"thr":66}}
+{"t":28,"api":{"cpu":0.0,"rss_mb":4.1,"fds":6,"thr":2}}
+{"t":33,"api":{"cpu":0.0,"rss_mb":4.1,"fds":6,"thr":2}}
+{"t":38,"api":{"cpu":0.0,"rss_mb":4.1,"fds":6,"thr":2}}

@@ -44,8 +44,9 @@
       request_buffers 512k
     }
   }
+  # The api pod's Caddy sends the prepared file (templates/api.yaml).
   handle /q/* {
-    reverse_proxy {{ $fn }}-api:21120
+    reverse_proxy {{ $fn }}-api:8081
   }
   handle /download/* {
     reverse_proxy {{ $fn }}-api:8081

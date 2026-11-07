@@ -1,0 +1,43 @@
+# Values for 10 000 registered devices and 3 000 concurrent sessions (docs/scaling.md):
+#   helm upgrade --install tether deploy/helm/tether-relay -f deploy/helm/tether-relay/examples/scale-10k.yaml
+# Sizes come from the load tests in docs/scaling.md ("Measured"); the chart defaults (256Mi) are
+# for a few hundred devices and would be OOM-killed at this size.
+
+hbbs:
+  # Every device registers with every hbbs pod (one WebSocket each, ~24 KB in hbbs).
+  replicas: 2
+  env:
+    # RegisterPk per source IP: whole sites behind one NAT (docs/scaling.md).
+    IP_BLOCK_PER_MIN: "300"
+    IP_BLOCK_IDS_PER_DAY: "5000"
+  resources:
+    requests: { cpu: 250m, memory: 384Mi }
+    limits: { cpu: "2", memory: 768Mi }
+
+hbbr:
+  # ~1 Gbit/s of relayed traffic per pod at ~1.2 cores (mimalloc build); hbbs hands out the least
+  # loaded pod. 1 500 relayed sessions at ~1 Mbit/s: 3 pods + 1 for drains and failures.
+  replicas: 4
+  env:
+    # Mb/s per pod over all its sessions (hbbr default 1024): above it every session on the pod
+    # queues. Set to what one pod's node can send.
+    TOTAL_BANDWIDTH: "1024"
+  resources:
+    requests: { cpu: "1", memory: 128Mi }
+    limits: { cpu: "3", memory: 512Mi }
+
+proxy:
+  # Caddy holds ~145 KB per idle TLS WebSocket (20 000 host registrations: 2 hbbs pods x 10 000
+  # devices) and needs ~3.3 cores per relayed Gbit/s with TLS here (less when TLS ends at the
+  # load balancer). Never set GOMEMLIMIT below the working set: GC then burns all CPU.
+  replicas: 3
+  resources:
+    requests: { cpu: "2", memory: 1536Mi }
+    limits: { cpu: "4", memory: 3Gi }
+
+api:
+  enabled: true
+  resources:
+    # 1 500 requests/s took one core; 10 000 devices use < 10 MB.
+    requests: { cpu: 100m, memory: 32Mi }
+    limits: { cpu: "1", memory: 128Mi }
