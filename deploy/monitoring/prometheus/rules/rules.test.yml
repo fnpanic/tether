@@ -107,3 +107,46 @@ tests:
             exp_annotations:
               summary: "tether-desk dropped 120 incoming connections (listen queue full)"
               description: "A reconnect storm overflowed a listen backlog: check somaxconn (sysctl 90-tether.conf) and the front end's backlog."
+  - interval: 1m
+    input_series:
+      - series: 'tether_api_release_generation{job="api",node="tether-desk"}'
+        values: '5x20'
+      - series: 'hbbs_release_generation{job="hbbs",node="tether-desk"}'
+        values: '4x20'
+      - series: 'tether_api_release_generation{job="api",node="tether-desk2"}'
+        values: '5x20'
+      - series: 'hbbs_release_generation{job="hbbs",node="tether-desk2"}'
+        values: '5x20'
+      - series: 'tether_api_release_index_serial{job="api",node="tether-desk",channel="stable"}'
+        values: '7x20'
+      - series: 'tether_api_release_index_serial{job="api",node="tether-desk2",channel="stable"}'
+        values: '6x20'
+      - series: 'tether_api_devices_update_state{job="api",node="tether-desk",state="failed"}'
+        values: '5x40'
+      - series: 'tether_api_devices_update_state{job="api",node="tether-desk",state="idle"}'
+        values: '95x40'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ReleaseGenerationMismatch
+        exp_alerts:
+          - exp_labels: { severity: warning, node: tether-desk }
+            exp_annotations:
+              summary: "tether-desk: hbbs does not push the current release generation"
+              description: "tether-api is at another release generation than hbbs for 2 minutes: the push hint is broken (hbbs cannot read /var/lib/tether-api/release-generation: group tether-api, restart hbbs). Devices still learn of releases from the heartbeat within 15 minutes."
+      - eval_time: 5m
+        alertname: ReleaseIndexMismatch
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: ReleaseIndexMismatch
+        exp_alerts:
+          - exp_labels: { severity: warning, channel: stable }
+            exp_annotations:
+              summary: "The release index of channel stable differs between relays"
+              description: "Not every relay has the newest signed release index for 10 minutes: a publish did not reach every relay. Tether Manage › Releases › Publish to missing relays."
+      - eval_time: 31m
+        alertname: UpdateFailuresHigh
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "5% of active devices report a failed update"
+              description: "Downloads or verification fail on many devices: a bad upload (sha256 or signature), a blocked CDN without relay fallback, or 503s from the download cap. Consider halting the rollout (Tether Manage › Releases › Rollouts)."

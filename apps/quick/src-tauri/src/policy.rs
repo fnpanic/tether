@@ -258,13 +258,37 @@ fn heartbeat() -> Result<(), String> {
     if keys_serial > 0 {
         body["server_keys_serial"] = serde_json::json!(keys_serial);
     }
-    http()?
-        .post(format!("{base}/api/heartbeat"))
-        .json(&body)
-        .send()
-        .map_err(|e| e.to_string())?;
+    let plain = body.clone();
+    // Update state only to relays that answered with a release generation: older ones reject
+    // unknown fields (400), and then the plain heartbeat goes again.
+    let new_relay = RELAY_HAS_RELEASES.load(Ordering::Relaxed);
+    if new_relay {
+        let (state, serial, version) = crate::update::heartbeat_fields();
+        body["release_serial"] = serde_json::json!(serial);
+        body["update_state"] = serde_json::json!(state);
+        if tether_trust::release::valid_version(&version) {
+            body["update_version"] = serde_json::json!(version);
+        }
+    }
+    let client = http()?;
+    let send = |b: &serde_json::Value| client.post(format!("{base}/api/heartbeat")).json(b).send().map_err(|e| e.to_string());
+    let mut resp = send(&body)?;
+    if new_relay && resp.status().as_u16() == 400 {
+        RELAY_HAS_RELEASES.store(false, Ordering::Relaxed);
+        resp = send(&plain)?;
+    }
+    // `{"releases": G}`: the relay's release generation; a change means "check for updates".
+    if resp.status().as_u16() == 200 {
+        if let Some(g) = tether_trust::read_limited(resp, 1024).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).and_then(|v| v["releases"].as_u64()) {
+            RELAY_HAS_RELEASES.store(true, Ordering::Relaxed);
+            crate::update::hint(server_host(base.trim_start_matches("https://")), g, 60);
+        }
+    }
     Ok(())
 }
+
+/// The heartbeat relay answered with a release generation (it knows the update fields).
+static RELAY_HAS_RELEASES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Background refresh every `policy.refresh-minutes` (1 with `policy.fast-apply`).
 /// Builds without an admin key (debug only, see build.rs) keep the defaults and stay offline.

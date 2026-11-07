@@ -68,7 +68,7 @@ export function App() {
       <TitleBar title={s.branding.title} logo={s.branding.logo} onHelp={s.branding.diagnostics ? () => setHelp(!help) : undefined} helpOpen={help} />
       <div className="flex min-h-0 flex-1 flex-col px-6 pb-5">
         {help ? (
-          <Help customApp={s.branding.custom_app} status={s.status} lastCheck={s.update.last_check} onBack={() => setHelp(false)} />
+          <Help customApp={s.branding.custom_app} status={s.status} lastCheck={s.update.last_check} stale={s.update.stale} onBack={() => setHelp(false)} />
         ) : (
           <>
             <UpdateBanner s={s} />
@@ -489,6 +489,7 @@ function UpdateBanner({ s }: { s: State }) {
       <div className="min-w-0 flex-1 text-caption">
         {s.blocked ? "An update is required before your technician can connect." : `Version ${u.available} is available.`}
         {countdown !== null && <span className="text-muted"> Restarting in {countdown} s.</span>}
+        {u.waiting_idle && countdown === null && <span className="text-muted"> Will update after this session.</span>}
         {u.error && <div className="text-footnote text-danger">{u.error}</div>}
       </div>
       {u.available && (
@@ -528,7 +529,7 @@ function Footer({ s, onError }: { s: State; onError: (m: string) => void }) {
   );
 }
 
-function Help({ customApp, status, lastCheck, onBack }: { customApp: string | null; status: number; lastCheck: string | null; onBack: () => void }) {
+function Help({ customApp, status, lastCheck, stale, onBack }: { customApp: string | null; status: number; lastCheck: string | null; stale?: boolean; onBack: () => void }) {
   const [d, setD] = useState<Diagnostics | null>(null);
   const [err, setErr] = useState("");
   // Per server; missing = checking. The local rows never wait for it.
@@ -551,7 +552,7 @@ function Help({ customApp, status, lastCheck, onBack }: { customApp: string | nu
     ? [
         ...(customApp ? ([["Custom app", customApp]] as [string, ReactNode][]) : []),
         ["Version", d.version],
-        ["Updates", <UpdateCheck last={lastCheck} />],
+        ["Updates", <UpdateCheck last={lastCheck} stale={stale} />],
         ["ID", formatId(d.id)],
         ["Connection", status === 1 ? "Ready" : status === 0 ? "Connecting to the server…" : "Offline"],
         ...(d.servers.length ? d.servers : [""]).map((sv, i): [string, ReactNode] => [
@@ -601,7 +602,7 @@ function Help({ customApp, status, lastCheck, onBack }: { customApp: string | nu
 }
 
 /** "Check for updates": the last result (also of the automatic check) and a button to check now. */
-function UpdateCheck({ last }: { last: string | null }) {
+function UpdateCheck({ last, stale }: { last: string | null; stale?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const check = () => {
@@ -621,6 +622,7 @@ function UpdateCheck({ last }: { last: string | null }) {
       <span data-testid="qs-update-check" className={text.startsWith("Check failed") ? "text-danger" : "text-muted"}>
         {text}
       </span>
+      {stale && <span className="text-warn">Update information is out of date.</span>}
       <button className="self-start text-accent disabled:opacity-40" disabled={busy} onClick={check}>
         Check for updates
       </button>

@@ -40,6 +40,7 @@ States per layer: `on` (user may change, `value` is the default), `off` (locked 
 | `update.check-hours` | updates | Check for updates every (hours) | `6` | technician, customer | – |
 | `update.minimum-version` | updates | Minimum version (older versions cannot connect) | – | technician, customer | – |
 | `update.force` | updates | Install required updates automatically | `N` | technician, customer | – |
+| `update.rollout` | updates | Staged rollouts: early joins the first wave, late waits until a release reaches everyone (early, default, late) | `default` | technician, customer | – |
 | `update.restart-seconds` | updates | Countdown before a forced update restarts the app (s) | `60` | technician, customer | – |
 | `policy.refresh-minutes` | policy | Check for policy changes every (minutes) | `15` | technician, customer | – |
 | `policy.fast-apply` | policy | Fast apply (check every minute) | `N` | technician, customer | – |

@@ -559,6 +559,12 @@ pub fn open_session(app: &AppHandle, peer: &str, conn: &str) -> tauri::Result<St
 /// Open session windows: key, peer, connection type.
 static WINDOWS: std::sync::Mutex<Vec<(String, String, String)>> = std::sync::Mutex::new(Vec::new());
 
+/// Main process: a session runs (an outgoing session or file transfer window, or a host session
+/// the `--cm` process reported). A forced update waits for this to clear (D7).
+pub fn busy() -> bool {
+    !open_sessions().is_empty() || HOST_SESSION.load(Ordering::Relaxed) != 0
+}
+
 /// Open session windows as `(key, peer, conn)`, oldest first (Advanced mode's session list).
 pub fn open_sessions() -> Vec<(String, String, String)> {
     WINDOWS.lock().unwrap_or_else(|e| e.into_inner()).clone()

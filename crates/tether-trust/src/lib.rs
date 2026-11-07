@@ -7,12 +7,14 @@
 //! - [`policy`]: policy bundle, feature registry, resolution into effective settings.
 //! - [`version`]: version ordering for update enforcement.
 //! - [`custom`]: signed custom TetherQS apps (trailer appended to the exe, distribution tokens).
+//! - [`release`]: signed release index, rollout, artifact binding (docs/update-design.md).
 //! - [`serverkeys`]: signed list of accepted server keys (server key rotation).
 //! - [`team`]: team roster (technician keys for `/api/team/*`) and key fingerprints.
 
 pub mod custom;
 pub mod envelope;
 pub mod policy;
+pub mod release;
 pub mod reqauth;
 pub mod serverkeys;
 pub mod team;

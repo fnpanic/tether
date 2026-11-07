@@ -1,5 +1,5 @@
 diff --git a/protos/rendezvous.proto b/protos/rendezvous.proto
-index b9b8ed7..39fa188 100644
+index b9b8ed7..31e1043 100644
 --- a/protos/rendezvous.proto
 +++ b/protos/rendezvous.proto
 @@ -12,6 +12,7 @@ enum ConnType {
@@ -146,7 +146,7 @@ index b9b8ed7..39fa188 100644
  }
  
  message PeerDiscovery {
-@@ -164,12 +226,51 @@ message OnlineResponse {
+@@ -164,12 +226,59 @@ message OnlineResponse {
  
  message KeyExchange {
    repeated bytes keys = 1; 
@@ -195,16 +195,26 @@ index b9b8ed7..39fa188 100644
 +  string candidate = 4;
 +}
 +
++// Tether: the relay's release generation changed (docs/update-design.md). Sent by hbbs on the
++// WebSocket of registered hosts only; a client waits uniform(0, spread_secs) and fetches the signed
++// release index. Unsigned on purpose: it only triggers a fetch. Old clients ignore the field.
++message ReleaseHint {
++  uint64 generation = 1;
++  uint32 spread_secs = 2;
++}
++
  message RendezvousMessage {
    oneof union {
      RegisterPeer register_peer = 6;
-@@ -193,5 +294,8 @@ message RendezvousMessage {
+@@ -193,5 +302,10 @@ message RendezvousMessage {
      OnlineResponse online_response = 24;
      KeyExchange key_exchange = 25;
      HealthCheck hc = 26;
 +    HttpProxyRequest http_proxy_request = 27;
 +    HttpProxyResponse http_proxy_response = 28;
 +    IceCandidate ice_candidate = 29;
++    // Tether: high tag, clear of future upstream ones.
++    ReleaseHint release_hint = 1001;
    }
  }
 diff --git a/src/tcp.rs b/src/tcp.rs

@@ -38,6 +38,8 @@ sysuser tether-api /var/lib/tether-api
 sysuser tether-https /var/lib/tether-https
 # Caddy serves /download/* straight from tether-api's data dir (group-readable, UMask=0027).
 usermod -aG tether-api tether-https
+# hbbs reads tether-api's release-generation for its update push hint (docs/update-design.md).
+usermod -aG tether-api tether
 install -d -o tether -g tether -m 0750 /var/lib/tether
 install -d -o tether-api -g tether-api -m 0750 /var/lib/tether-api
 install -d -o tether-https -g tether-https -m 0750 /var/lib/tether-https

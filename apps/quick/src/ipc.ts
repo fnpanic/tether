@@ -42,7 +42,7 @@ export interface State {
     /** data: URL of the custom app's logo, "" = none. */
     logo: string;
   };
-  update: { available: string | null; notes: string; required: boolean; forced_at: number | null; installing: boolean; error: string | null; last_check: string | null; progress: [number, number] | null };
+  update: { available: string | null; notes: string; required: boolean; forced_at: number | null; installing: boolean; error: string | null; last_check: string | null; progress: [number, number] | null; serial: number; stale: boolean; phase: string; waiting_idle: boolean };
   clients: Client[];
 }
 

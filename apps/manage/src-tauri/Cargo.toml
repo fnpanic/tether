@@ -28,6 +28,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 # Already in the tree via reqwest; streams release uploads for the progress bar.
 futures-util = { version = "0.3", default-features = false }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Already in the tree: release index hashes (sha256) and the gzip copy of TetherQS.exe for the CDN.
+sha2 = "0.10"
+flate2 = "1"
 
 # Already in the tree (0.61 via tauri); the private server key file gets a user-only DACL.
 [target.'cfg(windows)'.dependencies]

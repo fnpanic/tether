@@ -4,7 +4,10 @@
 //! list, docs/key-rotation.md), `devices.json`, `nonces.json`,
 //! `diag/tickets.json` + `diag/<ticket>.zip`, `custom/<id>.json` (custom TetherQS apps),
 //! `audit/<YYYY-MM-DD>.jsonl` (session audit log, `audit.rs`), `team/roster.json` + `team/tags.json`
-//! (technician access, `team.rs`), `download/…` (served by Caddy), `tmp/`.
+//! (technician access, `team.rs`), `download/…` (served by Caddy; `download/<channel>/releases.json`,
+//! the signed release index, by this server with `ETag: "<serial>"`), `release-generation` (the
+//! release generation G, bumped on every index or manifest change, read by hbbs for its push hint;
+//! docs/update-design.md), `tmp/`.
 
 mod audit;
 mod metrics;
@@ -26,7 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tether_trust::{custom, envelope, policy::Bundle, reqauth, serverkeys::KeyList, VerifyingKey};
+use tether_trust::{custom, envelope, policy::Bundle, release, reqauth, serverkeys::KeyList, VerifyingKey};
 use tiny_http::{Header, Request, Response, Server};
 
 const DAY: u64 = 86_400;
@@ -75,7 +78,20 @@ struct Heartbeat {
     /// Serial of the server key list the device applied (absent: none).
     #[serde(default)]
     server_keys_serial: u64,
+    /// Release index serial the device accepted (0: none). Sent only to relays that answered a
+    /// heartbeat with `{"releases": G}` (older relays reject unknown fields).
+    #[serde(default)]
+    release_serial: u64,
+    /// One of [`UPDATE_STATES`].
+    #[serde(default)]
+    update_state: String,
+    /// The version being downloaded / staged / waited for.
+    #[serde(default)]
+    update_version: String,
 }
+
+/// `update_state` values (docs/api.md "Heartbeat").
+const UPDATE_STATES: [&str; 9] = ["", "idle", "waiting-rollout", "downloading", "staged", "waiting-idle", "failed", "stale", "halted"];
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Device {
@@ -87,6 +103,12 @@ struct Device {
     serial: u64,
     #[serde(default)]
     server_keys_serial: u64,
+    #[serde(default)]
+    release_serial: u64,
+    #[serde(default)]
+    update_state: String,
+    #[serde(default)]
+    update_version: String,
     ip: String,
     last_seen: u64,
 }
@@ -220,6 +242,30 @@ struct App {
     policy_serial: Option<u64>,
     server_keys_serial: Option<u64>,
     team: team::Team,
+    /// Release generation G (`release-generation`).
+    release_gen: u64,
+    /// Per channel: serial and expiry of the stored `releases.json`.
+    indexes: HashMap<String, (u64, u64)>,
+    /// Devices that reported a newly staged update, by (profile, version), since start.
+    downloads: std::collections::BTreeMap<(String, String), u64>,
+}
+
+/// `/download/<channel>/releases.json` → the channel.
+fn release_index_channel(p: &str) -> Option<&str> {
+    let (ch, rest) = p.strip_prefix("/download/")?.split_once('/')?;
+    (rest == "releases.json" && valid_channel(ch)).then_some(ch)
+}
+
+/// Distinct (profile, version) series in the download counter; heartbeats are unauthenticated.
+const MAX_DOWNLOAD_SERIES: usize = 64;
+
+/// Serial and expiry of a stored release index (verified against the key it names: it was
+/// checked against the trusted keys on upload).
+fn index_meta(raw: &[u8]) -> Option<(u64, u64)> {
+    let doc: envelope::Signed = serde_json::from_slice(raw).ok()?;
+    let key = tether_trust::key_from_b64(&doc.key).ok()?;
+    let i = release::Index::from_json(&envelope::open(&doc, &[key]).ok()?).ok()?;
+    Some((i.serial, i.expires))
 }
 
 fn now() -> u64 {
@@ -480,6 +526,12 @@ fn valid_heartbeat(hb: &Heartbeat) -> Result<(), String> {
     if hb.os.len() > 128 || hb.os.chars().any(char::is_control) {
         return Err("bad os".into());
     }
+    if !UPDATE_STATES.contains(&hb.update_state.as_str()) {
+        return Err("bad update_state".into());
+    }
+    if !hb.update_version.is_empty() && !release::valid_version(&hb.update_version) {
+        return Err("bad update_version".into());
+    }
     Ok(())
 }
 
@@ -514,6 +566,14 @@ impl App {
         let devices: Vec<Device> = load_json(&data.join("devices.json"));
         let policy_serial = fs::read(data.join("policy.json")).ok().and_then(|b| stored_meta(&b)).map(|m| m.serial);
         let server_keys_serial = fs::read(data.join("server-keys.json")).ok().and_then(|b| stored_meta(&b)).map(|m| m.serial);
+        let release_gen = fs::read_to_string(data.join("release-generation")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        let mut indexes = HashMap::new();
+        for e in fs::read_dir(data.join("download"))?.flatten() {
+            let ch = e.file_name().to_string_lossy().into_owned();
+            if let Some(m) = fs::read(e.path().join("releases.json")).ok().and_then(|b| index_meta(&b)) {
+                indexes.insert(ch, m);
+            }
+        }
         let mut custom: Vec<CustomApp> = Vec::new();
         for e in fs::read_dir(data.join("custom"))?.flatten() {
             let p = e.path();
@@ -538,6 +598,9 @@ impl App {
             tickets: load_json(&data.join("diag/tickets.json")),
             policy_serial,
             server_keys_serial,
+            release_gen,
+            indexes,
+            downloads: Default::default(),
             started: now(),
             keys,
             data,
@@ -596,6 +659,11 @@ impl App {
         match (method.as_str(), path) {
             ("GET", "/api/policy") => self.get_signed(rq, self.policy_serial, "policy.json", "no policy published"),
             ("GET", "/api/server-keys") => self.get_signed(rq, self.server_keys_serial, "server-keys.json", "no server key list published"),
+            ("GET", p) if release_index_channel(p).is_some() => {
+                let ch = release_index_channel(p).unwrap_or_default();
+                let r = self.get_signed(rq, self.indexes.get(ch).map(|m| m.0), &format!("download/{ch}/releases.json"), "no release index published")?;
+                Ok(r.with_header(hdr("Cache-Control", "no-cache")))
+            }
             ("POST", "/api/heartbeat") => self.heartbeat(rq, body),
             ("POST", "/api/audit/conn") => self.audit_post(rq, body, "conn"),
             ("POST", "/api/audit/file") => self.audit_post(rq, body, "file"),
@@ -651,12 +719,25 @@ impl App {
             os: hb.os,
             serial: hb.serial,
             server_keys_serial: hb.server_keys_serial,
+            release_serial: hb.release_serial,
+            update_state: hb.update_state,
+            update_version: hb.update_version,
             ip,
             last_seen: t,
         };
+        // "Downloads by version": a device reporting a staged update it did not report before.
+        let staged = |s: &str| matches!(s, "staged" | "waiting-idle");
+        let prev = self.devices.get(&d.uuid).filter(|p| staged(&p.update_state)).map(|p| p.update_version.clone());
+        if staged(&d.update_state) && !d.update_version.is_empty() && prev.as_deref() != Some(&d.update_version) {
+            let k = (d.profile.clone(), d.update_version.clone());
+            if self.downloads.contains_key(&k) || self.downloads.len() < MAX_DOWNLOAD_SERIES {
+                *self.downloads.entry(k).or_default() += 1;
+            }
+        }
         self.devices.insert(d.uuid.clone(), d);
         self.devices_dirty = true;
-        Ok(empty(204))
+        // The release generation: a device that sees it change checks for updates (≤ 15 min).
+        Ok(json(&serde_json::json!({ "releases": self.release_gen })))
     }
 
     /// `POST /api/audit/<kind>` from a host (unauthenticated, see audit.rs). Success is an empty
@@ -792,6 +873,8 @@ impl App {
                 "devices": self.devices.len(),
                 "policy_serial": self.policy_serial,
                 "server_keys_serial": self.server_keys_serial,
+                "release_generation": self.release_gen,
+                "release_indexes": self.indexes.iter().map(|(c, (s, e))| (c.clone(), serde_json::json!({"serial": s, "expires": e}))).collect::<serde_json::Map<_, _>>(),
                 "uptime": now().saturating_sub(self.started),
             }))),
             (_, r) => {
@@ -1026,16 +1109,58 @@ impl App {
     fn put_release(&mut self, rq: &mut Request, body: &Body, url: &str, dest: &Path) -> Result<Resp, Resp> {
         let (tmp, _) = body.file()?;
         with_mapped(tmp, |body| self.auth(rq, "PUT", url, body)).map_err(internal)??;
+        let index = self.index_channel(dest);
+        if let Some(ch) = &index {
+            // The signed release index: verified like a policy, serials only go up. The same
+            // document again (Manage's "publish to missing relays") is accepted unchanged.
+            let raw = fs::read(tmp).map_err(internal)?;
+            if raw.len() > release::MAX_INDEX {
+                return Err(too_large());
+            }
+            let ix = release::Index::open(&raw, &self.keys, ch).map_err(|e| text(400, &e))?;
+            if let Some((cur, _)) = self.indexes.get(ch) {
+                if ix.serial < *cur || (ix.serial == *cur && fs::read(dest).ok().as_deref() != Some(&raw[..])) {
+                    return Err(text(409, "serial must be greater than the current release index's"));
+                }
+            }
+            self.indexes.insert(ch.clone(), (ix.serial, ix.expires));
+        }
         mkdirs(dest.parent().expect("under download/"), 0o750).map_err(internal)?;
         fs::rename(tmp, dest).map_err(internal)?;
+        self.bump_generation(dest);
         Ok(empty(204))
     }
 
-    fn delete_release(&self, dest: &Path) -> Result<Resp, Resp> {
+    /// `download/<channel>/releases.json` → its channel.
+    fn index_channel(&self, dest: &Path) -> Option<String> {
+        let rel = dest.strip_prefix(self.data.join("download")).ok()?;
+        let mut it = rel.iter();
+        let ch = it.next()?.to_str()?.to_owned();
+        (it.next()? == "releases.json" && it.next().is_none()).then_some(ch)
+    }
+
+    /// Every change of an index or a `latest.json` bumps G, written for hbbs (`release-generation`,
+    /// group-readable: hbbs's user is in group tether-api, see install.sh).
+    fn bump_generation(&mut self, dest: &Path) {
+        if !dest.file_name().is_some_and(|n| n == "releases.json" || n == "latest.json") {
+            return;
+        }
+        self.release_gen += 1;
+        let (gen, path) = (self.release_gen, self.data.join("release-generation"));
+        if let Err(e) = self.write_atomic(&path, format!("{gen}\n").as_bytes(), 0o644) {
+            eprintln!("release-generation: {e}");
+        }
+    }
+
+    fn delete_release(&mut self, dest: &Path) -> Result<Resp, Resp> {
         if !dest.is_file() {
             return Err(not_found());
         }
         fs::remove_file(dest).map_err(internal)?;
+        if let Some(ch) = self.index_channel(dest) {
+            self.indexes.remove(&ch);
+        }
+        self.bump_generation(dest);
         let root = self.data.join("download");
         let mut dir = dest.parent();
         while let Some(d) = dir.filter(|d| *d != root) {
@@ -1071,10 +1196,23 @@ impl App {
     /// Values for `/metrics` (`metrics.rs`).
     fn metrics_now(&self) -> Option<metrics::Now> {
         let t = now();
+        let active: Vec<&Device> = self.devices.values().filter(|d| d.last_seen + DAY > t).collect();
+        let mut by_version: HashMap<(String, String), u64> = HashMap::new();
+        let mut states: HashMap<String, u64> = HashMap::new();
+        for d in &active {
+            *by_version.entry((d.profile.clone(), d.version.clone())).or_default() += 1;
+            let s = if d.update_state.is_empty() { "unknown" } else { d.update_state.as_str() };
+            *states.entry(s.to_owned()).or_default() += 1;
+        }
         Some(metrics::Now {
             max_workers: MAX_WORKERS,
             devices: self.devices.len(),
-            devices_24h: self.devices.values().filter(|d| d.last_seen + DAY > t).count(),
+            devices_24h: active.len(),
+            release_generation: self.release_gen,
+            indexes: self.indexes.iter().map(|(c, (s, e))| (c.clone(), *s, *e)).collect(),
+            by_version: metrics::top(by_version, metrics::MAX_VERSION_SERIES),
+            update_states: states.into_iter().collect(),
+            downloads: self.downloads.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         })
     }
 

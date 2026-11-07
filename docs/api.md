@@ -58,7 +58,14 @@ Body (JSON, ≤ 2048 bytes, unknown fields rejected):
 ```
 `server_keys_serial` (optional, default 0): the server key list the device applied. Clients send
 it only once they have a list, so relay APIs from before it keep accepting their heartbeats.
-`204` on success. `429` when the same uuid posts more than once per 60 s or an IP more than 30 per
+Optional update fields (clients send them only to a relay that answered `{"releases": …}`, and
+retry without them on a `400`): `release_serial` (release index serial the device accepted),
+`update_state` (`idle`, `waiting-rollout`, `downloading`, `staged`, `waiting-idle`, `failed`,
+`stale`, `halted`), `update_version` (the version in flight).
+`200 {"releases": G}` on success (relays before 0.5.24: `204`, no body): `G` is the relay's
+release generation, bumped by every change of a `releases.json` or `latest.json`. A client that
+sees it change checks for updates (after a random delay); it is unsigned and only triggers a fetch.
+Clients up to 0.5.23 accept any 2xx and ignore the body. `429` when the same uuid posts more than once per 60 s or an IP more than 30 per
 minute. The server stores `{…, "ip": <client ip from X-Forwarded-For>, "last_seen": unix}` per uuid,
 at most 10 000 devices (oldest `last_seen` evicted), entries older than 180 days dropped.
 Clients send it after each policy check.
@@ -130,7 +137,7 @@ Failure: `401` with a short reason. Bodies over the limits: `413`.
 | `GET /api/admin/releases` | – | `[{channel,path,size,modified}]` |
 | `PUT /api/admin/download-page` | HTML (≤ 512 KiB) | `204`, stored as `download/index.html` |
 | `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>` | – | Session audit records (above), newest first. All optional: `since` (default 0), `limit` 1–5000 (default 1000), `device` matches `id` or `uuid` exactly (URL-encoded). Unknown parameter or bad value: `400`. |
-| `GET /api/admin/status` | – | `{version, disk_free, devices, policy_serial, server_keys_serial, uptime}` |
+| `GET /api/admin/status` | – | `{version, disk_free, devices, policy_serial, server_keys_serial, release_generation, release_indexes: {<channel>: {serial, expires}}, uptime}` |
 | `PUT /api/admin/team` | team roster (≤ 64 KiB, below) | `204`. Validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600). `{"members":[]}` turns team access off. |
 | `GET /api/admin/team` | – | the roster (`{"members":[]}` when none) |
 
@@ -200,6 +207,40 @@ format plus three optional fields:
 - `forced`: install without asking after `update.restart-seconds`.
 Clients enforce the stricter of manifest and policy. Blocking is done in the backend (session
 start, accepting incoming sessions), not only in the UI.
+
+### Release index (`download/<channel>/releases.json`)
+
+Written by Tether Manage (`PUT /api/admin/release/<channel>/releases.json`, signed request) before
+the `latest.json` files. tether-api accepts it only if it is a `tether_trust::envelope::Signed`
+document from a trusted admin key, of `type` `tether-releases/1`, for the channel of its path, with
+a serial above the stored one (`409` otherwise; the identical document again is `204`). Served by
+tether-api (Caddy/nginx route `GET /download/<channel>/releases.json` to it) with
+`ETag: "<serial>"` (equal on every relay), `304` on `If-None-Match`, `Cache-Control: no-cache`.
+Payload (≤ 64 KiB):
+```json
+{"type":"tether-releases/1","channel":"stable","serial":57,"issued":1762527600,"expires":1765119600,
+ "releases":{"customer/windows-x86_64":{
+   "version":"0.5.24","file":"TetherQS-0.5.24.exe","size":34900000,"sha256":"<64 hex>",
+   "signature":"<base64 of the .sig, as in latest.json>",
+   "urls":["https://{relay}/download/stable/customer/windows-x86_64/TetherQS-0.5.24.exe"],
+   "packed":{"encoding":"gzip","size":14600000,"sha256":"<64 hex>","urls":[
+     "https://tether-dl.thomas-schend.workers.dev/stable/customer/windows-x86_64/TetherQS-0.5.24.exe.gz",
+     "https://{relay}/download/stable/customer/windows-x86_64/TetherQS-0.5.24.exe.gz"]},
+   "notes":"…","mandatory":false,"minimumVersion":"","forced":false,"security":false,
+   "rollout":{"start":1762527600,"steps":[[0,1],[3600,10],[21600,50],[86400,100]]},"halted":false}}}
+```
+- Keys `<app>/<platform>`: `technician|customer` / `windows-x86_64|darwin-universal`. Unknown
+  fields are rejected (`deny_unknown_fields`).
+- `https://{relay}` stands for the relay the index came from: one document is valid on every relay.
+- Clients ask every relay; the highest valid serial wins and becomes the floor. Downloads are tried
+  `packed.urls` first (gzip; its own size and sha256 checked before unpacking), then `urls`; the
+  result must match `size`, `sha256`, the minisign signature and the signed trusted comment
+  (`file:`, `version:`). https only (except the `{relay}` base a debug build chooses).
+- Rollout: a device is eligible when its bucket `u16(SHA-256("tether-rollout"‖0‖uuid‖0‖app‖0‖version‖0)[0..2]) / 655.36`
+  is below the step's percent (`now - start`); policy `update.rollout` `early` joins at the first
+  step, `late` waits for 100 %. `security` skips the ramp; `halted` stops devices that did not
+  install it (they re-check right before installing).
+- `expires` (Manage: issued + 30 days): afterwards clients keep using it and report `stale`.
 
 ## Custom apps (branded TetherQS downloads)
 

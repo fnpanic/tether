@@ -32,6 +32,7 @@ pub fn run(args: Vec<String>) {
                 let h = app.handle().clone();
                 policy::spawn(move || {
                     let _ = h.emit_to("main", "cm", serde_json::json!({ "name": "policy", "payload": null }));
+                    update::wake();
                 });
                 update::spawn();
             }

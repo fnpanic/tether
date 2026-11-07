@@ -22,6 +22,8 @@ pub struct Keys {
     pub updater: minisign::SecretKey,
     /// Server key pairs generated here for a key rotation (docs/key-rotation.md), oldest first.
     pub server: Vec<SigningKey>,
+    /// Cloudflare account API token and account id for the release CDN (docs/updates.md "CDN").
+    pub cdn: Option<CdnCreds>,
     /// `Sealed.v` the vault was read with; `seal` refuses one newer than `FORMAT`.
     format: u32,
     /// Fields of `Plain` this version does not know, written back unchanged.
@@ -41,6 +43,12 @@ struct Sealed {
     ct: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CdnCreds {
+    pub account_id: String,
+    pub token: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Plain {
     admin: String,
@@ -48,6 +56,8 @@ struct Plain {
     /// Older versions of Tether Manage ignore it (no `deny_unknown_fields`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     server: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cdn: Option<CdnCreds>,
     /// Written by a newer Tether Manage: kept and sealed again unchanged.
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
@@ -69,7 +79,7 @@ fn d64(s: &str) -> Result<Vec<u8>, String> {
 impl Keys {
     pub fn generate() -> Result<Self, String> {
         let kp = minisign::KeyPair::generate_unencrypted_keypair().map_err(|e| e.to_string())?;
-        Ok(Keys { admin: tether_trust::generate_key(), updater: kp.sk, server: Vec::new(), format: 1, extra: Default::default() })
+        Ok(Keys { admin: tether_trust::generate_key(), updater: kp.sk, server: Vec::new(), cdn: None, format: 1, extra: Default::default() })
     }
 
     /// A new server key pair, kept in `server`. Like hbbs, no `/` in the public key (it can appear
@@ -125,6 +135,7 @@ impl Keys {
             admin: B64.encode(self.admin.to_bytes()),
             updater: B64.encode(self.updater.to_bytes()),
             server: self.server.iter().map(|k| B64.encode(k.to_bytes())).collect(),
+            cdn: self.cdn.clone(),
             extra: self.extra.clone(),
         })
         .map_err(|e| e.to_string())?;
@@ -134,7 +145,7 @@ impl Keys {
         plain.zeroize();
         key.zeroize();
         // 1 while an older Tether Manage loses nothing by opening it.
-        let v = if self.server.is_empty() && self.extra.is_empty() && self.format < 2 { 1 } else { FORMAT };
+        let v = if self.server.is_empty() && self.cdn.is_none() && self.extra.is_empty() && self.format < 2 { 1 } else { FORMAT };
         let sealed = Sealed {
             v,
             kdf: "argon2id".into(),
@@ -178,7 +189,7 @@ impl Keys {
             let b: [u8; 32] = d64(k)?.try_into().map_err(|_| "the key file is damaged".to_owned())?;
             server.push(SigningKey::from_bytes(&b));
         }
-        Ok(Keys { admin: SigningKey::from_bytes(&admin), updater, server, format: s.v, extra: std::mem::take(&mut p.extra) })
+        Ok(Keys { admin: SigningKey::from_bytes(&admin), updater, server, cdn: p.cdn.take(), format: s.v, extra: std::mem::take(&mut p.extra) })
     }
 
     /// Tauri updater signature for `data` named `file_name`: base64 of the minisign signature
@@ -232,6 +243,16 @@ mod tests {
         assert_eq!(B64.encode(&raw[32..]), public);
         assert!(!String::from_utf8(sealed).unwrap().contains(&secret[..20]));
         assert!(back.server_key_files("unknown").is_none());
+    }
+
+    #[test]
+    fn cdn_credentials_are_sealed() {
+        let mut k = Keys::generate().unwrap();
+        k.cdn = Some(CdnCreds { account_id: "acc".into(), token: "cf-secret-token".into() });
+        let sealed = k.seal("correct horse").unwrap();
+        assert_eq!(version_of(&sealed), FORMAT, "older Manage versions would drop it");
+        assert!(!String::from_utf8(sealed.clone()).unwrap().contains("cf-secret-token"));
+        assert_eq!(Keys::open(&sealed, "correct horse").unwrap().cdn, k.cdn);
     }
 
     /// Seal `plain` as format `v` the way some other version would.

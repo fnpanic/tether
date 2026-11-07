@@ -517,7 +517,28 @@ Status: open (upstream rule).
 version or block sessions with a high `minimum_version` (`apps/desktop/src-tauri/src/update.rs:77-96`,
 `apps/quick/src-tauri/src/update.rs:79-83`). Unsigned code is still refused.
 
-Status: open.
+Finding (2026-11-07): the minisign signature covers a trusted comment
+`timestamp:…	file:<name>	version:<version>` that Tether Manage has always written, but neither
+app checked it, so the rollback worked with any older signed build. The technician app also read
+the manifest twice (check, then install), so the installed version was not the checked one.
+
+Fix (next release, [update-design.md](update-design.md)):
+
+- Both apps verify the trusted comment after the signature: `file:` and `version:` must equal the
+  offered ones (`tether_trust::release::verify_artifact`), and the technician app installs exactly
+  the bytes it verified (`restore_update` + `install`), with no second manifest fetch.
+- Release metadata comes from the signed release index `download/<channel>/releases.json`, an
+  admin-key envelope like the policy: version, file, size, sha256, signature, URLs, flags, rollout.
+  Every byte of a download is checked against it, so download hosts (relays, the CDN) are not
+  trusted. A serial floor per channel (`releases-<channel>.serial`) refuses older indexes; once a
+  device accepted one, it never uses the unsigned `latest.json` again (and builds with
+  `REQUIRE_SIGNED_INDEX`, the release after this one, never do).
+- Expiry (30 days) only warns ("update information is out of date"): a relay can still freeze a
+  device that reaches no other source, until it notices.
+- Remaining: a stolen admin key can block sessions (as through policy); code still needs the
+  updater key as well.
+
+Status: fixed in the next release.
 
 ### W10. macOS direct listener not subnet-limited
 

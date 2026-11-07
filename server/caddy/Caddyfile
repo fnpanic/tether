@@ -87,10 +87,22 @@ http://:21125 {
 	# Release downloads and update manifests written by tether-api. Caddy (user tether-https)
 	# reads them through membership in group tether-api; see install.sh.
 	handle /download/* {
-		root * /var/lib/tether-api
-		@manifest path */latest.json
-		header @manifest Cache-Control "no-cache"
-		file_server
+		# The signed release index: tether-api serves it with ETag "<serial>" (equal on every
+		# relay, so If-None-Match works across relays) and counts the fetches.
+		@index path_regexp ^/download/[a-z0-9-]+/releases\.json$
+		handle @index {
+			reverse_proxy 127.0.0.1:21120
+		}
+		handle {
+			root * /var/lib/tether-api
+			@manifest path */latest.json
+			header @manifest Cache-Control "no-cache"
+			file_server {
+				# TetherQS-<v>.exe.gz beside the exe (Tether Manage uploads it): sent gzip-encoded
+				# to clients that accept it, 35 -> 15 MB (docs/update-design.md).
+				precompressed gzip
+			}
+		}
 	}
 
 	# Download page, if one was published; otherwise the plain marker text.

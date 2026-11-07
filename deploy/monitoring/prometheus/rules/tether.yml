@@ -168,6 +168,44 @@ groups:
           summary: "tether-api on {{ $labels.node }} answered 503 busy"
           description: "All 32 workers were busy: slow clients or a flood."
 
+  - name: tether-releases
+    rules:
+      - alert: ReleaseGenerationMismatch
+        expr: max by (node) (tether_api_release_generation) != max by (node) (hbbs_release_generation)
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.node }}: hbbs does not push the current release generation"
+          description: "tether-api is at another release generation than hbbs for 2 minutes: the push hint is broken (hbbs cannot read /var/lib/tether-api/release-generation: group tether-api, restart hbbs). Devices still learn of releases from the heartbeat within 15 minutes."
+      - alert: ReleaseIndexMismatch
+        expr: max by (channel) (tether_api_release_index_serial) != min by (channel) (tether_api_release_index_serial)
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "The release index of channel {{ $labels.channel }} differs between relays"
+          description: "Not every relay has the newest signed release index for 10 minutes: a publish did not reach every relay. Tether Manage › Releases › Publish to missing relays."
+      - alert: ReleaseIndexExpiringSoon
+        expr: min by (channel) (tether_api_release_index_expires_timestamp) - time() < 7 * 86400
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "The release index of channel {{ $labels.channel }} expires in {{ $value | humanizeDuration }}"
+          description: "After expiry devices show \"update information is out of date\" (they keep working). Unlock the keys in Tether Manage: it re-signs indexes that expire within 15 days."
+      - alert: UpdateFailuresHigh
+        expr: sum(tether_api_devices_update_state{state="failed"}) / clamp_min(sum(tether_api_devices_update_state), 1) > 0.02
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of active devices report a failed update"
+          description: "Downloads or verification fail on many devices: a bad upload (sha256 or signature), a blocked CDN without relay fallback, or 503s from the download cap. Consider halting the rollout (Tether Manage › Releases › Rollouts)."
+      - alert: UpdateStale
+        expr: sum(tether_api_devices_update_state{state="stale"}) > 0
+        for: 1h
+        labels: { severity: info }
+        annotations:
+          summary: "{{ $value }} devices hold an expired release index"
+          description: "They cannot reach a fresh signed index (relays serve an old one, or none was re-signed). Unlock the keys in Tether Manage."
+
   - name: tether-meta
     rules:
       # Always firing: the end-to-end check of Prometheus -> Alertmanager (and of an optional

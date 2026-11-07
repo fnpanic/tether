@@ -18,7 +18,11 @@ export function Gate({ state, onDone }: { state: AppState; onDone: () => void })
     setBusy(true);
     setError(null);
     try {
-      if (mode === "unlock") await invoke("keys_unlock", { passphrase: pass });
+      if (mode === "unlock") {
+        await invoke("keys_unlock", { passphrase: pass });
+        // Release indexes that expire within 15 days are re-signed (devices only warn after expiry).
+        invoke("release_index_refresh").catch(() => {});
+      }
       if (mode === "create") await invoke("keys_create", { passphrase: pass });
       if (mode === "import") await invoke("keys_import", { path: file, passphrase: pass });
       onDone();

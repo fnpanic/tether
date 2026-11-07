@@ -490,8 +490,9 @@ async fn update_check() -> R<Value> {
 }
 
 #[tauri::command]
-async fn update_install(app: AppHandle) -> R<()> {
-    crate::update::install(app).await
+async fn update_install(app: AppHandle, auto: Option<bool>) -> R<()> {
+    // `auto`: the forced countdown, refused while a session runs (D7).
+    crate::update::install(app, auto.unwrap_or(false)).await
 }
 
 #[tauri::command]

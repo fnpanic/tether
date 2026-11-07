@@ -1,0 +1,21 @@
+# Tether release downloads on Cloudflare Workers Static Assets (decision D1, docs/update-design.md,
+# deploy steps in docs/updates.md "CDN"). Free plan, no billing: requests that a static asset answers
+# never run the script below and do not count against the Workers request limit. Limits: 25 MiB per
+# file, 20 000 files per version.
+#
+# Tether Manage deploys a new version on every publish (assets upload API, the files of the current
+# and the previous release of each channel/app/platform). This file is the manual fallback:
+#   server/cloudflare/worker/deploy.sh <dir with <channel>/<app>/<platform>/<file>>
+#
+# The CDN is untrusted: clients check size, sha256, minisign signature and the signed version from
+# the relays' signed release index, and fall back to the relay URL.
+name = "tether-dl"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+preview_urls = false
+
+[assets]
+directory = "./public"
+# A miss runs the script (a plain 404); never `run_worker_first`, which would bill every download.
+not_found_handling = "none"
