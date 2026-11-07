@@ -1,18 +1,24 @@
 //! Portable self-update (no installer): `download/<channel>/customer/<platform>/latest.json`,
 //! minisign-verified exe (Windows) or zipped `.app` (macOS), swapped in next to the running one,
-//! then relaunched.
+//! then relaunched. Every relay is asked, the highest version wins; the signed trusted comment
+//! must name the offered file and version (`tether_trust::release`), so an older signed build
+//! cannot be offered under a newer version.
 
 use std::{
     collections::HashMap,
     io,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Condvar, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
 use hbb_common::base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
-use tether_trust::version;
+use tether_trust::{
+    release::{self, Candidate},
+    version,
+};
 
 use crate::policy;
 
@@ -82,21 +88,19 @@ pub fn evaluate(current: &str, m: &Manifest, policy_min: &str) -> (bool, bool) {
     (newer, required)
 }
 
-/// Tauri updater format: `signature` is base64 of the minisign signature file; the public key is
-/// base64 of the minisign public key file (a bare `RW…` key line is accepted too).
-pub fn verify(data: &[u8], signature: &str, pubkey: &str) -> Result<(), String> {
-    let pk = B64
-        .decode(pubkey.trim())
-        .ok()
-        .and_then(|raw| String::from_utf8(raw).ok())
-        .filter(|t| t.contains("untrusted comment"))
-        .map(|t| minisign_verify::PublicKey::decode(&t))
-        .unwrap_or_else(|| minisign_verify::PublicKey::from_base64(pubkey.trim()))
-        .map_err(|e| format!("bad updater key: {e}"))?;
-    let text = B64.decode(signature.trim()).map_err(|e| format!("bad signature encoding: {e}"))?;
-    let text = String::from_utf8(text).map_err(|_| "bad signature encoding".to_owned())?;
-    let sig = minisign_verify::Signature::decode(&text).map_err(|e| format!("bad signature: {e}"))?;
-    pk.verify(data, &sig, true).map_err(|e| format!("signature does not match: {e}"))
+static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+/// Check now (policy changed, release hint).
+pub fn wake() {
+    *WAKE.0.lock().unwrap() = true;
+    WAKE.1.notify_all();
+}
+
+impl Manifest {
+    fn candidate(&self) -> Option<Candidate> {
+        let p = self.platforms.get(PLATFORM)?;
+        Some(Candidate::legacy(&self.version, &self.notes, &p.url, &p.signature, self.mandatory, &self.minimum_version, self.forced))
+    }
 }
 
 fn with_suffix(p: &Path, suffix: &str) -> PathBuf {
@@ -239,20 +243,27 @@ fn manifest_url(base: &str, channel: &str) -> String {
     format!("{base}/download/{channel}/customer/{PLATFORM}/latest.json")
 }
 
-/// The first server with a release wins. An unreachable server, or one without a release on the
-/// channel (`Ok(None)`, HTTP 404), passes on to the next. `Ok(None)`: no server has a release.
-fn first_manifest(urls: &[String], get: impl Fn(&str) -> Result<Option<Manifest>, String>) -> Result<Option<Manifest>, String> {
+/// Every server is asked; the highest version wins (one stale relay cannot hold devices back).
+/// An unreachable server, or one without a release on the channel (`Ok(None)`, HTTP 404), does
+/// not count. `Ok(None)`: no server has a release.
+fn highest_manifest(urls: &[String], get: impl Fn(&str) -> Result<Option<Manifest>, String>) -> Result<Option<Manifest>, String> {
     let mut errors = Vec::new();
     let mut answered = false;
+    let mut best: Option<Manifest> = None;
     for u in urls {
         match get(u) {
-            Ok(Some(m)) => return Ok(Some(m)),
+            Ok(Some(m)) => {
+                answered = true;
+                if best.as_ref().is_none_or(|b| version::compare(&m.version, &b.version) == Some(std::cmp::Ordering::Greater)) {
+                    best = Some(m);
+                }
+            }
             Ok(None) => answered = true,
             Err(e) => errors.push(format!("{}: {e}", u.split('/').nth(2).unwrap_or(u))),
         }
     }
     if answered {
-        Ok(None)
+        Ok(best)
     } else if errors.is_empty() {
         Err("no server".into())
     } else {
@@ -260,16 +271,33 @@ fn first_manifest(urls: &[String], get: impl Fn(&str) -> Result<Option<Manifest>
     }
 }
 
+/// Per URL: ETag and manifest of the last 200 (each relay has its own ETags).
+static ETAGS: Mutex<Option<HashMap<String, (String, Manifest)>>> = Mutex::new(None);
+
 fn get_manifest(client: &reqwest::blocking::Client, url: &str) -> Result<Option<Manifest>, String> {
-    let resp = client.get(url).send().map_err(|e| crate::commands::with_causes(&e))?;
+    let etag = ETAGS.lock().unwrap().as_ref().and_then(|m| m.get(url)).map(|e| e.0.clone());
+    let mut rq = client.get(url);
+    if let Some(t) = &etag {
+        rq = rq.header("If-None-Match", t);
+    }
+    let resp = rq.send().map_err(|e| crate::commands::with_causes(&e))?;
     match resp.status().as_u16() {
+        304 => Ok(ETAGS.lock().unwrap().as_ref().and_then(|m| m.get(url)).map(|e| e.1.clone())),
         404 => Ok(None),
-        200 => resp.json().map(Some).map_err(|e| format!("invalid update manifest: {e}")),
+        200 => {
+            let tag = resp.headers().get("ETag").and_then(|v| v.to_str().ok()).map(str::to_owned);
+            let raw = tether_trust::read_limited(resp, 64 * 1024).map_err(|e| format!("update manifest: {e}"))?;
+            let m: Manifest = serde_json::from_slice(&raw).map_err(|e| format!("invalid update manifest: {e}"))?;
+            if let Some(t) = tag {
+                ETAGS.lock().unwrap().get_or_insert_with(HashMap::new).insert(url.to_owned(), (t, m.clone()));
+            }
+            Ok(Some(m))
+        }
         s => Err(format!("HTTP {s}")),
     }
 }
 
-/// One check against every server (first with a release wins). Returns the text for
+/// One check against every server (highest version wins). Returns the text for
 /// "Check for updates"; the same text (or the error) is kept in the state for the help page.
 pub fn check() -> Result<String, String> {
     let r = check_inner();
@@ -291,7 +319,7 @@ fn check_inner() -> Result<String, String> {
     let channel = channel(eff.get("update.channel"));
     let client = policy::http()?;
     let urls: Vec<String> = policy::base_urls().iter().map(|b| manifest_url(b, channel)).collect();
-    let Some(m) = first_manifest(&urls, |u| get_manifest(&client, u))? else {
+    let Some(m) = highest_manifest(&urls, |u| get_manifest(&client, u))? else {
         *MANIFEST.lock().unwrap() = None;
         STATE.lock().unwrap().available = None;
         return Ok(format!("TetherQS {VERSION} is up to date (no release on channel \"{channel}\")."));
@@ -323,33 +351,9 @@ fn check_inner() -> Result<String, String> {
 pub fn install() -> Result<(), String> {
     let r = (|| {
         let m = MANIFEST.lock().unwrap().clone().ok_or("no update available")?;
-        let p = m.platforms.get(PLATFORM).ok_or("no build for this platform")?;
-        if !p.url.starts_with("https://") {
-            return Err("update URL must be https".to_owned());
-        }
+        let c = m.candidate().ok_or("no build for this platform")?;
         STATE.lock().unwrap().installing = true;
-        let mut resp = policy::http()?
-            .get(&p.url)
-            .timeout(Duration::from_secs(600))
-            .send()
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| format!("download failed: {}", crate::commands::with_causes(&e)))?;
-        // Relays serve a few hundred KB/s: show progress, the download can take minutes.
-        let total = resp.content_length().unwrap_or(0);
-        let mut bytes = Vec::with_capacity((total as usize).min(MAX_EXE));
-        let mut buf = vec![0u8; 256 * 1024];
-        loop {
-            let n = io::Read::read(&mut resp, &mut buf).map_err(|e| format!("download failed: {e}"))?;
-            if n == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&buf[..n]);
-            if bytes.len() > MAX_EXE {
-                return Err("update too large".into());
-            }
-            STATE.lock().unwrap().progress = Some([bytes.len() as u64, total]);
-        }
-        verify(&bytes, &p.signature, PUBKEY.ok_or("no updater key in this build")?)?;
+        let bytes = download(&c, PUBKEY.ok_or("no updater key in this build")?)?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let replace = |e: io::Error| format!("could not replace the program: {e}");
         let u = unit(&exe).map_err(replace)?;
@@ -369,7 +373,52 @@ pub fn install() -> Result<(), String> {
     r
 }
 
-/// Check at start and every `update.check-hours` (after a failed check: 15 minutes).
+/// Each URL in turn (https only), then the verified bytes.
+fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
+    let mut last = String::from("no download URL");
+    for url in &c.urls {
+        match download_one(url, c).and_then(|b| c.verify(&b, key).map(|_| b)) {
+            Ok(b) => return Ok(b),
+            Err(e) => {
+                hbb_common::log::warn!("update download {url}: {e}");
+                last = e;
+            }
+        }
+    }
+    Err(last)
+}
+
+fn download_one(url: &str, c: &Candidate) -> Result<Vec<u8>, String> {
+    if !url.starts_with("https://") {
+        return Err("update URL must be https".to_owned());
+    }
+    let mut resp = policy::http()?
+        .get(url)
+        .timeout(Duration::from_secs(1800))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("download failed: {}", crate::commands::with_causes(&e)))?;
+    // Relays serve a few hundred KB/s: show progress, the download can take minutes. A gzip
+    // transfer (relay `precompressed`) is decoded by reqwest; its Content-Length is the packed size.
+    let total = if c.size > 0 { c.size } else { resp.content_length().unwrap_or(0) };
+    let mut bytes = Vec::with_capacity((total as usize).min(MAX_EXE));
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = io::Read::read(&mut resp, &mut buf).map_err(|e| format!("download failed: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        if bytes.len() > MAX_EXE || (c.size > 0 && bytes.len() as u64 > c.size) {
+            return Err("update too large".into());
+        }
+        STATE.lock().unwrap().progress = Some([bytes.len() as u64, total.max(bytes.len() as u64)]);
+    }
+    Ok(bytes)
+}
+
+/// Check at start (after a random 0-60 s), every `update.check-hours` (+0-20 % jitter), after a
+/// policy change ([`wake`]), and 15 minutes after a failed check.
 pub fn spawn() {
     std::thread::spawn(|| {
         cleanup_old();
@@ -377,21 +426,24 @@ pub fn spawn() {
             hbb_common::log::warn!("no TETHER_UPDATER_PUB_KEY: self-update disabled");
             return;
         }
+        std::thread::sleep(Duration::from_secs(release::uniform_secs(60)));
         loop {
             let eff = policy::current();
             let hours: u64 = eff.get("update.check-hours").parse().unwrap_or(6);
             let wait = match check() {
                 Ok(t) => {
                     hbb_common::log::info!("update check: {t}");
-                    hours.max(1) * 3600
+                    release::jitter(Duration::from_secs(hours.max(1) * 3600), 20)
                 }
                 // No network yet or every server down: try again soon, not in `check-hours`.
                 Err(e) => {
                     hbb_common::log::warn!("update check: {e}");
-                    15 * 60
+                    release::jitter(Duration::from_secs(15 * 60), 20)
                 }
             };
-            std::thread::sleep(Duration::from_secs(wait));
+            let woken = WAKE.0.lock().unwrap();
+            let (mut woken, _) = WAKE.1.wait_timeout_while(woken, wait, |w| !*w).unwrap();
+            *woken = false;
         }
     });
 }
@@ -427,21 +479,22 @@ mod tests {
     }
 
     #[test]
-    fn first_server_with_a_release_wins() {
+    fn highest_release_over_servers_wins() {
         let urls = ["https://r1/x".to_owned(), "https://r2/x".to_owned()];
         let got = |r1: Result<Option<&str>, &str>, r2: Result<Option<&str>, &str>| {
-            first_manifest(&urls, |u| {
+            highest_manifest(&urls, |u| {
                 let r = if u.starts_with("https://r1") { r1 } else { r2 };
                 r.map(|o| o.map(|v| manifest(v, false, ""))).map_err(str::to_owned)
             })
             .map(|m| m.map(|m| m.version))
         };
-        assert_eq!(got(Ok(Some("1.0.0")), Ok(Some("2.0.0"))), Ok(Some("1.0.0".into())));
+        assert_eq!(got(Ok(Some("1.0.0")), Ok(Some("2.0.0"))), Ok(Some("2.0.0".into())));
+        assert_eq!(got(Ok(Some("2.0.0")), Ok(Some("1.0.0"))), Ok(Some("2.0.0".into())));
         assert_eq!(got(Err("down"), Ok(Some("2.0.0"))), Ok(Some("2.0.0".into())));
         assert_eq!(got(Ok(None), Ok(Some("2.0.0"))), Ok(Some("2.0.0".into())));
         assert_eq!(got(Ok(None), Err("down")), Ok(None));
         assert_eq!(got(Err("refused"), Err("timeout")), Err("r1: refused; r2: timeout".into()));
-        assert_eq!(first_manifest(&[], |_| Ok(None)).unwrap_err(), "no server");
+        assert_eq!(highest_manifest(&[], |_| Ok(None)).unwrap_err(), "no server");
     }
 
     /// Against the production relays (read-only): `cargo test -- --ignored prod_release`.
@@ -453,26 +506,30 @@ mod tests {
             let m = get_manifest(&client, &manifest_url(&base, "stable")).unwrap().expect("no release");
             let p = &m.platforms[PLATFORM];
             let bytes = client.get(&p.url).timeout(Duration::from_secs(600)).send().unwrap().bytes().unwrap();
-            verify(&bytes, &p.signature, PUBKEY.unwrap()).unwrap();
+            m.candidate().unwrap().verify(&bytes, PUBKEY.unwrap()).unwrap();
             println!("{base}: {} {} bytes, signature ok, newer than {VERSION}: {:?}", m.version, bytes.len(), evaluate(VERSION, &m, "").0);
         }
     }
 
     #[test]
-    fn minisign_tauri_format() {
+    fn minisign_tauri_format_and_trusted_comment() {
         let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
         let data = b"TetherQS.exe bytes";
-        let sig_text = minisign::sign(Some(&kp.pk), &kp.sk, Cursor::new(&data[..]), None, None).unwrap().to_string();
+        let trusted = "timestamp:1\tfile:TetherQS-0.5.24.exe\tversion:0.5.24";
+        let sig_text = minisign::sign(Some(&kp.pk), &kp.sk, Cursor::new(&data[..]), Some(trusted), None).unwrap().to_string();
         let sig = B64.encode(&sig_text);
-        let pk_file = kp.pk.to_box().unwrap().to_string();
-        let pk_tauri = B64.encode(&pk_file);
-        let pk_bare = kp.pk.to_base64();
-        assert!(verify(data, &sig, &pk_tauri).is_ok());
-        assert!(verify(data, &sig, &pk_bare).is_ok());
-        assert!(verify(b"tampered", &sig, &pk_tauri).is_err());
+        let pk_tauri = B64.encode(kp.pk.to_box().unwrap().to_string());
+        let c = |v: &str| Candidate::legacy(v, "", &format!("https://r/download/stable/customer/windows-x86_64/TetherQS-{v}.exe"), &sig, false, "", false);
+        assert!(c("0.5.24").verify(data, &pk_tauri).is_ok());
+        assert!(c("0.5.24").verify(data, &kp.pk.to_base64()).is_ok());
+        assert!(c("0.5.24").verify(b"tampered", &pk_tauri).is_err());
+        // The same signed build offered as a newer version: refused (W9 rollback).
+        assert!(c("0.5.30").verify(data, &pk_tauri).is_err());
         let other = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
-        assert!(verify(data, &sig, &B64.encode(other.pk.to_box().unwrap().to_string())).is_err());
-        assert!(verify(data, "not base64!", &pk_tauri).is_err());
+        assert!(c("0.5.24").verify(data, &B64.encode(other.pk.to_box().unwrap().to_string())).is_err());
+        let mut bad = c("0.5.24");
+        bad.signature = "not base64!".into();
+        assert!(bad.verify(data, &pk_tauri).is_err());
     }
 
     #[test]

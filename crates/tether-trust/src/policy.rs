@@ -153,6 +153,7 @@ pub const FEATURES: &[Feature] = &[
     t!("update.check-hours", "updates", "Check for updates every (hours)", "Nach Updates suchen alle (Stunden)", Kind::Number, "6", BOTH),
     t!("update.minimum-version", "updates", "Minimum version (older versions cannot connect)", "Mindestversion (ältere Versionen können nicht verbinden)", Kind::Text, "", BOTH),
     b!("update.force", "updates", "Install required updates automatically", "Pflicht-Updates automatisch installieren", "N", None, BOTH),
+    c!("update.rollout", "updates", "Staged rollouts: early joins the first wave, late waits until a release reaches everyone", "Gestaffelte Verteilung: früh in der ersten Welle, spät erst wenn alle es bekommen", "default", &["early", "default", "late"], "default", None, BOTH),
     t!("update.restart-seconds", "updates", "Countdown before a forced update restarts the app (s)", "Countdown vor erzwungenem Neustart (s)", Kind::Number, "60", BOTH),
     // Policy delivery.
     t!("policy.refresh-minutes", "policy", "Check for policy changes every (minutes)", "Richtlinie prüfen alle (Minuten)", Kind::Number, "15", BOTH),

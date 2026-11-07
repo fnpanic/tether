@@ -365,20 +365,43 @@ pub fn proxy_url() -> Option<String> {
 pub(crate) fn api(
     build: impl Fn(&reqwest::blocking::Client, &str) -> reqwest::blocking::RequestBuilder,
 ) -> Result<reqwest::blocking::Response, String> {
-    // Debug builds only: tests point the API at a local stand-in (http://127.0.0.1:<port>).
+    api_via(&api_hosts(), build)
+}
+
+/// Debug builds only: tests point the API at a local stand-in (`TETHER_DEV_API=http://127.0.0.1:<port>`).
+fn dev_api() -> Option<String> {
     #[cfg(debug_assertions)]
     if let Ok(base) = std::env::var("TETHER_DEV_API") {
-        let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
-        return build(&client, base.trim_end_matches('/')).send().map_err(|e| format!("offline: {e}"));
+        return Some(base.trim_end_matches('/').to_owned());
     }
-    let hosts = api_hosts();
+    None
+}
+
+/// Relays to ask one by one (update checks ask every relay, the highest release wins), with the
+/// base URL `{relay}` stands for in the release index. A debug build's dev API is the only one.
+pub(crate) fn relay_bases() -> Vec<(String, String)> {
+    match dev_api() {
+        Some(b) => vec![(server_host(b.trim_start_matches("http://")).to_owned(), b)],
+        None => api_hosts().into_iter().map(|h| (h.clone(), format!("https://{h}"))).collect(),
+    }
+}
+
+/// [`api`] against the given hosts only, in order.
+pub(crate) fn api_via(
+    hosts: &[String],
+    build: impl Fn(&reqwest::blocking::Client, &str) -> reqwest::blocking::RequestBuilder,
+) -> Result<reqwest::blocking::Response, String> {
+    if let Some(base) = dev_api() {
+        let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
+        return build(&client, &base).send().map_err(|e| format!("offline: {e}"));
+    }
     if hosts.is_empty() {
         return Err("offline: no server compiled into this build".into());
     }
     let proxy = proxy_url();
     let mut last = String::new();
     // First reachable server: each one over all routes before the next.
-    for host in &hosts {
+    for host in hosts {
         for via_proxy in [true, false] {
             if via_proxy && proxy.is_none() {
                 continue;
@@ -405,6 +428,35 @@ pub(crate) fn api(
         }
     }
     Err(format!("offline: {last}"))
+}
+
+/// GET of any https URL (release downloads, also on a CDN): through the proxy first (if any),
+/// then direct; TLS verified against the OS trust store. `http://` only for a debug build's dev API.
+pub(crate) fn fetch(url: &str, timeout: Duration) -> Result<reqwest::blocking::Response, String> {
+    if !url.starts_with("https://") && !dev_api().is_some_and(|b| url.starts_with(&b)) {
+        return Err(format!("not an https URL: {url}"));
+    }
+    let proxy = proxy_url();
+    let mut last = String::new();
+    for via_proxy in [true, false] {
+        if via_proxy && proxy.is_none() {
+            continue;
+        }
+        let mut b = reqwest::blocking::Client::builder()
+            .use_rustls_tls()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(timeout)
+            .user_agent(concat!("Tether/", env!("CARGO_PKG_VERSION")));
+        if via_proxy {
+            b = b.proxy(reqwest::Proxy::all(proxy.as_deref().unwrap_or_default()).map_err(|e| e.to_string())?);
+        }
+        match b.build().map_err(|e| e.to_string())?.get(url).send().and_then(|r| r.error_for_status()) {
+            Ok(r) => return Ok(r),
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(format!("download failed: {last}"))
 }
 
 /// One policy check (and server key list check). `Ok(true)` when a newer bundle was applied.

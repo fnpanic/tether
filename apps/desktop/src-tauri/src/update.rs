@@ -1,13 +1,17 @@
-//! Updates (docs/api.md "Download layout and update manifests").
+//! Updates (docs/api.md "Download layout and update manifests", docs/updates.md).
 //!
 //! The manifest `https://<relay>/download/<channel>/technician/<target>/latest.json` is read here
 //! (custom fields `mandatory`, `minimumVersion`, `forced`) and cached in the config dir, so every
 //! process role can enforce it without network: below the policy or manifest minimum version, or
-//! with a pending mandatory update, sessions are refused (`blocked`). Download, signature check
-//! (minisign, `TETHER_UPDATER_PUB_KEY`) and install are done by `tauri-plugin-updater`.
+//! with a pending mandatory update, sessions are refused (`blocked`). Every relay is asked (with
+//! `If-None-Match`), the highest version wins. The download is verified here (minisign,
+//! `TETHER_UPDATER_PUB_KEY`, and the signed trusted comment must name the offered file and
+//! version, `tether_trust::release`), and exactly those bytes go to `tauri-plugin-updater`'s
+//! installer: the version checked is the version installed.
 
 use std::{
     cmp::Ordering,
+    collections::{BTreeMap, HashMap},
     sync::{Condvar, LazyLock, Mutex},
     time::Duration,
 };
@@ -17,7 +21,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::AppHandle;
 use tauri_plugin_updater::UpdaterExt;
-use tether_trust::version::{below_minimum, compare};
+use tether_trust::{
+    release::{self, Candidate},
+    version::{below_minimum, compare},
+};
 
 use crate::policy;
 
@@ -37,7 +44,27 @@ pub struct Manifest {
     pub minimum_version: String,
     #[serde(default)]
     pub forced: bool,
+    /// `{"windows-x86_64": {"url", "signature"}}` as in the Tauri manifest.
+    #[serde(default)]
+    pub platforms: BTreeMap<String, Platform>,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Platform {
+    pub url: String,
+    pub signature: String,
+}
+
+impl Manifest {
+    /// The installable release for this platform, if the manifest lists one.
+    fn candidate(&self) -> Option<Candidate> {
+        let p = self.platforms.get(&target())?;
+        Some(Candidate::legacy(&self.version, &self.notes, &p.url, &p.signature, self.mandatory, &self.minimum_version, self.forced))
+    }
+}
+
+/// Per relay: ETag and manifest of its last 200 (the relays' ETags differ).
+static ETAGS: LazyLock<Mutex<HashMap<String, (String, Option<Manifest>)>>> = LazyLock::new(Default::default);
 
 static LAST: LazyLock<Mutex<Option<Manifest>>> = LazyLock::new(|| {
     let cached = std::fs::read(Config::path("update-state.json")).ok();
@@ -125,15 +152,60 @@ pub fn status() -> Value {
 
 // ----------------------------------------------------------------------------- check / install
 
-/// Fetch the manifest (blocking). `Err("offline: …")` when the server cannot be reached.
+/// The manifest of one relay; 304 answers come from the remembered copy.
+fn manifest_from(host: &str, path: &str) -> Result<Option<Manifest>, String> {
+    let etag = ETAGS.lock().unwrap().get(host).map(|e| e.0.clone());
+    let r = policy::api_via(&[host.to_owned()], |c, base| {
+        let rq = c.get(format!("{base}{path}"));
+        match &etag {
+            Some(t) => rq.header("If-None-Match", t),
+            None => rq,
+        }
+    })?;
+    match r.status().as_u16() {
+        304 => Ok(ETAGS.lock().unwrap().get(host).and_then(|e| e.1.clone())),
+        404 => Ok(None),
+        200 => {
+            let tag = r.headers().get("ETag").and_then(|v| v.to_str().ok()).map(str::to_owned);
+            let raw = tether_trust::read_limited(r, 64 * 1024).map_err(|e| format!("update manifest: {e}"))?;
+            let m: Manifest = serde_json::from_slice(&raw).map_err(|e| format!("invalid update manifest: {e}"))?;
+            if let Some(t) = tag {
+                ETAGS.lock().unwrap().insert(host.to_owned(), (t, Some(m.clone())));
+            }
+            Ok(Some(m))
+        }
+        s => Err(format!("update server answered {s}")),
+    }
+}
+
+/// Highest version over every relay's answer; an error only when no relay answered.
+fn highest(answers: Vec<Result<Option<Manifest>, String>>) -> Result<Option<Manifest>, String> {
+    let mut best: Option<Manifest> = None;
+    let mut errors = Vec::new();
+    let mut answered = false;
+    for a in answers {
+        match a {
+            Ok(m) => {
+                answered = true;
+                if let Some(m) = m.filter(|m| best.as_ref().is_none_or(|b| compare(&m.version, &b.version) == Some(Ordering::Greater))) {
+                    best = Some(m);
+                }
+            }
+            Err(e) => errors.push(e),
+        }
+    }
+    if answered {
+        Ok(best)
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// Ask every relay for the manifest (blocking). `Err("offline: …")` when none can be reached.
 pub fn check() -> Result<Value, String> {
     let path = manifest_path(&target());
-    let r = policy::api(|c, base| c.get(format!("{base}{path}")))?;
-    let m = match r.status().as_u16() {
-        404 => None,
-        200 => Some(r.json::<Manifest>().map_err(|e| format!("invalid update manifest: {e}"))?),
-        s => return Err(format!("update server answered {s}")),
-    };
+    let answers = policy::relay_bases().iter().map(|(host, _)| manifest_from(host, &path)).collect();
+    let m = highest(answers)?;
     let raw = serde_json::to_vec(&m).unwrap_or_default();
     if let Err(e) = policy::write_atomic(&Config::path("update-state.json"), &raw) {
         log::warn!("cannot cache update state: {e}");
@@ -144,45 +216,67 @@ pub fn check() -> Result<Value, String> {
     Ok(s)
 }
 
+/// Download the candidate (each URL in turn) and return the verified bytes.
+fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
+    let mut last = String::from("no download URL");
+    for url in &c.urls {
+        match download_one(url, c).and_then(|b| c.verify(&b, key).map(|_| b)) {
+            Ok(b) => return Ok(b),
+            Err(e) => {
+                log::warn!("update download {url}: {e}");
+                last = e;
+            }
+        }
+    }
+    Err(last)
+}
+
+fn download_one(url: &str, c: &Candidate) -> Result<Vec<u8>, String> {
+    let mut r = policy::fetch(url, Duration::from_secs(1800))?;
+    let total = if c.size > 0 { c.size } else { r.content_length().unwrap_or(0) };
+    let mut bytes = Vec::with_capacity(total.min(release::MAX_ARTIFACT) as usize);
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut r, &mut buf).map_err(|e| format!("download failed: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        if bytes.len() as u64 > release::MAX_ARTIFACT || (c.size > 0 && bytes.len() as u64 > c.size) {
+            return Err("the download is larger than announced".into());
+        }
+        crate::app::emit("update-progress", json!({ "done": bytes.len(), "total": total }));
+    }
+    Ok(bytes)
+}
+
 /// Download, verify and install the update, then restart. Progress: `update-progress` events.
 pub async fn install(app: AppHandle) -> Result<(), String> {
     if !policy::on("update.enabled") {
         return Err("locked:update.enabled: Your organisation installs updates for you.".into());
     }
     let key = UPDATER_KEY.filter(|k| !k.is_empty()).ok_or("Updates are not configured in this build.")?;
-    // Every server serves the same signed releases; the updater tries them in order.
-    let mut endpoints = Vec::new();
-    for host in policy::api_hosts() {
-        endpoints.push(format!("https://{host}{}", manifest_path("{{target}}")).parse().map_err(|e| format!("{e}"))?);
-    }
-    let mut b = app
-        .updater_builder()
-        .pubkey(key)
-        .target(target())
-        .endpoints(endpoints)
-        .map_err(|e| e.to_string())?;
+    let c = LAST.lock().unwrap().clone().filter(newer).and_then(|m| m.candidate()).ok_or("No update is available.")?;
+    let bytes = tauri::async_runtime::spawn_blocking({
+        let c = c.clone();
+        move || download(&c, key)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    install_bytes(&app, key, &c, &bytes)?;
+    app.restart();
+}
+
+/// Hand verified bytes to the plugin's installer (NSIS on Windows, the .app on macOS). The plugin
+/// checks the signature and the signed version once more.
+fn install_bytes(app: &AppHandle, key: &str, c: &Candidate, bytes: &[u8]) -> Result<(), String> {
+    let mut b = app.updater_builder().pubkey(key).target(target());
     if let Some(p) = policy::proxy_url().and_then(|p| p.parse().ok()) {
         b = b.proxy(p);
     }
-    let update = b
-        .build()
-        .map_err(|e| e.to_string())?
-        .check()
-        .await
-        .map_err(|e| format!("offline: {e}"))?
-        .ok_or("No update is available.")?;
-    let mut done = 0u64;
-    update
-        .download_and_install(
-            |chunk, total| {
-                done += chunk as u64;
-                crate::app::emit("update-progress", json!({ "done": done, "total": total }));
-            },
-            || {},
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    app.restart();
+    let raw = json!({ "version": c.version, "notes": c.notes, "platforms": { target(): { "url": c.urls.first(), "signature": c.signature } } });
+    let update = b.build().map_err(|e| e.to_string())?.restore_update(raw).map_err(|e| e.to_string())?.ok_or("No update is available.")?;
+    update.install(bytes).map_err(|e| e.to_string())
 }
 
 /// Ask the checker to run now (policy changed).
@@ -191,17 +285,19 @@ pub fn on_policy_change() {
     WAKE.1.notify_all();
 }
 
-/// Main UI: check on start, every `update.check-hours`, and after each policy change.
+/// Main UI: check on start (after a random 5-60 s), every `update.check-hours` (+0-20 % jitter,
+/// so devices never poll in step), and after each policy change.
 pub fn start() {
     std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_secs(5));
+        std::thread::sleep(Duration::from_secs(5 + release::uniform_secs(55)));
         loop {
             if let Err(e) = check() {
                 log::info!("update check: {e}");
             }
             let hours = policy::get("update.check-hours").parse::<u64>().unwrap_or(6).max(1);
             let woken = WAKE.0.lock().unwrap();
-            let (mut woken, _) = WAKE.1.wait_timeout_while(woken, Duration::from_secs(hours * 3600), |w| !*w).unwrap();
+            let wait = release::jitter(Duration::from_secs(hours * 3600), 20);
+            let (mut woken, _) = WAKE.1.wait_timeout_while(woken, wait, |w| !*w).unwrap();
             *woken = false;
         }
     });
@@ -236,6 +332,25 @@ mod tests {
         assert!(m.mandatory && m.forced);
         assert_eq!(m.minimum_version, "0.3.0");
         assert_eq!(serde_json::from_str::<Manifest>(r#"{"version":"1"}"#).unwrap().minimum_version, "");
+    }
+
+    #[test]
+    fn highest_version_over_relays_wins() {
+        let v = |x: &str| Ok(Some(m(x, false, "")));
+        let got = |a: Vec<Result<Option<Manifest>, String>>| highest(a).map(|m| m.map(|m| m.version));
+        assert_eq!(got(vec![v("0.5.23"), v("0.5.24")]), Ok(Some("0.5.24".into())));
+        assert_eq!(got(vec![v("0.5.24"), Err("down".into())]), Ok(Some("0.5.24".into())));
+        assert_eq!(got(vec![Ok(None), v("0.5.2")]), Ok(Some("0.5.2".into())));
+        assert_eq!(got(vec![Ok(None), Err("down".into())]), Ok(None));
+        assert_eq!(got(vec![Err("a".into()), Err("b".into())]), Err("a; b".into()));
+    }
+
+    #[test]
+    fn manifest_platform_becomes_a_bound_candidate() {
+        let raw = format!(r#"{{"version":"0.5.24","platforms":{{"{}":{{"url":"https://h/download/stable/technician/x/Tether_0.5.24_x64-setup.exe","signature":"S"}}}}}}"#, target());
+        let c = serde_json::from_str::<Manifest>(&raw).unwrap().candidate().unwrap();
+        assert_eq!((c.file.as_str(), c.version.as_str(), c.serial), ("Tether_0.5.24_x64-setup.exe", "0.5.24", 0));
+        assert!(serde_json::from_str::<Manifest>(r#"{"version":"1"}"#).unwrap().candidate().is_none());
     }
 
     #[test]
