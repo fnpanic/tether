@@ -390,6 +390,6 @@ first, then Hetzner. Binaries: hbbs `e54407712c521448`, hbbr `cf88ce4c5650a05b`,
 127.0.0.1 only and are closed from outside, `/ws/id` and `/ws/relay` answer 101 through TLS, relay
 port 21116 open, Prometheus 27/27 targets up.
 
-SSH to Hetzner goes to the IP `46.224.17.114` (host key pinned at creation). The `known_hosts`
-entry for the name `tether-desk.duckdns.org` is still Oracle 1's old key, so SSH by name fails
-the host-key check; that is expected, do not override it, replace the stale entry deliberately.
+SSH to Hetzner works by name again: the stale `known_hosts` entry (Oracle 1's old key) was removed
+and the name pinned to the Hetzner key `SHA256:1E3Zw7qyBXy6xCERG2w6dMGvuAlnBcOr8gfRSSMd9oM`, the same key
+pinned for `46.224.17.114` at creation.
