@@ -6,6 +6,19 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Added
+- **Tether Manage: custom download page templates** ([docs/download-page.md](docs/download-page.md)).
+  Download page → **Design: Standard (built-in) | Custom HTML**. Standard stays the default and is
+  byte-identical to before. Custom HTML fills your own HTML file at publish time: `{{tether.<app>.<os>.url|cdn_url|file|version|size|bytes|sha256|date|notes|minimum_version}}`,
+  `{{tether.title|intro|relay|published}}`, custom-app links, and `{{#…}}` / `{{^…}}` sections for
+  "not published". The release data comes from the signed `releases.json`. Values are HTML-escaped;
+  unknown placeholders, unsafe positions (script, event handlers, non-URL values in `href`),
+  `<base>`, external resources (unless allowed) and pages over 512 KiB are errors before publishing.
+  Every chosen template version is kept in the data dir, with a sandboxed preview, a placeholder
+  reference with copy buttons, and a downloadable starter template
+  ([docs/examples/download-template.html](docs/examples/download-template.html)). A stable release
+  publish rebuilds the page with the chosen design. No relay change.
+
 ## [0.5.24] — 2026-11-07
 Tether / TetherQS 0.5.24 (Windows and macOS), Tether Manage 0.5.7; relays: tether-api, hbbs, Caddy/nginx config (deployed 2026-11-07).
 
