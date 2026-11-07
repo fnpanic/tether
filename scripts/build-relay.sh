@@ -15,8 +15,8 @@ rsync -a --delete --exclude target --exclude .git --exclude '*.sqlite3-*' --excl
 mkdir -p "$OUT/server" "$OUT/crates"
 rsync -a --delete --exclude target "$SRC/server/api/" "$OUT/server/api/"
 rsync -a --delete --exclude target "$SRC/crates/tether-trust/" "$OUT/crates/tether-trust/"
-(cd "$OUT/rustdesk-server" && cargo build --release --target $T --bin hbbs --bin hbbr --bin relay-harness)
+(cd "$OUT/rustdesk-server" && cargo build --release --target $T --bin hbbs --bin hbbr --bin relay-harness --bin tether-load)
 (cd "$OUT/server/api" && cargo build --release --target $T)
-for b in hbbs hbbr relay-harness; do install -m 0755 "$OUT/rustdesk-server/target/$T/release/$b" "$OUT/bin/"; done
+for b in hbbs hbbr relay-harness tether-load; do install -m 0755 "$OUT/rustdesk-server/target/$T/release/$b" "$OUT/bin/"; done
 install -m 0755 "$OUT/server/api/target/$T/release/tether-api" "$OUT/bin/"
 ls -l "$OUT/bin"

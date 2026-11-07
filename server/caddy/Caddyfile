@@ -65,8 +65,23 @@ http://:21125 {
 
 	# Private custom-app download links (GET /q/<token>, docs/api.md "Custom apps"). No access log
 	# is configured: the tokens are secrets.
+	# tether-api checks the token and names a prepared file (X-Accel-Redirect); Caddy sends it,
+	# so a slow download does not hold one of tether-api's 32 workers. qcache/ is not under
+	# download/, so it is reachable only this way.
 	handle /q/* {
-		reverse_proxy 127.0.0.1:21120
+		reverse_proxy 127.0.0.1:21120 {
+			header_up X-Tether-Accel 1
+			@accel header X-Accel-Redirect *
+			handle_response @accel {
+				root * /var/lib/tether-api
+				rewrite * {rp.header.X-Accel-Redirect}
+				header Content-Type application/vnd.microsoft.portable-executable
+				header Content-Disposition {rp.header.Content-Disposition}
+				header Cache-Control no-store
+				header X-Content-Type-Options nosniff
+				file_server
+			}
+		}
 	}
 
 	# Release downloads and update manifests written by tether-api. Caddy (user tether-https)

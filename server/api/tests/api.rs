@@ -267,7 +267,11 @@ fn heartbeat() {
     for i in 0..30 {
         assert_eq!(s.req("POST", "/api/heartbeat", &ip3, hb(&format!("dev-{i:04}")).as_bytes()).status, 204, "post {i}");
     }
-    assert_eq!(s.req("POST", "/api/heartbeat", &ip3, hb("dev-9999").as_bytes()).status, 429);
+    let r = s.req("POST", "/api/heartbeat", &ip3, hb("dev-9999").as_bytes());
+    assert_eq!((r.status, r.body.as_slice()), (429, &b"too many requests"[..]));
+    // A known device behind that IP is not refused for the IP's count, only by its own interval.
+    let r = s.req("POST", "/api/heartbeat", &ip3, hb("aaaa-1111").as_bytes());
+    assert_eq!((r.status, r.body.as_slice()), (429, &b"heartbeat too frequent"[..]));
     assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").json()["devices"], 31);
 }
 
@@ -429,6 +433,18 @@ fn custom_apps() {
     assert_eq!(plain, exe);
     let p = custom::open(doc.unwrap(), &[k.verifying_key()]).unwrap();
     assert_eq!((p.id.as_str(), p.accent.as_str()), ("acme-1", "#c8102e"));
+    // Behind Caddy (X-Tether-Accel): no body, the path of the same bytes for Caddy to send.
+    let r = s.req("GET", &q, &[("X-Tether-Accel", "1")], b"");
+    assert_eq!((r.status, r.body.len()), (204, 0));
+    assert_eq!(r.header("Content-Disposition"), Some("attachment; filename=\"ACME GmbH-Support.exe\""));
+    let rel = r.header("X-Accel-Redirect").unwrap().to_owned();
+    assert_eq!(rel, "/qcache/acme-1--TetherQS-0.4.1.exe");
+    let cached = s.dir.join(rel.trim_start_matches('/'));
+    assert_eq!(std::fs::read(&cached).unwrap(), s.req("GET", &q, &[], b"").body);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&cached).unwrap().permissions().mode() & 0o777, 0o640, "readable by Caddy's group");
+    }
 
     let list = s.admin(&k, "GET", "/api/admin/custom", b"").json();
     assert_eq!(list.as_array().unwrap().len(), 1);
@@ -436,7 +452,7 @@ fn custom_apps() {
     assert_eq!(list[0]["token"], tok.as_str());
     assert_eq!(list[0]["expires"], exp);
     assert_eq!(list[0]["channel"], "stable");
-    assert_eq!(list[0]["downloads"], 1);
+    assert_eq!(list[0]["downloads"], 3);
     assert!(list[0]["last_download"].as_u64().is_some());
     assert!(list[0].get("profile").is_none());
 
@@ -448,6 +464,7 @@ fn custom_apps() {
     // Replacing with a new token: the old link stops working, counters restart.
     let tok2 = custom::new_token();
     assert_eq!(s.admin(&k, "PUT", path, &custom_body(&k, "acme-1", "ACME", &tok2, exp)).status, 204);
+    assert!(!cached.exists(), "prepared copy of the old profile kept");
     assert_eq!(s.req("GET", &q, &[], b"").status, 404);
     assert_eq!(s.req("GET", &format!("/q/{tok2}"), &[], b"").status, 200);
     assert_eq!(s.admin(&k, "GET", "/api/admin/custom", b"").json()[0]["downloads"], 1);

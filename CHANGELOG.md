@@ -6,6 +6,10 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+Relays: scaling to 10 000 devices and 3 000 concurrent sessions ([docs/scaling.md](docs/scaling.md):
+capacity model, load tests, architecture, cost, rollout). Server-side only; clients and wire
+formats are unchanged and old clients keep working.
+
 ### Added
 - **Mac build runner** ([docs/mac-build-runner.md](docs/mac-build-runner.md)): builds on the Mac
   start from the PC through Tether file transfer alone, also while the Mac's screen is locked, for
@@ -56,6 +60,35 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   `/_metrics/*` on the other node for the monitoring node's IP and password only. Helm:
   `metrics.enabled`, `metrics.serviceMonitor.enabled`. End-to-end test
   `scripts/test-monitoring.sh`.
+
+### Fixed
+- **hbbs: hosts behind a busy NAT took minutes to come back after an hbbs restart.** Every
+  WebSocket reconnect sends RegisterPk, and upstream allows 32 per source IP per minute. A
+  RegisterPk that repeats a host's registered uuid and key now passes that limit (2 000 hosts
+  behind 20 IPs: back in 5 s instead of ~200 s). The limits are configurable
+  (`IP_BLOCK_PER_MIN`, `IP_BLOCK_IDS_PER_DAY`; `tether-hbbs.service` sets 300 and 5 000).
+- **hbbs/hbbr: reconnect storms overflowed the listen backlog** (128): 18 040 SYNs dropped when
+  10 000 clients reconnected at once. Now 8192 (with `net.core.somaxconn` 8192): none dropped.
+- **tether-api: heartbeats of large sites were refused.** The limit of 30 heartbeats per IP per
+  minute hit every site with more than ~450 devices behind one IP; it now applies only to devices
+  the API does not know yet. The device list holds 50 000 devices (was 10 000).
+- **tether-api: slow custom-app downloads (`/q/<token>`) blocked the API.** Each held one of 32
+  workers for the whole download. With the new Caddyfile, tether-api prepares the file once and
+  Caddy sends it (`X-Accel-Redirect`); old and new Caddyfile and tether-api work in any
+  combination. Helm: the api pod's Caddy serves `/q/`.
+- hbbs: the punch-request log (admin command `pr`) is capped at 10 000 entries instead of growing
+  for as long as hbbs runs; no global lock per WebSocket ping.
+
+### Changed
+- **hbbr uses mimalloc** instead of musl's allocator: 30–38 % less CPU per relayed Gbit/s.
+- `server/sysctl/90-tether.conf` (installed by `install.sh`): conntrack table, accept queues,
+  UDP buffer for hbbs (`-M 8388608` in the unit), BBR, reserved service ports. tether-api unit:
+  `LimitNOFILE=65536`.
+- Helm: `examples/scale-10k.yaml` with measured sizes (the chart defaults are for small installs).
+- `tools/load`: load generator (`tether-load`, built by `scripts/build-relay.sh`) and scripts for
+  registrations, relay traffic, tether-api, downloads and restarts; results in
+  `tools/load/results`.
+
 
 ## [0.5.21] — 2026-11-07
 

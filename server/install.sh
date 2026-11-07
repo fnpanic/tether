@@ -61,6 +61,12 @@ chmod 0644 /etc/tether/api.env
 
 units=(tether-hbbs.service tether-hbbr.service tether-https.service tether-api.service)
 for u in "${units[@]}"; do install -m 0644 "$HERE/systemd/$u" /etc/systemd/system/; done
+# Kernel limits for 10 000 hosts / 3 000 sessions per node (docs/scaling.md); -e skips keys this
+# kernel lacks (nf_conntrack before the firewall loaded it).
+if [ -f "$HERE/sysctl/90-tether.conf" ]; then
+  install -m 0644 "$HERE/sysctl/90-tether.conf" /etc/sysctl.d/90-tether.conf
+  sysctl -e -q -p /etc/sysctl.d/90-tether.conf || true
+fi
 if [ -n "${DUCKDNS_DOMAIN:-}" ] && [ -n "${DUCKDNS_TOKEN:-}" ]; then
   (umask 077; printf 'DUCKDNS_DOMAIN=%s\nDUCKDNS_TOKEN=%s\n' "$DUCKDNS_DOMAIN" "$DUCKDNS_TOKEN" > /etc/tether/duckdns.env)
   install -m 0644 "$HERE/systemd/tether-ddns.service" "$HERE/systemd/tether-ddns.timer" /etc/systemd/system/
@@ -69,6 +75,7 @@ fi
 # SELinux (Oracle Linux): give the new files their default contexts.
 if command -v restorecon >/dev/null; then
   restorecon -R /usr/local/bin /etc/tether /etc/systemd/system /var/lib/tether /var/lib/tether-api /var/lib/tether-https
+  [ -f /etc/sysctl.d/90-tether.conf ] && restorecon /etc/sysctl.d/90-tether.conf
 fi
 
 # Host firewall first, so Caddy can get its certificate on the first try: relay ports, 443, and 80 forwarded to 443 (fallback route for clients).

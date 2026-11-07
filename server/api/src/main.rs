@@ -30,7 +30,9 @@ use tether_trust::{custom, envelope, policy::Bundle, reqauth, serverkeys::KeyLis
 use tiny_http::{Header, Request, Response, Server};
 
 const DAY: u64 = 86_400;
-const MAX_DEVICES: usize = 10_000;
+/// Devices kept (oldest seen dropped first). 10 000 users plus reinstalls within DEVICE_TTL need
+/// headroom; 50 000 is ~7 MB of devices.json and ~25 MB of memory (docs/scaling.md).
+const MAX_DEVICES: usize = 50_000;
 const DEVICE_TTL: u64 = 180 * DAY;
 const HB_UUID_INTERVAL: u64 = 60;
 const HB_IP_PER_MIN: u32 = 30;
@@ -624,14 +626,16 @@ impl App {
 
     fn heartbeat(&mut self, rq: &mut Request, body: &Body) -> Result<Resp, Resp> {
         let t = now();
-        if !rate_ok(&mut self.ip_hits, client_ip(rq), t, HB_IP_PER_MIN) {
-            return Err(text(429, "too many requests"));
-        }
         let body = body.bytes(LIMIT_HEARTBEAT)?;
         let hb: Heartbeat = serde_json::from_slice(body).map_err(|e| text(400, &e.to_string()))?;
         valid_heartbeat(&hb).map_err(|e| text(400, &e))?;
-        if self.devices.get(&hb.uuid).is_some_and(|d| t < d.last_seen + HB_UUID_INTERVAL) {
-            return Err(text(429, "too many requests"));
+        // Known devices are limited per uuid only: a site behind one NAT IP has hundreds of them.
+        // The per-IP limit is for new uuids, which would push real devices out of the list.
+        match self.devices.get(&hb.uuid) {
+            Some(d) if t < d.last_seen + HB_UUID_INTERVAL => return Err(text(429, "heartbeat too frequent")),
+            Some(_) => {}
+            None if !rate_ok(&mut self.ip_hits, client_ip(rq), t, HB_IP_PER_MIN) => return Err(text(429, "too many requests")),
+            None => {}
         }
         if !self.devices.contains_key(&hb.uuid) && self.devices.len() >= MAX_DEVICES {
             if let Some(oldest) = self.devices.values().min_by_key(|d| d.last_seen).map(|d| d.uuid.clone()) {
@@ -904,6 +908,7 @@ impl App {
         let entry = CustomApp { id: id.to_owned(), name: p.name, token: req.token, expires: req.expires, channel: req.channel, created, downloads, last_download, profile: req.profile };
         self.check_space(body.len() as u64)?;
         self.save(&format!("custom/{id}.json"), &entry).map_err(internal)?;
+        self.qcache_drop(id);
         match old {
             Some(i) => self.custom[i] = entry,
             None => self.custom.push(entry),
@@ -914,6 +919,7 @@ impl App {
     fn delete_custom(&mut self, id: &str) -> Result<Resp, Resp> {
         let i = self.custom.iter().position(|c| c.id == id && valid_custom_id(id)).ok_or_else(not_found)?;
         fs::remove_file(self.data.join("custom").join(format!("{id}.json"))).map_err(internal)?;
+        self.qcache_drop(id);
         self.custom.remove(i);
         Ok(empty(204))
     }
@@ -933,32 +939,40 @@ impl App {
         let dir = self.data.join("download").join(&c.channel).join("customer/windows-x86_64");
         let exe = (|| {
             let m: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("latest.json")).ok()?).ok()?;
-            let file = m["platforms"]["windows-x86_64"]["url"].as_str()?.rsplit('/').next().filter(|f| valid_segment(f))?;
-            let f = File::open(dir.join(file)).ok()?;
-            let len = f.metadata().ok().filter(|m| m.is_file())?.len();
-            Some((f, len))
+            let file = m["platforms"]["windows-x86_64"]["url"].as_str()?.rsplit('/').next().filter(|f| valid_segment(f))?.to_owned();
+            let f = File::open(dir.join(&file)).ok()?;
+            let meta = f.metadata().ok().filter(|m| m.is_file())?;
+            Some((f, meta, file))
         })();
-        let Some((f, len)) = exe else {
+        let Some((f, meta, file)) = exe else {
             eprintln!("custom app {} (token {}…): no Windows TetherQS release in channel {}", c.id, token_hint(token), c.channel);
             return Err(not_found());
         };
+        let len = meta.len();
         let trailer = custom::trailer(&serde_json::to_vec(&c.profile).map_err(internal)?);
         let size = len as usize + trailer.len();
         let disposition = format!("attachment; filename=\"{}\"", download_name(&c.name));
-        let body: Box<dyn Read + Send> = Box::new(f.take(len).chain(io::Cursor::new(trailer)));
-        let resp = Response::new(
-            tiny_http::StatusCode(200),
-            vec![
-                hdr("Content-Type", "application/vnd.microsoft.portable-executable"),
-                hdr("Content-Disposition", &disposition),
-                hdr("Cache-Control", "no-store"),
-                hdr("X-Content-Type-Options", "nosniff"),
-            ],
-            body,
-            Some(size),
-            None,
-        )
-        .with_chunked_threshold(usize::MAX); // tiny_http would switch to chunked above 32 KiB
+        // Behind the Caddyfile's handle_response (it sets X-Tether-Accel): answer with the path of
+        // a prepared copy and let Caddy send it, so a slow download does not hold a worker.
+        let resp = if header(rq, "X-Tether-Accel").as_deref() == Some("1") {
+            let rel = self.qcache(&c.id.clone(), &file, f, &meta, &trailer).map_err(internal)?;
+            empty(204).with_header(hdr("X-Accel-Redirect", &rel)).with_header(hdr("Content-Disposition", &disposition))
+        } else {
+            let body: Box<dyn Read + Send> = Box::new(f.take(len).chain(io::Cursor::new(trailer)));
+            Response::new(
+                tiny_http::StatusCode(200),
+                vec![
+                    hdr("Content-Type", "application/vnd.microsoft.portable-executable"),
+                    hdr("Content-Disposition", &disposition),
+                    hdr("Cache-Control", "no-store"),
+                    hdr("X-Content-Type-Options", "nosniff"),
+                ],
+                body,
+                Some(size),
+                None,
+            )
+            .with_chunked_threshold(usize::MAX) // tiny_http would switch to chunked above 32 KiB
+        };
         let c = &mut self.custom[i];
         c.downloads += 1;
         c.last_download = Some(t);
@@ -967,6 +981,46 @@ impl App {
             eprintln!("custom app {}: could not save the download count: {e}", entry.id);
         }
         Ok(resp)
+    }
+
+    /// `qcache/<id>--<exe>`: the exe with this app's trailer, as Caddy serves it for `/q/`
+    /// (path relative to the data dir). Rebuilt when the release or the profile changed; other
+    /// copies of the app are removed. The directory is not under `download/`, so it is reachable
+    /// only through the X-Accel-Redirect of a valid token.
+    fn qcache(&self, id: &str, file: &str, mut exe: File, meta: &fs::Metadata, trailer: &[u8]) -> io::Result<String> {
+        let dir = self.data.join("qcache");
+        mkdirs(&dir, 0o750)?;
+        let name = format!("{id}--{file}");
+        let dest = dir.join(&name);
+        let fresh = fs::metadata(&dest).is_ok_and(|m| {
+            m.len() == meta.len() + trailer.len() as u64 && m.modified().ok() >= meta.modified().ok()
+        });
+        if !fresh {
+            self.qcache_drop(id);
+            let tmp = tmp_path(&self.data);
+            let r = (|| {
+                let mut f = OpenOptions::new().write(true).create_new(true).mode(0o640).open(&tmp)?;
+                io::copy(&mut exe, &mut f)?;
+                f.write_all(trailer)?;
+                f.sync_all()?;
+                fs::rename(&tmp, &dest)
+            })();
+            if r.is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+            r?;
+        }
+        Ok(format!("/qcache/{name}"))
+    }
+
+    /// Removes the prepared `/q/` copies of an app (its profile or token changed, or it was revoked).
+    fn qcache_drop(&self, id: &str) {
+        let prefix = format!("{id}--");
+        for e in fs::read_dir(self.data.join("qcache")).into_iter().flatten().flatten() {
+            if e.file_name().to_str().is_some_and(|n| n.starts_with(&prefix)) {
+                let _ = fs::remove_file(e.path());
+            }
+        }
     }
 
     fn put_release(&mut self, rq: &mut Request, body: &Body, url: &str, dest: &Path) -> Result<Resp, Resp> {

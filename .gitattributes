@@ -8,3 +8,5 @@ patches/*.patch text eol=lf
 
 # Monitoring config and installer, copied to the Linux nodes as they are.
 deploy/monitoring/** text eol=lf
+# Kernel settings copied to Linux relays.
+server/sysctl/* text eol=lf
