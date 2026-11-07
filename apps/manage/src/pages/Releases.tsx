@@ -6,7 +6,7 @@ import { useApp } from "../App";
 import { api, bytes, host, inTauri, invoke, when, type RelayResult } from "../lib/ipc";
 import { idle, percent, track, type Progress } from "../lib/progress";
 import { PublishSheet } from "../components/publish";
-import { groupReleases, type ReleaseGroup } from "../lib/releases";
+import { describeRamp, groupReleases, rampPresets, rolloutState, type IndexView, type ReleaseGroup } from "../lib/releases";
 import { Badge, Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Table, TextArea, TextField, Toggle } from "../components/ui";
 
 interface Release {
@@ -364,6 +364,8 @@ export function Releases() {
   const [mandatory, setMandatory] = useState(false);
   const [minimumVersion, setMinimumVersion] = useState("");
   const [forced, setForced] = useState(false);
+  const [rollout, setRollout] = useState("standard");
+  const [security, setSecurity] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [list, setList] = useState<Release[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -421,6 +423,7 @@ export function Releases() {
       <PageHeader title="Releases" sub="What each relay publishes, and signing new installers with the update key." />
       <LatestBuilds onDone={() => setRound((r) => r + 1)} />
       <Overview key={round} />
+      <Rollouts key={`r${round}`} />
 
       <h2 className="mb-3 text-headline font-semibold">Sign and publish a new release</h2>
       <Card>
@@ -472,6 +475,16 @@ export function Releases() {
           <Label text="Minimum version" hint="Older versions are blocked. Leave empty for none.">
             <TextField value={minimumVersion} onChange={(e) => setMinimumVersion(e.target.value)} placeholder="0.3.0" />
           </Label>
+          <Label text="Rollout" hint={describeRamp(rampPresets[rollout as keyof typeof rampPresets])}>
+            <Segmented<string> value={rollout} onChange={setRollout} options={[{ value: "standard", label: "Standard" }, { value: "fast", label: "Fast" }, { value: "now", label: "Immediately" }]} />
+          </Label>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-caption font-semibold">Security release</p>
+              <p className="text-footnote text-muted">Skips the rollout: every device gets it at once.</p>
+            </div>
+            <Toggle label="Security release" checked={security} onChange={setSecurity} />
+          </div>
         </div>
         <div className="mt-6 flex justify-end">
           <Button variant="primary" size="lg" disabled={!file || !version.trim()} onClick={() => setReviewing(true)}>
@@ -491,7 +504,7 @@ export function Releases() {
           }}
           run={async () => {
             const r = await invoke<RelayResult[]>("release_publish", {
-              args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced },
+              args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced, rollout, security },
             });
             toast(`Released ${version} to ${channel}`);
             setFile("");
@@ -509,9 +522,12 @@ export function Releases() {
             <dd className="break-all font-mono text-footnote">{target}</dd>
             <dt className="text-muted">Flags</dt>
             <dd>{[mandatory && "mandatory", forced && "forced", minimumVersion.trim() && `minimum ${minimumVersion.trim()}`].filter(Boolean).join(", ") || "none"}</dd>
+            <dt className="text-muted">Rollout</dt>
+            <dd>{security ? "security release: everyone at once" : describeRamp(rampPresets[rollout as keyof typeof rampPresets])}</dd>
           </dl>
           <p className="mt-3 text-caption text-muted">
-            Signed with the update key, then uploaded to each relay: files first, its own latest.json last. Devices on the {channel.trim()} channel get it at their next update check.
+            Signed with the update key, then uploaded to each relay (and the CDN, if set up): files first, then the signed release index, the legacy latest.json last. Online devices on the{" "}
+            {channel.trim()} channel hear of it within about a minute.
           </p>
         </PublishSheet>
       )}
@@ -578,5 +594,144 @@ export function Releases() {
         })}
       </Table>
     </>
+  );
+}
+
+/** The signed release index per channel: rollout progress, halt and resume (docs/updates.md). */
+function Rollouts() {
+  const { toast } = useApp();
+  const [channel, setChannel] = useState("stable");
+  const [view, setView] = useState<IndexView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState("");
+  const load = (ch = channel) => invoke<IndexView>("release_index", { channel: ch.trim() }).then(setView, (e) => setError(e.message));
+  useEffect(() => void load(), []);
+  const control = async (key: string, action: string, preset?: string) => {
+    const what = action === "halt" ? "Halt" : action === "resume" ? "Resume" : "Restart the rollout of";
+    if (!(await ask(`${what} ${key} on ${channel}? A new signed release index goes to every relay. Halting reaches devices in about 1 minute; devices that installed it keep it.`, { title: "Rollout", kind: "warning" }))) return;
+    setBusy(key);
+    try {
+      await invoke<RelayResult[]>("release_control", { channel: channel.trim(), key, action, preset });
+      toast(`${what} ${key}: done`);
+      await load();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <section className="mb-10">
+      <div className="mb-3 flex items-end justify-between gap-4">
+        <div>
+          <h2 className="text-headline font-semibold">Rollouts</h2>
+          <p className="mt-1 text-caption text-muted">
+            The signed release index devices follow. Serial {view?.serial ?? "–"}
+            {view?.days_left !== undefined && ` · valid for ${view.days_left} more days`}
+            {view?.relays.map((r) => ` · ${host(r.server)}: ${r.serial ?? "none"}`).join("")}
+          </p>
+          {view?.stale && <ErrorText error="The release index has expired: devices show 'update information is out of date'. Unlock the keys to re-sign it." />}
+          {view?.days_left !== undefined && view.days_left < 7 && !view.stale && <p className="text-caption text-warn">The release index expires in {view.days_left} days; it is re-signed when you unlock the keys.</p>}
+        </div>
+        <div className="flex items-center gap-2">
+          <TextField className="w-28" value={channel} onChange={(e) => setChannel(e.target.value)} onKeyDown={(e) => e.key === "Enter" && load()} aria-label="Channel" />
+          <IconButton label="Refresh" onClick={() => load()}>
+            <RefreshCw size={16} />
+          </IconButton>
+        </div>
+      </div>
+      <ErrorText error={error} />
+      <Table head={["App", "Platform", "Version", "Rollout", "Ramp", ""]} empty={view && !view.entries.length ? "No signed release index on this channel yet: the next publish creates it." : false}>
+        {view?.entries.map((e) => {
+          const [kind, platform] = e.key.split("/") as [Kind, Platform];
+          return (
+            <tr key={e.key}>
+              <td>{APP[kind] ?? kind}</td>
+              <td>{OS[platform] ?? platform}</td>
+              <td className="font-semibold">{e.version}</td>
+              <td>
+                <Badge tone={e.halted ? "danger" : e.percent >= 100 || e.security ? "ok" : "warn"}>{rolloutState(e)}</Badge>
+                {e.cdn && <span className="ml-2 text-footnote text-muted">CDN</span>}
+              </td>
+              <td className="text-footnote text-muted">{e.security ? "–" : `${describeRamp(e.steps)} from ${when(e.start)}`}</td>
+              <td className="whitespace-nowrap text-right">
+                {e.halted ? (
+                  <Button size="sm" disabled={!!busy} onClick={() => control(e.key, "resume")}>
+                    Resume
+                  </Button>
+                ) : (
+                  <Button size="sm" disabled={!!busy} onClick={() => control(e.key, "halt")}>
+                    Halt
+                  </Button>
+                )}{" "}
+                {!e.security && e.percent < 100 && (
+                  <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => control(e.key, "ramp", "now")}>
+                    Everyone now
+                  </Button>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </Table>
+      <CdnSettings />
+    </section>
+  );
+}
+
+/** Cloudflare Workers Static Assets for downloads (D1). The token is sealed in the key vault. */
+function CdnSettings() {
+  const { toast } = useApp();
+  const [s, setS] = useState<{ enabled: boolean; base: string; worker: string; credentials: string | null | undefined } | null>(null);
+  const [envFile, setEnvFile] = useState("");
+  const [pass, setPass] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => void invoke<typeof s>("cdn_state").then(setS, () => {}), []);
+  if (!s) return null;
+  const save = async (enabled: boolean) => {
+    setError(null);
+    try {
+      await invoke("cdn_configure", { enabled, base: s.base.trim(), worker: s.worker.trim(), envFile: envFile.trim() || null, passphrase: pass || null });
+      setS(await invoke("cdn_state"));
+      setPass("");
+      toast(enabled ? "CDN on: the next publish deploys to Cloudflare" : "CDN settings saved");
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+  return (
+    <Card className="mt-4">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <p className="text-caption font-semibold">Download CDN (Cloudflare Workers, free plan)</p>
+          <p className="text-footnote text-muted">
+            Each publish deploys the update files (max. 25 MiB each; TetherQS as .gz) as a new version of the Worker. Devices verify every byte and fall back to the relays. Credentials:{" "}
+            {s.credentials ? `account ${s.credentials.slice(0, 6)}…` : "not stored"}
+          </p>
+        </div>
+        <Toggle label="CDN" checked={s.enabled} onChange={(v) => save(v)} />
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3">
+        <Label text="Address">
+          <TextField value={s.base} onChange={(e) => setS({ ...s, base: e.target.value })} />
+        </Label>
+        <Label text="Worker">
+          <TextField value={s.worker} onChange={(e) => setS({ ...s, worker: e.target.value })} />
+        </Label>
+        <Label text="Credentials file" hint="cf.env with CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID; stored sealed with the key passphrase.">
+          <div className="flex gap-2">
+            <TextField readOnly value={envFile} placeholder="No file chosen" />
+            <Button onClick={async () => { const f = await open({ filters: [{ name: "Env file", extensions: ["env", "txt"] }] }); if (typeof f === "string") setEnvFile(f); }}>Choose…</Button>
+          </div>
+        </Label>
+        <Label text="Key passphrase">
+          <TextField type="password" value={pass} onChange={(e) => setPass(e.target.value)} />
+        </Label>
+      </div>
+      <ErrorText error={error} />
+      <div className="mt-3 flex justify-end">
+        <Button onClick={() => save(s.enabled)}>Save</Button>
+      </div>
+    </Card>
   );
 }

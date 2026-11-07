@@ -1,7 +1,7 @@
 // node --test src/lib/releases.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { groupReleases } from "./releases.ts";
+import { describeRamp, groupReleases, rampPresets, rolloutState } from "./releases.ts";
 
 test("one group per release, manifest separate, newest first", () => {
   const f = (path: string, size = 1) => ({ channel: "stable", path, size, modified: size });
@@ -27,4 +27,20 @@ test("one group per release, manifest separate, newest first", () => {
     ],
   );
   assert.equal(g[2].size, 32);
+});
+
+test("ramp presets read as steps", () => {
+  assert.equal(describeRamp(rampPresets.standard), "1 % at once → 10 % after 1 h → 50 % after 6 h → 100 % after 1 d");
+  assert.equal(describeRamp(rampPresets.fast), "10 % at once → 100 % after 1 h");
+  assert.equal(describeRamp(rampPresets.now), "Every device at once");
+  assert.equal(describeRamp([]), "");
+});
+
+test("rollout state", () => {
+  const e = { key: "technician/windows-x86_64", version: "1", percent: 10, halted: false, security: false, mandatory: false, forced: false, start: 0, steps: [], cdn: false };
+  assert.equal(rolloutState(e), "10 % of devices");
+  assert.equal(rolloutState({ ...e, halted: true }), "Halted");
+  assert.equal(rolloutState({ ...e, percent: 100 }), "Everyone");
+  assert.equal(rolloutState({ ...e, percent: 0 }), "Not started");
+  assert.equal(rolloutState({ ...e, security: true }), "Security release: everyone");
 });

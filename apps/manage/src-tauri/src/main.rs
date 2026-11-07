@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+mod cdn;
 mod keys;
 mod live;
 mod private;
@@ -126,6 +127,17 @@ impl App {
             out.push(RelayResult::of(&sv, r.map(|_| Value::Null)));
         }
         out
+    }
+    /// CDN credentials and base URL, when the CDN is on and the keys are unlocked.
+    fn cdn_config(&self) -> Option<(cdn::Creds, String)> {
+        let s = self.settings();
+        if !s["cdn"]["enabled"].as_bool().unwrap_or(false) {
+            return None;
+        }
+        let k = self.keys.lock().unwrap();
+        let c = k.as_ref()?.cdn.clone()?;
+        let worker = s["cdn"]["worker"].as_str().unwrap_or(cdn::DEFAULT_WORKER).to_owned();
+        Some((cdn::Creds { account_id: c.account_id, token: c.token, worker }, s["cdn"]["base"].as_str().unwrap_or(cdn::DEFAULT_BASE).to_owned()))
     }
     fn published(&self) -> BTreeMap<u64, PathBuf> {
         fs::read_dir(self.path("policy/published"))
@@ -689,6 +701,15 @@ struct ReleaseArgs {
     mandatory: bool,
     minimum_version: String,
     forced: bool,
+    /// Ramp preset (`standard` = D4 default, `fast`, `now`); "" = standard.
+    #[serde(default)]
+    rollout: String,
+    /// Unix seconds the ramp starts; 0 = now.
+    #[serde(default)]
+    rollout_start: u64,
+    /// Security release: skips the ramp.
+    #[serde(default)]
+    security: bool,
 }
 
 /// One release as it goes to a relay: its files (artifact first) and the manifest fields.
@@ -706,6 +727,8 @@ struct Upload {
     minimum_version: String,
     forced: bool,
     pub_date: String,
+    /// The gzip copy (TetherQS.exe), also in `files` as `<name>.gz`.
+    packed: Option<Vec<u8>>,
 }
 
 /// Event `release-progress` for the publish sheet: one release (`dir`, `version`) going to one
@@ -742,6 +765,25 @@ async fn upload_release_reported(app: &App, ui: &AppHandle, server: &str, u: &Up
 /// Every node gets the files and its own manifest: its download URL points at itself, so a node
 /// can serve updates even when the others are down. Returns the update URL.
 async fn upload_release(app: &App, ui: &AppHandle, server: &str, u: &Upload) -> R<String> {
+    upload_files(app, ui, server, u).await?;
+    put_manifest(app, ui, server, u).await
+}
+
+/// The release files (artifact first) to one relay.
+async fn upload_files(app: &App, ui: &AppHandle, server: &str, u: &Upload) -> R<()> {
+    let base = format!("/api/admin/release/{}/{}", u.channel, u.dir);
+    for (f, bytes) in &u.files {
+        let ct = if f.ends_with(".sig") { "text/plain" } else { "application/octet-stream" };
+        let p = Progress { total: bytes.len() as u64, ..Progress::new(u, server, f) };
+        emit(ui, p.clone());
+        let ui = ui.clone();
+        api::admin_upload(server, &app.admin_key()?, &format!("{base}/{f}"), bytes.clone(), ct, move |sent| emit(&ui, Progress { sent, ..p.clone() })).await?;
+    }
+    Ok(())
+}
+
+/// The legacy `latest.json` (clients up to 0.5.23), written last. Returns the update URL.
+async fn put_manifest(app: &App, ui: &AppHandle, server: &str, u: &Upload) -> R<String> {
     let url = format!("{server}/download/{}/{}/{}", u.channel, u.dir, u.name);
     let new = release::platform_keys(&u.platform).iter().map(|k| (k.to_string(), release::Platform { signature: u.sig.clone(), url: url.clone() })).collect();
     // Read before writing: another OS's build of the same version in this manifest stays listed.
@@ -756,14 +798,6 @@ async fn upload_release(app: &App, ui: &AppHandle, server: &str, u: &Upload) -> 
         forced: u.forced,
     };
     let base = format!("/api/admin/release/{}/{}", u.channel, u.dir);
-    // Artifacts first, manifest last: clients never see a latest.json pointing at a missing file.
-    for (f, bytes) in &u.files {
-        let ct = if f.ends_with(".sig") { "text/plain" } else { "application/octet-stream" };
-        let p = Progress { total: bytes.len() as u64, ..Progress::new(u, server, f) };
-        emit(ui, p.clone());
-        let ui = ui.clone();
-        api::admin_upload(server, &app.admin_key()?, &format!("{base}/{f}"), bytes.clone(), ct, move |sent| emit(&ui, Progress { sent, ..p.clone() })).await?;
-    }
     emit(ui, Progress::new(u, server, "latest.json"));
     app.call_on(server, "PUT", &format!("{base}/latest.json"), serde_json::to_vec_pretty(&manifest).unwrap(), "application/json").await?;
     Ok(url)
@@ -773,6 +807,9 @@ async fn upload_release(app: &App, ui: &AppHandle, server: &str, u: &Upload) -> 
 /// technician app the manual-download disk image with its signature.
 fn release_files(kind: &str, platform: &str, version: &str, name: &str) -> Vec<String> {
     let mut v = vec![name.to_owned(), format!("{name}.sig")];
+    if release::wants_packed(kind, platform) {
+        v.push(format!("{name}.gz"));
+    }
     if (kind, platform) == ("technician", release::MAC) {
         let dmg = release::dmg_name(version);
         v.push(format!("{dmg}.sig"));
@@ -812,6 +849,12 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs) 
         files.push((dmg_name.clone(), bytes));
         files.push((format!("{dmg_name}.sig"), dmg_sig.into_bytes()));
     }
+    let packed = release::wants_packed(&a.kind, &a.platform).then(|| release::gzip(&files[0].1));
+    if let Some(p) = &packed {
+        files.push((format!("{name}.gz"), p.clone()));
+    }
+    let rollout = release::rollout(&a.rollout, if a.rollout_start == 0 { api::now() } else { a.rollout_start })?;
+    let security = a.security;
     let u = Upload {
         channel: a.channel,
         dir,
@@ -825,16 +868,279 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs) 
         minimum_version: a.minimum_version,
         forced: a.forced,
         pub_date: release::rfc3339(api::now()),
+        packed,
     };
+    publish_upload(&app, &ui, &u, security, rollout).await
+}
+
+/// The update file the CDN serves for a release: the gzip copy if there is one, else the artifact.
+fn cdn_file(u: &Upload) -> (String, &[u8]) {
+    match &u.packed {
+        Some(p) => (format!("{}.gz", u.name), p.as_slice()),
+        None => (u.name.clone(), u.files[0].1.as_slice()),
+    }
+}
+
+/// Upload order (docs/update-design.md §5.9): files to every relay and the CDN, then the signed
+/// release index to every relay, then the legacy `latest.json`. One result per relay (+ "CDN").
+async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, rollout: tether_trust::release::Rollout) -> R<Vec<RelayResult>> {
+    let cdn_conf = app.cdn_config();
+    if cdn_conf.is_some() {
+        let (f, bytes) = cdn_file(u);
+        cdn::check_size(&f, bytes.len() as u64)?;
+    }
+    let servers = app.servers();
+    let mut errs: Vec<Option<String>> = Vec::new();
+    for server in &servers {
+        let r = upload_files(app, ui, server, u).await;
+        if let Err(e) = &r {
+            emit(ui, Progress { done: true, error: Some(e.clone()), ..Progress::new(u, server, "") });
+        }
+        errs.push(r.err());
+    }
+    if errs.iter().all(Option::is_some) {
+        return Err(servers.iter().zip(&errs).map(|(s, e)| format!("{s}: {}", e.as_deref().unwrap_or(""))).collect::<Vec<_>>().join("; "));
+    }
+    let mut extra = Vec::new();
+    let cdn_base = match cdn_publish(app, u).await {
+        Ok(b) => {
+            if let Some(b) = &b {
+                extra.push(RelayResult::of("CDN", Ok(json!({ "base": b }))));
+            }
+            b
+        }
+        Err(e) => {
+            // The relays carry the release alone; clients use the relay URL.
+            extra.push(RelayResult::of("CDN", Err(e)));
+            None
+        }
+    };
+    let (_, data) = (&u.files[0].0, &u.files[0].1);
+    let m = release::Manifest {
+        version: u.version.clone(),
+        notes: u.notes.clone(),
+        pub_date: u.pub_date.clone(),
+        platforms: Default::default(),
+        mandatory: u.mandatory,
+        minimum_version: u.minimum_version.clone(),
+        forced: u.forced,
+    };
+    let e = release::entry(&u.channel, &u.dir, &u.name, data, &u.sig, u.packed.as_deref(), cdn_base.as_deref(), &m, security, rollout);
+    let key = u.dir.clone();
+    let index = publish_index(app, &u.channel, &servers, move |r| {
+        r.insert(key, e);
+    })
+    .await;
     let mut out = Vec::new();
-    for server in app.servers() {
-        let r = upload_release_reported(&app, &ui, &server, &u).await;
-        out.push(RelayResult::of(&server, r.map(|url| json!({ "url": url }))));
+    for (i, server) in servers.iter().enumerate() {
+        let r = match (&errs[i], &index) {
+            (Some(e), _) => Err(e.clone()),
+            (None, Err(e)) => Err(format!("release index: {e}")),
+            (None, Ok(per)) => match per.get(server) {
+                Some(Err(e)) => Err(format!("release index: {e}")),
+                _ => put_manifest(app, ui, server, u).await,
+            },
+        };
+        emit(ui, Progress { done: true, error: r.as_ref().err().cloned(), ..Progress::new(u, server, "") });
+        out.push(RelayResult::of(server, r.map(|url| json!({ "url": url }))));
     }
     if let Some(e) = none_ok(&out) {
         return Err(e);
     }
+    out.extend(extra);
     Ok(out)
+}
+
+/// The CDN's next version: the release's update file plus what the CDN already holds. `Ok(None)`:
+/// no CDN configured.
+async fn cdn_publish(app: &App, u: &Upload) -> R<Option<String>> {
+    let Some((creds, base)) = app.cdn_config() else { return Ok(None) };
+    let (file, bytes) = cdn_file(u);
+    let path = format!("/{}/{}/{}", u.channel, u.dir, file);
+    let current: cdn::Assets = fs::read(app.path("cdn-assets.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let next = cdn::next_assets(&current, &format!("{}/{}", u.channel, u.dir), &u.version, &[(path.clone(), bytes)])?;
+    let new = std::sync::Arc::new((path, bytes.to_vec()));
+    let relay = app.server();
+    cdn::deploy(api::shared(), cdn::API, &creds, &next, move |p: String| {
+        let (new, relay) = (new.clone(), relay.clone());
+        async move {
+            if p == new.0 {
+                return Ok(new.1.clone());
+            }
+            // An older file Cloudflare no longer has: the relays keep every release file.
+            api::public(&relay, &format!("/download{p}")).await?.ok_or_else(|| format!("{p} is missing on {relay}"))
+        }
+    })
+    .await?;
+    app.write("cdn-assets.json", &serde_json::to_vec_pretty(&next).unwrap())?;
+    Ok(Some(base))
+}
+
+/// Every relay's release index for `channel` that this admin key signed: `(server, index, raw)`.
+async fn relay_indexes(app: &App, channel: &str, servers: &[String]) -> R<Vec<(String, Option<(tether_trust::release::Index, Vec<u8>)>)>> {
+    let key = app.admin_key()?.verifying_key();
+    let mut out = Vec::new();
+    for sv in servers {
+        let got = api::public(sv, &format!("/download/{channel}/releases.json")).await.ok().flatten();
+        let ix = got.and_then(|raw| tether_trust::release::Index::open(&raw, &[key], channel).ok().map(|i| (i, raw)));
+        out.push((sv.clone(), ix));
+    }
+    Ok(out)
+}
+
+/// Sign the next index (the highest verified one on the relays, changed by `change`) and put it on
+/// every relay. Serial: max(relays, this PC's last) + 1. Per relay: the outcome.
+async fn publish_index(app: &App, channel: &str, servers: &[String], change: impl FnOnce(&mut BTreeMap<String, tether_trust::release::Entry>)) -> R<BTreeMap<String, R<()>>> {
+    let live = relay_indexes(app, channel, servers).await?;
+    let local_path = format!("releases/{channel}.serial");
+    let local: u64 = fs::read_to_string(app.path(&local_path)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    let base = live.iter().filter_map(|(_, i)| i.as_ref().map(|i| i.0.clone())).max_by_key(|i| i.serial);
+    let serial = next_serial(live.iter().filter_map(|(_, i)| i.as_ref().map(|i| i.0.serial)).chain([local]), "release index")?;
+    let ix = release::next_index(base, channel, serial, api::now(), change)?;
+    let doc = serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&ix).unwrap(), &app.admin_key()?)).unwrap();
+    app.write(&local_path, serial.to_string().as_bytes())?;
+    let mut out = BTreeMap::new();
+    for sv in servers {
+        let r = app.call_on(sv, "PUT", &format!("/api/admin/release/{channel}/releases.json"), doc.clone(), "application/json").await.map(|_| ());
+        out.insert(sv.clone(), r);
+    }
+    Ok(out)
+}
+
+/// The rollout view: the highest verified index on the relays, with the ramp's percent now.
+#[tauri::command]
+async fn release_index(app: State<'_, App>, channel: String) -> R<Value> {
+    if !release::valid_channel(&channel) {
+        return Err("invalid channel".into());
+    }
+    let servers = app.servers();
+    let live = relay_indexes(&app, &channel, &servers).await?;
+    let relays: Vec<Value> = live.iter().map(|(s, i)| json!({ "server": s, "serial": i.as_ref().map(|i| i.0.serial) })).collect();
+    let Some(ix) = live.into_iter().filter_map(|(_, i)| i.map(|i| i.0)).max_by_key(|i| i.serial) else {
+        return Ok(json!({ "channel": channel, "serial": null, "relays": relays, "entries": [] }));
+    };
+    let now = api::now();
+    let entries: Vec<Value> = ix
+        .releases
+        .iter()
+        .map(|(k, e)| {
+            json!({ "key": k, "version": e.version, "percent": e.percent(now), "halted": e.halted, "security": e.security,
+                "mandatory": e.mandatory, "forced": e.forced, "start": e.rollout.start, "steps": e.rollout.steps, "cdn": e.urls.len() > 1 || e.packed.as_ref().is_some_and(|p| p.urls.len() > 1) })
+        })
+        .collect();
+    Ok(json!({ "channel": channel, "serial": ix.serial, "expires": ix.expires, "days_left": (ix.expires.saturating_sub(now)) / 86_400, "stale": ix.stale(now), "relays": relays, "entries": entries }))
+}
+
+/// Halt, resume, or restart the ramp of one release: a re-signed index (new serial). Devices see it
+/// within about a minute (hbbs push) and re-check right before installing.
+#[tauri::command]
+async fn release_control(app: State<'_, App>, channel: String, key: String, action: String, preset: Option<String>) -> R<Vec<RelayResult>> {
+    if !release::valid_channel(&channel) {
+        return Err("invalid channel".into());
+    }
+    let servers = app.servers();
+    let preset = preset.unwrap_or_default();
+    let ramp = if action == "ramp" { Some(release::rollout(&preset, api::now())?) } else { None };
+    let mut missing = false;
+    let per = publish_index(&app, &channel, &servers, |r| match r.get_mut(&key) {
+        None => missing = true,
+        Some(e) => match action.as_str() {
+            "halt" => e.halted = true,
+            "resume" => e.halted = false,
+            "security" => e.security = true,
+            _ => {
+                if let Some(ramp) = ramp {
+                    e.rollout = ramp;
+                }
+            }
+        },
+    })
+    .await?;
+    if missing {
+        return Err(format!("{key} is not in the release index of {channel}"));
+    }
+    let out: Vec<RelayResult> = per.into_iter().map(|(s, r)| RelayResult::of(&s, r.map(|_| Value::Null))).collect();
+    if let Some(e) = none_ok(&out) {
+        return Err(e);
+    }
+    Ok(out)
+}
+
+/// After unlocking: re-sign every channel's index that expires within 15 days (D3: clients only
+/// warn after expiry, so this keeps "update information is out of date" from showing).
+#[tauri::command]
+async fn release_index_refresh(app: State<'_, App>) -> R<Vec<Value>> {
+    let servers = app.servers();
+    let mut channels: Vec<String> = Vec::new();
+    for sv in &servers {
+        if let Ok(b) = app.call_on(sv, "GET", "/api/admin/releases", Vec::new(), "application/json").await {
+            for f in serde_json::from_slice::<Vec<Value>>(&b).unwrap_or_default() {
+                if f["path"] == "releases.json" {
+                    if let Some(c) = f["channel"].as_str().filter(|c| !channels.iter().any(|x| x == c)) {
+                        channels.push(c.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for ch in channels {
+        let live = relay_indexes(&app, &ch, &servers).await?;
+        let Some(expires) = live.iter().filter_map(|(_, i)| i.as_ref()).max_by_key(|i| i.0.serial).map(|i| i.0.expires) else { continue };
+        if expires > api::now() + 15 * 86_400 {
+            continue;
+        }
+        let per = publish_index(&app, &ch, &servers, |_| {}).await?;
+        out.push(json!({ "channel": ch, "ok": per.values().all(Result::is_ok) }));
+    }
+    Ok(out)
+}
+
+/// CDN settings (secrets are never sent to the UI).
+#[tauri::command]
+fn cdn_state(app: State<App>) -> Value {
+    let s = app.settings();
+    let k = app.keys.lock().unwrap();
+    json!({
+        "enabled": s["cdn"]["enabled"].as_bool().unwrap_or(false),
+        "base": s["cdn"]["base"].as_str().unwrap_or(cdn::DEFAULT_BASE),
+        "worker": s["cdn"]["worker"].as_str().unwrap_or(cdn::DEFAULT_WORKER),
+        "credentials": k.as_ref().map(|k| k.cdn.as_ref().map(|c| c.account_id.clone())),
+    })
+}
+
+/// Store the Cloudflare account API token and account id in the key vault (sealed with the
+/// passphrase), from the fields or a `cf.env` file; base URL and worker name in the settings.
+#[tauri::command]
+fn cdn_configure(app: State<App>, enabled: bool, base: String, worker: String, account_id: Option<String>, token: Option<String>, env_file: Option<String>, passphrase: Option<String>) -> R<()> {
+    if !base.starts_with("https://") || base.contains(char::is_whitespace) {
+        return Err("The CDN address must start with https://".into());
+    }
+    if worker.is_empty() || !worker.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        return Err("Worker name: lowercase letters, digits and dashes.".into());
+    }
+    let creds = match (env_file.filter(|f| !f.is_empty()), account_id.filter(|a| !a.is_empty()), token.filter(|t| !t.is_empty())) {
+        (Some(f), _, _) => Some(cdn::parse_env(&fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?)?),
+        (None, Some(a), Some(t)) => Some((t, a)),
+        _ => None,
+    };
+    if let Some((token, account_id)) = creds {
+        let pass = passphrase.filter(|p| !p.is_empty()).ok_or("Enter the key passphrase to store the Cloudflare token.")?;
+        let mut k = app.keys.lock().unwrap();
+        let keys = k.as_mut().ok_or("Unlock the keys first.")?;
+        keys.cdn = Some(keys::CdnCreds { account_id, token });
+        let sealed = keys.seal(&pass)?;
+        // The passphrase must be the vault's: check by opening what was just sealed is not enough.
+        let on_disk = fs::read(app.path("keys.json")).map_err(err)?;
+        Keys::open(&on_disk, &pass).map_err(|_| "Wrong passphrase.".to_owned())?;
+        app.write("keys.json", &sealed)?;
+    }
+    if enabled && app.keys.lock().unwrap().as_ref().is_some_and(|k| k.cdn.is_none()) {
+        return Err("Store the Cloudflare credentials first.".into());
+    }
+    let mut s = app.settings();
+    s["cdn"] = json!({ "enabled": enabled, "base": base.trim_end_matches('/'), "worker": worker });
+    app.write("settings.json", &serde_json::to_vec_pretty(&s).unwrap())
 }
 
 /// Files in `dir` and its subfolders, two levels deep (`dist/windows/...`, `dist/macos/...`).
@@ -950,10 +1256,15 @@ async fn release_sync(app: State<'_, App>, ui: AppHandle, channel: String, kind:
     let (src, m) = source.ok_or_else(|| format!("No relay publishes {version} yet. Publish it with Sign and publish."))?;
     let mut files = Vec::new();
     for f in release_files(&kind, &platform, &version, &name) {
-        let bytes = api::public(&src, &format!("/download/{channel}/{dir}/{f}")).await?.ok_or_else(|| format!("{src} publishes {version} but has no {f}"))?;
-        files.push((f, bytes));
+        match api::public(&src, &format!("/download/{channel}/{dir}/{f}")).await? {
+            Some(bytes) => files.push((f, bytes)),
+            // Releases from before the release index have no gzip copy.
+            None if f.ends_with(".gz") => {}
+            None => return Err(format!("{src} publishes {version} but has no {f}")),
+        }
     }
     let sig = String::from_utf8(files[1].1.clone()).map_err(|_| format!("{name}.sig is not text"))?;
+    let packed = files.iter().find(|(f, _)| f.ends_with(".gz")).map(|(_, b)| b.clone());
     let u = Upload {
         channel,
         dir,
@@ -967,10 +1278,31 @@ async fn release_sync(app: State<'_, App>, ui: AppHandle, channel: String, kind:
         minimum_version: m.minimum_version,
         forced: m.forced,
         pub_date: m.pub_date,
+        packed,
     };
+    // The newest signed release index goes to the relays that lack it (the same document: relays
+    // accept an identical copy), before their latest.json.
+    let live = relay_indexes(&app, &u.channel, &servers).await?;
+    let best = live.iter().filter_map(|(_, i)| i.as_ref()).max_by_key(|i| i.0.serial).map(|i| (i.0.serial, i.1.clone()));
     let mut out = Vec::new();
     for sv in &servers {
-        let r = if targets.contains(sv) { upload_release_reported(&app, &ui, sv, &u).await.map(|url| json!({ "url": url })) } else { Ok(json!({ "already": true })) };
+        let r = if targets.contains(sv) {
+            let behind = live.iter().find(|(s, _)| s == sv).is_some_and(|(_, i)| i.as_ref().map(|i| i.0.serial) < best.as_ref().map(|b| b.0));
+            match (&best, behind) {
+                (Some((_, raw)), true) => async {
+                    upload_files(&app, &ui, sv, &u).await?;
+                    app.call_on(sv, "PUT", &format!("/api/admin/release/{}/releases.json", u.channel), raw.clone(), "application/json").await?;
+                    let url = put_manifest(&app, &ui, sv, &u).await;
+                    emit(&ui, Progress { done: true, error: url.as_ref().err().cloned(), ..Progress::new(&u, sv, "") });
+                    url
+                }
+                .await
+                .map(|url| json!({ "url": url })),
+                _ => upload_release_reported(&app, &ui, sv, &u).await.map(|url| json!({ "url": url })),
+            }
+        } else {
+            Ok(json!({ "already": true }))
+        };
         out.push(RelayResult::of(sv, r));
     }
     Ok(out)
@@ -1292,6 +1624,11 @@ fn main() {
             policy_history,
             policy_local,
             release_publish,
+            release_index,
+            release_control,
+            release_index_refresh,
+            cdn_state,
+            cdn_configure,
             releases_overview,
             release_sync,
             release_scan,
@@ -1394,6 +1731,7 @@ mod tests {
     #[test]
     fn files_that_belong_to_a_release() {
         assert_eq!(release_files("technician", release::WINDOWS, "0.3.1", "Tether_0.3.1_x64-setup.exe"), ["Tether_0.3.1_x64-setup.exe", "Tether_0.3.1_x64-setup.exe.sig"]);
+        assert_eq!(release_files("customer", release::WINDOWS, "0.3.1", "TetherQS-0.3.1.exe"), ["TetherQS-0.3.1.exe", "TetherQS-0.3.1.exe.sig", "TetherQS-0.3.1.exe.gz"]);
         assert_eq!(
             release_files("technician", release::MAC, "0.3.1", "Tether_0.3.1_universal.app.tar.gz"),
             ["Tether_0.3.1_universal.app.tar.gz", "Tether_0.3.1_universal.app.tar.gz.sig", "Tether_0.3.1_universal.dmg", "Tether_0.3.1_universal.dmg.sig"]

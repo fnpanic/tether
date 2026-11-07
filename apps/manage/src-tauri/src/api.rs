@@ -5,6 +5,10 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tether_trust::{reqauth, SigningKey};
 
+pub fn shared() -> &'static reqwest::Client {
+    client()
+}
+
 fn client() -> &'static reqwest::Client {
     static C: OnceLock<reqwest::Client> = OnceLock::new();
     C.get_or_init(|| {

@@ -1,7 +1,9 @@
-//! Update manifests (`latest.json`, docs/api.md) and the download page.
+//! Update manifests (`latest.json`, docs/api.md), the signed release index (`releases.json`,
+//! docs/update-design.md) and the download page.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use tether_trust::release::{self as rel, Entry, Index, Packed, Rollout};
 
 pub const WINDOWS: &str = "windows-x86_64";
 /// macOS builds are universal (Apple silicon + Intel); the technician app asks for this target.
@@ -122,6 +124,74 @@ pub fn merge_platforms(existing: Option<&[u8]>, version: &str, new: BTreeMap<Str
         .unwrap_or_default();
     out.extend(new);
     out
+}
+
+/// Key of a release in the index: `technician/windows-x86_64`.
+pub fn index_key(kind: &str, platform: &str) -> String {
+    format!("{kind}/{platform}")
+}
+
+/// The ramp of a new release: a preset (`standard`, the D4 default; `fast`; `now`) from `start`.
+pub fn rollout(preset: &str, start: u64) -> Result<Rollout, String> {
+    let steps = rel::preset(if preset.is_empty() { "standard" } else { preset }).ok_or_else(|| format!("unknown rollout preset {preset:?}"))?;
+    Ok(Rollout { start, steps: steps.to_vec() })
+}
+
+/// The gzip copy of TetherQS.exe (CDN files may not exceed 25 MiB; the relays serve it as
+/// `precompressed`). Only the Windows exe: the other artifacts are compressed already.
+pub fn wants_packed(kind: &str, platform: &str) -> bool {
+    (kind, platform) == ("customer", WINDOWS)
+}
+
+pub fn gzip(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    e.write_all(data).expect("in memory");
+    e.finish().expect("in memory")
+}
+
+/// One index entry. `cdn`: the CDN base when this release's file is on it. The relay URL is always
+/// last (`{relay}`: the relay the index came from), so a blocked CDN falls back to it.
+#[allow(clippy::too_many_arguments)]
+pub fn entry(channel: &str, dir: &str, name: &str, data: &[u8], signature: &str, packed: Option<&[u8]>, cdn: Option<&str>, m: &Manifest, security: bool, rollout: Rollout) -> Entry {
+    let at = |base: &str, f: &str| format!("{}/{channel}/{dir}/{f}", base.trim_end_matches('/'));
+    let relay = |f: &str| format!("https://{{relay}}/download/{channel}/{dir}/{f}");
+    let gz = format!("{name}.gz");
+    let urls = match (cdn, packed) {
+        (Some(b), None) => vec![at(b, name), relay(name)],
+        _ => vec![relay(name)],
+    };
+    Entry {
+        version: m.version.clone(),
+        file: name.to_owned(),
+        size: data.len() as u64,
+        sha256: rel::sha256_hex(data),
+        signature: signature.to_owned(),
+        urls,
+        notes: m.notes.clone(),
+        mandatory: m.mandatory,
+        minimum_version: m.minimum_version.clone(),
+        forced: m.forced,
+        security,
+        rollout,
+        halted: false,
+        packed: packed.map(|p| Packed {
+            encoding: "gzip".into(),
+            size: p.len() as u64,
+            sha256: rel::sha256_hex(p),
+            urls: cdn.map(|b| at(b, &gz)).into_iter().chain([relay(&gz)]).collect(),
+        }),
+    }
+}
+
+/// The next index: `base` (the highest verified one on the relays) with `change` applied, a new
+/// serial, issued now, valid for 30 days (D3).
+pub fn next_index(base: Option<Index>, channel: &str, serial: u64, now: u64, change: impl FnOnce(&mut BTreeMap<String, Entry>)) -> Result<Index, String> {
+    let mut releases = base.map(|b| b.releases).unwrap_or_default();
+    change(&mut releases);
+    let ix = Index { kind: rel::INDEX_TYPE.into(), channel: channel.into(), serial, issued: now, expires: now + rel::EXPIRY_SECS, releases };
+    ix.validate()?;
+    Ok(ix)
 }
 
 pub fn valid_version(v: &str) -> bool {
@@ -362,6 +432,44 @@ mod tests {
         assert!(!html.contains(".sig") && !html.contains("<details"));
         // Cards stretch to the row height; the button sits at the bottom of each.
         assert!(html.contains(".cta{align-self:flex-start;margin-top:auto;"));
+    }
+
+    fn manifest(v: &str) -> Manifest {
+        Manifest { version: v.into(), notes: "n".into(), pub_date: String::new(), platforms: BTreeMap::new(), mandatory: false, minimum_version: String::new(), forced: false }
+    }
+
+    #[test]
+    fn index_entries_list_cdn_then_relay() {
+        let data = b"installer";
+        let e = entry("stable", "technician/windows-x86_64", "Tether_0.5.24_x64-setup.exe", data, "SIG", None, Some("https://tether-dl.x.workers.dev/"), &manifest("0.5.24"), false, rollout("", 100).unwrap());
+        assert_eq!(e.urls, ["https://tether-dl.x.workers.dev/stable/technician/windows-x86_64/Tether_0.5.24_x64-setup.exe", "https://{relay}/download/stable/technician/windows-x86_64/Tether_0.5.24_x64-setup.exe"]);
+        assert_eq!((e.size, e.sha256.len(), e.rollout.steps.len()), (9, 64, 4));
+        e.validate().unwrap();
+        // TetherQS: the plain exe only from the relays; the gzip copy from the CDN, then the relay.
+        let gz = gzip(b"TetherQS exe");
+        let q = entry("stable", "customer/windows-x86_64", "TetherQS-0.5.24.exe", b"TetherQS exe", "SIG", Some(&gz), Some("https://cdn"), &manifest("0.5.24"), true, rollout("now", 0).unwrap());
+        assert_eq!(q.urls, ["https://{relay}/download/stable/customer/windows-x86_64/TetherQS-0.5.24.exe"]);
+        let p = q.packed.as_ref().unwrap();
+        assert_eq!(p.urls, ["https://cdn/stable/customer/windows-x86_64/TetherQS-0.5.24.exe.gz", "https://{relay}/download/stable/customer/windows-x86_64/TetherQS-0.5.24.exe.gz"]);
+        assert!(q.security);
+        q.validate().unwrap();
+        // gzip round trip.
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&gz[..]), &mut out).unwrap();
+        assert_eq!(out, b"TetherQS exe");
+        assert!(wants_packed("customer", WINDOWS) && !wants_packed("technician", WINDOWS) && !wants_packed("customer", MAC));
+        assert!(rollout("bogus", 0).is_err());
+    }
+
+    #[test]
+    fn next_index_keeps_other_entries() {
+        let a = entry("stable", "technician/windows-x86_64", "Tether_1.0.0_x64-setup.exe", b"a", "S", None, None, &manifest("1.0.0"), false, rollout("now", 0).unwrap());
+        let b = entry("stable", "customer/darwin-universal", "TetherQS-1.0.0-universal.zip", b"b", "S", None, None, &manifest("1.0.0"), false, rollout("now", 0).unwrap());
+        let first = next_index(None, "stable", 1, 1000, |r| { r.insert(index_key("technician", WINDOWS), a.clone()); }).unwrap();
+        let second = next_index(Some(first), "stable", 2, 2000, |r| { r.insert(index_key("customer", MAC), b.clone()); }).unwrap();
+        assert_eq!(second.releases.len(), 2);
+        assert_eq!((second.serial, second.issued, second.expires), (2, 2000, 2000 + 30 * 86_400));
+        assert!(next_index(None, "Bad", 1, 0, |_| {}).is_err());
     }
 
     #[test]

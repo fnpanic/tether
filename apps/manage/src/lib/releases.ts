@@ -42,3 +42,52 @@ export function groupReleases(files: ReleaseFile[]): ReleaseGroup[] {
     .map((g) => ({ ...g, files: g.files.sort((a, b) => a.path.localeCompare(b.path)) }))
     .sort((a, b) => a.channel.localeCompare(b.channel) || a.dir.localeCompare(b.dir) || (a.version === null ? -1 : b.version === null ? 1 : byVersion(b.version, a.version)));
 }
+
+/** Ramp steps `[offset seconds, percent]`; must match tether_trust::release::RAMP_* (D4). */
+export const rampPresets = {
+  standard: [[0, 1], [3600, 10], [21600, 50], [86400, 100]],
+  fast: [[0, 10], [3600, 100]],
+  now: [[0, 100]],
+} as const satisfies Record<string, readonly (readonly [number, number])[]>;
+
+const after = (s: number) => (s === 0 ? "at once" : s % 86400 === 0 ? `after ${s / 86400} d` : s % 3600 === 0 ? `after ${s / 3600} h` : `after ${Math.round(s / 60)} min`);
+
+/** "1 % at once → 10 % after 1 h → …" */
+export function describeRamp(steps: readonly (readonly [number, number])[] | undefined): string {
+  if (!steps?.length) return "";
+  if (steps.length === 1 && steps[0][1] === 100 && steps[0][0] === 0) return "Every device at once";
+  return steps.map(([s, p]) => `${p} % ${after(s)}`).join(" → ");
+}
+
+/** One release in the signed index (release_index command). */
+export interface IndexEntry {
+  key: string;
+  version: string;
+  percent: number;
+  halted: boolean;
+  security: boolean;
+  mandatory: boolean;
+  forced: boolean;
+  start: number;
+  steps: [number, number][];
+  cdn: boolean;
+}
+
+export interface IndexView {
+  channel: string;
+  serial: number | null;
+  expires?: number;
+  days_left?: number;
+  stale?: boolean;
+  relays: { server: string; serial: number | null }[];
+  entries: IndexEntry[];
+}
+
+/** Where a rollout stands, for the table. */
+export function rolloutState(e: IndexEntry): string {
+  if (e.halted) return "Halted";
+  if (e.security) return "Security release: everyone";
+  if (e.percent >= 100) return "Everyone";
+  if (e.percent === 0) return "Not started";
+  return `${e.percent} % of devices`;
+}
