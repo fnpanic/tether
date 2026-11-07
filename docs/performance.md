@@ -525,3 +525,169 @@ on the same home line, which that evening also carried a Teams test call and the
 camera stream. Every Tether version is limited the same way on that path (the 0.5.16 host was
 no better), and the backlog cut keeps the stream alive instead of queueing. To compare versions,
 run them back to back on a quiet line; the VM end-to-end test against 0.5.18 passed 5/5.
+
+# Image quality vs AnyDesk (2026-11-07)
+
+Question: how close is Tether's remote picture to AnyDesk's, measured rather than eyeballed, and
+can Tether reach it without costing latency, frame rate, bandwidth or CPU under motion?
+
+## Setup
+
+- **Host:** the Hyper-V VM `tether-bench` (Windows 11 LTSC, 4 vCPU, no GPU, 1920×1080 at 100 %),
+  user `customer`. TetherQS 0.5.20 (`dist/quick/TetherQS-0.5.20.exe`), then the build from this
+  change; AnyDesk 9.8.3 installed as a service. Codec: Tether Auto = **AV1** (software) on this
+  host, Image quality **Balanced**; AnyDesk defaults. Only one product connected at a time.
+- **Network:** for this comparison the VM had direct egress (`vm-nocorp.ps1 -Off`, undone with
+  `vm-corp-restore.ps1`), because AnyDesk does not get through the TLS-inspecting test proxy.
+  Both products went **through their relays over the internet**: AnyDesk TCP 443 to its relay
+  (57.128.101.82, read from the VM's connection table), Tether with "force relay"
+  (`session_reconnect` with `forceRelay`, stats: route Relay; without it Tether went direct over
+  the LAN).
+- **Tether viewer:** release `tether.exe` on a hidden desktop of this PC (`e2e/hidden-run.ps1`,
+  own profile and WebView2 folder), "Original size" (canvas = 1920×1080 device pixels, so
+  sharpening Auto is k = 0), WebCodecs on the RTX 3080; the session canvas is read over CDP
+  (`tools/bench/quality-view.mjs`).
+- **AnyDesk viewer:** the Windows client cannot be used invisibly: started on a hidden desktop it
+  crashes at once (0xc0000005, even for `--version`; fine on the normal desktop). So the viewer is
+  **AnyDesk 8.1.0 for Linux on Xvfb in WSL** (a clean Ubuntu distro, display `:98`, 1940×1220,
+  window sized with `xdotool`), read with `tools/bench/xgrab.py`; nothing appears on the Windows
+  desktop. The picture is encoded by the same AnyDesk 9.8.3 host either way; viewer-side numbers
+  (latency, pictures/s) include its software (llvmpipe) rendering in WSL. AnyDesk for Linux
+  refuses to run as root and checks the logind seat (WSL has none); without a system bus it
+  accepts the user: `Xvfb :98 -screen 0 1940x1220x24 -nolisten tcp &`, then
+  `echo <pw> | DISPLAY=:98 GDK_BACKEND=x11 DBUS_SYSTEM_BUS_ADDRESS=unix:path=/nonexistent anydesk <id>
+  --with-password`, `xdotool windowmove <w> 0 0 windowsize <w> 1940 1220` (WAYLAND_DISPLAY unset).
+  AnyDesk's free-licence watermark is drawn on the host screen; that rectangle is pasted from the
+  reference into every shot of every viewer (`MASKS` in `quality-measure.py`).
+
+## Method
+
+- **Page:** `tools/bench/quality.html`, full screen in Edge kiosk mode in the VM: 8–12 px text
+  (ClearType and grayscale), coloured text on coloured backgrounds, 1 px lines and checkers, a
+  UI-like panel, a seeded "photo", gradients, and a text panel that scrolls in `?mode=scroll`
+  (1 px per 33 ms) with the Date.now() barcode of `stress.html` at the top left.
+- **Still page (`?cycle=1`):** a flat cover from :45 to :59 of every minute; at :00 the page
+  appears as one full-screen change with **new text and photo every minute** (AnyDesk reuses
+  pictures it has seen before: an unchanged page cost it 22 kB instead of ~300 kB). Grabs at :02
+  (first picture) and :40 (settled). Reference: the VM's own screenshot of the same minute
+  (`tools/bench/qgrab.ps1`, `CopyFromScreen` in the console session); a run whose reference came
+  too late is discarded. VM bytes sent and CPU per second from :59 for 30 s
+  (`tools/bench/qperf.ps1`: `Get-NetAdapterStatistics` and the processor counter, over
+  PowerShell Direct).
+- **Metrics** (`tools/bench/quality-measure.py`, 1:1 after template-matching the picture in the
+  shot; scored area y 88–1031, the barcode bar and the taskbar line excluded): PSNR of Y, Cb, Cr
+  (BT.601 full range from RGB), SSIM and 5-scale MS-SSIM on Y; for text: Laplacian variance
+  relative to the reference (**sharp**, 1.0 = as sharp) and mean |ΔCb|+|ΔCr| on the reference's
+  edge pixels (**fringe**, levels). `quality-table.py` averages the runs.
+- **Scroll:** 60 s of barcode latency samples (Tether: `stress-sampler.mjs` every 15 ms; AnyDesk:
+  `xgrab.py sample` every 5 ms in WSL, time-stamped on Windows by `udp-stamp.mjs` because the WSL
+  clock was off by up to a second), distinct barcode values per second, three grabs (the still
+  left half against the static reference), VM bytes/CPU for 50 s. Latency includes the VM clock
+  offset (−1 ms, `clock_offset.py`) and the sampler's own read: compare columns, not absolutes.
+- One run = `tools/bench/quality-run.sh static|scroll <label> tether:<port>|anydesk <dir>`.
+
+## Where Tether lost quality
+
+1. **Wrong colours in the viewer (the largest loss).** The host converts the screen to YUV with
+   libyuv (BT.601, limited range) for VP8/VP9/AV1 and leaves the bitstream's colour description
+   unset; WebCodecs decoded it as BT.709. Flat colours, host screen → Tether viewer: blue
+   (0,0,255) → (0,16,255), red (255,0,0) → (255,26,0), (208,0,0) → (224,21,0), green (0,192,0) →
+   (0,163,0); greys were right; VP9 the same. AnyDesk reproduced every colour within one level.
+   This alone capped Tether at ~32.5 dB whatever the encoder did: Image quality **Best**
+   (3.1 Mbit/s, AV1 q 10–30) gave 32.58 dB against 32.47 dB for Balanced (q 18–38).
+2. **No refinement of a still picture with AV1.** Upstream's static refresh repeats the last
+   picture so the encoder can refine it, but not for AV1 (0 repeats), which Auto picks on GPU-less
+   hosts: the first picture after a change (CBR at Balanced, ~120 kB for this page) stayed as it
+   was. Offline (`libs/scrap/examples/refine.rs`, not committed: the page encoded and decoded with
+   Tether's AV1 settings) ten repeats at the same quality reach 45.8 dB Y (in YUV), ten at the best
+   q range (5–25) 50.5 dB after 7 frames, for 180 kB more.
+3. **Chroma 4:2:0** smears coloured text and ClearType fringes. AnyDesk does the same (its
+   coloured-text Cb PSNR 24.1 dB against Tether's 23.6 dB, crops below), so 4:4:4 (twice the
+   encoder input, a new key frame on every switch) was not needed to reach it. Viewer scaling and
+   sharpening play no part at 1:1.
+
+## Changes
+
+- **Viewer** (`apps/desktop/src/lib/video.ts`, `decoderConfig`): VP8/VP9/AV1 decoders are
+  configured with `colorSpace {matrix: smpte170m, fullRange: false, primaries: bt709, transfer:
+  iec61966-2-1}`: the host's matrix, sRGB primaries and transfer, so nothing else is converted.
+  H.264/H.265 (hardware encoders convert on the GPU) are left as they were. Works with every host
+  version.
+- **Host** (`src/server/video_service/static_refresh.rs`): AV1 gets up to 10 static-refresh
+  repeats (100 ms apart, like VP9). The first repeat sets the encoder to `refine_ratio(q)` = 3 ×
+  the QoS ratio, at most 2.0 (AV1 q 5–25): Balanced refines fully, a link the QoS controller has
+  throttled to 0.3 refines at 0.9. The next captured frame restores the QoS ratio before it is
+  encoded (`restore_quality`), so motion is coded exactly as before; repeats do not count as
+  motion for the bitrate controller (unchanged).
+
+## Result: still page (3 runs each; settled at :40, first picture at :02 in brackets)
+
+| | Tether 0.5.20 | Tether after | AnyDesk 9.8.3 |
+|---|---|---|---|
+| PSNR Y, all | 32.47 (31.98) dB | **39.24** (39.25) dB | 35.30 (35.26) dB |
+| PSNR Cb / Cr, all | 25.54 / 25.63 dB | 25.77 / 25.93 dB | **26.65 / 26.65** dB |
+| SSIM Y | 0.9894 (0.9856) | **0.9953** (0.9953) | 0.9928 (0.9914) |
+| MS-SSIM Y | 0.9900 (0.9886) | **0.9981** (0.9981) | 0.9976 (0.9974) |
+| Text 8–12 px: PSNR Y / sharp / fringe | 39.83 / 0.995 / 35.8 | **43.44** / 0.984 / 35.5 | 34.63 / 0.920 / **33.1** |
+| Coloured text: PSNR Y / Cb / fringe | 26.96 / 23.11 / 57.5 | **40.44** / 23.60 / 56.6 | 34.47 / **24.10 / 51.5** |
+| Photo: PSNR Y | 39.38 dB | 47.25 dB | **51.06** dB |
+| VM sent: page-switch second + rest of 30 s | 120 + 13 kB | 341 + 14 kB | 262 + 51 kB |
+| VM CPU, total / host app | 7.0 % / 0.6 % | 7.0 % / 0.8 % | 6.3 % / 1.6 % |
+
+"After" = the TetherQS and viewer built from this change; three runs before the viewer build, with
+the 0.5.20 viewer patched over CDP to the same `colorSpace`, gave the same 39.25 dB. Each change
+alone (settled): viewer colours only (host 0.5.20) 38.37 dB, SSIM 0.9938, MS-SSIM
+0.9976, 118 kB; host refinement only (old viewer) 32.70 dB, the colour error hides it.
+
+Tether now matches or beats AnyDesk on every luma measure at about the same bytes per page
+(341 + 14 kB against 262 + 51 kB; before: 120 + 13 kB);
+AnyDesk keeps an edge on the photo (51 vs 47 dB, both beyond visible loss) and on chroma (about
+0.9 dB: 4:2:0 fringes on coloured text). AnyDesk's text is softer (sharp 0.92). The refinement
+takes about one second (ten repeats 100 ms apart), so the picture at :02 is already refined.
+Crops (host screenshot | viewer, 3× nearest neighbour; each row is its own run and minute):
+`tools/bench/results/quality/{text,color,photo,ui}.png`.
+
+## Result: scrolling panel (2 runs of 60 s each)
+
+| | Tether 0.5.20 | Tether after | AnyDesk 9.8.3 (Linux viewer in WSL) |
+|---|---|---|---|
+| Still left half during the scroll, PSNR Y | 32.13 dB | 40.57 dB | 23.5–36.5 dB (it re-sends full-width bands at lower quality) |
+| Scrolling panel sharpness | 1.03–1.06 | 1.01–1.07 | 0.96–0.99 |
+| Latency median / p95 | 129 / 164 ms | 129 / 163 ms | 140 / 242 ms |
+| Distinct pictures / s | 21.2 | 21.3 | 17.6 |
+| VM sent | 157 kbit/s | 163 kbit/s | 493 kbit/s |
+| VM CPU, total / host app | 8.4 % / 1.3 % | 8.9 % / 0.9 % | 12.2 % / 2.3 % |
+
+(Tether after: the new TetherQS with the 0.5.20 viewer patched over CDP to the new `colorSpace`.)
+Under motion the barcode changes every frame, so nothing is refined: latency, frame rate and
+bytes are unchanged within noise.
+
+## Stress test, before and after (Tether, Auto = AV1, relay, 8 min each)
+
+Extra delay over idle, median / p95 (ms) from `stress-sampler.mjs` (every 250 ms), and what the VM
+sent (kbit/s) per phase; two 8-minute runs each (`results/quality/stress.txt`). "Before" = TetherQS
+and viewer 0.5.20 (the second run after restoring the VM to 0.5.20), "after" = this change (first
+run with the CDP-patched 0.5.20 viewer, second with the built viewer).
+
+| Run | scroll | photo | noise | stalls ≥ 0.5 s | VM kbit/s idle / scroll / photo / noise | VM CPU noise |
+|---|---|---|---|---|---|---|
+| before 1 | +5 / +45 | −3 / +70 | +386 / +634 | 0 | 169 / 562 / 6791 / 36112 | 64.6 % |
+| before 2 | +7 / +44 | 0 / +53 | +747 / +1070 | 1 (0.52 s) | 152 / 632 / 6533 / 37701 | 67.2 % |
+| after 1 | +12 / +46 | −4 / +68 | +708 / +1072 | 0 | 156 / 533 / 7604 / 36221 | 63.2 % |
+| after 2 | +8 / +44 | −2 / +60 | +558 / +955 | 2 (0.53 s) | 136 / 641 / 5634 / 38582 | 67.1 % |
+
+Idle, scroll and photo are unchanged; full-screen noise is bandwidth-bound on this internet relay
+path and varies as much between the two "before" runs (+386 vs +747 ms median) as between before
+and after. In the photo phase (a new picture every 2 s, still in between) the refinement runs
+after each picture; its bytes are within the run-to-run spread (5.6–7.6 Mbit/s), and the delay of
+the next picture did not grow (p95 +53…+70 before, +60…+68 after).
+
+## Not verified
+
+- macOS WebKit honouring `VideoDecoderConfig.colorSpace` (documented for Safari 17+; not run on a
+  Mac). H.264/H.265 from hardware encoders: colours not checked (no GPU host in this setup).
+- AnyDesk with its Windows viewer (it crashes on a hidden desktop); its latency here includes the
+  WSL software renderer. The earlier Windows-viewer drag comparison is above.
+- Tether through the TLS-inspecting proxy after the change (the relay path through the internet
+  was measured; the proxy forwards the same bytes).
+- Slow links: `refine_ratio` scales with the QoS ratio, but no run on a throttled link was made.

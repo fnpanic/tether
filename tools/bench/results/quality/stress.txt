@@ -1,0 +1,48 @@
+== before
+  errors 0, non-empty states {}
+  phase        n   median      p95      max  +idle med  +idle p95
+  idle       454      104      137      171         +0        +33
+  scroll     455      109      149      168         +5        +45
+  photo      457      101      174      294         -3        +70
+  noise      456      490      738      936       +386       +634
+  stalls >= 0.5 s: 0; longest: []
+idle        169 kbit/s  CPU  10.5 %  (120 s)
+scroll      562 kbit/s  CPU  30.2 %  (120 s)
+photo      6791 kbit/s  CPU  22.2 %  (120 s)
+noise     36112 kbit/s  CPU  64.6 %  (120 s)
+== before2
+  errors 0, non-empty states {}
+  phase        n   median      p95      max  +idle med  +idle p95
+  idle       454      104      138      201         +0        +34
+  scroll     455      111      148      194         +7        +44
+  photo      457      104      157      311         +0        +53
+  noise      455      851     1174     1583       +747      +1070
+  stalls >= 0.5 s: 1; longest: [(524, 'noise')]
+idle        152 kbit/s  CPU  13.4 %  (120 s)
+scroll      632 kbit/s  CPU  27.7 %  (120 s)
+photo      6533 kbit/s  CPU  22.8 %  (120 s)
+noise     37701 kbit/s  CPU  67.2 %  (120 s)
+== after
+  errors 0, non-empty states {}
+  phase        n   median      p95      max  +idle med  +idle p95
+  idle       452      104      138      203         +0        +34
+  scroll     456      116      150      233        +12        +46
+  photo      456      100      172      312         -4        +68
+  noise      458      812     1176     1575       +708      +1072
+  stalls >= 0.5 s: 0; longest: []
+idle        156 kbit/s  CPU  13.3 %  (120 s)
+scroll      533 kbit/s  CPU  29.4 %  (120 s)
+photo      7604 kbit/s  CPU  23.2 %  (120 s)
+noise     36221 kbit/s  CPU  63.2 %  (120 s)
+== after2
+  errors 0, non-empty states {}
+  phase        n   median      p95      max  +idle med  +idle p95
+  idle       454      103      138      187         +0        +35
+  scroll     455      111      147      174         +8        +44
+  photo      458      101      163      383         -2        +60
+  noise      455      661     1058     1375       +558       +955
+  stalls >= 0.5 s: 2; longest: [(526, 'noise'), (521, 'noise')]
+idle        136 kbit/s  CPU  11.4 %  (120 s)
+scroll      641 kbit/s  CPU  27.2 %  (120 s)
+photo      5634 kbit/s  CPU  22.0 %  (120 s)
+noise     38582 kbit/s  CPU  67.1 %  (120 s)

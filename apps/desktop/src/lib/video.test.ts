@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { KEY_RETRY_MS, KeyRecovery } from "./video";
+import { CODEC, decoderConfig, KEY_RETRY_MS, KeyRecovery } from "./video";
+
+describe("decoderConfig", () => {
+  it("decodes the software codecs with the host's BT.601 limited-range matrix", () => {
+    for (const c of [CODEC.vp8, CODEC.vp9, CODEC.av1]) {
+      expect(decoderConfig(c).colorSpace).toEqual({ primaries: "bt709", transfer: "iec61966-2-1", matrix: "smpte170m", fullRange: false });
+    }
+    for (const c of [CODEC.h264, CODEC.h265]) expect(decoderConfig(c).colorSpace).toBeUndefined();
+    expect(decoderConfig(CODEC.av1).codec).toBe("av01.0.08M.08");
+  });
+});
 
 describe("KeyRecovery", () => {
   it("after a reconnect waits for the stream's key frame and asks only if it is late", () => {

@@ -1,0 +1,208 @@
+<!doctype html>
+<!--
+  Tether picture-quality test page (host screen, 1920x1080 at 100 %, Edge kiosk full screen).
+  Deterministic: no random input, no time-dependent pixels except ?mode=scroll.
+    ?mode=static (default)  everything still; the barcode box is a flat grey bar
+    ?cycle=1                with either mode: a flat dark cover hides the page in seconds 45-59 of every
+                            minute (VM clock), so the page re-appears as one full-screen change at :00
+                            (like opening a document) with new text and photo every minute (seeded
+                            by the minute); grab at :02 (first picture) and :30 (settled)
+    ?mode=scroll            the panel #scroll moves 1 px every 33 ms (30 px/s) and the barcode at
+                            the top left shows Date.now() as in stress.html (latency)
+  Regions (CSS px = device px; tools/bench/quality-measure.py has the same rectangles):
+    bar    0,0     1920x88   barcode (scroll) or flat grey (static); not scored
+    text   0,88    640x496   black/grey text 8-12 px, ClearType and grayscale
+    color  640,88  640x496   coloured text on coloured backgrounds (chroma subsampling)
+    lines  1280,88 640x496   1 px lines, checkers, fine colour lines
+    ui     0,584   640x496   UI screenshot-like: menu, buttons, table with grid
+    photo  640,584 640x496   procedural photo (seeded)
+    grad   1280,584 640x248  gradients
+    scroll 1280,832 640x248  text panel (moves in ?mode=scroll)
+-->
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Tether quality</title>
+<style>
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #fff; color: #000; font-family: "Segoe UI", sans-serif; }
+  .r { position: absolute; overflow: hidden; box-sizing: border-box; }
+  #bar { left: 0; top: 0; width: 1920px; height: 88px; background: #808080; }
+  #text { left: 0; top: 88px; width: 640px; height: 496px; padding: 6px 8px; background: #fff; }
+  #text p { margin: 0 0 3px; white-space: nowrap; }
+  #text .gs { opacity: 0.999; } /* a composited layer: Chromium draws grayscale anti-aliasing */
+  #color { left: 640px; top: 88px; width: 640px; height: 496px; }
+  #color div { height: 31px; padding: 0 6px; white-space: nowrap; line-height: 31px; }
+  #lines { left: 1280px; top: 88px; width: 640px; height: 496px; background: #fff; }
+  #ui { left: 0; top: 584px; width: 640px; height: 496px; background: #f3f3f3; font-size: 12px; }
+  #photo { left: 640px; top: 584px; width: 640px; height: 496px; }
+  #grad { left: 1280px; top: 584px; width: 640px; height: 248px; }
+  #scroll { left: 1280px; top: 832px; width: 640px; height: 248px; background: #fff; font-size: 11px; line-height: 15px; }
+  #scroll .in { position: absolute; left: 8px; top: 0; width: 624px; }
+  #scroll p { margin: 0; white-space: nowrap; }
+  .menu { height: 26px; background: #fff; border-bottom: 1px solid #ddd; display: flex; gap: 14px; padding: 0 8px; line-height: 26px; }
+  .btn { display: inline-block; padding: 3px 10px; margin: 6px 4px; border: 1px solid #adadad; background: #e1e1e1; border-radius: 2px; }
+  .btn.p { background: #0067c0; color: #fff; border-color: #0067c0; }
+  table { border-collapse: collapse; margin: 6px 8px; background: #fff; }
+  td, th { border: 1px solid #c8c8c8; padding: 1px 6px; font-size: 11px; text-align: left; }
+  th { background: #e8eef7; font-weight: 600; }
+  .ic { display: inline-block; width: 16px; height: 16px; vertical-align: middle; margin-right: 4px; }
+</style>
+</head>
+<body>
+<canvas id="bar" class="r" width="1920" height="88"></canvas>
+<div id="text" class="r"></div>
+<div id="color" class="r"></div>
+<canvas id="lines" class="r" width="640" height="496"></canvas>
+<div id="ui" class="r"></div>
+<canvas id="photo" class="r" width="640" height="496"></canvas>
+<canvas id="grad" class="r" width="640" height="248"></canvas>
+<div id="scroll" class="r"><div class="in"></div></div>
+<div id="cover" class="r" style="left:0;top:0;width:1920px;height:1080px;background:#2b2b2b;z-index:9;display:none"></div>
+<script>
+  const mode = new URLSearchParams(location.search).get("mode") || "static";
+  const cycle = new URLSearchParams(location.search).get("cycle");
+  const cover = document.getElementById("cover");
+  const covered = () => new Date().getSeconds() >= 45;
+  if (cycle) cover.style.display = covered() ? "block" : "none";
+  // cycle: new text and photo every minute (the minute the page is shown in), so no viewer can reuse
+  // pictures it has seen before; the reference is grabbed in the same minute.
+  let seed = cycle ? 1000 + Math.floor((Date.now() + 15000) / 60000) % 1000000 : 12345;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const words = "remote support session viewer host encoder quality pixel subsampling chroma luma bitrate keyframe latency window cursor keyboard relay codec sharp text line gradient photo".split(" ");
+  const sentence = (n) => Array.from({ length: n }, () => words[Math.floor(rnd() * words.length)]).join(" ");
+
+  // text: black and grey text at 8..12 px; ClearType (opaque layer) and grayscale (own layer)
+  const T = document.getElementById("text");
+  for (const [px, cls, col] of [[8, "", "#000"], [9, "", "#000"], [10, "", "#000"], [11, "", "#000"], [12, "", "#000"], [10, "", "#555"], [11, "gs", "#000"], [9, "gs", "#000"], [12, "", "#1a4fa0"]]) {
+    for (let i = 0; i < 3; i++) {
+      const p = document.createElement("p");
+      p.className = cls; p.style.fontSize = px + "px"; p.style.color = col;
+      p.textContent = `${px}px ${cls || "ct"} ${sentence(14)} 0123456789 Il1| O0 rn m`;
+      T.appendChild(p);
+    }
+  }
+  const mono = document.createElement("p"); mono.style.font = "11px Consolas, monospace"; mono.textContent = "fn main() { let x = 0x1F4; println!(\"{x:?} il1I|O0\"); } // Consolas 11px"; T.appendChild(mono);
+  const mono2 = mono.cloneNode(); mono2.style.font = "9px Consolas, monospace"; mono2.textContent = "C:\\Users\\customer\\AppData\\Local\\Temp\\setup_0042.log  [ OK ]  12:34:56.789"; T.appendChild(mono2);
+
+  // color: coloured text on coloured backgrounds (where 4:2:0 smears)
+  const C = document.getElementById("color");
+  const pairs = [["#ff0000", "#0000ff"], ["#0000ff", "#ff0000"], ["#00a000", "#ff00ff"], ["#ffff00", "#7000a0"], ["#ffffff", "#d00000"], ["#ff0000", "#00c000"],
+    ["#0060ff", "#ffa000"], ["#000000", "#ff4040"], ["#00ffff", "#a00000"], ["#ff00ff", "#006000"], ["#ffffff", "#0050c0"], ["#c00000", "#ffffff"],
+    ["#0000c0", "#ffff80"], ["#008000", "#ffe0e0"], ["#ff6000", "#002060"], ["#e00000", "#e0e0e0"]];
+  pairs.forEach(([fg, bg], i) => {
+    const d = document.createElement("div");
+    d.style.color = fg; d.style.background = bg; d.style.fontSize = (9 + (i % 4)) + "px";
+    d.textContent = `${9 + (i % 4)}px ${fg} on ${bg}: ${sentence(9)}`;
+    C.appendChild(d);
+  });
+
+  // lines: 1 px lines, gaps 1..4, checkers, diagonal, fine colour lines
+  {
+    const g = document.getElementById("lines").getContext("2d", { alpha: false });
+    g.fillStyle = "#fff"; g.fillRect(0, 0, 640, 496);
+    g.fillStyle = "#000";
+    for (let gap = 1; gap <= 4; gap++) {
+      const x0 = 10 + (gap - 1) * 75;
+      for (let x = x0; x < x0 + 60; x += gap + 1) g.fillRect(x, 10, 1, 110);   // vertical
+      for (let y = 130; y < 190; y += gap + 1) g.fillRect(x0, y, 60, 1);       // horizontal
+    }
+    for (let y = 0; y < 100; y++) for (let x = 0; x < 100; x++) if ((x + y) & 1) g.fillRect(320 + x, 10 + y, 1, 1); // 1 px checker
+    for (let y = 0; y < 100; y += 2) for (let x = 0; x < 100; x += 2) if (((x + y) >> 1) & 1) g.fillRect(440 + x, 10 + y, 2, 2);
+    g.lineWidth = 1; g.strokeStyle = "#000";
+    for (let i = 0; i < 24; i++) { g.beginPath(); g.moveTo(320, 140); g.lineTo(320 + 300 * Math.cos(i * Math.PI / 48), 140 + 300 * Math.sin(i * Math.PI / 48)); g.stroke(); }
+    const cols = ["#ff0000", "#00c000", "#0000ff", "#ff00ff", "#00c0c0", "#c0c000"];
+    cols.forEach((c, i) => { g.fillStyle = c; for (let x = 10; x < 300; x += 3) g.fillRect(x, 210 + i * 14, 1, 10); });
+    cols.forEach((c, i) => { g.fillStyle = c; for (let y = 300; y < 480; y += 3) g.fillRect(10 + i * 50, y, 40, 1); });
+    g.fillStyle = "#808080"; g.fillRect(320, 300, 300, 180);
+    g.fillStyle = "#000"; for (let x = 330; x < 610; x += 4) g.fillRect(x, 310, 1, 160);
+    g.fillStyle = "#fff"; for (let y = 312; y < 470; y += 4) g.fillRect(332, y, 276, 1);
+  }
+
+  // ui: a window-like screenshot
+  {
+    const U = document.getElementById("ui");
+    U.innerHTML = `<div class="menu"><b>File</b><span>Edit</span><span>View</span><span>Tools</span><span>Help</span></div>
+      <div><span class="btn p">Connect</span><span class="btn">Cancel</span><span class="btn">Settings…</span><span class="btn">Transfer files</span>
+      <label style="margin-left:8px"><input type="checkbox" checked> Remember</label> <label><input type="radio" checked> A</label></div>`;
+    const tb = document.createElement("table");
+    let h = "<tr><th>Name</th><th>Status</th><th>Last seen</th><th>Version</th><th>OS</th></tr>";
+    const st = [["Online", "#0a7d26"], ["Offline", "#888"], ["Busy", "#c42b1c"]];
+    for (let i = 0; i < 17; i++) {
+      const s = st[i % 3];
+      h += `<tr><td><span class="ic" style="background:hsl(${i * 37 % 360},70%,45%)"></span>PC-${(1000 + i * 37).toString(16).toUpperCase()}</td><td style="color:${s[1]}">● ${s[0]}</td><td>2026-11-0${1 + i % 6} 1${i % 10}:${(i * 7) % 60}</td><td>0.5.${i % 21}</td><td>Windows 11 ${23 + i % 3}H2</td></tr>`;
+    }
+    tb.innerHTML = h; U.appendChild(tb);
+  }
+
+  // photo: seeded value noise in several octaves + soft colour fields (photo-like, deterministic)
+  {
+    const cv = document.getElementById("photo"), g = cv.getContext("2d", { alpha: false });
+    const W = 640, Hh = 496, img = g.createImageData(W, Hh), d = img.data;
+    const grid = (n) => { const a = new Float32Array((n + 1) * (n + 1)); for (let i = 0; i < a.length; i++) a[i] = rnd(); return a; };
+    const oct = [4, 8, 16, 32, 64, 128].map((n) => [n, grid(n), grid(n), grid(n)]);
+    const sm = (t) => t * t * (3 - 2 * t);
+    for (let y = 0; y < Hh; y++) for (let x = 0; x < W; x++) {
+      let v = [0, 0, 0], amp = 1, tot = 0;
+      for (const [n, ...gs] of oct) {
+        const fx = x / W * n, fy = y / Hh * n, ix = Math.floor(fx), iy = Math.floor(fy), tx = sm(fx - ix), ty = sm(fy - iy);
+        gs.forEach((gg, c) => { const at = (i, j) => gg[j * (n + 1) + i]; v[c] += amp * ((at(ix, iy) * (1 - tx) + at(ix + 1, iy) * tx) * (1 - ty) + (at(ix, iy + 1) * (1 - tx) + at(ix + 1, iy + 1) * tx) * ty); });
+        tot += amp; amp *= 0.62;
+      }
+      const k = (y * W + x) * 4, l = v[0] / tot;
+      d[k] = Math.min(255, 255 * (0.55 * l + 0.45 * v[1] / tot) ** 1.2);
+      d[k + 1] = Math.min(255, 255 * (0.7 * l + 0.3 * v[2] / tot));
+      d[k + 2] = Math.min(255, 255 * (0.8 * l + 0.2 * (1 - v[1] / tot)) ** 1.4);
+      d[k + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+  }
+
+  // gradients
+  {
+    const g = document.getElementById("grad").getContext("2d", { alpha: false });
+    const band = (y, h, stops) => { const gr = g.createLinearGradient(0, 0, 640, 0); stops.forEach((s, i) => gr.addColorStop(i / (stops.length - 1), s)); g.fillStyle = gr; g.fillRect(0, y, 640, h); };
+    band(0, 62, ["#000", "#fff"]);
+    band(62, 62, ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff"]);
+    band(124, 62, ["#203040", "#304860"]);   // shallow: banding shows here
+    band(186, 62, ["#fff0e0", "#e0f0ff"]);
+  }
+
+  // scroll panel
+  const S = document.querySelector("#scroll .in");
+  for (let i = 0; i < 200; i++) { const p = document.createElement("p"); p.textContent = `${String(i).padStart(3, "0")} ${sentence(12)}`; S.appendChild(p); }
+
+  // barcode (scroll mode): the same Date.now() code as stress.html, cell 20 px
+  const bar = document.getElementById("bar").getContext("2d", { alpha: false });
+  bar.fillStyle = "#808080"; bar.fillRect(0, 0, 1920, 88);
+  const CELL = 20, H = 64, PAD = 8, BITS = 40;
+  function encode(ms) {
+    const v = ms >>> 0, by = [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+    const sum = (by[0] + by[1] + by[2] + by[3] + 0x5a) & 255, bits = [];
+    for (let i = 31; i >= 0; i--) bits.push((v >>> i) & 1);
+    for (let i = 7; i >= 0; i--) bits.push((sum >>> i) & 1);
+    return bits;
+  }
+  if (cycle) {
+    const loadedAt = Date.now();
+    setInterval(() => {
+      cover.style.display = covered() ? "block" : "none";
+      // Rebuild with the next minute's content while covered.
+      if (covered() && new Date().getSeconds() >= 47 && Date.now() - loadedAt > 20000) location.reload();
+    }, 50);
+  }
+  if (mode === "scroll") {
+    const t0 = Date.now(), span = S.scrollHeight - 248;
+    const draw = () => {
+      const now = Date.now();
+      bar.fillStyle = "#808080"; bar.fillRect(0, 0, 860, 88);
+      bar.fillStyle = "#ff0000"; bar.fillRect(PAD, PAD, CELL, H);
+      encode(now).forEach((b, i) => { bar.fillStyle = b ? "#000" : "#fff"; bar.fillRect(PAD + CELL * (i + 1), PAD, CELL, H); });
+      bar.fillStyle = "#00ff00"; bar.fillRect(PAD + CELL * (BITS + 1), PAD, CELL, H);
+      S.style.top = -(Math.floor((now - t0) / 33) % span) + "px";
+      requestAnimationFrame(draw);
+    };
+    requestAnimationFrame(draw);
+  }
+</script>
+</body>
+</html>

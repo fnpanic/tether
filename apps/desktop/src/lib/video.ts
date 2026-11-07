@@ -18,6 +18,17 @@ const CODEC_STRING: Record<number, string> = {
   5: "hvc1.1.6.L153.B0",
 };
 
+// The host converts VP8/VP9/AV1 input with libyuv (BT.601, limited range) and leaves the bitstream's colour
+// description unset; WebCodecs then decodes with BT.709, which shifts saturated colours by up to 30 levels
+// (pure green 192 -> 163, blue gains 16 green). Name the host's matrix; primaries/transfer are the sRGB the
+// screen had, so nothing else is converted. Hardware H.264/H.265 hosts convert on the GPU: left as decoded.
+const HOST_BT601: VideoColorSpaceInit = { primaries: "bt709", transfer: "iec61966-2-1", matrix: "smpte170m", fullRange: false };
+
+export function decoderConfig(codec: number): VideoDecoderConfig {
+  const libyuv = codec === CODEC.vp8 || codec === CODEC.vp9 || codec === CODEC.av1;
+  return { codec: CODEC_STRING[codec], optimizeForLatency: true, hardwareAcceleration: "no-preference", ...(libyuv && { colorSpace: HOST_BT601 }) };
+}
+
 export interface Packet {
   kind: number;
   codec: number;
@@ -297,7 +308,7 @@ export class VideoPipeline {
         this.cb.onFail(codec, this.display);
       },
     });
-    dec.configure({ codec: CODEC_STRING[codec], optimizeForLatency: true, hardwareAcceleration: "no-preference" });
+    dec.configure(decoderConfig(codec));
     this.decoder = dec;
     this.decodedSinceConfigure = 0;
     this.stats.codec = Object.entries(CODEC).find(([, v]) => v === codec)?.[0]?.toUpperCase() ?? "";
