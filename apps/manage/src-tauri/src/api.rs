@@ -80,6 +80,15 @@ pub async fn admin_upload(server: &str, key: &SigningKey, path: &str, body: Vec<
     finish(req.send().await).await
 }
 
+/// Unauthenticated `HEAD` of a public file: `Ok(false)` on 404.
+pub async fn exists(server: &str, path: &str) -> Result<bool, String> {
+    match finish(client().head(url(server, path)).send().await).await {
+        Ok(_) => Ok(true),
+        Err(e) if e.contains("HTTP 404") => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Unauthenticated GET (public `latest.json`, `/api/policy`). `Ok(None)` on 404.
 pub async fn public(server: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
     match finish(client().get(url(server, path)).send().await).await {

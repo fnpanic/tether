@@ -88,7 +88,7 @@ Set when publishing in Tether Manage › Releases (decision D4):
 
 | Key | Default | Effect |
 | --- | --- | --- |
-| `update.enabled` | `Y` | Check and install updates. `N`: the app does not install updates itself; the organisation deploys them. |
+| `update.enabled` | `Y` | Check and install updates. `N`: the app does not install updates itself; the organisation deploys them. Both apps still read the release index, so a release's minimum version keeps blocking sessions; `mandatory` and `forced` then do not apply, and nothing is offered or downloaded. |
 | `update.channel` | `stable` | Channel folder to read |
 | `update.check-hours` | `6` | Fallback poll interval (minimum 1 hour, +0–20 % jitter) |
 | `update.minimum-version` | – | Versions below it cannot be used for sessions |
@@ -128,7 +128,9 @@ enforces it without network access:
 1. The main window process checks as described above. The requests use the API route racer
    (443, then 80; proxy, then direct). `tether --check-update` runs the same check.
 2. Once the device is eligible, the installer is downloaded in the background, verified and kept in
-   the config folder (`update-<version>.staged`, verified again before use).
+   the config folder (`update-<version>.staged`, verified again before use). Every check deletes
+   the other `update-*.staged` files (superseded or installed versions: on Windows the installer
+   ends the app before it could remove its file).
 3. **Install and restart** (or the forced countdown) re-checks the index, then hands the verified
    bytes to the Tauri updater's installer (no second download, so the version checked is the
    version installed). It runs the NSIS installer in passive mode (progress window, no questions).

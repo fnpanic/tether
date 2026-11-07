@@ -112,9 +112,7 @@ fn floor(path: &Path, admin: &[VerifyingKey]) -> u64 {
 
 /// Per process: several process roles may store the same list at once.
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".{}.tmp", std::process::id()));
-    std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("cannot cache server key list: {e}"))
+    crate::write_atomic(path, data).map_err(|e| format!("cannot cache server key list: {e}"))
 }
 
 /// A fetched document: verified, validated and stored at `path` when its serial is higher than the

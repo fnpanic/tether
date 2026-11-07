@@ -11,7 +11,6 @@ mod netpolicy;
 mod policy;
 mod recording;
 mod security;
-mod session_policy;
 mod sink;
 mod team;
 mod update;

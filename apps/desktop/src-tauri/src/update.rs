@@ -323,6 +323,10 @@ pub fn check() -> Result<Value, String> {
         log::warn!("cannot cache update state: {e}");
     }
     *LAST.lock().unwrap() = found;
+    // The Windows installer exits the app before `install` can delete the file it used.
+    if let Some(dir) = Config::path("update-state.json").parent() {
+        release::prune_staged(dir, offer().and_then(|c| staged_path(&c)).as_deref());
+    }
     if let Some(c) = offer() {
         stage_in_background(c);
     }
@@ -444,6 +448,7 @@ pub async fn install(app: AppHandle, auto: bool) -> Result<(), String> {
     if auto && crate::app::busy() {
         return Err("busy: The update installs when the session ends.".into());
     }
+    // On Windows this does not return (the installer takes over); the next check removes the file.
     install_bytes(&app, key, &c, &bytes)?;
     if let Some(p) = staged_path(&c) {
         let _ = std::fs::remove_file(p);

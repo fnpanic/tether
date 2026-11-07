@@ -20,6 +20,35 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 - **Mac build runner**: after a restart it kills a lost job's process group only if the group
   leader is still that job's process (start time), not a process that reused the pid.
 - Shortcut ledger reviewed (PONYTAIL-DEBT.md): 5 fixed, 2 markers removed, 4 kept with triggers.
+- **Tether Manage: a relay only gets a release index whose files it serves** (devices there would
+  have fetched files the relay does not have, HTTP 404). Before publish, Halt, Resume, ramp and
+  re-sign, Manage checks every artifact and gzip copy of the new index on each relay; one whose
+  upload failed or that misses an earlier release keeps its old index and is reported with the
+  missing files ("use Publish to missing relays").
+- **Tether Manage: release index after an admin key rotation.** Manage verifies the relays' indexes
+  with its own key and the `TETHER_ADMIN_PUB_KEY` list it is built with, so the first publish with a
+  new key keeps the other releases and the serial stays above the devices' floor. An index no
+  trusted key verifies stops the publish with an explanation instead of being replaced.
+- **Pre-release versions compare like semver** (`0.5.0-test.9 < 0.5.0-test.10 < 0.5.0`) in the
+  apps and in Tether Manage (Releases list, Devices version filter use the same order).
+- **Staged update downloads are cleaned up**: every update check deletes `update-*.staged` files
+  other than the current candidate's (the Windows installer ends the app before it could). TetherQS
+  writes the staged file atomically.
+- **Download page and halted releases**: custom templates leave halted releases out; the Standard
+  page refuses to build while its version is halted; after Halt on `stable` Manage reminds you to
+  publish the download page again.
+- **TetherQS with `update.enabled = N`** still reads the release index: a release minimum version
+  blocks sessions as in the technician app, and a stale "update required" no longer blocks after
+  updates were turned off.
+- **Packed downloads decoded by a proxy**: the size limit for the gzip URL is the larger of the
+  packed and the plain size, so a body already decoded on the way is not cut off.
+
+### Security
+- **Technician app: `session_policy_get` returns only the values the session window needs**
+  (`connect.reconnect-minutes`, `recording.mode`); the recording upload token is no longer readable
+  from the webview.
+- **TetherQS: custom app profile fetch** reads at most the profile size limit instead of the whole
+  answer first.
 
 ## [0.5.25] — 2026-11-07
 Tether / TetherQS 0.5.25 (Windows and macOS), Tether Manage 0.5.8; relays: tether-api and Caddy/nginx config (deployed 2026-11-07). The signed release index is required from this release on (`REQUIRE_SIGNED_INDEX`).

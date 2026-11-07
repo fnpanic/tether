@@ -1,7 +1,7 @@
 // node --test src/lib/releases.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { describeRamp, groupReleases, rampPresets, rolloutState } from "./releases.ts";
+import { compareVersion, describeRamp, groupReleases, rampPresets, rolloutState } from "./releases.ts";
 
 test("one group per release, manifest separate, newest first", () => {
   const f = (path: string, size = 1) => ({ channel: "stable", path, size, modified: size });
@@ -62,4 +62,25 @@ test("rollout state", () => {
   assert.equal(rolloutState({ ...e, percent: 100 }), "Everyone");
   assert.equal(rolloutState({ ...e, percent: 0 }), "Not started");
   assert.equal(rolloutState({ ...e, security: true }), "Security release: everyone");
+});
+
+// Mirrors tether_trust::version tests (ordering).
+test("compareVersion: the clients' version order", () => {
+  const lt = (a: string, b: string) => {
+    assert.equal(compareVersion(a, b), -1, `${a} < ${b}`);
+    assert.equal(compareVersion(b, a), 1, `${b} > ${a}`);
+  };
+  lt("0.3.0", "0.3.1");
+  lt("0.3.1-test", "0.3.1");
+  lt("0.9.9", "0.10.0");
+  assert.equal(compareVersion("1.0", "1.0.0"), 0);
+  lt("0.5.0-test.9", "0.5.0-test.10");
+  lt("0.5.0-test.10", "0.5.0-test.10.1");
+  lt("0.5.0-1", "0.5.0-beta");
+  lt("0.5.0-alpha", "0.5.0-beta");
+  lt("0.5.0-test.10", "0.5.0");
+  assert.equal(compareVersion("0.5.0-rc.2", "0.5.0-rc.2"), 0);
+  lt("0.5.0", "unknown");
+  const f = (v: string) => ({ channel: "beta", path: `technician/windows-x86_64/Tether_${v}_x64-setup.exe`, size: 1, modified: 1 });
+  assert.deepEqual(groupReleases([f("0.5.0-test.9"), f("0.5.0-test.10"), f("0.5.0")]).map((g) => g.version), ["0.5.0", "0.5.0-test.10", "0.5.0-test.9"]);
 });
