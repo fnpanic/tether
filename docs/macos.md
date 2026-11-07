@@ -241,13 +241,12 @@ Rejected alternatives:
   readable without permissions, but the newest entries on the test Mac (Edge) had no URL at all,
   other unpackers do not record one, and the URL would contain the secret token.
 
-Not verified: the folder name under **App Translocation** (an app started straight from a
-quarantined download runs from a random read-only path). Apple's translocation keeps the bundle's
-name (`/private/var/folders/…/AppTranslocation/<UUID>/d/<Name> [<id>].app`), but the private
-`SecTranslocateCreateSecureDirectoryForURL` is refused inside the runner's sandbox
-(`Operation not permitted`) and a GUI start needs Open Anyway at the unlocked Mac. Check once by
-hand: download a custom link in Safari, start the app from Downloads, then
-`ps -o command= -p $(pgrep -x TetherQS)` shows the translocated path, and the title bar the name.
+**App Translocation: verified by hand (2026-11-07).** A custom link opened in Safari on the Mac, the app
+started from Downloads (so macOS runs it from a random read-only translocation path), showed the custom
+app's name and branding. Translocation keeps the bundle name
+(`/private/var/folders/…/AppTranslocation/<UUID>/d/<Name> [<id>].app`), which is all TetherQS needs. The
+runner cannot test this itself: `SecTranslocateCreateSecureDirectoryForURL` is refused in its sandbox and
+a GUI start needs Open Anyway at the unlocked Mac.
 
 ## Publish with Tether Manage
 
