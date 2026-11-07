@@ -378,3 +378,18 @@ and tether-api 22/22 (real host and viewer, registration, rotation, relay), audi
 `test-relay.sh` (hbbs 19, tether-api 16, backup failover) all green. After: both relays answer
 pubkey, policy, download page, audit (400 on an empty record) and the WebSocket upgrade (101);
 cm-window e2e through the production hbbs 33/33; no hbbs errors, devices registering.
+
+## Relay update 0.5.23 (2026-11-07)
+
+Security fix W5 (docs/encryption.md §11): hbbs and hbbr bind their WebSocket ports 21118/21119 to
+`WS_BIND`, default `127.0.0.1`; Caddy/nginx reach them there. Rolled out with
+`C:ms
+ightelay-0523\deploy.sh` (install.sh, backup in `/root/bak-0523`, `rollback.sh`), Oracle 2
+first, then Hetzner. Binaries: hbbs `e54407712c521448`, hbbr `cf88ce4c5650a05b`, tether-api
+`3960b37ad3e76309`. Verified on both nodes: all four services active, 21118/21119 listen on
+127.0.0.1 only and are closed from outside, `/ws/id` and `/ws/relay` answer 101 through TLS, relay
+port 21116 open, Prometheus 27/27 targets up.
+
+SSH to Hetzner goes to the IP `46.224.17.114` (host key pinned at creation). The `known_hosts`
+entry for the name `tether-desk.duckdns.org` is still Oracle 1's old key, so SSH by name fails
+the host-key check; that is expected, do not override it, replace the stale entry deliberately.

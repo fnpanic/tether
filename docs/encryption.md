@@ -488,7 +488,7 @@ sends: hbbs the last `X-Forwarded-For` hop (`rendezvous_server.rs:1750-1754`), h
 or `X-Forwarded-For` (`relay_server.rs:415-426`). That defeats per-IP limits and the IP check of
 the `RegisterPk` rule (W8), and the connection has no TLS.
 
-Status: fixed in the next relay release: hbbs/hbbr bind 21118/21119 to `WS_BIND`, default `127.0.0.1` (`listen_ws` in rustdesk-server common.rs); the Helm chart sets `WS_BIND=0.0.0.0` for its separate proxy pod. Effective once the relays are updated.
+Status: fixed and deployed on both relays (2026-11-07, relay 0.5.23): hbbs/hbbr bind 21118/21119 to `WS_BIND`, default `127.0.0.1` (`listen_ws` in rustdesk-server common.rs); the Helm chart sets `WS_BIND=0.0.0.0` for its separate proxy pod. Effective once the relays are updated.
 
 ### W6. Host authenticity rests on hbbs and the server key
 
