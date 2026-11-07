@@ -278,10 +278,12 @@ fn apply_core(eff: &Effective, applied: &mut Vec<String>) {
     }
     // A server or key stored while settings.server was allowed (or written into the config file)
     // must not stay the trust anchor: locked means the built-in servers and signed key list.
-    if !eff.on("settings.server") {
-        for k in SERVER_OPTIONS {
+    // These are FLOOR keys, so never in `applied`: policy can only blank them, not set them.
+    for k in SERVER_OPTIONS {
+        if eff.on("settings.server") {
+            o.remove(*k);
+        } else {
             o.insert((*k).to_owned(), String::new());
-            applied.push((*k).to_owned());
         }
     }
     drop((o, od));
@@ -531,12 +533,11 @@ mod tests {
         // stay blanked.
         let mut applied2 = applied.clone();
         apply_core(&resolve(None, PROFILE, "dev", None), &mut applied2);
-        assert_eq!(applied2, SERVER_OPTIONS);
+        assert!(applied2.is_empty());
         assert_eq!(OVERWRITE_SETTINGS.read().unwrap().get("key").map(String::as_str), Some(""));
         let mut allow = resolve(None, PROFILE, "dev", None);
         allow.values.insert("settings.server".into(), "Y".into());
         apply_core(&allow, &mut applied2);
-        assert!(applied2.is_empty());
         assert!(OVERWRITE_SETTINGS.read().unwrap().get("key").is_none());
         assert!(!OVERWRITE_DISPLAY_SETTINGS.read().unwrap().contains_key("codec-preference"));
         assert!(OVERWRITE_SETTINGS.read().unwrap().get("enable-clipboard").is_none());
