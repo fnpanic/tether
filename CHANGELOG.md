@@ -20,6 +20,26 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   update-runner); Tether's own Mac build as a job: `tools/macbuild/jobs/tether/submit.sh`
   (temporary keychain, designated-requirement check, dmg without the Finder AppleScript, app swap
   after unlock with rollback). Unit tests: `tools/macbuild/test_macbuild.py`.
+- **Advanced mode** in the technician app for people with hundreds of machines
+  ([docs/advanced.md](docs/advanced.md)): the home view becomes the host inventory: one list of recent, hand-added, imported and (with Team)
+  organisation devices; virtualised, search under 2 ms per keystroke on 5,000 hosts; fuzzy search
+  with `#tag`, field filters (`os:`, `ver:<`, `seen:<7d`, `is:online` …) and AND / OR / NOT;
+  namespaced, coloured tags with bulk edit; tag rules; saved searches; pins, names and private notes;
+  Ctrl+K command palette and full keyboard control (Enter connect, Shift+Enter files, Alt+Enter view
+  only); open-sessions panel (Ctrl+Alt+Del, lock, restart); per-host session history; JSON/CSV
+  import and export (notes left out unless chosen). Switched with **Hosts** on the home view or in
+  Settings; loaded on demand, so the simple view starts as before. New policy feature `ui.advanced`
+  (`off`, `available` (default), `forced`).
+- **View only** sessions from Advanced mode (and `--view-only`, which was passed but ignored): the
+  host refuses input for that session; the device's own view-only setting is restored afterwards.
+- **Online status** for many IDs at once (batched hbbs online query). hbbs now also answers online
+  queries on the `/ws/id` WebSocket path Tether clients use; without the relay update the list
+  shows "Online status needs a relay update".
+- **Team access** ([docs/api.md](docs/api.md#team-technician-endpoints)): each technician app has its
+  own Ed25519 key; an administrator adds it to the team roster on the new **Team** page of Tether
+  Manage. Members then read the organisation's devices (no IP addresses) and share tags, names,
+  rules and saved searches (`/api/team/*`, signed requests, revision check with three-way merge on
+  conflicts, size and rate limits); members with the audit flag see a host's session log.
 
 ## [0.5.21] — 2026-11-07
 
