@@ -7,6 +7,8 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ## [Unreleased]
 
 ### Added
+- **Tether Manage: delete download page templates** you no longer need (bin next to the Template list,
+  asks first). The template the published Custom page is built from cannot be deleted.
 - **Tether Manage: custom download page templates** ([docs/download-page.md](docs/download-page.md)).
   Download page → **Design: Standard (built-in) | Custom HTML**. Standard stays the default and is
   byte-identical to before. Custom HTML fills your own HTML file at publish time: `{{tether.<app>.<os>.url|cdn_url|file|version|size|bytes|sha256|date|notes|minimum_version}}`,

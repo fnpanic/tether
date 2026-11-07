@@ -152,6 +152,12 @@ of them, newest first; pick an earlier one to go back. `settings.json` keeps `pa
 These are saved when you publish, like the title and introduction, so the rebuild after a release
 uses the design that was last published.
 
+**Deleting** a version: pick it in the **Template** list and click the bin next to it (asks first;
+`page_template_delete`). The template the published page uses is marked "· published" and cannot be
+deleted while the Custom design is published, because the page is rebuilt from it after every stable
+release; publish another template or the Standard design first. With Standard published, every
+template can be deleted.
+
 ## Using it
 
 1. Download page → **Design: Custom HTML** → **Download starter template**, and edit the file.

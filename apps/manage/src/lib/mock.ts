@@ -288,6 +288,7 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       return file;
     },
     page_template_list: () => Object.keys(templates).sort().reverse().map((file) => ({ file, size: templates[file].length })),
+    page_template_delete: () => void delete templates[a.file],
     page_template_read: () => templates[a.file] ?? (() => { throw new Error("missing"); })(),
     page_data: () => {
       const r = (file: string, cdn = false) => ({ version: "0.5.24", file, size: 24_100_000, sha256: "9f".repeat(32), notes: "Faster reconnects.", minimum_version: "", mandatory: false, date: now - 7200, cdn_url: cdn ? `https://tether-dl.thomas-schend.workers.dev/stable/technician/windows-x86_64/${file}` : null });

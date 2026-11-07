@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { save } from "@tauri-apps/plugin-dialog";
+import { ask, save } from "@tauri-apps/plugin-dialog";
+import { Trash2 } from "lucide-react";
 import { useApp } from "../App";
 import { api, host, inTauri, invoke, type RelayResult } from "../lib/ipc";
 import { previewDoc } from "../lib/page-preview";
 import { buildPage, MAX_PAGE, pageHtml, reference, type CustomApp, type Filled, type PageSettings } from "../lib/page-template";
 import starter from "../../../../docs/examples/download-template.html?raw";
 import { PublishSheet } from "../components/publish";
-import { Button, Card, CopyField, ErrorText, Label, PageHeader, Segmented, Select, TextArea, TextField, Toggle } from "../components/ui";
+import { Button, Card, CopyField, ErrorText, IconButton, Label, PageHeader, Segmented, Select, TextArea, TextField, Toggle } from "../components/ui";
 
 type Design = "standard" | "custom";
 
@@ -73,6 +74,25 @@ export function DownloadPage() {
     toast("Download page published");
     return r;
   };
+
+  // The published template is refused by the backend (the page is rebuilt from it after releases).
+  const remove = async (file: string) => {
+    const sure = inTauri ? await ask(`Delete the template ${templateLabel(file)}? This cannot be undone.`, { title: "Delete template", kind: "warning" }) : true;
+    if (!sure) return;
+    setError(null);
+    try {
+      await invoke("page_template_delete", { file });
+      await listTemplates();
+      if (template === file) {
+        setTemplate(null);
+        clear();
+      }
+      toast("Template deleted");
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+  const published = s.page_design === "custom" ? s.page_template : null;
 
   const upload = async (file: File | undefined) => {
     if (!file) return;
@@ -145,8 +165,10 @@ export function DownloadPage() {
             </>
           ) : (
             <>
-              <Label text="Template" hint="Every file you choose is kept; pick an earlier one to go back.">
+              <Label text="Template" hint="Every file you choose is kept; pick an earlier one to go back, or delete versions you no longer need.">
+                <div className="flex items-center gap-2">
                 <Select
+                  className="min-w-0 flex-1"
                   value={template ?? ""}
                   onChange={(e) => {
                     setTemplate(e.target.value || null);
@@ -157,9 +179,21 @@ export function DownloadPage() {
                   {templates.map((t) => (
                     <option key={t.file} value={t.file}>
                       {templateLabel(t.file)}
+                      {t.file === published ? " · published" : ""}
                     </option>
                   ))}
                 </Select>
+                {template && (
+                  <IconButton
+                    label={template === published ? "The published page uses this template" : "Delete this template"}
+                    className="disabled:pointer-events-none disabled:opacity-30"
+                    disabled={template === published}
+                    onClick={() => remove(template)}
+                  >
+                    <Trash2 size={16} />
+                  </IconButton>
+                )}
+                </div>
               </Label>
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" onClick={() => picker.current?.click()}>

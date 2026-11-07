@@ -1455,6 +1455,27 @@ fn page_template_read(app: State<App>, file: String) -> R<String> {
     fs::read_to_string(app.path(&format!("{PAGE_TEMPLATES}/{file}"))).map_err(|_| format!("The stored template {file} is missing or not UTF-8."))
 }
 
+/// Why `file` must stay: it is what the published download page is built from (the page is rebuilt
+/// from it after every stable release). Standard design: every template may go.
+fn template_in_use(settings: &Value, file: &str) -> Option<&'static str> {
+    (settings["page_design"] == "custom" && settings["page_template"] == file)
+        .then_some("The published download page uses this template. Publish another template or the Standard design first.")
+}
+
+#[tauri::command]
+fn page_template_delete(app: State<App>, file: String) -> R<()> {
+    if !template_file_ok(&file) {
+        return Err("invalid template name".into());
+    }
+    if let Some(why) = template_in_use(&app.settings(), &file) {
+        return Err(why.into());
+    }
+    match fs::remove_file(app.path(&format!("{PAGE_TEMPLATES}/{file}"))) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(err(e)),
+        _ => Ok(()),
+    }
+}
+
 // ---- custom apps ----
 
 /// Local copy of a custom app (the relay list has no logo or settings): `custom/<id>.json`.
@@ -1727,6 +1748,7 @@ fn main() {
             page_template_save,
             page_template_list,
             page_template_read,
+            page_template_delete,
             custom_save,
             custom_list,
             custom_delete,
@@ -1768,6 +1790,16 @@ mod server_list_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_published_template_cannot_be_deleted() {
+        let s = json!({ "page_design": "custom", "page_template": "1-a.html" });
+        assert!(template_in_use(&s, "1-a.html").is_some());
+        assert!(template_in_use(&s, "2-b.html").is_none(), "other versions may go");
+        let standard = json!({ "page_design": "standard", "page_template": "1-a.html" });
+        assert!(template_in_use(&standard, "1-a.html").is_none(), "Standard published: the kept choice may go");
+        assert!(template_in_use(&json!({}), "1-a.html").is_none());
+    }
 
     #[test]
     fn page_template_names_stay_in_their_folder() {
