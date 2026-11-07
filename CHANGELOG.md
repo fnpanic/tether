@@ -6,6 +6,9 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+## [0.5.24] — 2026-11-07
+Tether / TetherQS 0.5.24 (Windows and macOS), Tether Manage 0.5.7; relays: tether-api, hbbs, Caddy/nginx config (deployed 2026-11-07).
+
 ### Security
 - **Update binaries bound to their signed version (W9 rollback)**: both apps now check the minisign
   trusted comment (`file:` and `version:` must be the offered ones). Before, neither did, so a relay
