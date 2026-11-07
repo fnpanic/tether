@@ -172,8 +172,12 @@ Exceptions, which keep their own Dock icon as before:
 
 - The connection window when the main Tether does not run (its server was started some other
   way) or when the socket cannot be created: then it is the only way to reach the window.
-- `tether --connect <id>` from Terminal opens its session in a separate process (Windows hands it
-  to the running Tether; macOS does not yet).
+- `tether --connect <id>` from Terminal while Tether does not run opens its session in a process
+  of its own. While Tether runs, the request (with a `--password-env`/`--password-stdin`
+  password) goes to the running Tether through the single-instance socket and the second process
+  exits, as on Windows; only a socket owned by the same user gets it (`/tmp` is shared by all
+  users). `tether://` links always go to the running Tether (macOS delivers them to it). The
+  forwarding is built on the Mac but not yet tried there by hand (Windows: keyrot-e2e).
 
 TetherQS runs its connection manager in its single process: one icon.
 

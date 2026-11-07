@@ -232,6 +232,17 @@ def killpg(pgid, sig):
         pass
 
 
+def started_near(pid, t, slack=5):
+    """Whether process `pid` started within `slack` s of `t`: a job leader recorded before a reboot
+    or a pid wrap is then not mistaken for an unrelated process that reuses its pid."""
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True,
+                             timeout=10, env={"LC_ALL": "C", "PATH": DEFAULT_PATH}).stdout.strip()
+        return abs(time.mktime(time.strptime(out, "%a %b %d %H:%M:%S %Y")) - t) <= slack
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return False
+
+
 class Runner:
     def __init__(self, root):
         self.root = os.path.realpath(root)
@@ -588,8 +599,9 @@ class Runner:
             for job_id in os.listdir(jd) if os.path.isdir(jd) else []:
                 st = self.status(user, job_id)
                 if st.get("state") == "running":
-                    if st.get("pid"):
-                        killpg(st["pid"], signal.SIGKILL)  # shortcut: pgid could be reused after a reboot; harmless then (own uid only)
+                    # Only the job's own group: after a reboot or pid wrap the pid may be another process's.
+                    if st.get("pid") and started_near(st["pid"], st.get("started_at", 0)):
+                        killpg(st["pid"], signal.SIGKILL)
                     self.set_status(user, job_id, state="failed", reason="runner restarted", ended_at=now())
                 if st.get("on_unlock") == "running":
                     self.set_status(user, job_id, on_unlock="failed: runner restarted")

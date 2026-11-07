@@ -333,7 +333,8 @@ fn machine_json() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn machine_json() -> Option<String> {
-    // shortcut: reads via `defaults`, no plist crate; fine for one string key.
+    // shortcut: reads via `defaults`, no plist crate; fine for one string key. Upgrade (plist crate
+    // or CFPreferences) when a second managed key or a non-string value is read.
     let out = std::process::Command::new("/usr/bin/defaults")
         .args(["read", "/Library/Managed Preferences/net.tether.app", "PolicyJson"])
         .output()

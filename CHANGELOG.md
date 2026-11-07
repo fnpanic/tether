@@ -6,6 +6,21 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Fixed
+- **Sessions started together no longer slow each other down**: the extra 800 ms a session waits for
+  WebRTC over TURN before taking the relay now depends on that session's own peer offering a TURN
+  candidate, not on any session in the process (Advanced mode opening several at once, or screen
+  and file transfer together).
+- **macOS: `tether --connect <id>` while Tether runs** opens the session in the running Tether
+  (one Dock icon, one session list), as on Windows; only a single-instance socket owned by the same
+  user gets the request.
+- **Relays: `process_cpu_seconds_total` and `process_start_time_seconds`** use the system's clock
+  tick rate (`sysconf(_SC_CLK_TCK)`) instead of assuming 100 (hbbs/hbbr).
+- **TetherQS (macOS custom apps)**: a profile that cannot be cached is logged instead of ignored.
+- **Mac build runner**: after a restart it kills a lost job's process group only if the group
+  leader is still that job's process (start time), not a process that reused the pid.
+- Shortcut ledger reviewed (PONYTAIL-DEBT.md): 5 fixed, 2 markers removed, 4 kept with triggers.
+
 ## [0.5.25] — 2026-11-07
 Tether / TetherQS 0.5.25 (Windows and macOS), Tether Manage 0.5.8; relays: tether-api and Caddy/nginx config (deployed 2026-11-07). The signed release index is required from this release on (`REQUIRE_SIGNED_INDEX`).
 

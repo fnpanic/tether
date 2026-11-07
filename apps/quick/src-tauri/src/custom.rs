@@ -106,9 +106,10 @@ fn from_bundle(exe: &Path, keys: &[VerifyingKey], cache_path: impl Fn(&str) -> P
     }
     let doc = fetch(id).map_err(|e| format!("custom app {id}: could not fetch the profile: {e}"))?;
     let p = custom::open(&doc, keys).map_err(|e| format!("custom app {id}: {e}"))?;
-    // shortcut: a failed cache write only means fetching again at the next start.
-    let _ = cache.parent().map(std::fs::create_dir_all);
-    let _ = std::fs::write(&cache, &doc);
+    // Not fatal: the profile is fetched again at the next start.
+    if let Err(e) = cache.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&cache, &doc)) {
+        hbb_common::log::warn!("custom app {id}: profile not cached at {}: {e}", cache.display());
+    }
     Ok((p, Vec::new()))
 }
 
