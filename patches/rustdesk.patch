@@ -1673,7 +1673,7 @@ index 53831cc..3df641a 100644
 +    }
  }
 diff --git a/src/core_main.rs b/src/core_main.rs
-index 19a2670..01fcdec 100644
+index 19a2670..ca50ab9 100644
 --- a/src/core_main.rs
 +++ b/src/core_main.rs
 @@ -93,7 +93,8 @@ pub fn core_main() -> Option<CoreMainAction> {
@@ -1686,7 +1686,7 @@ index 19a2670..01fcdec 100644
      if args.is_empty() {
          #[cfg(target_os = "linux")]
          let should_check_start_tray = crate::check_process("--server", false);
-@@ -365,6 +366,7 @@ pub fn core_main() -> Option<CoreMainAction> {
+@@ -365,12 +366,21 @@ pub fn core_main() -> Option<CoreMainAction> {
                  return None;
              }
          } else if args[0] == "--tray" {
@@ -1694,6 +1694,42 @@ index 19a2670..01fcdec 100644
              if !crate::check_process("--tray", true) {
                  crate::tray::start_tray();
              }
+             return None;
+         } else if args[0] == "--install-service" {
+             log::info!("start --install-service");
++            // Tether: Windows returns only on failure (success exits); a failed install must not exit 0.
++            #[cfg(windows)]
++            if crate::platform::install_service() {
++                return Some(CoreMainAction::ExitFailure(hbb_common::anyhow::anyhow!(
++                    "service installation failed or was cancelled, see the install-service log"
++                )));
++            }
++            #[cfg(not(windows))]
+             crate::platform::install_service();
+             return None;
+         } else if args[0] == "--uninstall-service" {
+@@ -724,7 +734,7 @@ pub fn core_main() -> Option<CoreMainAction> {
+ }
+ 
+ fn import_config(path: &str) {
+-    use hbb_common::{config::*, get_exe_time, get_modified_time};
++    use hbb_common::{config::*, get_modified_time};
+     let path2 = path.replace(".toml", "2.toml");
+     let path2 = std::path::Path::new(&path2);
+     let path = std::path::Path::new(path);
+@@ -734,9 +744,9 @@ fn import_config(path: &str) {
+         log::info!("Empty source config, skipped");
+         return;
+     }
+-    if get_modified_time(&path) > get_modified_time(&Config::file())
+-        && get_modified_time(&path) < get_exe_time()
+-    {
++    // Tether: no `< get_exe_time()` condition. On an NSIS install the exe is older than every
++    // setting made since (e.g. the permanent password), which was then never imported.
++    if get_modified_time(&path) > get_modified_time(&Config::file()) {
+         if store_path(Config::file(), config).is_err() {
+             log::info!("config written");
+         }
 diff --git a/src/hbbs_http/sync.rs b/src/hbbs_http/sync.rs
 index aac220b..2b67671 100644
 --- a/src/hbbs_http/sync.rs
@@ -1875,6 +1911,19 @@ index d321d12..0e01ef2 100644
 +        let _: id = msg_send![token, retain];
 +    }
 +}
+diff --git a/src/platform/windows.rs b/src/platform/windows.rs
+index 206a88d..73b91fa 100644
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -4186,7 +4186,7 @@ pub fn message_box(text: &str) {
+         .encode_utf16()
+         .chain(std::iter::once(0))
+         .collect::<Vec<u16>>();
+-    let caption = "RustDesk Output"
++    let caption = format!("{} Output", crate::get_app_name())
+         .encode_utf16()
+         .chain(std::iter::once(0))
+         .collect::<Vec<u16>>();
 diff --git a/src/port_forward.rs b/src/port_forward.rs
 index 26f8cbc..dbc483f 100644
 --- a/src/port_forward.rs
@@ -4780,10 +4829,10 @@ index 0000000..8911df8
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..d7b9ace
+index 0000000..832643b
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,418 @@
 +//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
 +//!
 +//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
@@ -5115,13 +5164,31 @@ index 0000000..d7b9ace
 +        hbb_common::config::PeerConfig::remove(id);
 +    }
 +
-+    pub fn install_service() {
-+        crate::ui_interface::install_me(
-+            "desktopicon startmenu".to_owned(),
-+            crate::ui_interface::install_path(),
-+            false,
-+            false,
-+        );
++    /// Unattended access. Windows: Tether is already installed (NSIS), so only the service is created
++    /// (UAC prompt), with the user's settings imported; never the core's full self-install
++    /// (`install_me` replaces the install folder and registry). On success the core restarts the
++    /// app so its server role moves into the service, i.e. this returns only on failure or cancel.
++    pub fn install_service() -> bool {
++        #[cfg(windows)]
++        return !crate::platform::install_service();
++        #[cfg(not(windows))]
++        {
++            crate::ui_interface::install_me(
++                "desktopicon startmenu".to_owned(),
++                crate::ui_interface::install_path(),
++                false,
++                false,
++            );
++            true
++        }
++    }
++
++    /// Unattended access is on: the Windows service runs (elsewhere: the core's install check).
++    pub fn is_service_installed() -> bool {
++        #[cfg(windows)]
++        return crate::platform::windows::is_self_service_running();
++        #[cfg(not(windows))]
++        return crate::ui_interface::is_installed();
 +    }
 +
 +    /// Blocking HTTPS PUT of a file through the core's proxy/TLS-aware client.

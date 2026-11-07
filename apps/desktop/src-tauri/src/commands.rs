@@ -27,6 +27,7 @@ pub struct Status {
     /// -1 not ready, 0 connecting, 1 ready
     status: i32,
     key_confirmed: bool,
+    /// Unattended access is on (Windows: the service runs).
     installed: bool,
     version: String,
 }
@@ -39,7 +40,7 @@ fn status() -> Status {
         password: api::temporary_password(),
         status: s.status_num,
         key_confirmed: s.key_confirmed,
-        installed: api::is_installed(),
+        installed: api::is_service_installed(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
@@ -120,10 +121,14 @@ fn remove_peer(id: String) -> R<()> {
 }
 
 #[tauri::command]
-fn install_service() -> R<()> {
+async fn install_service() -> R<()> {
     crate::policy::require("security.unattended", "Your organisation does not allow unattended access.")?;
-    std::thread::spawn(api::install_service);
-    Ok(())
+    // Windows: on success the core restarts Tether, so this only returns on failure or cancel.
+    if blocking(api::install_service).await? {
+        Ok(())
+    } else {
+        Err("The service was not installed (cancelled, or see the log).".to_owned())
+    }
 }
 
 /// macOS only (None elsewhere): Screen Recording (else the technician gets no picture) and
