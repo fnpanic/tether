@@ -535,9 +535,9 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <h4>Does the customer have to open ports or change the firewall?</h4>
 <p>No. Tether only makes outgoing TLS connections on TCP 443 to your relay names (port 80 as a fallback). IT only needs to allow <code>tether-desk.duckdns.org</code> and <code>tether-desk2.duckdns.org</code> with WebSocket upgrades and long-lived connections.</p>
 <h4>Does it work behind a corporate proxy or Zscaler-style TLS inspection?</h4>
-<p>Yes. Tether finds the system proxy (environment variables, WinINet, PAC files, WPAD; macOS system settings) and checks it again every minute. If the proxy re-signs TLS with a company certificate that Windows trusts, Tether accepts it. The proxy still sees only encrypted session data.</p>
+<p>Yes. Tether finds the system proxy (environment variables, WinINet, PAC files, WPAD; macOS system settings) and checks it again every minute. If the proxy re-signs TLS with a company certificate that Windows trusts, Tether accepts it. The proxy then sees device IDs and connection requests, but the session itself stays end-to-end encrypted.</p>
 <h4>Can the relay operator watch sessions?</h4>
-<p>No. The relay forwards ciphertext. It knows device IDs, IP addresses and connection times, which is why you run the relay yourself.</p>
+<p>Not by watching the traffic: the relay forwards ciphertext and never has the session keys. It knows device IDs, IP addresses and connection times, which is why you run the relay yourself. The relay's private server key vouches for which device is which, so someone who controls the ID server and holds that key could impersonate a device; keep the relays and the key secured. Details: <code>docs/encryption.md</code> in the repository.</p>
 <h4>Can a technician connect without the customer noticing?</h4>
 <p>Only to a device where unattended access was set up with a permanent password. TetherQS always shows an incoming session, and recording always needs the other side's consent.</p>
 <h4>What happens if one relay fails?</h4>

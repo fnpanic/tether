@@ -4,6 +4,37 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Documentation
+
+- New [docs/encryption.md](docs/encryption.md): how a connection is encrypted end to end, derived
+  from the code with file:line references (identities and key storage, registration, rendezvous,
+  key agreement and per-direction keys, transport paths, password challenge, who sees what), and
+  what hbbs/hbbr can and cannot do. States plainly that hbbs holding the server key can
+  impersonate hosts (no host-key pinning, no viewer identity key).
+- SECURITY.md: a threat model (assets, trust boundaries, actors with mitigations and
+  residual risks). Corrected: the rendezvous WebSocket is authenticated by TLS alone (the server
+  key authenticates host keys, not hbbs); WebRTC sessions are protected by DTLS only, not by
+  secretbox inside DTLS; TLS 1.2 or 1.3 (rustls defaults), not 1.3 only; `-k` compares a public
+  key (configuration check, not authentication); "secrets at rest" are obfuscated with the
+  machine uid, the device secret key is unencrypted; no app shows a device its own fingerprint;
+  connecting by IP address skips the encryption check; hbbs/hbbr bind all interfaces and the
+  installer opens 21115-21117/tcp and 21116/udp; what the relay stores; the update manifest is
+  unsigned (rollback to an older signed build, blocking via `minimum_version`).
+- README, user guide FAQ and architecture page: security wording matched to the code, with a
+  pointer to docs/encryption.md.
+- After an independent review: a "Known weaknesses" list (W1-W13, one status line each) in
+  docs/encryption.md and SECURITY.md. Added or corrected: key exchange version 0 is reachable with
+  non-Tether peers and broken (same key and nonces both ways); legacy port-forward tunnels run
+  without the inner encryption; the exact trusted-key rule (`server_keys_for`) and that `key` /
+  custom server are local options; plain `ws://` for IP endpoints; hbbs/hbbr WebSocket ports bound
+  to all interfaces with client-chosen IP headers when reached directly; password-less ways in
+  (resume ticket, file-transfer companion, trusted-device token, recent session); recording consent
+  binds honest viewers only; offline guessing from a captured challenge response; keystroke timing;
+  LAN lookup reveals the target ID; macOS direct listener not subnet-limited; machine uuid in hbbs
+  logs; hbbr may create the server key; native-tls TLS versions; the h1 citation.
+
 ## [0.5.22] — 2026-11-07
 
 Tether / TetherQS 0.5.22 (Windows and macOS), Tether Manage 0.5.6; relay parts as listed (hbbs, hbbr,
