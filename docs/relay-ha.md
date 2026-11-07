@@ -247,6 +247,9 @@ Tether Manage (implemented in 0.4.0; the server setting is a comma-separated rel
 
 ## Capacity
 
+Sizing for 10 000 devices and 3 000 sessions, with measurements: [scaling.md](scaling.md). The
+estimate below was for the Oracle micro VMs.
+
 - Relays carry the session traffic; hbbs carries only signalling. One E2.1.Micro has 1/8 OCPU,
   1 GB RAM and up to 480 Mbit/s network. Oracle's Always Free outbound allowance is 10 TB/month.
   Estimate (not measured): a remote-desktop session averages 1–5 Mbit/s, so one micro VM is

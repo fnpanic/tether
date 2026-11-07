@@ -62,7 +62,7 @@ Use the production key pair (the same as on the VMs) or clients will not trust t
 | `proxy.service.*` | ClusterIP :80 | `LoadBalancer`/`NodePort`. TLS on `tlsPort` when `proxy.tls.secretName` is set (e.g. cert-manager). |
 | `api.enabled` | false | tether-api + file server sidecar on a PVC (`api.persistence.size` 5Gi; uploads need 2 GiB free). |
 | `podDisruptionBudget.maxUnavailable` | 1 | For hbbs and hbbr (node drains evict one pod at a time). |
-| `*.resources` | 50m/32Mi requests, 1 CPU/256Mi limits | Sized for small nodes. |
+| `*.resources` | 50m/32Mi requests, 1 CPU/256Mi limits | Sized for small nodes; for 10 000 devices / 3 000 sessions use `examples/scale-10k.yaml` (hbbs 768Mi, proxy 3Gi, 4 hbbr; [scaling.md](scaling.md)). |
 
 Pods run as non-root (65532) with a read-only root filesystem, all capabilities dropped (Caddy
 keeps `NET_BIND_SERVICE`, which its binary needs to start) and RuntimeDefault seccomp.

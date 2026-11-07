@@ -5,3 +5,6 @@ server/caddy/Caddyfile text eol=lf
 
 # Patches are applied to LF checkouts of upstream (scripts/bootstrap.sh): keep them LF everywhere.
 patches/*.patch text eol=lf
+
+# Kernel settings copied to Linux relays.
+server/sysctl/* text eol=lf

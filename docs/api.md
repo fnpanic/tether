@@ -181,7 +181,7 @@ works on any relay. The relay never modifies the profile; TetherQS verifies the 
 | `DELETE /api/admin/custom/<id>` (signed) | – | `204`; the link stops working at once. `404` if unknown. |
 | `GET /q/<token>` (public) | – | The current `TetherQS-<v>.exe` of the entry's channel (from `download/<channel>/customer/windows-x86_64/latest.json`) with `custom::trailer(<signed profile>)` appended, `Content-Disposition: attachment; filename="<Name>-Support.exe"` (name reduced to `[A-Za-z0-9 _.-]`). `404` for unknown, revoked **and** expired tokens (same answer, no oracle). Rate-limited to 30 requests/min per IP. Counts downloads. |
 
-Caddy routes `/q/*` to `tether-api`. Tokens are 256-bit random (`custom::new_token`), compared
+Caddy routes `/q/*` to `tether-api`, which checks the token and, when Caddy sends `X-Tether-Accel: 1`, answers with `X-Accel-Redirect: /qcache/<id>--<exe>` (the exe with the trailer, prepared once in the data dir outside `download/`); Caddy then sends that file, so slow downloads hold no worker ([scaling.md](scaling.md)). Without the header the file is streamed as before. Tokens are 256-bit random (`custom::new_token`), compared
 exactly; links are not listed anywhere public. TetherQS self-updates keep the profile: after
 verifying a new plain exe it re-appends its own trailer. Custom apps are Windows-only for now
 (the macOS TetherQS is a `.app` bundle).
