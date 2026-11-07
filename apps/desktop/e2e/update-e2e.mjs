@@ -18,7 +18,9 @@
 // when its upload fails it keeps its old index (no index pointing at files it lacks), and the
 // client on the first relay still updates. Finally an admin key rotation: a second Tether Manage
 // with a new vault (built with the old key in TETHER_ADMIN_PUB_KEY) publishes TetherQS and the new
-// index keeps the release signed with the old key.
+// index keeps the release signed with the old key; relay B, still without the 0.9.25 files, does
+// not get it until "Publish to missing relays" (release_sync) copies them, then a publish reaches
+// both.
 //
 //   node e2e/update-e2e.mjs
 // Env: TECH_EXE, OLD_EXE, MANAGE_EXE, BIN (WSL dir with hbbs/hbbr/tether-api), KEY_A, VAULT.
@@ -430,11 +432,23 @@ async function main() {
   const qs = join(work, "TetherQS-0.9.26.exe");
   copyFileSync(join(process.env.SystemRoot, "System32", "hostname.exe"), qs);
   const pubQs = await ipc(m2, "release_publish", { args: { file: qs, kind: "customer", platform: "windows-x86_64", channel: "stable", version: "0.9.26", notes: "e2e rotation", mandatory: false, minimum_version: "", forced: false, rollout: "now", security: false } }).catch((e) => [{ ok: false, error: String(e.message ?? e) }]);
-  check("after the admin key rotation the new Manage publishes to both relays", pubQs.length >= 2 && relayRes(pubQs).every((r) => r.ok), JSON.stringify(pubQs).slice(0, 300));
-  for (const [name, api] of [["A", API], ["B", API_B]]) {
-    const ix = await indexOf(api);
-    check(`relay ${name}: the new-key index keeps the old-key release and raises the serial`, ix?.key === newPub && ix.releases["customer/windows-x86_64"]?.version === "0.9.26" && !!ix.releases[KEY]?.version && ix.serial > before.serial, ix && `serial ${ix.serial}, ${Object.keys(ix.releases).join(" ")}`);
-  }
+  const qsA = pubQs.find((r) => r.server === PROXY);
+  const qsB = pubQs.find((r) => r.server === PROXY_B);
+  check("after the admin key rotation the new Manage publishes to relay A", qsA?.ok, JSON.stringify(pubQs).slice(0, 300));
+  let ixA = await indexOf(API);
+  check("relay A: the new-key index keeps the old-key release and raises the serial", ixA?.key === newPub && ixA.releases["customer/windows-x86_64"]?.version === "0.9.26" && ixA.releases[KEY]?.version === "0.9.25" && ixA.serial > before.serial, ixA && `serial ${ixA.serial}, ${Object.keys(ixA.releases).join(" ")}`);
+  check("relay B (no 0.9.25 files) is reported with the missing file and the hint", qsB && !qsB.ok && qsB.error?.includes("Tether_0.9.25_x64-setup.exe") && qsB.error.includes("Publish to missing relays"), qsB?.error);
+  let ixB = await indexOf(API_B);
+  check("relay B keeps its old index", ixB?.serial === bAfter.serial && ixB.key !== newPub, `serial ${ixB?.serial}`);
+  // Publish to missing relays: release_sync copies 0.9.25 and the newest index to B.
+  const sync = await ipc(m2, "release_sync", { channel: "stable", kind: "technician", platform: "windows-x86_64", version: "0.9.25" }).catch((e) => [{ ok: false, error: String(e.message ?? e) }]);
+  ixB = await indexOf(API_B);
+  check("Publish to missing relays brings relay B up to date", sync.find((r) => r.server === PROXY_B)?.ok && ixB?.serial === ixA.serial && ixB.releases[KEY]?.version === "0.9.25", `${JSON.stringify(sync).slice(0, 200)}; B serial ${ixB?.serial}`);
+  const qs27 = join(work, "TetherQS-0.9.27.exe");
+  copyFileSync(join(process.env.SystemRoot, "System32", "hostname.exe"), qs27);
+  const pub27 = await ipc(m2, "release_publish", { args: { file: qs27, kind: "customer", platform: "windows-x86_64", channel: "stable", version: "0.9.27", notes: "e2e after sync", mandatory: false, minimum_version: "", forced: false, rollout: "now", security: false } }).catch((e) => [{ ok: false, error: String(e.message ?? e) }]);
+  [ixA, ixB] = [await indexOf(API), await indexOf(API_B)];
+  check("the next publish reaches both relays (same new-key index)", relayRes(pub27).length === 2 && relayRes(pub27).every((r) => r.ok) && ixA.serial === ixB.serial && ixB.key === newPub && ixB.releases["customer/windows-x86_64"]?.version === "0.9.27", JSON.stringify(pub27).slice(0, 200));
 }
 
 try {

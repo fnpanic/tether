@@ -116,10 +116,13 @@ with the new key keeps every release in it and takes a serial above it. If a rel
 that no listed key verifies, Manage refuses to publish ("… no trusted admin key verifies …")
 instead of starting a new index without those releases.
 
-**Releases on several relays.** The files go to every relay first. A relay whose upload failed is
-reported as failed ("release index not updated on this relay") and does not get the new index: the
-index points devices at the relay it came from, so it must never name files that relay lacks. It
-keeps serving its previous index; publish again (or **Publish to missing relays**) once it is fixed.
+**Releases on several relays.** The files go to every relay first. The index points devices at the
+relay it came from, so it must never name files that relay lacks: before a new index (publish,
+Halt, Resume, ramp, re-sign) goes to a relay, Manage checks (`HEAD`) that the relay serves every
+artifact and gzip copy the index lists. A relay whose upload failed, or that misses a file of an
+earlier release, keeps its previous index and is reported as failed with the missing files
+("… use Publish to missing relays"). **Publish to missing relays** copies the release and the newest
+index to it; later publishes reach it again.
 
 ### Server key
 

@@ -7,9 +7,11 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ## [Unreleased]
 
 ### Fixed
-- **Tether Manage: a relay whose release upload failed no longer gets the new release index**
-  (devices there would have fetched files the relay does not have, HTTP 404). It keeps its old
-  index and is reported as failed, "release index not updated on this relay".
+- **Tether Manage: a relay only gets a release index whose files it serves** (devices there would
+  have fetched files the relay does not have, HTTP 404). Before publish, Halt, Resume, ramp and
+  re-sign, Manage checks every artifact and gzip copy of the new index on each relay; one whose
+  upload failed or that misses an earlier release keeps its old index and is reported with the
+  missing files ("use Publish to missing relays").
 - **Tether Manage: release index after an admin key rotation.** Manage verifies the relays' indexes
   with its own key and the `TETHER_ADMIN_PUB_KEY` list it is built with, so the first publish with a
   new key keeps the other releases and the serial stays above the devices' floor. An index no

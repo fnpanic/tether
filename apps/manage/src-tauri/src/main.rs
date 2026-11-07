@@ -1046,12 +1046,51 @@ async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[
     let ix = release::next_index(base, channel, serial, api::now(), change)?;
     let doc = serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&ix).unwrap(), &app.admin_key()?)).unwrap();
     app.write(&local_path, serial.to_string().as_bytes())?;
-    let mut out = BTreeMap::new();
+    // Devices fetch `{relay}` URLs from the relay the index came from: a relay that lacks one of
+    // the files keeps its old index.
+    let paths = relay_paths(&ix);
+    let mut missing = BTreeMap::new();
     for sv in targets {
-        let r = app.call_on(sv, "PUT", &format!("/api/admin/release/{channel}/releases.json"), doc.clone(), "application/json").await.map(|_| ());
-        out.insert(sv.clone(), r);
+        let mut m = Vec::new();
+        for p in &paths {
+            match api::exists(sv, p).await {
+                Ok(true) => {}
+                Ok(false) => m.push(p.clone()),
+                Err(e) => m.push(format!("{p} (could not check: {e})")),
+            }
+        }
+        missing.insert(sv.clone(), m);
+    }
+    let (send, mut out) = index_targets(targets, &missing);
+    for sv in send {
+        let r = app.call_on(&sv, "PUT", &format!("/api/admin/release/{channel}/releases.json"), doc.clone(), "application/json").await.map(|_| ());
+        out.insert(sv, r);
     }
     Ok(out)
+}
+
+/// The `/download/…` paths devices fetch from the relay that served `ix` (artifacts and packed copies).
+fn relay_paths(ix: &tether_trust::release::Index) -> Vec<String> {
+    let urls = ix.releases.values().flat_map(|e| e.urls.iter().chain(e.packed.iter().flat_map(|p| p.urls.iter())));
+    let mut v: Vec<String> = urls.filter_map(|u| u.strip_prefix("https://{relay}").map(str::to_owned)).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The targets that serve every file of the new index, and an error for each one that does not.
+fn index_targets(targets: &[String], missing: &BTreeMap<String, Vec<String>>) -> (Vec<String>, BTreeMap<String, R<()>>) {
+    let mut send = Vec::new();
+    let mut skipped = BTreeMap::new();
+    for sv in targets {
+        match missing.get(sv).filter(|m| !m.is_empty()) {
+            None => send.push(sv.clone()),
+            Some(m) => {
+                skipped.insert(sv.clone(), Err(format!("the relay lacks {}; not updated, use Publish to missing relays", m.join(", "))));
+            }
+        }
+    }
+    (send, skipped)
 }
 
 /// The rollout view: the highest verified index on the relays, with the ramp's percent now.
@@ -2041,6 +2080,21 @@ mod tests {
         // Only this PC's key: the relay's index is not silently dropped, the publish is refused.
         let e = usable_indexes(open_indexes(got(), &trusted_admin_keys(new.verifying_key(), ""), "stable"), "stable").unwrap_err();
         assert!(e.contains("https://a") && e.contains("TETHER_ADMIN_PUB_KEY"), "{e}");
+    }
+
+    #[test]
+    fn the_index_goes_only_to_relays_that_serve_all_its_files() {
+        let k = tether_trust::generate_key();
+        let ix = tether_trust::release::Index::open(&signed_index(&k, 1, &[("technician/windows-x86_64", "0.5.25", false), ("customer/windows-x86_64", "0.5.24", false)]), &[k.verifying_key()], "stable").unwrap();
+        let paths = relay_paths(&ix);
+        assert_eq!(paths, ["/download/stable/customer/windows-x86_64/f", "/download/stable/technician/windows-x86_64/f"]);
+        let (a, b, c) = ("https://a".to_owned(), "https://b".to_owned(), "https://c".to_owned());
+        let missing = BTreeMap::from([(a.clone(), vec![]), (b.clone(), vec![paths[1].clone()])]);
+        let (send, skipped) = index_targets(&[a.clone(), b.clone(), c.clone()], &missing);
+        assert_eq!(send, [a, c]);
+        let e = skipped[&b].as_ref().unwrap_err();
+        assert!(e.contains(&paths[1]) && e.contains("Publish to missing relays"), "{e}");
+        assert_eq!(skipped.len(), 1);
     }
 
     #[test]
