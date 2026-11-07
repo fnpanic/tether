@@ -11,6 +11,7 @@
 
 mod audit;
 mod metrics;
+mod prune;
 mod team;
 
 use std::collections::HashMap;
@@ -808,7 +809,7 @@ impl App {
                 "PUT" => self.put_release(rq, body, url, &dest),
                 "DELETE" => {
                     self.auth(rq, method, url, body.bytes(LIMIT_SMALL)?)?;
-                    self.delete_release(&dest)
+                    self.delete_guarded(&dest, url)
                 }
                 _ => Err(not_found()),
             };
@@ -819,6 +820,7 @@ impl App {
             ("PUT", "download-page") => LIMIT_PAGE,
             ("PUT", "team") => team::LIMIT_ROSTER,
             ("POST", "diag-ticket") => LIMIT_SMALL,
+            ("POST", "releases/prune") => prune::LIMIT_PRUNE,
             ("PUT", r) if r.starts_with("custom/") => LIMIT_CUSTOM,
             ("DELETE", r) if r.starts_with("custom/") => LIMIT_SMALL,
             ("GET", "policy-history" | "devices" | "diag" | "releases" | "status" | "custom" | "audit" | "team") => LIMIT_SMALL,
@@ -839,6 +841,7 @@ impl App {
                 Ok(empty(204))
             }
             ("POST", "diag-ticket") => self.new_ticket(body),
+            ("POST", "releases/prune") => self.prune(body),
             ("PUT", r) if r.starts_with("custom/") => self.put_custom(&r["custom/".len()..], body),
             ("DELETE", r) if r.starts_with("custom/") => self.delete_custom(&r["custom/".len()..]),
             ("GET", "custom") => {
@@ -876,6 +879,7 @@ impl App {
                 "release_generation": self.release_gen,
                 "release_indexes": self.indexes.iter().map(|(c, (s, e))| (c.clone(), serde_json::json!({"serial": s, "expires": e}))).collect::<serde_json::Map<_, _>>(),
                 "uptime": now().saturating_sub(self.started),
+                "last_prune": prune::last(&self.data),
             }))),
             (_, r) => {
                 let ticket = r.strip_prefix("diag/").unwrap_or("");
@@ -1161,15 +1165,20 @@ impl App {
             self.indexes.remove(&ch);
         }
         self.bump_generation(dest);
+        self.remove_empty_dirs(dest.parent().expect("under download/"));
+        Ok(empty(204))
+    }
+
+    /// Removes `dir` and its parents up to `download/` while they are empty.
+    fn remove_empty_dirs(&self, dir: &Path) {
         let root = self.data.join("download");
-        let mut dir = dest.parent();
+        let mut dir = Some(dir);
         while let Some(d) = dir.filter(|d| *d != root) {
             if fs::remove_dir(d).is_err() {
                 break; // not empty
             }
             dir = d.parent();
         }
-        Ok(empty(204))
     }
 
     fn list_releases(&self) -> Result<Resp, Resp> {

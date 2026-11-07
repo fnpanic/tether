@@ -178,6 +178,25 @@ pub fn render(now: &Now, data_dir: &Path) -> String {
     for ((p, v), n) in &now.downloads {
         let _ = writeln!(o, "tether_api_release_downloads_total{{profile=\"{}\",version=\"{}\"}} {n}", label(p), label(v));
     }
+    let (rel_bytes, rel_versions) = crate::prune::usage(data_dir);
+    header(&mut o, "tether_api_release_bytes", "gauge", "Bytes of release files below download/<channel>/, by channel.");
+    for (c, b) in &rel_bytes {
+        let _ = writeln!(o, "tether_api_release_bytes{{channel=\"{}\"}} {b}", label(c));
+    }
+    header(&mut o, "tether_api_release_versions", "gauge", "Release versions on disk, by channel, app and platform.");
+    for (c, dir, n) in &rel_versions {
+        let (app, platform) = dir.split_once('/').unwrap_or_default();
+        let _ = writeln!(o, "tether_api_release_versions{{channel=\"{}\",app=\"{}\",platform=\"{}\"}} {n}", label(c), label(app), label(platform));
+    }
+    let last = crate::prune::last(data_dir).and_then(|r| r["time"].as_u64()).unwrap_or(0);
+    for (name, typ, help, v) in [
+        ("tether_api_release_prune_runs_total", "counter", "Executed release prunes since start.", crate::prune::RUNS.load(Relaxed)),
+        ("tether_api_release_prune_freed_bytes_total", "counter", "Bytes deleted by release prunes since start.", crate::prune::FREED.load(Relaxed)),
+        ("tether_api_release_prune_last_timestamp", "gauge", "Unix time of the last executed release prune (release-prune.jsonl; 0: none).", last),
+    ] {
+        header(&mut o, name, typ, help);
+        let _ = writeln!(o, "{name} {v}");
+    }
     header(&mut o, "tether_build_info", "gauge", "Build version.");
     let _ = writeln!(o, "tether_build_info{{version=\"{}\"}} 1", env!("CARGO_PKG_VERSION"));
     process(&mut o);
