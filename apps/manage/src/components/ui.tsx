@@ -1,6 +1,6 @@
 // Shared primitives, copied from apps/desktop/src/components/ui.tsx. Visual rules: /DESIGN.md.
 import { type ButtonHTMLAttributes, type ReactNode, useEffect, useRef, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy } from "lucide-react";
 
 type Variant = "primary" | "secondary" | "utility" | "pearl" | "ghost" | "danger";
 
@@ -218,6 +218,31 @@ export function Modal({ children, onClose, width = 420 }: { children: ReactNode;
 }
 
 /** Table shell with the list-row look. */
+/** "101–200 of 10,000" and first/previous/next/last; hidden while everything fits on one page. */
+export function Pager({ page, pages, from, to, total, onPage, noun = "rows" }: { page: number; pages: number; from: number; to: number; total: number; onPage: (p: number) => void; noun?: string }) {
+  if (pages <= 1) return null;
+  const n = (x: number) => x.toLocaleString();
+  return (
+    <nav aria-label={`Pages of ${noun}`} className="mt-3 flex items-center justify-end gap-1 text-caption">
+      <span className="mr-2 text-muted">
+        {n(from)}–{n(to)} of {n(total)} {noun} · page {page + 1} of {pages}
+      </span>
+      <IconButton className="disabled:pointer-events-none disabled:opacity-30" label="First page" disabled={page === 0} onClick={() => onPage(0)}>
+        <ChevronsLeft size={16} />
+      </IconButton>
+      <IconButton className="disabled:pointer-events-none disabled:opacity-30" label="Previous page" disabled={page === 0} onClick={() => onPage(page - 1)}>
+        <ChevronLeft size={16} />
+      </IconButton>
+      <IconButton className="disabled:pointer-events-none disabled:opacity-30" label="Next page" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>
+        <ChevronRight size={16} />
+      </IconButton>
+      <IconButton className="disabled:pointer-events-none disabled:opacity-30" label="Last page" disabled={page >= pages - 1} onClick={() => onPage(pages - 1)}>
+        <ChevronsRight size={16} />
+      </IconButton>
+    </nav>
+  );
+}
+
 export function Table({ head, children, empty }: { head: string[]; children: ReactNode; empty?: string | false }) {
   return (
     <div className="overflow-auto rounded-2xl border border-hairline bg-tile">

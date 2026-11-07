@@ -74,6 +74,19 @@ const audit = [
   { ts: now - 86400 * 2, kind: "alarm", action: "alarm", id: "305 662 950", uuid: "dXVpZC0zMDU2NjI5NTA=", conn_id: 0, typ: 0, info: '{"ip":"203.0.113.9"}', src: "91.4.77.9", relay: R1, nonce: "alarm-1" },
 ].sort((x, y) => y.ts - x.ts);
 
+// `?many` in the browser preview: 10 000 extra devices and 1 500 sessions, to check paging at fleet scale.
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("many")) {
+  for (let i = 0; i < 10_000; i++) {
+    const id = String(100_000_000 + i * 7919).replace(/(\d{3})(?=\d)/g, "$1 ");
+    devices.push({ uuid: `f1ee7000-${i}`, id, profile: i % 4 ? "customer" : "technician", version: i % 3 ? "0.4.0" : "0.3.1", os: i % 5 ? "windows 10.0.26300" : "macos 15.1", serial: 4 - (i % 2), ip: `10.${(i >> 8) & 255}.${i & 255}.7`, last_seen: now - i * 37 });
+  }
+  for (let i = 0; i < 1_500; i++) {
+    const id = String(200_000_000 + i * 104_729).slice(0, 9).replace(/(\d{3})(?=\d)/g, "$1 ");
+    audit.push(conn(now - i * 300 - 60, "connect", id, i, { ip: "84.12.9.20" }), conn(now - i * 300 - 55, "login", id, i, { peer_id: "482 019 337", peer_name: "Anna Berger", conn_type: "remote", primary_auth: "click" }), conn(now - i * 300, "disconnect", id, i));
+  }
+  audit.sort((x, y) => y.ts - x.ts);
+}
+
 const admin: Record<string, unknown> = {
   "/api/admin/devices": devices,
   "/api/admin/releases": [

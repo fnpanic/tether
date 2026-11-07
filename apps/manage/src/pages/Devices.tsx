@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { useApp } from "../App";
 import { ago, api, midnight, type Device } from "../lib/ipc";
-import { Badge, ErrorText, IconButton, PageHeader, Segmented, Select, Table, TextField } from "../components/ui";
+import { paginate } from "../lib/paging";
+import { Badge, ErrorText, IconButton, PageHeader, Pager, Segmented, Select, Table, TextField } from "../components/ui";
 
 /** "windows 10.0.26300" → "windows"; "macos 15.1" / "darwin 24.1" → "macos". */
 const family = (os: string) => {
@@ -26,6 +27,7 @@ export function Devices() {
   const [profile, setProfile] = useState("");
   const [group, setGroup] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
 
   const load = () => {
     setError(null);
@@ -54,6 +56,9 @@ export function Devices() {
     .filter((d) => !text || [d.id, d.uuid, d.profile, d.version, d.os, d.ip, draft.assignments[d.uuid] ?? ""].some((v) => String(v).toLowerCase().includes(text)))
     .sort((a, b) => b.last_seen - a.last_seen);
   const filtered = when !== "all" || os || version || profile || group || text;
+  // Back to page 1 whenever the filters change; paginate() clamps if the list shrinks otherwise.
+  useEffect(() => setPage(0), [when, os, version, profile, group, text]);
+  const pg = paginate(rows, page);
 
   const assign = (uuid: string, g: string) => {
     const assignments = { ...draft.assignments };
@@ -144,7 +149,7 @@ export function Devices() {
         ))}
       </div>
       <Table head={["ID", "Profile", "Version", "OS", "Policy", "Last seen", "IP", "Group"]} empty={devices && !rows.length ? (filtered ? "No device matches the filters." : "No device has checked in yet.") : false}>
-        {rows.map((d) => {
+        {pg.items.map((d) => {
           const groups = Object.entries(draft.groups).filter(([, g]) => g.profile === d.profile);
           const stale = liveSerial != null && d.serial < liveSerial;
           return (
@@ -183,6 +188,7 @@ export function Devices() {
           );
         })}
       </Table>
+      <Pager {...pg} onPage={setPage} noun="devices" />
     </>
   );
 }

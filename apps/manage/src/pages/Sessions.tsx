@@ -4,7 +4,8 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { useApp } from "../App";
 import { api, host, inTauri, invoke, type Device } from "../lib/ipc";
 import { actionLabel, alarmLabel, duration, matches, sessions, toCsv, type AuditEvent, type Row } from "../lib/sessions";
-import { Badge, Button, ErrorText, IconButton, PageHeader, Segmented, Table, TextField } from "../components/ui";
+import { paginate } from "../lib/paging";
+import { Badge, Button, ErrorText, IconButton, PageHeader, Pager, Segmented, Table, TextField } from "../components/ui";
 
 type Range = "1" | "7" | "30" | "90";
 const LIMIT = 5000;
@@ -17,6 +18,7 @@ export function Sessions() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [q, setQ] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
 
   const load = () => {
     setError(null);
@@ -35,6 +37,8 @@ export function Sessions() {
 
   const all = events ? sessions(events) : [];
   const rows = all.filter((r) => matches(r, q));
+  useEffect(() => setPage(0), [q, range]);
+  const pg = paginate(rows, page);
   const os = new Map(devices.map((d) => [d.id.replace(/\s+/g, ""), d]));
   const device = (r: Row) => os.get(r.id.replace(/\s+/g, ""));
 
@@ -103,7 +107,7 @@ export function Sessions() {
         ))}
       </div>
       <Table head={["Time", "Host", "Technician", "IP", "Action", "Duration"]} empty={events && !rows.length ? (q ? "No event matches the search." : "No session in this time range.") : false}>
-        {rows.map((r) => {
+        {pg.items.map((r) => {
           const d = device(r);
           return (
             <tr key={`${r.nonce ?? ""}|${r.uuid}|${r.conn_id}|${r.action}|${r.ts}`} data-testid="session-row">
@@ -140,6 +144,7 @@ export function Sessions() {
           );
         })}
       </Table>
+      <Pager {...pg} onPage={setPage} noun="events" />
     </>
   );
 }
