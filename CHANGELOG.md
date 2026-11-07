@@ -4,6 +4,34 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Fixed
+- **Wrong colours in the technician app with VP8/VP9/AV1.** The host converts the screen with the
+  BT.601 matrix but the bitstream does not say so, and the app's WebCodecs decoder used BT.709:
+  saturated colours were off by up to 30 levels (pure green 192 shown as 163, blue tinted
+  green, reds lighter). The decoder is now told the host's matrix; colours match the remote
+  screen within a level. This was the largest part of the picture-quality gap to AnyDesk
+  (luma PSNR on the quality test page 32.5 -> 38.4 dB with this fix alone). Hardware H.264/H.265
+  hosts are unchanged.
+
+### Changed
+- **Sharper still pictures with AV1 (GPU-less hosts).** When the remote screen stops changing,
+  the host now refines the still picture with up to ten extra AV1 frames at the encoder's best
+  quantizer range (upstream refined only VP8/VP9/H.264/H.265; AV1, which Auto picks on hosts
+  without a GPU, kept the first, coarse picture). The refinement strength follows the bitrate the
+  link allows (Balanced: full, a congested link: less), and the next change on the screen is
+  coded at the normal quality again, so motion, latency and bandwidth under motion are
+  unchanged. Together with the colour fix: 39.2 dB against AnyDesk's 35.3 dB on the same VM,
+  at about the same bytes per page; see "Image quality vs AnyDesk" in `docs/performance.md`.
+
+### Added
+- Picture-quality bench: `tools/bench/quality.html` (deterministic test page), `quality-run.sh`,
+  `quality-measure.py` (PSNR Y/Cb/Cr, SSIM, MS-SSIM, text sharpness and colour fringing against
+  the host's own screenshot), `quality-table.py`, `quality-view.mjs` (Tether viewer canvas over
+  CDP), `xgrab.py` + `udp-stamp.mjs` (a viewer on Xvfb in WSL, e.g. AnyDesk for Linux),
+  `qgrab.ps1` / `qperf.ps1` (the VM's own screenshot; its bytes sent and CPU per second).
+
 ## [0.5.20] — 2026-11-06
 
 ### Fixed
