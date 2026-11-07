@@ -393,3 +393,21 @@ port 21116 open, Prometheus 27/27 targets up.
 SSH to Hetzner works by name again: the stale `known_hosts` entry (Oracle 1's old key) was removed
 and the name pinned to the Hetzner key `SHA256:1E3Zw7qyBXy6xCERG2w6dMGvuAlnBcOr8gfRSSMd9oM`, the same key
 pinned for `46.224.17.114` at creation.
+
+## Relay update 0.5.24: update system (2026-11-07)
+
+tether-api (release generation, signed `releases.json`, heartbeat `200 {"releases":G}`, release
+metrics), hbbs (`ReleaseHint` push, tag 1001) and the Caddy/nginx config from `docs/update-design.md`.
+Rolled out with `C:ms
+ightelay-0524\deploy.sh` (backup `/root/bak-0524`, `rollback.sh`), Oracle 2
+first, then Hetzner. Binaries: hbbs `b09f06d0d2a2f3a4`, hbbr `3f5f9cb56df4ef47`, tether-api
+`51355464b3ae6f6e`. Verified on both nodes: services active, user `tether` in group `tether-api`,
+WebSocket 101, `latest.json` 200 (old clients), `releases.json` 404 until the first signed publish,
+`release-generation` absent until then (G = 0, metrics present). Monitoring re-installed on Hetzner
+(`install.sh monitor`): 27/27 targets up, 27 rules incl. the five release alerts.
+
+CDN: Worker `tether-dl` (Workers Static Assets, free plan) at
+`https://tether-dl.thomas-schend.workers.dev`, first deployed with `server/cloudflare/worker/deploy.sh`
+(test file + `stable/customer/windows-x86_64/TetherQS-0.5.24.exe.gz`). Measured from the office PC:
+14.6 MB in 2.5 s cold, 0.9 s cached (`CF-Cache-Status: HIT`); sha256 and unpacked bytes identical; 404 for
+missing files, 405 for POST. Tether Manage 0.5.7 replaces the contents on every publish.
