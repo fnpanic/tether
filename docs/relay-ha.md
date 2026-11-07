@@ -411,3 +411,14 @@ CDN: Worker `tether-dl` (Workers Static Assets, free plan) at
 (test file + `stable/customer/windows-x86_64/TetherQS-0.5.24.exe.gz`). Measured from the office PC:
 14.6 MB in 2.5 s cold, 0.9 s cached (`CF-Cache-Status: HIT`); sha256 and unpacked bytes identical; 404 for
 missing files, 405 for POST. Tether Manage 0.5.7 replaces the contents on every publish.
+
+## tether-api with release cleanup (2026-11-07)
+
+Only tether-api changed (`POST /api/admin/releases/prune`, DELETE guard with `?force=1`,
+`release-prune.jsonl`, release metrics; docs/release-cleanup.md). Installed with
+`C:ms
+ightelay-prune\deploy.sh` (backup `/root/bak-prune/tether-api`, restores it automatically if
+the service or `/metrics` does not come up), Oracle 2 first, then Hetzner. Binary `7e397165c5de5410` on
+both. Verified: service active, unsigned prune 401, `tether_api_release_bytes{channel="stable"}` 2.26 GB
+per relay, `releases.json`, `latest.json` and `/` 200 on both. Monitoring re-installed on Hetzner for
+the new Grafana panels: 27/27 targets up. The first clean-up run is done from Tether Manage 0.5.8.
