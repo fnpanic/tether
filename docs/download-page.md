@@ -20,6 +20,7 @@ are not deleted.
 | Relay stores it | `server/api/src/main.rs:835` writes `download/index.html`. The body limit is `LIMIT_PAGE` = 512 KiB (`server/api/src/main.rs:52`, [api.md](api.md) lines 13 and 138) |
 | Relay serves it | Caddy `handle /` (`server/caddy/Caddyfile:109`) and nginx `location = /` (`server/nginx/nginx.conf:196`) serve `index.html`. It is also served as `/download/index.html` by the `/download/*` file server |
 | Rebuilt after a release | Releases → **Publish the latest builds**: after a `stable` publish, `apps/manage/src/pages/Releases.tsx:252` rebuilds the page with the saved settings |
+| Halted releases | **Halt** changes only the signed index, so a published page keeps its links until it is published again (Manage says so after a Halt on `stable`). Custom templates leave halted releases out (`page_data`). The Standard page is built from `latest.json`, so it refuses to build while the version it would offer is halted in the stable index: resume it or publish a newer version first. |
 | Preview | Sandboxed `<iframe sandbox="" srcdoc>`; `previewDoc` (`apps/manage/src/lib/page-preview.ts`) adds `<base target="_blank">` so that clicking a link cannot navigate the frame |
 
 Both designs go through one function, `buildPage` (`apps/manage/src/lib/page-template.ts:288`).

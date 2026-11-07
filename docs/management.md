@@ -108,6 +108,19 @@ The screen shows the public halves only. Private keys never leave the PC.
 Release builds refuse to compile without these values; see the build commands in
 [deployment.md](deployment.md).
 
+Build Tether Manage with the same `TETHER_ADMIN_PUB_KEY` as the apps. Each release publish (and
+Halt, Resume, ramp) signs a new release index based on the newest index on the relays; Manage builds
+on an index signed by its own key or by any key in that list. After an **admin key rotation** the
+relays still serve the index signed with the old key: with the old key listed, the first publish
+with the new key keeps every release in it and takes a serial above it. If a relay serves an index
+that no listed key verifies, Manage refuses to publish ("… no trusted admin key verifies …")
+instead of starting a new index without those releases.
+
+**Releases on several relays.** The files go to every relay first. A relay whose upload failed is
+reported as failed ("release index not updated on this relay") and does not get the new index: the
+index points devices at the relay it came from, so it must never name files that relay lacks. It
+keeps serving its previous index; publish again (or **Publish to missing relays**) once it is fixed.
+
 ### Server key
 
 hbbs and hbbr sign device identities with the server key (`/var/lib/tether/id_ed25519` on every

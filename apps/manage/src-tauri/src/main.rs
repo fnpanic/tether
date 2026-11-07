@@ -23,6 +23,10 @@ use tether_trust::team::Roster;
 use tether_trust::{envelope, SigningKey, VerifyingKey};
 
 const DEFAULT_SERVER: &str = "https://tether-desk.duckdns.org";
+/// The admin keys the apps are built with (comma-separated, as for Tether and TetherQS). After an
+/// admin key rotation the relays still serve release indexes signed with the old key; Manage builds
+/// on them only when it was built with that key listed here (docs/management.md).
+const TRUSTED_ADMIN_KEYS: Option<&str> = option_env!("TETHER_ADMIN_PUB_KEY");
 
 struct App {
     dir: PathBuf,
@@ -927,14 +931,18 @@ async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, r
     };
     let e = release::entry(&u.channel, &u.dir, &u.name, data, &u.sig, u.packed.as_deref(), cdn_base.as_deref(), &m, security, rollout);
     let key = u.dir.clone();
-    let index = publish_index(app, &u.channel, &servers, move |r| {
+    // Only relays that hold the files get the new index: clients fetch `{relay}` URLs from the
+    // relay the index came from, so a relay without the files keeps its old index (devices there
+    // stay on the old release; those that see both relays take the higher serial).
+    let uploaded: Vec<String> = servers.iter().zip(&errs).filter(|(_, e)| e.is_none()).map(|(s, _)| s.clone()).collect();
+    let index = publish_index(app, &u.channel, &servers, &uploaded, move |r| {
         r.insert(key, e);
     })
     .await;
     let mut out = Vec::new();
     for (i, server) in servers.iter().enumerate() {
         let r = match (&errs[i], &index) {
-            (Some(e), _) => Err(e.clone()),
+            (Some(e), _) => Err(format!("{e} (release index not updated on this relay)")),
             (None, Err(e)) => Err(format!("release index: {e}")),
             (None, Ok(per)) => match per.get(server) {
                 Some(Err(e)) => Err(format!("release index: {e}")),
@@ -985,22 +993,52 @@ async fn cdn_deploy(app: &App, ui: &AppHandle, u: &Upload, creds: cdn::Creds) ->
     app.write("cdn-assets.json", &serde_json::to_vec_pretty(&next).unwrap())
 }
 
-/// Every relay's release index for `channel` that this admin key signed: `(server, index, raw)`.
-async fn relay_indexes(app: &App, channel: &str, servers: &[String]) -> R<Vec<(String, Option<(tether_trust::release::Index, Vec<u8>)>)>> {
-    let key = app.admin_key()?.verifying_key();
-    let mut out = Vec::new();
-    for sv in servers {
-        let got = api::public(sv, &format!("/download/{channel}/releases.json")).await.ok().flatten();
-        let ix = got.and_then(|raw| tether_trust::release::Index::open(&raw, &[key], channel).ok().map(|i| (i, raw)));
-        out.push((sv.clone(), ix));
-    }
-    Ok(out)
+type LiveIndex = Option<(tether_trust::release::Index, Vec<u8>)>;
+
+/// This PC's admin key and the ones the apps trust ([`TRUSTED_ADMIN_KEYS`]).
+fn trusted_admin_keys(own: VerifyingKey, built_in: &str) -> Vec<VerifyingKey> {
+    let mut keys = vec![own];
+    keys.extend(built_in.split(',').filter(|k| !k.trim().is_empty()).filter_map(|k| tether_trust::key_from_b64(k).ok()).filter(|k| *k != own));
+    keys
 }
 
-/// Sign the next index (the highest verified one on the relays, changed by `change`) and put it on
-/// every relay. Serial: max(relays, this PC's last) + 1. Per relay: the outcome.
-async fn publish_index(app: &App, channel: &str, servers: &[String], change: impl FnOnce(&mut BTreeMap<String, tether_trust::release::Entry>)) -> R<BTreeMap<String, R<()>>> {
-    let live = relay_indexes(app, channel, servers).await?;
+/// Per relay: its release index verified with `keys`, `Ok(None)` when it serves none (or cannot be
+/// reached), `Err` when it serves one that no trusted key verifies.
+fn open_indexes(got: Vec<(String, Option<Vec<u8>>)>, keys: &[VerifyingKey], channel: &str) -> Vec<(String, R<LiveIndex>)> {
+    got.into_iter().map(|(sv, raw)| {
+        let ix = raw.map(|raw| tether_trust::release::Index::open(&raw, keys, channel).map(|i| (i, raw))).transpose();
+        (sv, ix)
+    }).collect()
+}
+
+/// The indexes to build the next one on. A relay's index no trusted key verifies (signed with an
+/// admin key this build does not list, or damaged) stops the publish: building without it would
+/// drop its releases and could take a serial below the devices' floor.
+fn usable_indexes(live: Vec<(String, R<LiveIndex>)>, channel: &str) -> R<Vec<(String, LiveIndex)>> {
+    live.into_iter().map(|(sv, ix)| ix.map(|i| (sv.clone(), i)).map_err(|e| format!(
+        "{sv} serves a release index for {channel} that no trusted admin key verifies ({e}). Publishing now would drop the releases in it. If the admin key was rotated, build Tether Manage with TETHER_ADMIN_PUB_KEY listing the keys the apps trust (docs/management.md)."
+    ))).collect()
+}
+
+async fn fetch_indexes(app: &App, channel: &str, servers: &[String]) -> R<Vec<(String, R<LiveIndex>)>> {
+    let keys = trusted_admin_keys(app.admin_key()?.verifying_key(), TRUSTED_ADMIN_KEYS.unwrap_or(""));
+    let mut got = Vec::new();
+    for sv in servers {
+        got.push((sv.clone(), api::public(sv, &format!("/download/{channel}/releases.json")).await.ok().flatten()));
+    }
+    Ok(open_indexes(got, &keys, channel))
+}
+
+/// Every relay's release index for `channel` that a trusted admin key signed: `(server, index, raw)`.
+/// For views; one that does not verify counts as none.
+async fn relay_indexes(app: &App, channel: &str, servers: &[String]) -> R<Vec<(String, LiveIndex)>> {
+    Ok(fetch_indexes(app, channel, servers).await?.into_iter().map(|(s, i)| (s, i.ok().flatten())).collect())
+}
+
+/// Sign the next index (the highest verified one on `servers`, changed by `change`) and put it on
+/// the relays in `targets`. Serial: max(relays, this PC's last) + 1. Per target: the outcome.
+async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[String], change: impl FnOnce(&mut BTreeMap<String, tether_trust::release::Entry>)) -> R<BTreeMap<String, R<()>>> {
+    let live = usable_indexes(fetch_indexes(app, channel, servers).await?, channel)?;
     let local_path = format!("releases/{channel}.serial");
     let local: u64 = fs::read_to_string(app.path(&local_path)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
     let base = live.iter().filter_map(|(_, i)| i.as_ref().map(|i| i.0.clone())).max_by_key(|i| i.serial);
@@ -1009,7 +1047,7 @@ async fn publish_index(app: &App, channel: &str, servers: &[String], change: imp
     let doc = serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&ix).unwrap(), &app.admin_key()?)).unwrap();
     app.write(&local_path, serial.to_string().as_bytes())?;
     let mut out = BTreeMap::new();
-    for sv in servers {
+    for sv in targets {
         let r = app.call_on(sv, "PUT", &format!("/api/admin/release/{channel}/releases.json"), doc.clone(), "application/json").await.map(|_| ());
         out.insert(sv.clone(), r);
     }
@@ -1023,9 +1061,9 @@ async fn release_index(app: State<'_, App>, channel: String) -> R<Value> {
         return Err("invalid channel".into());
     }
     let servers = app.servers();
-    let live = relay_indexes(&app, &channel, &servers).await?;
-    let relays: Vec<Value> = live.iter().map(|(s, i)| json!({ "server": s, "serial": i.as_ref().map(|i| i.0.serial) })).collect();
-    let Some(ix) = live.into_iter().filter_map(|(_, i)| i.map(|i| i.0)).max_by_key(|i| i.serial) else {
+    let live = fetch_indexes(&app, &channel, &servers).await?;
+    let relays: Vec<Value> = live.iter().map(|(s, i)| json!({ "server": s, "serial": i.as_ref().ok().and_then(Option::as_ref).map(|i| i.0.serial), "error": i.as_ref().err() })).collect();
+    let Some(ix) = live.into_iter().filter_map(|(_, i)| i.ok().flatten().map(|i| i.0)).max_by_key(|i| i.serial) else {
         return Ok(json!({ "channel": channel, "serial": null, "relays": relays, "entries": [] }));
     };
     let now = api::now();
@@ -1051,7 +1089,7 @@ async fn release_control(app: State<'_, App>, channel: String, key: String, acti
     let preset = preset.unwrap_or_default();
     let ramp = if action == "ramp" { Some(release::rollout(&preset, api::now())?) } else { None };
     let mut missing = false;
-    let per = publish_index(&app, &channel, &servers, |r| match r.get_mut(&key) {
+    let per = publish_index(&app, &channel, &servers, &servers, |r| match r.get_mut(&key) {
         None => missing = true,
         Some(e) => match action.as_str() {
             "halt" => e.halted = true,
@@ -1099,7 +1137,7 @@ async fn release_index_refresh(app: State<'_, App>) -> R<Vec<Value>> {
         if expires > api::now() + 15 * 86_400 {
             continue;
         }
-        let per = publish_index(&app, &ch, &servers, |_| {}).await?;
+        let per = publish_index(&app, &ch, &servers, &servers, |_| {}).await?;
         out.push(json!({ "channel": ch, "ok": per.values().all(Result::is_ok) }));
     }
     Ok(out)
@@ -1488,6 +1526,9 @@ async fn auto_prune(app: &App) -> Option<RelayResult> {
 #[tauri::command]
 async fn page_render(app: State<'_, App>, title: String, intro: String, technician: bool, customer: bool) -> R<String> {
     let server = app.server();
+    // Halt changes only the signed index, not latest.json.
+    let ix = relay_indexes(&app, "stable", &app.servers()).await?.into_iter().filter_map(|(_, i)| i.map(|i| i.0)).max_by_key(|i| i.serial);
+    let mut halted = vec![];
     let mut sections = vec![];
     for (id, name, platform) in [("windows", "Windows", release::WINDOWS), ("macos", "macOS", release::MAC)] {
         let mut offers = vec![];
@@ -1501,6 +1542,10 @@ async fn page_render(app: State<'_, App>, title: String, intro: String, technici
                 None => None,
             };
             let version = m.as_ref().and_then(|m| m["version"].as_str()).unwrap_or("?").to_owned();
+            if is_halted(ix.as_ref(), kind, platform, &version) {
+                halted.push(format!("{label} {version} ({name})"));
+                continue;
+            }
             // The updater artifact latest.json points at; uploaded before latest.json by
             // release_publish, so it exists when the manifest does.
             let artifact = m.as_ref().and_then(|m| Some(m["platforms"][platform]["url"].as_str()?.rsplit('/').next()?.to_owned()));
@@ -1515,10 +1560,18 @@ async fn page_render(app: State<'_, App>, title: String, intro: String, technici
         }
         sections.push(release::OsSection { id, name, offers });
     }
+    if !halted.is_empty() {
+        return Err(format!("{} halted in the stable release index. Resume it or publish a newer version, then publish the download page.", halted.join(", ") + if halted.len() > 1 { " are" } else { " is" }));
+    }
     if sections.iter().flat_map(|s| &s.offers).all(|o| o.href.is_none()) {
         return Err("There is no stable release of the offered apps yet. Publish one first.".into());
     }
     Ok(release::download_page(&title, &intro, &sections))
+}
+
+/// `version` of `kind/platform` is halted in the signed index.
+fn is_halted(ix: Option<&tether_trust::release::Index>, kind: &str, platform: &str, version: &str) -> bool {
+    ix.and_then(|i| i.releases.get(&release::index_key(kind, platform))).is_some_and(|e| e.halted && e.version == version)
 }
 
 /// The primary download of a release and the files that belong to it ("More files").
@@ -1550,7 +1603,7 @@ async fn page_data(app: State<'_, App>) -> R<Value> {
     let live = relay_indexes(&app, "stable", &app.servers()).await?;
     let mut out = serde_json::Map::new();
     let Some(ix) = live.into_iter().filter_map(|(_, i)| i.map(|i| i.0)).max_by_key(|i| i.serial) else { return Ok(Value::Object(out)) };
-    for (key, e) in &ix.releases {
+    for (key, e) in ix.releases.iter().filter(|(_, e)| !e.halted) {
         let (mut file, mut size, mut sha256, mut cdn_url) = (e.file.clone(), e.size, e.sha256.clone(), (e.urls.len() > 1).then(|| e.urls[0].clone()));
         if key == &release::index_key("technician", release::MAC) {
             file = release::dmg_name(&e.version);
@@ -1959,6 +2012,46 @@ mod server_list_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn signed_index(key: &SigningKey, serial: u64, versions: &[(&str, &str, bool)]) -> Vec<u8> {
+        let m = |v: &str| release::Manifest { version: v.into(), notes: String::new(), pub_date: String::new(), platforms: BTreeMap::new(), mandatory: false, minimum_version: String::new(), forced: false };
+        let ix = release::next_index(None, "stable", serial, 1000, |r| {
+            for (dir, v, halted) in versions {
+                let mut e = release::entry("stable", dir, "f", b"x", "S", None, None, &m(v), false, release::rollout("now", 0).unwrap());
+                e.halted = *halted;
+                r.insert((*dir).into(), e);
+            }
+        })
+        .unwrap();
+        serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&ix).unwrap(), key)).unwrap()
+    }
+
+    #[test]
+    fn indexes_signed_with_a_rotated_admin_key_are_built_on_or_refused() {
+        let (old, new) = (tether_trust::generate_key(), tether_trust::generate_key());
+        let raw = signed_index(&old, 7, &[("technician/windows-x86_64", "0.5.24", false), ("customer/windows-x86_64", "0.5.24", false)]);
+        let got = || vec![("https://a".to_owned(), Some(raw.clone())), ("https://b".to_owned(), None)];
+        // Built with the old key listed (the apps' TETHER_ADMIN_PUB_KEY): base and serial come from it.
+        let keys = trusted_admin_keys(new.verifying_key(), &format!("{}, {} ,", tether_trust::key_to_b64(&old.verifying_key()), tether_trust::key_to_b64(&new.verifying_key())));
+        assert_eq!(keys.len(), 2);
+        let live = usable_indexes(open_indexes(got(), &keys, "stable"), "stable").unwrap();
+        let base = live.iter().find_map(|(_, i)| i.as_ref()).unwrap();
+        assert_eq!((base.0.serial, base.0.releases.len()), (7, 2));
+        assert!(live[1].1.is_none());
+        // Only this PC's key: the relay's index is not silently dropped, the publish is refused.
+        let e = usable_indexes(open_indexes(got(), &trusted_admin_keys(new.verifying_key(), ""), "stable"), "stable").unwrap_err();
+        assert!(e.contains("https://a") && e.contains("TETHER_ADMIN_PUB_KEY"), "{e}");
+    }
+
+    #[test]
+    fn halted_releases_are_not_offered_on_the_download_page() {
+        let k = tether_trust::generate_key();
+        let ix = tether_trust::release::Index::open(&signed_index(&k, 1, &[("technician/windows-x86_64", "0.5.24", true), ("customer/windows-x86_64", "0.5.24", false)]), &[k.verifying_key()], "stable").unwrap();
+        assert!(is_halted(Some(&ix), "technician", release::WINDOWS, "0.5.24"));
+        assert!(!is_halted(Some(&ix), "technician", release::WINDOWS, "0.5.23"), "latest.json already points elsewhere");
+        assert!(!is_halted(Some(&ix), "customer", release::WINDOWS, "0.5.24"));
+        assert!(!is_halted(None, "technician", release::WINDOWS, "0.5.24"));
+    }
 
     #[test]
     fn the_published_template_cannot_be_deleted() {

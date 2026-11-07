@@ -381,25 +381,29 @@ fn check_inner() -> Result<String, String> {
     if PUBKEY.is_none() {
         return Err("updates are not configured in this build".into());
     }
-    if !eff.on("update.enabled") {
-        return Ok("Your organisation installs updates for you.".into());
-    }
+    // Off: still checked, so a release minimum version blocks as in the technician app; nothing is
+    // offered, downloaded or required by `mandatory` (the organisation deploys updates).
+    let enabled = eff.on("update.enabled");
     let channel = channel(eff.get("update.channel"));
     let client = policy::http()?;
     let bases = policy::base_urls();
     let Some(m) = find_release(&client, &bases, channel)? else {
         *MANIFEST.lock().unwrap() = None;
+        release::prune_staged(&fallback_dir(), None);
         let mut s = STATE.lock().unwrap();
         s.available = None;
+        s.required = false;
         s.phase = "idle".into();
         return Ok(format!("TetherQS {VERSION} is up to date (no release on channel \"{channel}\")."));
     };
     let t = now();
     let bucket = release::bucket(&policy::device_uuid(), "customer", &m.version);
     let eligible = m.eligible(bucket, t, eff.get("update.rollout"));
-    let (newer, required) = evaluate(VERSION, &m, eff.get("update.minimum-version"), eligible);
-    let offer = newer && eligible;
+    let (newer, required) = evaluate(VERSION, &m, eff.get("update.minimum-version"), enabled && eligible);
+    let offer = enabled && newer && eligible;
     let auto = offer && (m.forced || (required && eff.on("update.force")));
+    // Superseded or installed downloads (the running exe is the new one after a swap).
+    release::prune_staged(&fallback_dir(), staged_path(&m).filter(|_| offer).as_deref());
     {
         let mut s = STATE.lock().unwrap();
         s.available = offer.then(|| m.version.clone());
@@ -408,6 +412,7 @@ fn check_inner() -> Result<String, String> {
         s.serial = m.serial;
         s.stale = m.stale(t);
         s.phase = match () {
+            _ if !enabled => "idle",
             _ if m.halted && version::compare(&m.version, VERSION) == Some(std::cmp::Ordering::Greater) => "halted",
             _ if newer && !eligible => "waiting-rollout",
             _ if s.stale => "stale",
@@ -417,6 +422,7 @@ fn check_inner() -> Result<String, String> {
         .into();
     }
     let text = match () {
+        _ if !enabled => "Your organisation installs updates for you.".to_owned(),
         _ if offer => format!("Version {} is available (this is {VERSION}).", m.version),
         _ if newer => format!("TetherQS {VERSION} is up to date; {} is rolling out ({} % of devices so far).", m.version, m.rollout.percent(t)),
         _ => format!("TetherQS {VERSION} is up to date."),
@@ -512,7 +518,7 @@ fn stage_in_background(c: Candidate) {
     std::thread::spawn(move || {
         STATE.lock().unwrap().phase = "downloading".into();
         let r = PUBKEY.ok_or("no updater key".to_owned()).and_then(|k| download(&c, k)).and_then(|b| {
-            std::fs::create_dir_all(path.parent().unwrap_or(&path)).and_then(|_| std::fs::write(&path, b)).map_err(|e| e.to_string())
+            tether_trust::write_atomic(&path, &b).map_err(|e| e.to_string())
         });
         let mut s = STATE.lock().unwrap();
         match r {

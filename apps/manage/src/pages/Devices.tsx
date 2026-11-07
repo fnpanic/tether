@@ -3,6 +3,7 @@ import { RefreshCw } from "lucide-react";
 import { useApp } from "../App";
 import { ago, api, midnight, type Device } from "../lib/ipc";
 import { paginate } from "../lib/paging";
+import { compareVersion } from "../lib/releases";
 import { Badge, ErrorText, IconButton, PageHeader, Pager, Segmented, Select, Table, TextField } from "../components/ui";
 
 /** "windows 10.0.26300" → "windows"; "macos 15.1" / "darwin 24.1" → "macos". */
@@ -13,8 +14,8 @@ const family = (os: string) => {
 const FAMILY: Record<string, string> = { windows: "Windows", macos: "macOS", linux: "Linux" };
 const familyName = (f: string) => FAMILY[f] ?? f;
 
-/** Newest version first (numeric parts compared as numbers). */
-const byVersion = (a: string, b: string) => b.localeCompare(a, undefined, { numeric: true });
+/** Newest version first. */
+const byVersion = (a: string, b: string) => compareVersion(b, a);
 
 export function Devices() {
   const { draft, setDraft, live } = useApp();

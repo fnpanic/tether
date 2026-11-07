@@ -1,4 +1,5 @@
-// Update delivery end to end (docs/update-design.md, docs/updates.md), everything on this PC:
+// Update delivery end to end (docs/update-design.md, docs/updates.md), everything on this PC.
+// Published test versions are 0.9.x, above the version of this checkout.
 // - hbbs + hbbr + tether-api from scripts/build-relay.sh (WSL, ~/updimpl-build/bin), hbbs on
 //   127.0.0.1:22116 with key A of keyrot-e2e, watching tether-api's release-generation file
 //   (RELEASE_HINT_SPREAD=10 so the test does not wait a minute per step);
@@ -13,6 +14,11 @@
 // signed index; the rollout bucket is respected; the update is downloaded, verified and staged;
 // halt and resume; a tampered index, an older serial and a downgraded binary are refused; no
 // install while a session runs, install once idle; the old client ignores the hint.
+// A second relay (tether-api on 22140 behind a second proxy, 22141) is in Manage's relay list:
+// when its upload fails it keeps its old index (no index pointing at files it lacks), and the
+// client on the first relay still updates. Finally an admin key rotation: a second Tether Manage
+// with a new vault (built with the old key in TETHER_ADMIN_PUB_KEY) publishes TetherQS and the new
+// index keeps the release signed with the old key.
 //
 //   node e2e/update-e2e.mjs
 // Env: TECH_EXE, OLD_EXE, MANAGE_EXE, BIN (WSL dir with hbbs/hbbr/tether-api), KEY_A, VAULT.
@@ -35,6 +41,8 @@ const HIDDEN = resolve(import.meta.dirname, "hidden-run.ps1");
 const DESK = "tether-update-test";
 const API = "http://127.0.0.1:22130";
 const PROXY = "http://127.0.0.1:22131";
+const API_B = "http://127.0.0.1:22140";
+const PROXY_B = "http://127.0.0.1:22141";
 const HBBS_METRICS = "http://127.0.0.1:22133/metrics";
 const SPREAD = 10;
 const PW = "Up-Pass-" + randomBytes(4).toString("hex") + "!";
@@ -43,6 +51,7 @@ const ADMIN_PUB = readFileSync(join(VAULT, "env.txt"), "utf8").trim().split(/\s+
 const work = mkdtempSync(join(tmpdir(), "update-e2e-"));
 const wslPath = (p) => "/mnt/" + p[0].toLowerCase() + p.slice(2).replace(/\\/g, "/");
 const apiDir = join(work, "api");
+const apiDirB = join(work, "api-b");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const pages = (b) => b.contexts().flatMap((c) => c.pages());
 const ipc = (p, cmd, args) => p.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args]);
@@ -102,8 +111,9 @@ function startServers() {
   const rdir = `/tmp/update-e2e-relay-${process.pid}`;
   execFileSync("wsl", ["-d", "Ubuntu-22.04", "--", "bash", "-c", `rm -rf ${rdir} && mkdir -p ${rdir} && cp ${wslPath(KEY_A)}/id_ed25519* ${rdir}/`]);
   mkdirSync(apiDir);
+  mkdirSync(apiDirB);
   const gen = `${wslPath(apiDir)}/release-generation`;
-  const api = wsl([`${BIN}/tether-api`, "--data", wslPath(apiDir), "--listen", "127.0.0.1:22130"], [`ADMIN_PUB_KEY=${ADMIN_PUB}`]);
+  startApis(ADMIN_PUB);
   const hbbr = wsl(["bash", "-c", `cd ${rdir} && exec ${BIN}/hbbr -p 22117 -k _`], ["HEALTH_PORT=0", "METRICS_PORT=22134"]);
   const hbbs = wsl(["bash", "-c", `cd ${rdir} && exec ${BIN}/hbbs -p 22116 -r 127.0.0.1:22117 -k _`], [
     "HEALTH_PORT=22132",
@@ -111,11 +121,58 @@ function startServers() {
     `RELEASE_GENERATION_FILE=${gen}`,
     `RELEASE_HINT_SPREAD=${SPREAD}`,
   ]);
-  for (const p of [api, hbbr, hbbs]) {
-    p.stdout.on("data", (d) => (relayOut += d));
-    p.stderr.on("data", (d) => (relayOut += d));
-    children.push(p);
-  }
+  for (const p of [hbbr, hbbs]) watch(p);
+}
+function watch(p) {
+  p.stdout.on("data", (d) => (relayOut += d));
+  p.stderr.on("data", (d) => (relayOut += d));
+  children.push(p);
+}
+/** Both tether-api instances (relay A and B), trusting `keys`. */
+function startApis(keys) {
+  watch(wsl([`${BIN}/tether-api`, "--data", wslPath(apiDir), "--listen", "127.0.0.1:22130"], [`ADMIN_PUB_KEY=${keys}`]));
+  watch(wsl([`${BIN}/tether-api`, "--data", wslPath(apiDirB), "--listen", "127.0.0.1:22140"], [`ADMIN_PUB_KEY=${keys}`]));
+}
+async function restartApis(keys) {
+  try {
+    execFileSync("wsl", ["-d", "Ubuntu-22.04", "--", "pkill", "-f", `${BIN}/tether-api --data`], { stdio: "ignore" });
+  } catch {}
+  await sleep(1000);
+  startApis(keys);
+  for (const a of [API, API_B]) await until(`tether-api ${a}`, () => fetch(a + "/api/policy", { signal: AbortSignal.timeout(3000) }).then((r) => r.status !== 502), 30000, 500);
+}
+const indexOf = async (api) => {
+  const r = await fetch(`${api}/download/stable/releases.json`);
+  if (r.status !== 200) return null;
+  const doc = await r.json();
+  return { key: doc.key, ...JSON.parse(Buffer.from(doc.payload, "base64")) };
+};
+
+// ---- relay B's Caddy stand-in: can refuse release file uploads (a full disk, a broken node) ----
+let failB = false;
+let proxyB;
+function startProxyB() {
+  proxyB = createServer((req, res) => {
+    const path = req.url.split("?")[0];
+    const file = /^\/api\/admin\/release\//.test(path) && !/\/(releases|latest)\.json$/.test(path);
+    if (failB && req.method === "PUT" && file) {
+      req.resume();
+      return res.writeHead(507, { "Content-Type": "text/plain" }).end("insufficient storage");
+    }
+    if (path.startsWith("/download/") && !/^\/download\/[a-z0-9-]+\/releases\.json$/.test(path)) {
+      const rel = decodeURIComponent(path).replace(/^\/download\//, "");
+      const f = join(apiDirB, "download", ...rel.split("/"));
+      if (rel.includes("..") || !existsSync(f)) return res.writeHead(404).end();
+      return res.writeHead(200, { "Content-Type": "application/octet-stream" }).end(readFileSync(f));
+    }
+    const up = request({ host: "127.0.0.1", port: 22140, path: req.url, method: req.method, headers: req.headers }, (r) => {
+      res.writeHead(r.statusCode, r.headers);
+      r.pipe(res);
+    });
+    up.on("error", () => res.writeHead(502).end("bad gateway"));
+    req.pipe(up);
+  });
+  return new Promise((r) => proxyB.listen(22141, "127.0.0.1", r));
 }
 const metric = async (name) => {
   const t = await fetch(HBBS_METRICS, { signal: AbortSignal.timeout(3000) }).then((r) => r.text());
@@ -183,16 +240,18 @@ function startProxy() {
 }
 
 // ---- Tether Manage ----
-async function startManage() {
-  const dir = join(work, "manage");
+/** `fresh`: a new vault (a new admin key) instead of a copy of the test vault. */
+async function startManage(name = "manage", port = 9481, fresh = false) {
+  const dir = join(work, name);
   mkdirSync(dir);
-  copyFileSync(join(VAULT, "keys.json"), join(dir, "keys.json"));
-  writeFileSync(join(dir, "settings.json"), JSON.stringify({ server: PROXY }));
-  hidden(MANAGE, "", { TETHER_MANAGE_DIR: dir, WEBVIEW2_USER_DATA_FOLDER: join(dir, "wv2"), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9481" });
-  const b = await until("manage devtools", () => chromium.connectOverCDP("http://127.0.0.1:9481"), 60000, 500);
-  const p = await until("manage page", () => pages(b).find((x) => !x.url().startsWith("devtools")), 30000);
-  await until("manage ready", () => p.evaluate(() => !!window.__TAURI_INTERNALS__), 30000);
-  await ipc(p, "keys_unlock", { passphrase: PASS });
+  if (!fresh) copyFileSync(join(VAULT, "keys.json"), join(dir, "keys.json"));
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ server: `${PROXY},${PROXY_B}` }));
+  hidden(MANAGE, "", { TETHER_MANAGE_DIR: dir, WEBVIEW2_USER_DATA_FOLDER: join(dir, "wv2"), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` });
+  const b = await until(`${name} devtools`, () => chromium.connectOverCDP(`http://127.0.0.1:${port}`), 60000, 500);
+  const p = await until(`${name} page`, () => pages(b).find((x) => !x.url().startsWith("devtools")), 30000);
+  await until(`${name} ready`, () => p.evaluate(() => !!window.__TAURI_INTERNALS__), 30000);
+  if (fresh) await ipc(p, "keys_create", { passphrase: PW });
+  else await ipc(p, "keys_unlock", { passphrase: PASS });
   return p;
 }
 
@@ -240,13 +299,15 @@ async function main() {
   startServers();
   await until("tether-api", () => fetch(API + "/api/policy", { signal: AbortSignal.timeout(3000) }).then((r) => r.status === 404), 30000, 500);
   await until("hbbs", () => relayOut.includes("Listening on websocket"), 30000);
+  await until("tether-api B", () => fetch(API_B + "/api/policy", { signal: AbortSignal.timeout(3000) }).then((r) => r.status === 404), 30000, 500);
   await startProxy();
+  await startProxyB();
   const m = await startManage();
 
   // The installer of the "new" releases: a harmless exe (the NSIS step runs it and the app exits).
   const art = (v) => {
     const f = join(work, `Tether_${v}_x64-setup.exe`);
-    copyFileSync(join(process.env.SystemRoot, "System32", v === "0.5.25" ? "whoami.exe" : "hostname.exe"), f);
+    copyFileSync(join(process.env.SystemRoot, "System32", v === "0.9.25" ? "whoami.exe" : "hostname.exe"), f);
     return f;
   };
   const publish = (v, rollout) =>
@@ -264,13 +325,14 @@ async function main() {
   check("client starts with no release published", !st0.version && !st0.rollout, JSON.stringify(st0).slice(0, 120));
   await sleep(3000);
 
-  // 1. Publish 0.5.24 (Standard ramp) and wait for the push. No update_check from here on.
+  // 1. Publish 0.9.24 (Standard ramp) and wait for the push. No update_check from here on.
   const uuid = readFileSync(cfg("up-host", "install-uuid"), "utf8").trim();
-  const b24 = bucket(uuid, "technician", "0.5.24");
+  const b24 = bucket(uuid, "technician", "0.9.24");
   const hintsBefore = await metric("hbbs_release_hints_sent_total");
   const t0 = Date.now();
-  const pub = await publish("0.5.24", "standard");
-  check("Manage publishes 0.5.24 with a signed index through tether-api", pub.filter((r) => r.server !== "CDN").every((r) => r.ok), JSON.stringify(pub).slice(0, 160));
+  const pub = await publish("0.9.24", "standard");
+  const relayRes = (out) => out.filter((r) => r.server === PROXY || r.server === PROXY_B);
+  check("Manage publishes 0.9.24 with a signed index to both relays", relayRes(pub).length === 2 && relayRes(pub).every((r) => r.ok), JSON.stringify(pub).slice(0, 160));
   const idx = await fetch(`${API}/download/stable/releases.json`).then((r) => r.json());
   const payload = JSON.parse(Buffer.from(idx.payload, "base64"));
   check("tether-api serves the signed index (serial, Standard ramp)", payload.serial >= 1 && payload.releases[KEY]?.rollout.steps.length === 4, `serial ${payload.serial}`);
@@ -283,7 +345,7 @@ async function main() {
   check("hbbs sent ReleaseHint frames (both hosts)", (await metric("hbbs_release_hints_sent_total")) - hintsBefore >= 2, `+${(await metric("hbbs_release_hints_sent_total")) - hintsBefore}`);
   check("the release generation file drives hbbs", (await metric("hbbs_release_generation")) >= 2);
   const inRamp = b24 < 1;
-  check(`rollout bucket respected (bucket ${b24.toFixed(2)} vs 1 % at the first step)`, inRamp ? seen?.version === "0.5.24" : seen?.phase === "waiting-rollout" && !seen.version && seen.rollout?.version === "0.5.24", seen && `${seen.phase} ${seen.version}`);
+  check(`rollout bucket respected (bucket ${b24.toFixed(2)} vs 1 % at the first step)`, inRamp ? seen?.version === "0.9.24" : seen?.phase === "waiting-rollout" && !seen.version && seen.rollout?.version === "0.9.24", seen && `${seen.phase} ${seen.version}`);
   const oldSt = await ipc(old, "status");
   check("the 0.5.23 client ignores the ReleaseHint (still online, still running)", oldSt.status === 1 && alive(oldPid));
 
@@ -291,9 +353,9 @@ async function main() {
   await ipc(m, "release_control", { channel: "stable", key: KEY, action: "ramp", preset: "now" });
   const staged = await until("staged", async () => {
     const s = await ipc(h, "update_status");
-    return s.phase === "staged" && s.version === "0.5.24" ? s : null;
+    return s.phase === "staged" && s.version === "0.9.24" ? s : null;
   }, 120000, 1000).catch(() => null);
-  check("after 'Everyone now' the client downloads, verifies and stages 0.5.24", staged && existsSync(cfg("up-host", "update-0.5.24.staged")));
+  check("after 'Everyone now' the client downloads, verifies and stages 0.9.24", staged && existsSync(cfg("up-host", "update-0.9.24.staged")));
   const floor = () => readFileSync(cfg("up-host", "releases-stable.serial"), "utf8").trim().split(" ")[0];
   check("the client keeps the serial floor", +floor() >= payload.serial + 1, floor());
 
@@ -312,31 +374,42 @@ async function main() {
   const noInstall = await ipcErr(h, "update_install", { auto: false });
   check("installing a halted release is refused (re-checked before install)", /halted|No update/.test(noInstall ?? ""), noInstall);
   await ipc(m, "release_control", { channel: "stable", key: KEY, action: "resume" });
-  check("resume offers it again", await until("resumed", async () => ((await ipc(h, "update_status")).version === "0.5.24" ? true : null), 90000, 1000).catch(() => false));
+  check("resume offers it again", await until("resumed", async () => ((await ipc(h, "update_status")).version === "0.9.24" ? true : null), 90000, 1000).catch(() => false));
 
   // 5. A compromised relay: tampered index, replayed older index.
   const serialNow = +floor();
   mode = "tamper";
   await ipc(h, "update_check").catch(() => null);
   let s = await ipc(h, "update_status");
-  check("a tampered index (9.9.9, serial +100, old signature) is refused", s.version === "0.5.24" && +floor() === serialNow, `${s.version}, floor ${floor()}`);
+  check("a tampered index (9.9.9, serial +100, old signature) is refused", s.version === "0.9.24" && +floor() === serialNow, `${s.version}, floor ${floor()}`);
   mode = "replay";
   await ipc(h, "update_check").catch(() => null);
   s = await ipc(h, "update_status");
   check("a replayed older index (lower serial) is refused", s.serial === serialNow && +floor() === serialNow, `serial ${s.serial}`);
   mode = "pass";
 
-  // 6. A downgraded binary: 0.5.25 published, but the relay serves the 0.5.24 installer for it.
-  swapFrom = ["Tether_0.5.25_x64-setup.exe", "Tether_0.5.24_x64-setup.exe"];
-  await publish("0.5.25", "now");
-  const failed = await until("0.5.25 refused", async () => {
+  // 6. A downgraded binary: 0.9.25 published, but the relay serves the 0.9.24 installer for it.
+  // ... and relay B cannot store the 0.9.25 files: it must keep its old index.
+  swapFrom = ["Tether_0.9.25_x64-setup.exe", "Tether_0.9.24_x64-setup.exe"];
+  const bBefore = await indexOf(API_B);
+  failB = true;
+  const pub25 = await publish("0.9.25", "now");
+  failB = false;
+  const rB = pub25.find((r) => r.server === PROXY_B);
+  check("relay B's failed upload is reported, with 'index not updated'", rB && !rB.ok && /index not updated/.test(rB.error ?? ""), rB?.error);
+  check("relay A took 0.9.25", pub25.find((r) => r.server === PROXY)?.ok);
+  const bAfter = await indexOf(API_B);
+  check("relay B keeps its old index (same serial, still 0.9.24: no index pointing at files it lacks)", bAfter && bAfter.serial === bBefore.serial && bAfter.releases[KEY]?.version === "0.9.24", `serial ${bBefore?.serial} -> ${bAfter?.serial}, ${bAfter?.releases[KEY]?.version}`);
+  const aAfter = await indexOf(API);
+  check("relay A's index has 0.9.25 with a higher serial than B's", aAfter.releases[KEY]?.version === "0.9.25" && aAfter.serial > bAfter.serial, `A ${aAfter.serial}, B ${bAfter.serial}`);
+  const failed = await until("0.9.25 refused", async () => {
     const st = await ipc(h, "update_status");
-    return st.version === "0.5.25" && st.phase === "failed" ? st : null;
+    return st.version === "0.9.25" && st.phase === "failed" ? st : null;
   }, 120000, 1000).catch(() => null);
-  check("a downgraded binary for 0.5.25 is refused (size/sha256 against the signed index)", failed && !existsSync(cfg("up-host", "update-0.5.25.staged")), failed?.phase);
+  check("a downgraded binary for 0.9.25 is refused (size/sha256 against the signed index)", failed && !existsSync(cfg("up-host", "update-0.9.25.staged")), failed?.phase);
   swapFrom = null;
   await ipc(h, "update_check");
-  check("with the right file 0.5.25 is staged", await until("0.5.25 staged", () => existsSync(cfg("up-host", "update-0.5.25.staged")), 60000, 1000).catch(() => false));
+  check("with the right file 0.9.25 is staged", await until("0.9.25 staged", () => existsSync(cfg("up-host", "update-0.9.25.staged")), 60000, 1000).catch(() => false));
 
   // 7. Session ends: the install goes ahead (the "installer" runs and the app exits).
   await sess.close();
@@ -345,18 +418,38 @@ async function main() {
   ipc(h, "update_install", { auto: true }).catch((e) => (installErr = String(e.message ?? e)));
   const exited = await until("host exits", () => !alive(hostPid) || installErr, 60000, 1000).catch(() => false);
   check("once idle the update installs (the app hands over to the installer and exits)", exited && !alive(hostPid), installErr ?? "");
+  const stagedLeft = ["0.9.24", "0.9.25"].filter((v) => existsSync(cfg("up-host", `update-${v}.staged`)));
+  check("the superseded 0.9.24 download was removed by the check that found 0.9.25", !stagedLeft.includes("0.9.24"), stagedLeft.join(", ") || "none");
+
+  // 8. Admin key rotation: a new vault on "another PC"; both relays trust the old and the new key.
+  // Its first publish (TetherQS) must keep the technician release signed with the old key.
+  const m2 = await startManage("manage-new", 9484, true);
+  const newPub = (await ipc(m2, "state")).admin_pub;
+  await restartApis(`${ADMIN_PUB},${newPub}`);
+  const before = await indexOf(API);
+  const qs = join(work, "TetherQS-0.9.26.exe");
+  copyFileSync(join(process.env.SystemRoot, "System32", "hostname.exe"), qs);
+  const pubQs = await ipc(m2, "release_publish", { args: { file: qs, kind: "customer", platform: "windows-x86_64", channel: "stable", version: "0.9.26", notes: "e2e rotation", mandatory: false, minimum_version: "", forced: false, rollout: "now", security: false } }).catch((e) => [{ ok: false, error: String(e.message ?? e) }]);
+  check("after the admin key rotation the new Manage publishes to both relays", pubQs.length >= 2 && relayRes(pubQs).every((r) => r.ok), JSON.stringify(pubQs).slice(0, 300));
+  for (const [name, api] of [["A", API], ["B", API_B]]) {
+    const ix = await indexOf(api);
+    check(`relay ${name}: the new-key index keeps the old-key release and raises the serial`, ix?.key === newPub && ix.releases["customer/windows-x86_64"]?.version === "0.9.26" && !!ix.releases[KEY]?.version && ix.serial > before.serial, ix && `serial ${ix.serial}, ${Object.keys(ix.releases).join(" ")}`);
+  }
 }
 
 try {
   await main();
 } catch (e) {
   console.error("update e2e failed:", e.message);
+  if (process.env.VERBOSE) console.error(relayOut.slice(-3000));
   results.push({ name: e.message, ok: false });
 } finally {
   for (const p of pids) kill(p);
   for (const p of children) p.kill();
-  proxy?.closeAllConnections?.();
-  proxy?.close();
+  for (const p of [proxy, proxyB]) {
+    p?.closeAllConnections?.();
+    p?.close();
+  }
   try {
     execFileSync("wsl", ["-d", "Ubuntu-22.04", "--", "pkill", "-f", `update-e2e-`], { stdio: "ignore" });
     execFileSync("wsl", ["-d", "Ubuntu-22.04", "--", "pkill", "-f", `${BIN}/`], { stdio: "ignore" });

@@ -22,6 +22,42 @@ export interface ReleaseGroup {
 // Must match tether_trust::release::file_version (artifact, .sig, TetherQS .exe.gz, mac .dmg + .sig).
 const NAME = /^(?:Tether_(.+?)_(?:x64-setup\.exe|universal\.app\.tar\.gz|universal\.dmg)(?:\.sig)?|TetherQS-(.+?)(?:-universal\.zip(?:\.sig)?|\.exe(?:\.sig|\.gz)?))$/;
 
+/** `MAJOR.MINOR.PATCH[-pre]`, numbers only in the core (tether_trust::version::parse). */
+function parseVersion(v: string): { core: number[]; pre: string | null } | null {
+  v = v.trim().replace(/^v+/, "");
+  const i = v.indexOf("-");
+  const core = (i < 0 ? v : v.slice(0, i)).split(".");
+  if (core.length > 4 || !core.every((p) => /^\d+$/.test(p))) return null;
+  return { core: core.map(Number), pre: i < 0 ? null : v.slice(i + 1) };
+}
+
+const sign = (n: number) => (n < 0 ? -1 : n > 0 ? 1 : 0);
+
+/** Semver pre-release order, as tether_trust::version::compare_pre. */
+function comparePre(x: string, y: string): number {
+  const a = x.split("."), b = y.split(".");
+  for (let i = 0; ; i++) {
+    if (i >= a.length || i >= b.length) return sign(a.length - b.length);
+    const [p, q] = [a[i], b[i]];
+    const [pn, qn] = [/^\d+$/.test(p), /^\d+$/.test(q)];
+    const o = pn && qn ? sign(Number(p) - Number(q)) : pn ? -1 : qn ? 1 : p < q ? -1 : p > q ? 1 : 0;
+    if (o) return o;
+  }
+}
+
+/** Version order of the clients and tether_trust::version::compare (`0.5.0-test.9 < 0.5.0-test.10 <
+ *  0.5.0`). Strings that are no version sort after versions, among themselves numeric-aware. */
+export function compareVersion(a: string, b: string): number {
+  const va = parseVersion(a), vb = parseVersion(b);
+  if (!va || !vb) return va ? -1 : vb ? 1 : a.localeCompare(b, undefined, { numeric: true });
+  for (let i = 0; i < Math.max(va.core.length, vb.core.length); i++) {
+    const o = sign((va.core[i] ?? 0) - (vb.core[i] ?? 0));
+    if (o) return o;
+  }
+  if (va.pre === null || vb.pre === null) return va.pre === vb.pre ? 0 : va.pre === null ? 1 : -1;
+  return comparePre(va.pre, vb.pre);
+}
+
 /** One line per release, newest version first within a channel and app. */
 export function groupReleases(files: ReleaseFile[]): ReleaseGroup[] {
   const groups = new Map<string, ReleaseGroup>();
@@ -37,10 +73,9 @@ export function groupReleases(files: ReleaseFile[]): ReleaseGroup[] {
     g.modified = Math.max(g.modified, f.modified);
     groups.set(key, g);
   }
-  const byVersion = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
   return [...groups.values()]
     .map((g) => ({ ...g, files: g.files.sort((a, b) => a.path.localeCompare(b.path)) }))
-    .sort((a, b) => a.channel.localeCompare(b.channel) || a.dir.localeCompare(b.dir) || (a.version === null ? -1 : b.version === null ? 1 : byVersion(b.version, a.version)));
+    .sort((a, b) => a.channel.localeCompare(b.channel) || a.dir.localeCompare(b.dir) || (a.version === null ? -1 : b.version === null ? 1 : compareVersion(b.version, a.version)));
 }
 
 /** Ramp steps `[offset seconds, percent]`; must match tether_trust::release::RAMP_* (D4). */
@@ -79,7 +114,8 @@ export interface IndexView {
   expires?: number;
   days_left?: number;
   stale?: boolean;
-  relays: { server: string; serial: number | null }[];
+  /** `error`: the relay serves an index no trusted admin key verifies (publishing is refused). */
+  relays: { server: string; serial: number | null; error?: string | null }[];
   entries: IndexEntry[];
 }
 

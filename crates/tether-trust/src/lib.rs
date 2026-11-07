@@ -53,6 +53,17 @@ pub fn read_limited(r: impl std::io::Read, limit: usize) -> Result<Vec<u8>, Stri
     Ok(out)
 }
 
+/// Write via a per-process temp file + rename: readers (and other process roles) never see a
+/// half-written file.
+pub fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, path))
+}
+
 pub(crate) fn b64() -> &'static base64::engine::GeneralPurpose {
     &B64
 }

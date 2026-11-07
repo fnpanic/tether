@@ -117,10 +117,9 @@ fn fetch(id: &str) -> Result<Vec<u8>, String> {
     let client = crate::policy::http()?;
     let mut err = "no relay in this build".to_owned();
     for base in crate::policy::base_urls() {
-        let r = client.get(format!("{base}/q/m/{id}")).timeout(Duration::from_secs(10)).send().and_then(|r| r.error_for_status()).and_then(|r| r.bytes());
-        match r {
-            Ok(b) if b.len() <= MAX_PROFILE_BYTES => return Ok(b.to_vec()),
-            Ok(_) => err = format!("{base}: profile too large"),
+        let r = client.get(format!("{base}/q/m/{id}")).timeout(Duration::from_secs(10)).send().and_then(|r| r.error_for_status());
+        match r.map_err(|e| e.to_string()).and_then(|r| tether_trust::read_limited(r, MAX_PROFILE_BYTES)) {
+            Ok(b) => return Ok(b),
             Err(e) => err = format!("{base}: {e}"),
         }
     }

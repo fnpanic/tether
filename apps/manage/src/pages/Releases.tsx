@@ -685,7 +685,8 @@ function Rollouts() {
     setBusy(key);
     try {
       await invoke<RelayResult[]>("release_control", { channel: channel.trim(), key, action, preset });
-      toast(`${what} ${key}: done`);
+      // The download page is built when it is published: it keeps linking a halted release.
+      toast(action === "halt" && channel.trim() === "stable" ? `Halt ${key}: done. Publish the download page again so it no longer offers this release.` : `${what} ${key}: done`);
       await load();
     } catch (e: any) {
       setError(e.message);
@@ -701,7 +702,7 @@ function Rollouts() {
           <p className="mt-1 text-caption text-muted">
             The signed release index devices follow. Serial {view?.serial ?? "–"}
             {view?.days_left !== undefined && ` · valid for ${view.days_left} more days`}
-            {view?.relays.map((r) => ` · ${host(r.server)}: ${r.serial ?? "none"}`).join("")}
+            {view?.relays.map((r) => ` · ${host(r.server)}: ${r.error ? "not verified" : (r.serial ?? "none")}`).join("")}
           </p>
           {view?.stale && <ErrorText error="The release index has expired: devices show 'update information is out of date'. Unlock the keys to re-sign it." />}
           {view?.days_left !== undefined && view.days_left < 7 && !view.stale && <p className="text-caption text-warn">The release index expires in {view.days_left} days; it is re-signed when you unlock the keys.</p>}

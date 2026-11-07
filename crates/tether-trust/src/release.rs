@@ -295,12 +295,19 @@ pub fn floor(path: &Path, admin: &[VerifyingKey]) -> u64 {
 }
 
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".{}.tmp", std::process::id()));
-    std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("cannot cache release index: {e}"))
+    crate::write_atomic(path, data).map_err(|e| format!("cannot cache release index: {e}"))
+}
+
+/// Delete every `update-*.staged` download in `dir` except `keep` (the current candidate's): a
+/// superseded or installed update is never needed again, and the Windows installer exits the app
+/// before it could clean up. Returns how many were removed.
+pub fn prune_staged(dir: &Path, keep: Option<&Path>) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    rd.flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("update-") && n.ends_with(".staged")))
+        .filter(|p| Some(p.as_path()) != keep && std::fs::remove_file(p).is_ok())
+        .count()
 }
 
 /// Of several fetched documents (`(relay base, raw)`), the valid one with the highest serial that
@@ -463,7 +470,8 @@ impl Candidate {
     /// Largest number of bytes to read from a source.
     pub fn limit(&self, packed: bool) -> u64 {
         match (&self.packed, packed) {
-            (Some(p), true) => p.size,
+            // A proxy or CDN may hand the packed URL over already decoded (see `accept`).
+            (Some(p), true) => p.size.max(self.size),
             _ if self.size > 0 => self.size,
             _ => MAX_ARTIFACT,
         }
@@ -815,6 +823,22 @@ mod tests {
     }
 
     #[test]
+    fn prune_staged_keeps_only_the_current_candidate() {
+        let dir = std::env::temp_dir().join(format!("tether-staged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for f in ["update-0.5.1.staged", "update-0.5.2.staged", "update-0.5.3.staged", "releases-stable.json", "update-state.json"] {
+            crate::write_atomic(&dir.join(f), b"x").unwrap();
+        }
+        assert_eq!(prune_staged(&dir, Some(&dir.join("update-0.5.3.staged"))), 2);
+        let mut left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["releases-stable.json", "update-0.5.3.staged", "update-state.json"]);
+        assert_eq!(prune_staged(&dir, None), 1);
+        assert_eq!(prune_staged(&dir.join("missing"), None), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn serial_floor_is_monotonic_and_survives_a_deleted_cache() {
         let admin = crate::generate_key();
         let trusted = [admin.verifying_key()];
@@ -952,12 +976,20 @@ mod tests {
     #[test]
     fn packed_copy_is_checked_before_and_after_unpacking() {
         let (kp, pk) = minisign_keys();
-        let exe = b"TetherQS plain exe bytes".to_vec();
+        let mut exe = b"TetherQS plain exe bytes".to_vec();
+        exe.resize(64, 0);
         let sig = sign(&kp, &exe, "timestamp:1\tfile:TetherQS-0.5.24.exe\tversion:0.5.24");
-        // A stand-in codec: "packing" reverses the bytes.
-        let pack = |d: &[u8]| d.iter().rev().copied().collect::<Vec<u8>>();
+        // A stand-in codec that shrinks like gzip: the trailing zeros become one count byte.
+        let pack = |d: &[u8]| {
+            let n = d.iter().rev().take_while(|b| **b == 0).count();
+            let mut out = d[..d.len() - n].to_vec();
+            out.push(n as u8);
+            out
+        };
         let gunzip = |d: &[u8], max: u64| {
-            let out = pack(d);
+            let (n, body) = d.split_last().unwrap();
+            let mut out = body.to_vec();
+            out.resize(body.len() + *n as usize, 0);
             if out.len() as u64 > max { Err("too big".to_owned()) } else { Ok(out) }
         };
         let packed = pack(&exe);
@@ -969,7 +1001,9 @@ mod tests {
         let ix = index(4, vec![("customer/windows-x86_64", e.clone())]);
         let c = Candidate::from_entry(&e, "https://r1", &ix);
         assert_eq!(c.sources(), [(e.packed.as_ref().unwrap().urls[0].clone(), true), ("https://r1/download/stable/customer/windows-x86_64/TetherQS-0.5.24.exe".into(), false)]);
-        assert_eq!((c.limit(true), c.limit(false)), (packed.len() as u64, exe.len() as u64));
+        assert!(packed.len() < exe.len());
+        // A packed source may arrive already decoded by a proxy: the limit must fit the artifact.
+        assert_eq!((c.limit(true), c.limit(false)), (exe.len() as u64, exe.len() as u64));
         assert_eq!(c.accept(packed.clone(), true, &pk, gunzip).unwrap(), exe);
         // Already decoded on the way (Content-Encoding): taken as the artifact.
         assert_eq!(c.accept(exe.clone(), true, &pk, gunzip).unwrap(), exe);

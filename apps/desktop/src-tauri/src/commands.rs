@@ -717,19 +717,25 @@ async fn team_audit(device: String, since: u64) -> R<Value> {
 // --- end advanced mode ---
 
 // --- reconnect/recording ---
-use crate::{recording, session_policy};
+use crate::recording;
 
-/// Policy value for the webview (`connect.reconnect-minutes`, `recording.*`).
+/// Policy values the webview reads (Session.tsx). Anything else, like `recording.upload-token`
+/// (masked in `policy_state` too), stays in Rust.
+const UI_POLICY: &[&str] = &["connect.reconnect-minutes", "recording.mode"];
+
 #[tauri::command]
-fn session_policy_get(id: String) -> String {
-    session_policy::get(&id)
+fn session_policy_get(id: String) -> R<String> {
+    if !UI_POLICY.contains(&id.as_str()) {
+        return Err(format!("{id} is not readable here"));
+    }
+    Ok(crate::policy::get(&id))
 }
 
 /// Start/stop recording. Starting without the host's permission asks the host user first.
 #[tauri::command]
 fn session_record(key: String, start: bool) -> R<()> {
     if start {
-        if session_policy::get("recording.mode") == "off" {
+        if crate::policy::get("recording.mode") == "off" {
             return Err("Recording is disabled by policy.".to_owned());
         }
         recording::apply_folder();
@@ -806,7 +812,7 @@ fn recordings_reset_folder() -> R<()> {
 /// Host side: load the consent question from policy (call once when the CM window opens).
 #[tauri::command]
 fn cm_record_consent_init() {
-    cm::set_record_consent_text(session_policy::get("recording.consent-text"));
+    cm::set_record_consent_text(crate::policy::get("recording.consent-text"));
 }
 
 /// Host side: answer to a `record_consent_request` event.
@@ -815,3 +821,12 @@ fn cm_record_consent(conn_id: i32, allow: bool) {
     cm::record_consent(conn_id, allow);
 }
 // --- end reconnect/recording ---
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn session_policy_get_refuses_secrets() {
+        assert!(super::session_policy_get("recording.upload-token".into()).is_err());
+        assert!(super::session_policy_get("recording.upload-target".into()).is_err());
+    }
+}

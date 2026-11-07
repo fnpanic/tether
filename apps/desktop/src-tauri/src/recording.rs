@@ -11,7 +11,7 @@ use std::{
 use librustdesk::ui::api;
 use serde::{Deserialize, Serialize};
 
-use super::session_policy as policy;
+use crate::policy;
 
 /// Serialises queue file access between session windows of this process.
 static LOCK: Mutex<()> = Mutex::new(());
