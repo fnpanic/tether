@@ -1,0 +1,12 @@
+# Installed as /etc/tether/caddy.d/grafana.caddy on the monitoring node (install.sh monitor).
+# Grafana at https://<this host>/grafana/: Caddy's password first (any IP: the admin's IP is
+# dynamic), then Grafana's own login. Caddy's Authorization header is not passed on.
+redir /grafana /grafana/ 308
+handle /grafana/* {
+	basic_auth {
+		@GRAFANA_USER@ @GRAFANA_HASH@
+	}
+	reverse_proxy 127.0.0.1:3000 {
+		header_up -Authorization
+	}
+}

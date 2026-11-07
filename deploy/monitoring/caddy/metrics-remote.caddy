@@ -1,0 +1,42 @@
+# Installed as /etc/tether/caddy.d/metrics-remote.caddy on a node that the Prometheus on the
+# OTHER node scrapes (deploy/monitoring/install.sh target). Imported into the public site block.
+# /_metrics/<job> answers only @SCRAPE_FROM@ (the monitoring node) with the scrape password;
+# every other client gets its connection closed. No access log is configured (none in Tether).
+# `route` keeps the order as written: the IP check and the password come before any proxying.
+handle /_metrics/* {
+	route {
+		@outside not remote_ip @SCRAPE_FROM@
+		abort @outside
+		basic_auth {
+			prometheus @SCRAPE_HASH@
+		}
+		handle /_metrics/hbbs {
+			rewrite * /metrics
+			reverse_proxy 127.0.0.1:21123
+		}
+		handle /_metrics/hbbr {
+			rewrite * /metrics
+			reverse_proxy 127.0.0.1:21124
+		}
+		handle /_metrics/api {
+			rewrite * /metrics
+			reverse_proxy 127.0.0.1:21120
+		}
+		handle /_metrics/caddy {
+			rewrite * /metrics
+			reverse_proxy 127.0.0.1:21125
+		}
+		handle /_metrics/node {
+			rewrite * /metrics
+			reverse_proxy 127.0.0.1:9100
+		}
+		# blackbox_exporter: ?module=...&target=... from prometheus.yml (probes of the other node).
+		handle /_metrics/probe {
+			rewrite * /probe
+			reverse_proxy 127.0.0.1:9115
+		}
+		handle {
+			respond 404
+		}
+	}
+}

@@ -7,6 +7,7 @@
 //! (technician access, `team.rs`), `download/…` (served by Caddy), `tmp/`.
 
 mod audit;
+mod metrics;
 mod team;
 
 use std::collections::HashMap;
@@ -283,7 +284,10 @@ fn read_body(rq: &mut Request, limit: u64) -> Result<Vec<u8>, Resp> {
     Deadline(rq.as_reader(), body_deadline(limit))
         .take(limit + 1)
         .read_to_end(&mut buf)
-        .map_err(|_| text(400, "could not read body"))?;
+        .map_err(|e| {
+            metrics::body_error(&e);
+            text(400, "could not read body")
+        })?;
     if buf.len() as u64 > limit {
         return Err(too_large());
     }
@@ -318,7 +322,10 @@ fn body_to_file(rq: &mut Request, data: &Path, limit: u64, mode: u32) -> Result<
     match r {
         Ok(n) if n <= limit => Ok(body),
         Ok(_) => Err(too_large()),
-        Err(e) => Err(internal(format!("upload failed: {e}"))),
+        Err(e) => {
+            metrics::body_error(&e);
+            Err(internal(format!("upload failed: {e}")))
+        }
     }
 }
 
@@ -341,7 +348,19 @@ fn lock(app: &Mutex<App>) -> MutexGuard<'_, App> {
 /// One request on its own worker thread. Only routing holds the state lock; the body is read
 /// before it and the response written after it, each read and write bounded by IO_TIMEOUT.
 fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
+    let (start, endpoint) = (Instant::now(), metrics::endpoint(rq.method().as_str(), rq.url()));
     let peer = rq.remote_addr().copied();
+    if endpoint == metrics::METRICS {
+        let page = match peer {
+            Some(p) if p.ip().is_loopback() => lock(app).metrics_now(),
+            _ => None,
+        };
+        let _ = rq.respond(match page {
+            Some(now) => text(200, &metrics::render(&now, data)).with_header(hdr("Content-Type", "text/plain; version=0.0.4")),
+            None => not_found(),
+        });
+        return;
+    }
     if let Some(p) = peer {
         set_io_timeouts(p, Some(IO_TIMEOUT));
     }
@@ -349,10 +368,12 @@ fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
         Ok(body) => lock(app).route(&mut rq, &body).unwrap_or_else(|e| e),
         Err(e) => e,
     };
+    let code = resp.status_code().0;
     let _ = rq.respond(resp);
     if let Some(p) = peer {
         set_io_timeouts(p, None); // an idle keep-alive connection from the proxy may wait
     }
+    metrics::observe(endpoint, code, start.elapsed());
 }
 
 fn disk_free(p: &Path) -> u64 {
@@ -993,6 +1014,16 @@ impl App {
         Ok(json(&out))
     }
 
+    /// Values for `/metrics` (`metrics.rs`).
+    fn metrics_now(&self) -> Option<metrics::Now> {
+        let t = now();
+        Some(metrics::Now {
+            max_workers: MAX_WORKERS,
+            devices: self.devices.len(),
+            devices_24h: self.devices.values().filter(|d| d.last_seen + DAY > t).count(),
+        })
+    }
+
     /// Periodic housekeeping: expiry, rate-limit and nonce pruning, device flush.
     fn maintain(&mut self) {
         let t = now();
@@ -1115,12 +1146,15 @@ fn main() {
         match server.recv_timeout(Duration::from_secs(1)) {
             Ok(Some(rq)) if busy.load(Ordering::SeqCst) >= MAX_WORKERS => {
                 let _ = rq.respond(text(503, "busy"));
+                metrics::BUSY_REJECTED.fetch_add(1, Ordering::Relaxed);
             }
             Ok(Some(rq)) => {
                 busy.fetch_add(1, Ordering::SeqCst);
                 let (app, data, busy) = (app.clone(), data.clone(), busy.clone());
                 std::thread::spawn(move || {
+                    metrics::ACTIVE.fetch_add(1, Ordering::Relaxed);
                     serve(&app, &data, rq);
+                    metrics::ACTIVE.fetch_sub(1, Ordering::Relaxed);
                     busy.fetch_sub(1, Ordering::SeqCst);
                 });
             }

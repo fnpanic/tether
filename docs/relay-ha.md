@@ -215,6 +215,8 @@ exposes only `/readyz/relay` (hbbr) and `/rendezvous/pubkey` (hbbs `/pubkey`).
 
 `HEALTH_PORT=<port>` overrides the port, and `HEALTH_PORT=0` turns the endpoint off.
 `DRAIN_TIMEOUT=<s>` sets the drain window (default 0: exit at once, the old behaviour).
+Prometheus metrics are separate, on 127.0.0.1 only: hbbs 21123, hbbr 21124 (`METRICS_PORT`,
+`METRICS_ADDR`), see [monitoring.md](monitoring.md).
 
 ## Policy, releases, devices and diagnostics on N nodes
 

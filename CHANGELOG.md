@@ -41,6 +41,22 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   rules and saved searches (`/api/team/*`, signed requests, revision check with three-way merge on
   conflicts, size and rate limits); members with the audit flag see a host's session log.
 
+- Relay monitoring ([docs/monitoring.md](docs/monitoring.md)): Prometheus metrics in hbbs
+  (127.0.0.1:21123: online hosts by path, connections, registrations, RegisterPk results, punch
+  holes, brute-force refusals, relay health / load / hand-outs, failover state and transitions,
+  TURN allocations, traffic and drops), hbbr (127.0.0.1:21124: sessions by transport, pairing,
+  waits and timeouts, relayed bytes, downgrades, blocks, draining) and tether-api (`/metrics` on
+  21120 for loopback only: requests by endpoint and status, latency histogram, workers vs cap,
+  busy and body timeouts, active devices, data dir size), all with process metrics; Caddy's
+  metrics on 127.0.0.1:21125 with the admin API still off. `deploy/monitoring/`: installer
+  (`install.sh target|monitor`), Prometheus (30 days) with alert rules and their promtool tests,
+  Alertmanager (Telegram ready, off by default), node_exporter, blackbox probes of each node's
+  public endpoints from the other node, six provisioned Grafana dashboards at
+  `https://<monitoring node>/grafana/` behind Caddy basic auth plus Grafana login, and
+  `/_metrics/*` on the other node for the monitoring node's IP and password only. Helm:
+  `metrics.enabled`, `metrics.serviceMonitor.enabled`. End-to-end test
+  `scripts/test-monitoring.sh`.
+
 ## [0.5.21] — 2026-11-07
 
 Clients: picture quality (colours, still-picture sharpening for AV1). Relays: the security fixes below,

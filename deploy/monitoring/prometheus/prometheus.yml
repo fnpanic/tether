@@ -1,0 +1,131 @@
+# Tether monitoring: Prometheus on the monitoring node (docs/monitoring.md).
+# install.sh fills in the @...@ placeholders:
+#   @LOCAL@        name of this node (label node=, e.g. tether-desk)
+#   @LOCAL_HOST@   its public host name (probed from the other node)
+#   @REMOTE@       name of the other node (e.g. tether-desk2)
+#   @REMOTE_HOST@  its public host name
+#   @REMOTE_ADDR@  where its Caddy serves /_metrics/* (host:port; 443 in production)
+#   @REMOTE_SCHEME@ https in production
+#   @ETC@          config dir (/etc/tether-monitoring)
+# The other node's exporters are reached through its Caddy at https://<host>/_metrics/<job>,
+# which only answers this node's IP with the scrape password (deploy/monitoring/caddy/).
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+
+rule_files:
+  - @ETC@/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+
+scrape_configs:
+  # ---- this node, over localhost ----
+  - job_name: hbbs
+    static_configs: [{ targets: ["127.0.0.1:21123"], labels: { node: "@LOCAL@" } }]
+  - job_name: hbbr
+    static_configs: [{ targets: ["127.0.0.1:21124"], labels: { node: "@LOCAL@" } }]
+  - job_name: api
+    static_configs: [{ targets: ["127.0.0.1:21120"], labels: { node: "@LOCAL@" } }]
+  - job_name: caddy
+    static_configs: [{ targets: ["127.0.0.1:21125"], labels: { node: "@LOCAL@" } }]
+  - job_name: node
+    static_configs: [{ targets: ["127.0.0.1:9100"], labels: { node: "@LOCAL@" } }]
+  - job_name: prometheus
+    static_configs: [{ targets: ["127.0.0.1:9090"], labels: { node: "@LOCAL@" } }]
+  - job_name: alertmanager
+    static_configs: [{ targets: ["127.0.0.1:9093"], labels: { node: "@LOCAL@" } }]
+  - job_name: blackbox_exporter
+    static_configs: [{ targets: ["127.0.0.1:9115"], labels: { node: "@LOCAL@" } }]
+
+  # ---- the other node, through its Caddy (HTTPS, IP allow-list + basic auth) ----
+  - job_name: hbbs_remote
+    metrics_path: /_metrics/hbbs
+    scheme: @REMOTE_SCHEME@
+    basic_auth: { username: prometheus, password_file: @ETC@/scrape.pass }
+    static_configs: [{ targets: ["@REMOTE_ADDR@"], labels: { node: "@REMOTE@" } }]
+    relabel_configs: [{ target_label: job, replacement: hbbs }]
+  - job_name: hbbr_remote
+    metrics_path: /_metrics/hbbr
+    scheme: @REMOTE_SCHEME@
+    basic_auth: { username: prometheus, password_file: @ETC@/scrape.pass }
+    static_configs: [{ targets: ["@REMOTE_ADDR@"], labels: { node: "@REMOTE@" } }]
+    relabel_configs: [{ target_label: job, replacement: hbbr }]
+  - job_name: api_remote
+    metrics_path: /_metrics/api
+    scheme: @REMOTE_SCHEME@
+    basic_auth: { username: prometheus, password_file: @ETC@/scrape.pass }
+    static_configs: [{ targets: ["@REMOTE_ADDR@"], labels: { node: "@REMOTE@" } }]
+    relabel_configs: [{ target_label: job, replacement: api }]
+  - job_name: caddy_remote
+    metrics_path: /_metrics/caddy
+    scheme: @REMOTE_SCHEME@
+    basic_auth: { username: prometheus, password_file: @ETC@/scrape.pass }
+    static_configs: [{ targets: ["@REMOTE_ADDR@"], labels: { node: "@REMOTE@" } }]
+    relabel_configs: [{ target_label: job, replacement: caddy }]
+  - job_name: node_remote
+    metrics_path: /_metrics/node
+    scheme: @REMOTE_SCHEME@
+    basic_auth: { username: prometheus, password_file: @ETC@/scrape.pass }
+    static_configs: [{ targets: ["@REMOTE_ADDR@"], labels: { node: "@REMOTE@" } }]
+    relabel_configs: [{ target_label: job, replacement: node }]
+
+  # ---- public endpoints, each node probed from the other one ----
+  # node = the node that owns the endpoint, probe_from = the node that probes it.
+  - job_name: probe_remote_from_local
+    metrics_path: /probe
+    static_configs:
+      - targets: ["https://@REMOTE_HOST@/readyz/relay"]
+        labels: { node: "@REMOTE@", probe: readyz, module: http_2xx }
+      - targets: ["https://@REMOTE_HOST@/rendezvous/pubkey"]
+        labels: { node: "@REMOTE@", probe: pubkey, module: http_2xx }
+      - targets: ["https://@REMOTE_HOST@/api/policy"]
+        labels: { node: "@REMOTE@", probe: policy, module: http_2xx }
+      - targets: ["@REMOTE_HOST@:443"]
+        labels: { node: "@REMOTE@", probe: ws_id, module: ws_id }
+      - targets: ["@REMOTE_HOST@:443"]
+        labels: { node: "@REMOTE@", probe: ws_relay, module: ws_relay }
+      - targets: ["@REMOTE_HOST@:21116"]
+        labels: { node: "@REMOTE@", probe: tcp_rendezvous, module: tcp_connect }
+      - targets: ["@REMOTE_HOST@:21117"]
+        labels: { node: "@REMOTE@", probe: tcp_relay, module: tcp_connect }
+    relabel_configs:
+      - { source_labels: [__address__], target_label: __param_target }
+      - { source_labels: [__address__], target_label: instance }
+      - { source_labels: [module], target_label: __param_module }
+      - { source_labels: [probe, __address__], regex: 'ws_(id|relay);([^:]+)(:[0-9]+)?', replacement: "wss://$2$3/ws/$1", target_label: instance }
+      - { target_label: job, replacement: probe }
+      # the local blackbox_exporter
+      - { target_label: __address__, replacement: "127.0.0.1:9115" }
+      - { target_label: probe_from, replacement: "@LOCAL@" }
+  - job_name: probe_local_from_remote
+    metrics_path: /_metrics/probe
+    scheme: @REMOTE_SCHEME@
+    basic_auth: { username: prometheus, password_file: @ETC@/scrape.pass }
+    static_configs:
+      - targets: ["https://@LOCAL_HOST@/readyz/relay"]
+        labels: { node: "@LOCAL@", probe: readyz, module: http_2xx }
+      - targets: ["https://@LOCAL_HOST@/rendezvous/pubkey"]
+        labels: { node: "@LOCAL@", probe: pubkey, module: http_2xx }
+      - targets: ["https://@LOCAL_HOST@/api/policy"]
+        labels: { node: "@LOCAL@", probe: policy, module: http_2xx }
+      - targets: ["@LOCAL_HOST@:443"]
+        labels: { node: "@LOCAL@", probe: ws_id, module: ws_id }
+      - targets: ["@LOCAL_HOST@:443"]
+        labels: { node: "@LOCAL@", probe: ws_relay, module: ws_relay }
+      - targets: ["@LOCAL_HOST@:21116"]
+        labels: { node: "@LOCAL@", probe: tcp_rendezvous, module: tcp_connect }
+      - targets: ["@LOCAL_HOST@:21117"]
+        labels: { node: "@LOCAL@", probe: tcp_relay, module: tcp_connect }
+    relabel_configs:
+      - { source_labels: [__address__], target_label: __param_target }
+      - { source_labels: [__address__], target_label: instance }
+      - { source_labels: [module], target_label: __param_module }
+      - { source_labels: [probe, __address__], regex: 'ws_(id|relay);([^:]+)(:[0-9]+)?', replacement: "wss://$2$3/ws/$1", target_label: instance }
+      - { target_label: job, replacement: probe }
+      # the other node's blackbox_exporter, through its Caddy
+      - { target_label: __address__, replacement: "@REMOTE_ADDR@" }
+      - { target_label: probe_from, replacement: "@REMOTE@" }

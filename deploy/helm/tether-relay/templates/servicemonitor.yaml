@@ -1,0 +1,25 @@
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+# Prometheus Operator: scrape /metrics of every hbbs and hbbr pod (docs/monitoring.md).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "tr.fullname" . }}
+  labels:
+    {{- include "tr.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      tether.metrics: "true"
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      relabelings:
+        - { sourceLabels: [__meta_kubernetes_pod_name], targetLabel: node }
+        - { sourceLabels: [__meta_kubernetes_service_name], regex: ".*-(hbbs|hbbr)", targetLabel: job }
+{{- end }}

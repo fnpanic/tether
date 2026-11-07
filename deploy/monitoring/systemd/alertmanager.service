@@ -1,0 +1,29 @@
+[Unit]
+Description=Alertmanager (Tether monitoring, docs/monitoring.md)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alertmanager
+Group=alertmanager
+# Single instance: the cluster port (0.0.0.0:9094 by default) is switched off.
+ExecStart=/usr/local/bin/alertmanager \
+  --config.file=/etc/tether-monitoring/alertmanager.yml \
+  --storage.path=/var/lib/alertmanager \
+  --web.listen-address=127.0.0.1:9093 \
+  --cluster.listen-address=
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+MemoryMax=128M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/alertmanager
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -225,6 +225,19 @@ works; Alt+Tab leaves; a lone Alt and Alt+F4 on TetherQS do not stall it).
   request.
 - The server stores only its key pair and an ID → public-key/IP registry. It never sees session
   content.
+- Monitoring ([docs/monitoring.md](docs/monitoring.md)): every metrics endpoint (hbbs 21123, hbbr
+  21124, tether-api `/metrics` on 21120, Caddy 21125, node_exporter 9100, blackbox_exporter 9115,
+  Prometheus 9090, Alertmanager 9093 with clustering off, Grafana 3000) listens on 127.0.0.1;
+  tether-api answers `/metrics` to loopback peers only and Caddy never forwards that path. Metrics
+  carry no peer IDs, IPs, keys or tokens, only fixed label sets (plus the relay names from hbbs's
+  `-r` list). Exposed through Caddy on 443: on a scraped node `/_metrics/*`, which closes the
+  connection for every IP except the monitoring node's and then needs the scrape password (bcrypt
+  in the Caddy snippet); on the monitoring node `/grafana/`, behind Caddy basic auth and then
+  Grafana's own login (no anonymous access, no sign-up, basic auth to Grafana off). Whoever has
+  the scrape password and the monitoring node's IP can also make the other node's
+  blackbox_exporter probe targets of their choice (`/_metrics/probe`); the password never leaves
+  the monitoring node. No firewall port is opened. The passwords
+  (`/etc/tether-monitoring/*.pass`) are generated on the node and never committed.
 - Keep `/var/lib/tether/id_ed25519` secret and back it up. Losing it, or a suspected leak, means a
   server key rotation ([docs/key-rotation.md](docs/key-rotation.md)); clients without key-list
   support (before this version) must be updated before that.

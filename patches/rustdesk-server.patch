@@ -902,20 +902,56 @@ index 9c76f41..fa33db3 100644
 +        assert!(stun_binding_response(&req, "1.2.3.4:5".parse().unwrap()).is_none());
 +    }
 +}
+diff --git a/src/hbbr.rs b/src/hbbr.rs
+index 4c8a784..2f14278 100644
+--- a/src/hbbr.rs
++++ b/src/hbbr.rs
+@@ -1,6 +1,7 @@
+ use clap::App;
+ mod common;
+ mod relay_server;
++mod metrics;
+ use flexi_logger::*;
+ use hbb_common::{config::RELAY_PORT, ResultType};
+ use relay_server::*;
 diff --git a/src/lib.rs b/src/lib.rs
-index 8da29a2..7f2735b 100644
+index 8da29a2..5c72db5 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,8 @@
  mod rendezvous_server;
  pub use rendezvous_server::*;
  pub mod common;
 +pub mod turn;
++pub mod metrics;
  mod database;
  mod peer;
  mod version;
+diff --git a/src/peer.rs b/src/peer.rs
+index 4ca87cf..7efd9c5 100644
+--- a/src/peer.rs
++++ b/src/peer.rs
+@@ -173,6 +173,18 @@ impl PeerMap {
+         self.map.read().await.get(id).cloned()
+     }
+ 
++    /// Tether metrics: (peers registered within `timeout_ms`, peers in memory).
++    pub(crate) async fn count_online(&self, timeout_ms: u128) -> (usize, usize) {
++        let peers: Vec<LockPeer> = self.map.read().await.values().cloned().collect();
++        let mut online = 0;
++        for p in &peers {
++            if p.read().await.last_reg_time.elapsed().as_millis() < timeout_ms {
++                online += 1;
++            }
++        }
++        (online, peers.len())
++    }
++
+     #[inline]
+     pub(crate) async fn is_in_memory(&self, id: &str) -> bool {
+         self.map.read().await.contains_key(id)
 diff --git a/src/relay_server.rs b/src/relay_server.rs
-index 0ec190a..69ae13b 100644
+index 0ec190a..f1dd2ce 100644
 --- a/src/relay_server.rs
 +++ b/src/relay_server.rs
 @@ -42,12 +42,19 @@ static DOWNGRADE_START_CHECK: AtomicUsize = AtomicUsize::new(1_800_000); // in m
@@ -938,19 +974,28 @@ index 0ec190a..69ae13b 100644
      if let Ok(mut file) = std::fs::File::open(BLACKLIST_FILE) {
          let mut contents = String::new();
          if file.read_to_string(&mut contents).is_ok() {
-@@ -88,7 +95,10 @@ pub async fn start(port: &str, key: &str) -> ResultType<()> {
+@@ -88,7 +95,11 @@ pub async fn start(port: &str, key: &str) -> ResultType<()> {
              io_loop(listen_any(port).await?, listen_any(port2).await?, &key).await;
          }
      };
 -    let listen_signal = crate::common::listen_signal();
 +    tokio::spawn(crate::common::serve_health(HEALTH_PORT, || SESSIONS.load(Ordering::SeqCst)));
++    tokio::spawn(crate::metrics::serve(21124, || async { crate::metrics::render_hbbr(crate::common::is_draining()) }));
 +    let listen_signal = crate::common::listen_signal_and_drain(|| {
 +        SESSIONS.load(Ordering::SeqCst) == 0 && PEERS.try_lock().map_or(false, |p| p.is_empty())
 +    });
      tokio::select!(
          res = main_task => res,
          res = listen_signal => res,
-@@ -427,7 +437,7 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
+@@ -381,6 +392,7 @@ async fn handle_connection(
+     let ip = ip.to_string();
+     if BLOCKLIST.read().await.get(&ip).is_some() {
+         log::info!("{} blocked", ip);
++        crate::metrics::BLOCKED.inc();
+         return;
+     }
+     let key = key.to_owned();
+@@ -427,7 +439,7 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
      if let Ok(Some(Ok(bytes))) = timeout(30_000, stream.recv()).await {
          if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
              if let Some(rendezvous_message::Union::RequestRelay(rf)) = msg_in.union {
@@ -959,10 +1004,13 @@ index 0ec190a..69ae13b 100644
                      log::warn!("Relay authentication failed from {} - invalid key", addr);
                      return;
                  }
-@@ -442,13 +452,18 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
+@@ -442,18 +454,32 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                              stream.set_raw();
                              log::info!("Both are raw");
                          }
++                        let t = (stream.is_ws() || peer.is_ws()) as usize;
++                        crate::metrics::PAIRED[t].inc();
++                        let _open = crate::metrics::Open::new(&crate::metrics::RELAY_SESSIONS[t]);
 +                        SESSIONS.fetch_add(1, Ordering::SeqCst);
                          if let Err(err) = relay(addr, &mut stream, peer, limiter, id.clone()).await
                          {
@@ -975,10 +1023,55 @@ index 0ec190a..69ae13b 100644
 +                    } else if refuse_new_pairs() {
 +                        // Draining: the client asks hbbs again and gets another relay.
 +                        log::info!("Draining, refused new relay request {} from {}", rf.uuid, addr);
++                        crate::metrics::PAIR_REFUSED_DRAINING.inc();
                      } else {
                          log::info!("New relay request {} from {}", rf.uuid, addr);
                          PEERS.lock().await.insert(rf.uuid.clone(), Box::new(stream));
-@@ -565,6 +580,11 @@ async fn relay(
+-                        sleep(30.).await;
+-                        PEERS.lock().await.remove(&rf.uuid);
++                        {
++                            let _waiting = crate::metrics::Open::new(&crate::metrics::PAIR_WAITING);
++                            sleep(30.).await;
++                        }
++                        if PEERS.lock().await.remove(&rf.uuid).is_some() {
++                            crate::metrics::PAIR_TIMEOUTS.inc();
++                        }
+                     }
+                 }
+             }
+@@ -497,6 +523,7 @@ async fn relay(
+                     total_limiter.consume(nb).await;
+                     total += nb;
+                     total_s += nb;
++                    crate::metrics::RELAY_BYTES.add(bytes.len() as u64);
+                     if !bytes.is_empty() {
+                         stream.send_raw(bytes.into()).await?;
+                     }
+@@ -516,6 +543,7 @@ async fn relay(
+                     total_limiter.consume(nb).await;
+                     total += nb;
+                     total_s += nb;
++                    crate::metrics::RELAY_BYTES.add(bytes.len() as u64);
+                     if !bytes.is_empty() {
+                         peer.send_raw(bytes.into()).await?;
+                     }
+@@ -534,6 +562,7 @@ async fn relay(
+         if n >= 1_000 {
+             if BLOCKLIST.read().await.get(&ip).is_some() {
+                 log::info!("{} blocked", ip);
++                crate::metrics::BLOCKED.inc();
+                 break;
+             }
+             blacked = BLACKLIST.read().await.get(&ip).is_some();
+@@ -553,6 +582,7 @@ async fn relay(
+                 && total > elapsed * downgrade_threshold
+             {
+                 downgrade = true;
++                crate::metrics::DOWNGRADES.inc();
+                 log::info!(
+                     "Downgrade {}, exceed downgrade threshold {}bit/ms in {}ms",
+                     id,
+@@ -565,6 +595,11 @@ async fn relay(
      Ok(())
  }
  
@@ -991,7 +1084,7 @@ index 0ec190a..69ae13b 100644
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..5a1d26e 100644
+index dff45eb..b830f05 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,14 @@ use std::{
@@ -1074,19 +1167,31 @@ index dff45eb..5a1d26e 100644
          let (tx, mut rx) = mpsc::unbounded_channel::<Data>();
          let software_url = get_arg("software-url");
          let version = hbb_common::get_version_from_url(&software_url);
-@@ -221,7 +247,10 @@ impl RendezvousServer {
+@@ -147,6 +173,7 @@ impl RendezvousServer {
+         log::info!("local-ip: {:?}", rs.inner.local_ip);
+         std::env::set_var("PORT_FOR_API", port.to_string());
+         rs.parse_relay_servers(&get_arg("relay-servers"));
++        let pm_metrics = rs.pm.clone();
+         let mut listener = create_tcp_listener(port).await?;
+         let mut listener2 = create_tcp_listener(nat_port).await?;
+         let mut listener3 = create_tcp_listener(ws_port).await?;
+@@ -221,7 +248,14 @@ impl RendezvousServer {
                  }
              }
          };
 -        let listen_signal = listen_signal();
 +        tokio::spawn(serve_health(HEALTH_PORT, || TCP_PEERS.try_lock().map_or(0, |p| p.len())));
++        tokio::spawn(crate::metrics::serve(21123, move || {
++            let pm = pm_metrics.clone();
++            async move { render_metrics(&pm).await }
++        }));
 +        // Nothing to wait for: hosts registered here are registered with the other servers too
 +        // and reconnect; DRAIN_TIMEOUT only gives proxies time to stop sending new requests.
 +        let listen_signal = listen_signal_and_drain(|| false);
          tokio::select!(
              res = main_task => res,
              res = listen_signal => res,
-@@ -237,6 +266,9 @@ impl RendezvousServer {
+@@ -237,6 +271,9 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> LoopFailure {
@@ -1096,7 +1201,7 @@ index dff45eb..5a1d26e 100644
          let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
          loop {
              tokio::select! {
-@@ -251,9 +283,24 @@ impl RendezvousServer {
+@@ -251,9 +288,25 @@ impl RendezvousServer {
                  }
                  Some(data) = rx.recv() => {
                      match data {
@@ -1118,12 +1223,13 @@ index dff45eb..5a1d26e 100644
 +                            } else if !had && has && self.relay_servers.iter().any(|r| r.2) {
 +                                log::info!("relay failover: primary relay healthy again");
 +                            }
++                            crate::metrics::failover(!has && rs.iter().any(|r| r.2));
 +                            self.relay_servers = Arc::new(rs);
 +                        }
                      }
                  }
                  res = socket.next() => {
-@@ -321,6 +368,16 @@ impl RendezvousServer {
+@@ -321,10 +374,21 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> ResultType<()> {
@@ -1140,7 +1246,12 @@ index dff45eb..5a1d26e 100644
          if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
              match msg_in.union {
                  Some(rendezvous_message::Union::RegisterPeer(rp)) => {
-@@ -340,89 +397,9 @@ impl RendezvousServer {
+                     // B registered
++                    crate::metrics::REGISTER_PEER[0].inc();
+                     if !rp.id.is_empty() {
+                         log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
+                         self.update_addr(rp.id, addr, socket).await?;
+@@ -340,89 +404,9 @@ impl RendezvousServer {
                      }
                  }
                  Some(rendezvous_message::Union::RegisterPk(rk)) => {
@@ -1217,12 +1328,12 @@ index dff45eb..5a1d26e 100644
 -                                (Instant::now(), HashMap::from([(ip.clone(), 1)])),
 -                            );
 -                        }
--                    }
--                    if changed {
--                        self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
 +                    if let Some(msg_out) = self.register_pk(rk, addr).await {
 +                        socket.send(&msg_out, addr).await?
                      }
+-                    if changed {
+-                        self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
+-                    }
 -                    let mut msg_out = RendezvousMessage::new();
 -                    msg_out.set_register_pk_response(RegisterPkResponse {
 -                        result: register_pk_response::Result::OK.into(),
@@ -1232,7 +1343,7 @@ index dff45eb..5a1d26e 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // UDP PunchHoleRequest is intentionally unsupported.
-@@ -479,9 +456,33 @@ impl RendezvousServer {
+@@ -479,9 +463,34 @@ impl RendezvousServer {
          addr: SocketAddr,
          key: &str,
          ws: bool,
@@ -1244,6 +1355,7 @@ index dff45eb..5a1d26e 100644
 +                    // Host registered over TCP/WebSocket: keep this connection as its signalling path,
 +                    // but only once register_peer accepted it (known key, same IP). Otherwise the
 +                    // answer is request_pk and the RegisterPk that follows decides.
++                    crate::metrics::REGISTER_PEER[crate::metrics::transport(ws)].inc();
 +                    if !rp.id.is_empty() {
 +                        let mut msg_out = self.register_peer(rp.id.clone(), addr).await;
 +                        if !msg_out.register_peer_response().request_pk {
@@ -1266,7 +1378,7 @@ index dff45eb..5a1d26e 100644
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // there maybe several attempt, so sink can be none
                      if let Some(sink) = sink.take() {
-@@ -521,8 +522,18 @@ impl RendezvousServer {
+@@ -521,8 +530,18 @@ impl RendezvousServer {
                              rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
                          }
                      }
@@ -1286,7 +1398,7 @@ index dff45eb..5a1d26e 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
                      allow_err!(self.handle_hole_sent(phs, addr, None).await);
-@@ -545,14 +556,31 @@ impl RendezvousServer {
+@@ -545,14 +564,31 @@ impl RendezvousServer {
                      msg_out.set_test_nat_response(res);
                      Self::send_to_sink(sink, msg_out).await;
                  }
@@ -1326,7 +1438,7 @@ index dff45eb..5a1d26e 100644
                  }
                  _ => {}
              }
-@@ -567,6 +595,12 @@ impl RendezvousServer {
+@@ -567,6 +603,12 @@ impl RendezvousServer {
          socket_addr: SocketAddr,
          socket: &mut FramedSocket,
      ) -> ResultType<()> {
@@ -1339,7 +1451,7 @@ index dff45eb..5a1d26e 100644
          let (request_pk, ip_change) = if let Some(old) = self.pm.get_in_memory(&id).await {
              let mut old = old.write().await;
              let ip = socket_addr.ip();
-@@ -601,7 +635,109 @@ impl RendezvousServer {
+@@ -601,7 +643,110 @@ impl RendezvousServer {
              request_pk,
              ..Default::default()
          });
@@ -1441,6 +1553,7 @@ index dff45eb..5a1d26e 100644
 +        if changed {
 +            self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
 +        }
++        crate::metrics::register_pk(0);
 +        let mut msg_out = RendezvousMessage::new();
 +        msg_out.set_register_pk_response(RegisterPkResponse {
 +            result: register_pk_response::Result::OK.into(),
@@ -1450,7 +1563,7 @@ index dff45eb..5a1d26e 100644
      }
  
      #[inline]
-@@ -620,17 +756,25 @@ impl RendezvousServer {
+@@ -620,17 +765,25 @@ impl RendezvousServer {
              &addr
          );
          let mut msg_out = RendezvousMessage::new();
@@ -1477,7 +1590,7 @@ index dff45eb..5a1d26e 100644
              socket.send(&msg_out, addr_a).await?;
          } else {
              self.send_to_tcp(msg_out, addr_a).await;
-@@ -658,6 +802,7 @@ impl RendezvousServer {
+@@ -658,6 +811,7 @@ impl RendezvousServer {
              socket_addr: la.local_addr.clone(),
              pk: self.get_pk(&la.version, la.id).await,
              relay_server: la.relay_server,
@@ -1485,16 +1598,34 @@ index dff45eb..5a1d26e 100644
              ..Default::default()
          };
          p.set_is_local(true);
-@@ -679,7 +824,7 @@ impl RendezvousServer {
+@@ -679,8 +833,9 @@ impl RendezvousServer {
          ws: bool,
      ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
          let mut ph = ph;
 -        if !key.is_empty() && ph.licence_key != key {
 +        if !crate::common::key_accepted(key, &ph.licence_key) {
              log::warn!("Authentication failed from {} for peer {} - invalid key", addr, ph.id);
++            crate::metrics::PUNCH[crate::metrics::PUNCH_KEY_MISMATCH].inc();
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
-@@ -754,6 +899,7 @@ impl RendezvousServer {
+                 failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
+@@ -700,6 +855,7 @@ impl RendezvousServer {
+                 (r.last_reg_time.elapsed().as_millis() as i64, r.socket_addr)
+             };
+             if elapsed >= REG_TIMEOUT {
++                crate::metrics::PUNCH[crate::metrics::PUNCH_OFFLINE].inc();
+                 let mut msg_out = RendezvousMessage::new();
+                 msg_out.set_punch_hole_response(PunchHoleResponse {
+                     failure: punch_hole_response::Failure::OFFLINE.into(),
+@@ -744,6 +900,7 @@ impl RendezvousServer {
+                     }
+                 });
+             let socket_addr = AddrMangle::encode(addr).into();
++            crate::metrics::PUNCH[if same_intranet { crate::metrics::PUNCH_LAN } else { crate::metrics::PUNCH_OK }].inc();
+             if same_intranet {
+                 log::debug!(
+                     "Fetch local addr {:?} {:?} request from {:?}",
+@@ -754,6 +911,7 @@ impl RendezvousServer {
                  msg_out.set_fetch_local_addr(FetchLocalAddr {
                      socket_addr,
                      relay_server,
@@ -1502,7 +1633,7 @@ index dff45eb..5a1d26e 100644
                      ..Default::default()
                  });
              } else {
-@@ -763,10 +909,23 @@ impl RendezvousServer {
+@@ -763,15 +921,29 @@ impl RendezvousServer {
                      peer_addr,
                      addr
                  );
@@ -1526,7 +1657,13 @@ index dff45eb..5a1d26e 100644
                      ..Default::default()
                  });
              }
-@@ -787,6 +946,13 @@ impl RendezvousServer {
+             Ok((msg_out, Some(peer_addr)))
+         } else {
++            crate::metrics::PUNCH[crate::metrics::PUNCH_NOT_EXIST].inc();
+             let mut msg_out = RendezvousMessage::new();
+             msg_out.set_punch_hole_response(PunchHoleResponse {
+                 failure: punch_hole_response::Failure::ID_NOT_EXIST.into(),
+@@ -787,6 +959,13 @@ impl RendezvousServer {
          stream: &mut FramedStream,
          peers: Vec<String>,
      ) -> ResultType<()> {
@@ -1540,7 +1677,7 @@ index dff45eb..5a1d26e 100644
          let mut states = BytesMut::zeroed((peers.len() + 7) / 8);
          for (i, peer_id) in peers.iter().enumerate() {
              if let Some(peer) = self.pm.get_in_memory(peer_id).await {
-@@ -805,9 +971,7 @@ impl RendezvousServer {
+@@ -805,9 +984,7 @@ impl RendezvousServer {
              states: states.into(),
              ..Default::default()
          });
@@ -1551,7 +1688,7 @@ index dff45eb..5a1d26e 100644
      }
  
      #[inline]
-@@ -821,19 +985,57 @@ impl RendezvousServer {
+@@ -821,19 +998,57 @@ impl RendezvousServer {
      #[inline]
      async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) {
          if let Some(sink) = sink.as_mut() {
@@ -1572,14 +1709,14 @@ index dff45eb..5a1d26e 100644
 +            match sink {
 +                Sink::TcpStream(s) => {
 +                    allow_err!(s.send(Bytes::from(bytes)).await);
-                 }
++                }
 +                Sink::Ws(ws) => {
 +                    allow_err!(ws.send(tungstenite::Message::Binary(bytes)).await);
-+                }
-+            }
-+        }
-+    }
-+
+                 }
+             }
+         }
+     }
+ 
 +    /// Send to the controller's punch socket and keep it for later messages (ICE candidates);
 +    /// it is dropped when that connection closes.
 +    /// The lock is held while sending so a candidate racing this message is not lost; a peer that
@@ -1590,10 +1727,10 @@ index dff45eb..5a1d26e 100644
 +        if let Some(sink) = punch.get_mut(&key) {
 +            if timeout(500, Self::send_sink(sink, msg)).await.is_err() {
 +                punch.remove(&key);
-             }
-         }
-     }
- 
++            }
++        }
++    }
++
 +    /// Tether: WebRTC trickle ICE between the two peers. From the host (on its own connection)
 +    /// `socket_addr` names the controller's punch socket; from the controller `id` names the
 +    /// host, reached over its registration. Candidates are opaque here: the peers check the
@@ -1617,7 +1754,25 @@ index dff45eb..5a1d26e 100644
      #[inline]
      async fn send_to_tcp_sync(
          &mut self,
-@@ -911,19 +1113,26 @@ impl RendezvousServer {
+@@ -888,6 +1103,7 @@ impl RendezvousServer {
+             if counter.1.elapsed().as_secs() > IP_BLOCK_DUR {
+                 counter.0 = 0;
+             } else if counter.0 > 30 {
++                crate::metrics::IP_BLOCKED[0].inc();
+                 return false;
+             }
+             counter.0 += 1;
+@@ -898,6 +1114,9 @@ impl RendezvousServer {
+             if counter.1.elapsed().as_secs() > DAY_SECONDS {
+                 counter.0.clear();
+             } else if counter.0.len() > 300 {
++                if is_new {
++                    crate::metrics::IP_BLOCKED[1].inc();
++                }
+                 return !is_new;
+             }
+             if is_new {
+@@ -911,19 +1130,28 @@ impl RendezvousServer {
      }
  
      fn parse_relay_servers(&mut self, relay_servers: &str) {
@@ -1649,11 +1804,13 @@ index dff45eb..5a1d26e 100644
 -        }
 -        let i = ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst) % self.relay_servers.len();
 -        self.relay_servers[i].clone()
-+        pick_relay(&self.relay_servers, ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst))
++        let r = pick_relay(&self.relay_servers, ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst));
++        crate::metrics::relay_assigned(&r);
++        r
      }
  
      async fn check_cmd(&self, cmd: &str) -> String {
-@@ -948,8 +1157,9 @@ impl RendezvousServer {
+@@ -948,8 +1176,9 @@ impl RendezvousServer {
                  if let Some(rs) = fds.next() {
                      self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                  } else {
@@ -1665,10 +1822,11 @@ index dff45eb..5a1d26e 100644
                      }
                  }
              }
-@@ -1148,20 +1358,21 @@ impl RendezvousServer {
+@@ -1148,20 +1377,22 @@ impl RendezvousServer {
          key: &str,
          ws: bool,
      ) -> ResultType<()> {
++        let _conn = crate::metrics::Open::new(&crate::metrics::CONNECTIONS[crate::metrics::transport(ws)]);
 +        // Messages queued for this connection (signalling for a host registered over it).
 +        let (peer_tx, mut peer_rx) = mpsc::unbounded_channel::<RendezvousMessage>();
          let mut sink;
@@ -1695,7 +1853,7 @@ index dff45eb..5a1d26e 100644
                      }
                  }
                  Ok(response)
-@@ -1169,22 +1380,71 @@ impl RendezvousServer {
+@@ -1169,22 +1400,71 @@ impl RendezvousServer {
              let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
              let (a, mut b) = ws_stream.split();
              sink = Some(Sink::Ws(a));
@@ -1774,7 +1932,7 @@ index dff45eb..5a1d26e 100644
          if sink.is_none() {
              self.tcp_punch.lock().await.remove(&try_into_v4(addr));
          }
-@@ -1268,18 +1528,43 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
+@@ -1268,24 +1548,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
      let mut futs = Vec::new();
      let rs = Arc::new(Mutex::new(Vec::new()));
      for x in rs0.iter() {
@@ -1824,7 +1982,15 @@ index dff45eb..5a1d26e 100644
              }
          }));
      }
-@@ -1330,17 +1615,13 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+     join_all(futs).await;
+     log::debug!("check_relay_servers");
+     let rs = std::mem::take(&mut *rs.lock().await);
++    let all: Vec<(String, bool)> = rs0.iter().map(|x| relay_entry(x)).map(|(a, _, b)| (a.to_owned(), b)).collect();
++    crate::metrics::relay_check(&all, &rs);
+     if !rs.is_empty() {
+         tx.send(Data::RelayServers(rs)).ok();
+     }
+@@ -1330,17 +1637,14 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
  }
  
  #[inline]
@@ -1834,6 +2000,7 @@ index dff45eb..5a1d26e 100644
 -    res: register_pk_response::Result,
 -) -> ResultType<()> {
 +fn rk_res(res: register_pk_response::Result) -> RendezvousMessage {
++    crate::metrics::register_pk(res as i32);
      let mut msg_out = RendezvousMessage::new();
      msg_out.set_register_pk_response(RegisterPkResponse {
          result: res.into(),
@@ -1844,7 +2011,7 @@ index dff45eb..5a1d26e 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1642,258 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1665,273 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
@@ -2103,12 +2270,27 @@ index dff45eb..5a1d26e 100644
 +        assert_eq!(h(&[]), None);
 +    }
 +}
++
++/// Tether: the `/metrics` page (crate::metrics) with the values read at scrape time.
++async fn render_metrics(pm: &PeerMap) -> String {
++    let (peers_online, peers_in_memory) = pm.count_online(REG_TIMEOUT as u128).await;
++    let tcp_signalling = TCP_PEERS.lock().await.len();
++    let turn = crate::turn::get();
++    crate::metrics::render_hbbs(&crate::metrics::HbbsNow {
++        peers_online,
++        peers_in_memory,
++        tcp_signalling,
++        turn_enabled: turn.is_some(),
++        turn_open: turn.map_or(0, |t| t.open_allocations()),
++        turn_max: turn.map_or(0, |t| t.max_allocations()),
++    })
++}
 diff --git a/src/turn.rs b/src/turn.rs
 new file mode 100644
-index 0000000..60d95ea
+index 0000000..778654b
 --- /dev/null
 +++ b/src/turn.rs
-@@ -0,0 +1,911 @@
+@@ -0,0 +1,934 @@
 +//! Tether: a TURN server (RFC 5766, UDP) inside hbbs, on hbbs's own UDP port (21116), so a
 +//! WebRTC session that cannot form a direct pair is relayed over UDP instead of hbbr's
 +//! TCP/WebSocket leg. The core's WebRTC data channel (KCP-style SCTP, see
@@ -2515,6 +2697,14 @@ index 0000000..60d95ea
 +        }
 +    }
 +
++    /// Tether metrics: open allocations and the cap.
++    pub fn open_allocations(&self) -> usize {
++        self.live.load(Ordering::SeqCst)
++    }
++    pub fn max_allocations(&self) -> usize {
++        self.cfg.max_allocations
++    }
++
 +    fn public_ip(&self) -> Option<Ipv4Addr> {
 +        Some(Ipv4Addr::from(self.public_ip.load(Ordering::SeqCst))).filter(|ip| !ip.is_unspecified())
 +    }
@@ -2544,7 +2734,10 @@ index 0000000..60d95ea
 +            Some(3) | Some(4) | Some(8) | Some(9) => {
 +                match self.auth.verified_user(b) {
 +                    Some(user) => self.auth.record_first_use(&user, from, now_secs()),
-+                    None if !self.unauth.lock().unwrap().take(1) => return true,
++                    None if !self.unauth.lock().unwrap().take(1) => {
++                        crate::metrics::TURN_UNAUTH_DROPPED.inc();
++                        return true;
++                    }
 +                    None => {}
 +                }
 +                self.client(from);
@@ -2557,7 +2750,9 @@ index 0000000..60d95ea
 +            _ => is_channel_data(b) && self.clients.lock().unwrap().contains_key(&from),
 +        };
 +        if to_control {
++            crate::metrics::TURN_REQUESTS.inc();
 +            if self.control.try_send((b.to_vec(), from)).is_err() {
++                crate::metrics::TURN_QUEUE_DROPPED.inc();
 +                log::debug!("TURN control queue full, dropped");
 +            }
 +            return true;
@@ -2691,11 +2886,17 @@ index 0000000..60d95ea
 +            let Some((b, from)) = self.rx.lock().await.recv().await else {
 +                return Err(webrtc_util::Error::Other("closed".into()));
 +            };
-+            if self.turn.allowed(from) && self.recv.lock().unwrap().take(b.len()) {
-+                let n = b.len().min(buf.len());
-+                buf[..n].copy_from_slice(&b[..n]);
-+                return Ok((n, from));
++            if !self.turn.allowed(from) {
++                continue;
 +            }
++            if !self.recv.lock().unwrap().take(b.len()) {
++                crate::metrics::TURN_BANDWIDTH_DROPPED[1].inc();
++                continue;
++            }
++            crate::metrics::TURN_BYTES[1].add(b.len() as u64);
++            let n = b.len().min(buf.len());
++            buf[..n].copy_from_slice(&b[..n]);
++            return Ok((n, from));
 +        }
 +    }
 +    async fn send(&self, _: &[u8]) -> webrtc_util::Result<usize> {
@@ -2721,8 +2922,10 @@ index 0000000..60d95ea
 +            }
 +        }
 +        if !self.send.lock().unwrap().take(b.len()) {
++            crate::metrics::TURN_BANDWIDTH_DROPPED[0].inc();
 +            return Ok(b.len());
 +        }
++        crate::metrics::TURN_BYTES[0].add(b.len() as u64);
 +        Ok(self.turn.send_to(b, to).await?)
 +    }
 +    fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
@@ -2758,10 +2961,12 @@ index 0000000..60d95ea
 +            return Err(turn::Error::Other("IPv4 relays only".into()));
 +        };
 +        if t.live.fetch_add(1, Ordering::SeqCst) >= t.cfg.max_allocations {
++            crate::metrics::TURN_ALLOCATIONS_REFUSED.inc();
 +            t.live.fetch_sub(1, Ordering::SeqCst);
 +            log::warn!("TURN allocation refused: {} allocations open", t.cfg.max_allocations);
 +            return Err(turn::Error::Other("allocation limit".into()));
 +        }
++        crate::metrics::TURN_ALLOCATIONS.inc();
 +        let (tx, rx) = mpsc::channel(QUEUE);
 +        let conn = RelayConn {
 +            id: t.next_id.fetch_add(1, Ordering::SeqCst),
