@@ -8,8 +8,12 @@ Fast, private, self-hosted remote desktop for Windows and macOS, with a Linux re
 - **Streaming:** FluxRT, a clean-room low-latency profile with hardware encoding on the host and
   WebCodecs hardware decoding in the viewer. See [docs/fluxrt-spec.md](docs/fluxrt-spec.md).
 - **Relay:** `hbbs` (ID/rendezvous) and `hbbr` (relay) on Linux via systemd or Docker.
-- **Security:** end-to-end encryption is mandatory, with no plaintext fallback. The server key is
-  pinned. 2FA, strong passwords and brute-force limits are built in. See [SECURITY.md](SECURITY.md).
+- **Security:** sessions are end-to-end encrypted between the two devices (X25519 key agreement,
+  XSalsa20-Poly1305 or DTLS, forward secrecy) and Tether refuses unencrypted sessions. The relay
+  forwards ciphertext; host keys are vouched for by the relay's server key, so that key must stay
+  secret (whoever holds it and controls hbbs could impersonate hosts). 2FA, strong passwords and
+  brute-force limits are built in. See [docs/encryption.md](docs/encryption.md) and the threat
+  model in [SECURITY.md](SECURITY.md).
 - **Design:** [DESIGN.md](DESIGN.md).
 - **Networks:** only TCP 443 (port 80 as fallback), works behind proxies and TLS inspection. See
   [docs/corporate-networks.md](docs/corporate-networks.md) and
