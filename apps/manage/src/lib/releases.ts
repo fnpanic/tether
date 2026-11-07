@@ -19,8 +19,8 @@ export interface ReleaseGroup {
   modified: number;
 }
 
-// Must match release::NAMES in src-tauri/src/release.rs (plus the mac disk image).
-const NAME = /^(?:Tether_(.+?)_(?:x64-setup\.exe|universal\.app\.tar\.gz|universal\.dmg)|TetherQS-(.+?)(?:-universal\.zip|\.exe))(?:\.sig)?$/;
+// Must match tether_trust::release::file_version (artifact, .sig, TetherQS .exe.gz, mac .dmg + .sig).
+const NAME = /^(?:Tether_(.+?)_(?:x64-setup\.exe|universal\.app\.tar\.gz|universal\.dmg)(?:\.sig)?|TetherQS-(.+?)(?:-universal\.zip(?:\.sig)?|\.exe(?:\.sig|\.gz)?))$/;
 
 /** One line per release, newest version first within a channel and app. */
 export function groupReleases(files: ReleaseFile[]): ReleaseGroup[] {
