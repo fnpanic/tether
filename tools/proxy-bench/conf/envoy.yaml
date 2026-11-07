@@ -1,0 +1,45 @@
+# Bench front: Envoy, WebSocket + API routes (no file server: Envoy has none).
+static_resources:
+  listeners:
+  - name: https
+    address: { socket_address: { address: 127.0.0.1, port_value: 28443 } }
+    per_connection_buffer_limit_bytes: 32768
+    filter_chains:
+    - transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          common_tls_context:
+            alpn_protocols: [h2, http/1.1]
+            tls_params: { tls_minimum_protocol_version: TLSv1_2 }
+            tls_certificates: [{ certificate_chain: { filename: "@W@/tls/localhost.crt" }, private_key: { filename: "@W@/tls/localhost.key" } }]
+      filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: https
+          use_remote_address: true
+          skip_xff_append: false
+          upgrade_configs: [{ upgrade_type: websocket }]
+          stream_idle_timeout: 3600s
+          route_config:
+            virtual_hosts:
+            - name: all
+              domains: ["*"]
+              request_headers_to_add: [{ header: { key: X-Real-IP, value: "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%" }, append_action: OVERWRITE_IF_EXISTS_OR_ADD }]
+              routes:
+              - { match: { path: /ws/id }, route: { cluster: hbbs_ws, timeout: 0s } }
+              - { match: { path: /ws/relay }, route: { cluster: hbbr_ws, timeout: 0s } }
+              - { match: { prefix: /api/ }, route: { cluster: api } }
+              - { match: { prefix: /download/ }, route: { cluster: files } }
+              - { match: { prefix: / }, direct_response: { status: 200, body: { inline_string: "Tether relay" } } }
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config: { "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router }
+  clusters:
+  - { name: hbbs_ws, type: STATIC, load_assignment: { cluster_name: hbbs_ws, endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 25118 } } } }] }] }, circuit_breakers: { thresholds: [{ max_connections: 1000000, max_requests: 1000000, max_pending_requests: 1000000 }] } }
+  - { name: hbbr_ws, type: STATIC, load_assignment: { cluster_name: hbbr_ws, endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 25119 } } } }] }] }, circuit_breakers: { thresholds: [{ max_connections: 1000000, max_requests: 1000000, max_pending_requests: 1000000 }] } }
+  - { name: api, type: STATIC, load_assignment: { cluster_name: api, endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 25120 } } } }] }] } }
+  - { name: files, type: STATIC, load_assignment: { cluster_name: files, endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 28126 } } } }] }] } }
+admin:
+  address: { socket_address: { address: 127.0.0.1, port_value: 28125 } }

@@ -6,6 +6,8 @@
 #   @REMOTE_HOST@  its public host name
 #   @REMOTE_ADDR@  where its Caddy serves /_metrics/* (host:port; 443 in production)
 #   @REMOTE_SCHEME@ https in production
+#   @LOCAL_PROXY@ / @REMOTE_PROXY@  front end of this / the other node: caddy or nginx (job name;
+#                  both serve their metrics on 127.0.0.1:21125, nginx through its exporter)
 #   @ETC@          config dir (/etc/tether-monitoring)
 # The other node's exporters are reached through its Caddy at https://<host>/_metrics/<job>,
 # which only answers this node's IP with the scrape password (deploy/monitoring/caddy/).
@@ -30,7 +32,7 @@ scrape_configs:
     static_configs: [{ targets: ["127.0.0.1:21124"], labels: { node: "@LOCAL@" } }]
   - job_name: api
     static_configs: [{ targets: ["127.0.0.1:21120"], labels: { node: "@LOCAL@" } }]
-  - job_name: caddy
+  - job_name: @LOCAL_PROXY@
     static_configs: [{ targets: ["127.0.0.1:21125"], labels: { node: "@LOCAL@" } }]
   - job_name: node
     static_configs: [{ targets: ["127.0.0.1:9100"], labels: { node: "@LOCAL@" } }]
@@ -60,12 +62,12 @@ scrape_configs:
     basic_auth: { username: prometheus, password_file: @ETC@/scrape.pass }
     static_configs: [{ targets: ["@REMOTE_ADDR@"], labels: { node: "@REMOTE@" } }]
     relabel_configs: [{ target_label: job, replacement: api }]
-  - job_name: caddy_remote
-    metrics_path: /_metrics/caddy
+  - job_name: @REMOTE_PROXY@_remote
+    metrics_path: /_metrics/@REMOTE_PROXY@
     scheme: @REMOTE_SCHEME@
     basic_auth: { username: prometheus, password_file: @ETC@/scrape.pass }
     static_configs: [{ targets: ["@REMOTE_ADDR@"], labels: { node: "@REMOTE@" } }]
-    relabel_configs: [{ target_label: job, replacement: caddy }]
+    relabel_configs: [{ target_label: job, replacement: @REMOTE_PROXY@ }]
   - job_name: node_remote
     metrics_path: /_metrics/node
     scheme: @REMOTE_SCHEME@

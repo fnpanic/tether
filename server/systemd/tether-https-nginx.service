@@ -1,0 +1,33 @@
+# Installed as /etc/systemd/system/tether-https.service by install.sh when PROXY=nginx (the
+# Caddy unit otherwise): same name, so every runbook (systemctl restart tether-https) still works.
+[Unit]
+Description=Tether relay HTTPS/WebSocket front end (nginx, TCP 443)
+After=network-online.target tether-hbbs.service tether-hbbr.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tether-https
+Group=tether-https
+ExecStartPre=/usr/sbin/nginx -e stderr -t -q -c /etc/tether/nginx.conf
+ExecStart=/usr/sbin/nginx -e stderr -c /etc/tether/nginx.conf -g "daemon off;"
+# Graceful: new workers take new connections, old ones keep their WebSockets (worker_shutdown_timeout).
+ExecReload=/usr/sbin/nginx -e stderr -t -q -c /etc/tether/nginx.conf
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+RuntimeDirectory=tether-https
+# Bind 80/443 without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# No NoNewPrivileges: under SELinux it would block the transition to nginx's confined domain
+# (httpd_t) that install.sh configures.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tether-https
+
+[Install]
+WantedBy=multi-user.target

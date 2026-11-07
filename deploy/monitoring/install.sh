@@ -6,6 +6,8 @@
 #     sudo PEER_HOST=<monitoring node's public name> SCRAPE_FROM=<its IP> SCRAPE_HASH='<bcrypt hash>' ./install.sh target
 #   The monitoring node (here: the Hetzner primary), after the line above was printed for it:
 #     sudo REMOTE_HOST=<other node's public name> ./install.sh monitor
+# The front end (Caddy or nginx, PROXY= in /etc/tether/server.env) gets the matching snippets;
+# REMOTE_PROXY=nginx on the monitoring node when the other node runs nginx (default caddy).
 #
 # target:  node_exporter + blackbox_exporter on localhost; with SCRAPE_FROM/SCRAPE_HASH also
 #          /_metrics/* in Caddy for the Prometheus on the monitoring node.
@@ -27,6 +29,7 @@ case "$(uname -m)" in
 esac
 [ -f /etc/tether/server.env ] || { echo "no /etc/tether/server.env: install the Tether relay first (server/install.sh)" >&2; exit 1; }
 HOST="$(sed -n 's/^RELAY_HOST=//p' /etc/tether/server.env)"
+PROXY="$(sed -n 's/^PROXY=//p' /etc/tether/server.env)"; PROXY="${PROXY:-caddy}"
 # The node whose public endpoints this node probes: the other one.
 [ "$ROLE" = monitor ] && PEER_HOST="${REMOTE_HOST:-}"
 : "${PEER_HOST:?PEER_HOST=<public host name of the other node> is required (monitor: REMOTE_HOST)}"
@@ -59,14 +62,19 @@ fill() { # fill <src> <dest> <mode> [owner]: copy with the @...@ placeholders fi
       -e "s|@LOCAL_HOST@|$HOST|g" -e "s|@REMOTE_HOST@|${REMOTE_HOST:-}|g" -e "s|@REMOTE_ADDR@|${REMOTE_ADDR:-}|g" \
       -e "s|@REMOTE_SCHEME@|https|g" -e "s|@SCRAPE_FROM@|${SCRAPE_FROM:-}|g" -e "s|@SCRAPE_HASH@|${SCRAPE_HASH:-}|g" \
       -e "s|@GRAFANA_USER@|${GRAFANA_USER:-}|g" -e "s|@GRAFANA_HASH@|${GRAFANA_HASH:-}|g" \
+      -e "s|@LOCAL_PROXY@|$PROXY|g" -e "s|@REMOTE_PROXY@|${REMOTE_PROXY:-caddy}|g" \
       -e "s|@TELEGRAM_CHAT_ID@|${TELEGRAM_CHAT_ID:-0}|g" "$1" > "$2.new"
   chmod "$3" "$2.new"
   [ -z "${4:-}" ] || chown "$4" "$2.new"
   mv "$2.new" "$2"
 }
 secret() { [ -s "$1" ] || (umask 077; head -c 24 /dev/urandom | base64 | tr -d '/+=' > "$1"); }
+# bcrypt hash for the basic-auth passwords, accepted by Caddy and nginx. Cost 5: the passwords are
+# 24 random bytes (no guessing at any cost), and nginx checks the hash on every request inside a
+# worker that also carries thousands of WebSockets.
+bcrypt() { python3 -W ignore -c 'import crypt,sys; print(crypt.crypt(sys.argv[1], crypt.mksalt(crypt.METHOD_BLOWFISH, rounds=32)))' "$1" 2>/dev/null || /usr/local/bin/caddy hash-password --plaintext "$1"; }
 
-install -d -m 0755 $ETC /etc/tether/caddy.d
+install -d -m 0755 $ETC /etc/tether/caddy.d /etc/tether/nginx.d
 
 # ---- every node: host metrics and probes ----
 sysuser node_exporter
@@ -79,7 +87,8 @@ for u in node_exporter blackbox_exporter; do install -m 0644 "$HERE/systemd/$u.s
 # The relay's Caddyfile must have the metrics listener and the caddy.d import (server/caddy/Caddyfile
 # since monitoring); install it from this checkout if the node still has an older one.
 caddy_changed=0
-if ! grep -q 'caddy.d/\*.caddy' /etc/tether/Caddyfile; then
+nginx_changed=0
+if [ "$PROXY" = caddy ] && ! grep -q 'caddy.d/\*.caddy' /etc/tether/Caddyfile; then
   [ -f "$HERE/../../server/caddy/Caddyfile" ] || { echo "/etc/tether/Caddyfile is older than monitoring: copy server/caddy/ along" >&2; exit 1; }
   cp -p /etc/tether/Caddyfile "/etc/tether/Caddyfile.bak-$(date +%Y%m%d%H%M)"
   install -m 0644 "$HERE/../../server/caddy/Caddyfile" /etc/tether/Caddyfile.new
@@ -87,10 +96,19 @@ if ! grep -q 'caddy.d/\*.caddy' /etc/tether/Caddyfile; then
 fi
 if [ -n "${SCRAPE_FROM:-}" ] || [ -n "${SCRAPE_HASH:-}" ]; then
   [ -n "${SCRAPE_FROM:-}" ] && [ -n "${SCRAPE_HASH:-}" ] || { echo "SCRAPE_FROM and SCRAPE_HASH go together" >&2; exit 1; }
-  case "$SCRAPE_HASH" in '$2'*) ;; *) echo "SCRAPE_HASH must be a bcrypt hash (caddy hash-password)" >&2; exit 1 ;; esac
+  case "$SCRAPE_HASH" in '$2'*) ;; *) echo "SCRAPE_HASH must be a bcrypt hash" >&2; exit 1 ;; esac
   # bcrypt hashes contain no | (the sed delimiter in fill)
-  fill "$HERE/caddy/metrics-remote.caddy" /etc/tether/caddy.d/metrics-remote.caddy.new 0644
-  if ! cmp -s /etc/tether/caddy.d/metrics-remote.caddy.new /etc/tether/caddy.d/metrics-remote.caddy 2>/dev/null; then caddy_changed=1; fi
+  if [ "$PROXY" = nginx ]; then
+    fill "$HERE/nginx/metrics-remote.conf" /etc/tether/nginx.d/metrics-remote.conf.new 0644
+    printf 'prometheus:%s\n' "$SCRAPE_HASH" > /etc/tether/nginx.d/metrics.htpasswd.new
+    chgrp tether-https /etc/tether/nginx.d/metrics.htpasswd.new && chmod 0640 /etc/tether/nginx.d/metrics.htpasswd.new
+    for f in metrics-remote.conf metrics.htpasswd; do
+      cmp -s /etc/tether/nginx.d/$f.new /etc/tether/nginx.d/$f 2>/dev/null || nginx_changed=1
+    done
+  else
+    fill "$HERE/caddy/metrics-remote.caddy" /etc/tether/caddy.d/metrics-remote.caddy.new 0644
+    if ! cmp -s /etc/tether/caddy.d/metrics-remote.caddy.new /etc/tether/caddy.d/metrics-remote.caddy 2>/dev/null; then caddy_changed=1; fi
+  fi
 fi
 
 # ---- monitoring node ----
@@ -113,7 +131,7 @@ if [ "$ROLE" = monitor ]; then
   chgrp prometheus $ETC/scrape.pass && chmod 0640 $ETC/scrape.pass
   secret $ETC/grafana-web.pass
   GRAFANA_USER=tether
-  GRAFANA_HASH="$(/usr/local/bin/caddy hash-password --plaintext "$(cat $ETC/grafana-web.pass)")"
+  GRAFANA_HASH="$(bcrypt "$(cat $ETC/grafana-web.pass)")"
 
   fill "$HERE/prometheus/prometheus.yml" $ETC/prometheus.yml 0644
   install -m 0644 "$HERE/prometheus/rules/tether.yml" $ETC/rules/tether.yml
@@ -155,8 +173,22 @@ EOF
   install -d -m 0755 /etc/systemd/system/grafana-server.service.d
   install -m 0644 "$HERE/systemd/grafana-server.override.conf" /etc/systemd/system/grafana-server.service.d/tether.conf
 
-  fill "$HERE/caddy/grafana.caddy" /etc/tether/caddy.d/grafana.caddy.new 0644
-  if ! cmp -s /etc/tether/caddy.d/grafana.caddy.new /etc/tether/caddy.d/grafana.caddy 2>/dev/null; then caddy_changed=1; fi
+  if [ "$PROXY" = nginx ]; then
+    install -m 0644 "$HERE/nginx/grafana.conf" /etc/tether/nginx.d/grafana.conf.new
+    # Keep the existing hash when the password is unchanged (bcrypt salts differ per run).
+    if [ -f /etc/tether/nginx.d/grafana.htpasswd ] && python3 -W ignore -c 'import crypt,sys; h=open(sys.argv[2]).read().split(":",1)[1].strip(); sys.exit(crypt.crypt(sys.argv[1], h) != h)' "$(cat $ETC/grafana-web.pass)" /etc/tether/nginx.d/grafana.htpasswd; then
+      cp -p /etc/tether/nginx.d/grafana.htpasswd /etc/tether/nginx.d/grafana.htpasswd.new
+    else
+      printf '%s:%s\n' "$GRAFANA_USER" "$GRAFANA_HASH" > /etc/tether/nginx.d/grafana.htpasswd.new
+    fi
+    chgrp tether-https /etc/tether/nginx.d/grafana.htpasswd.new && chmod 0640 /etc/tether/nginx.d/grafana.htpasswd.new
+    for f in grafana.conf grafana.htpasswd; do
+      cmp -s /etc/tether/nginx.d/$f.new /etc/tether/nginx.d/$f 2>/dev/null || nginx_changed=1
+    done
+  else
+    fill "$HERE/caddy/grafana.caddy" /etc/tether/caddy.d/grafana.caddy.new 0644
+    if ! cmp -s /etc/tether/caddy.d/grafana.caddy.new /etc/tether/caddy.d/grafana.caddy 2>/dev/null; then caddy_changed=1; fi
+  fi
 fi
 
 if command -v restorecon >/dev/null; then
@@ -183,6 +215,21 @@ if [ "$caddy_changed" = 1 ]; then
 fi
 rm -f /etc/tether/caddy.d/*.new
 
+# New nginx snippets: test the whole config with them in place, keep the old set if it fails, then
+# reload (graceful: no WebSocket is dropped).
+if [ "$nginx_changed" = 1 ]; then
+  t="$(mktemp -d)"
+  cp -p /etc/tether/nginx.d/* "$t/" 2>/dev/null || true
+  for f in /etc/tether/nginx.d/*.new; do mv "$f" "${f%.new}"; done
+  if ! /usr/sbin/nginx -e stderr -t -q -c /etc/tether/nginx.conf; then
+    rm -f /etc/tether/nginx.d/*; cp -p "$t"/* /etc/tether/nginx.d/ 2>/dev/null || true; rm -rf "$t"
+    echo "new nginx config invalid: nothing changed, nginx not reloaded" >&2
+    exit 1
+  fi
+  rm -rf "$t"
+fi
+rm -f /etc/tether/nginx.d/*.new
+
 systemctl daemon-reload
 systemctl enable --now node_exporter blackbox_exporter
 systemctl restart node_exporter blackbox_exporter
@@ -191,15 +238,16 @@ if [ "$ROLE" = monitor ]; then
   systemctl restart prometheus alertmanager grafana-server
 fi
 [ "$caddy_changed" = 1 ] && systemctl restart tether-https
+[ "$nginx_changed" = 1 ] && systemctl reload tether-https
 
 echo
 echo "Tether monitoring ($ROLE) installed on $HOST."
 if [ "$ROLE" = monitor ]; then
   echo "On $REMOTE_HOST run:"
-  echo "  sudo PEER_HOST=$HOST SCRAPE_FROM=<public IP of this node> SCRAPE_HASH='$(/usr/local/bin/caddy hash-password --plaintext "$(cat $ETC/scrape.pass)")' ./install.sh target"
+  echo "  sudo PEER_HOST=$HOST SCRAPE_FROM=<public IP of this node> SCRAPE_HASH='$(bcrypt "$(cat $ETC/scrape.pass)")' ./install.sh target"
   echo
   echo "Grafana: https://$HOST/grafana/"
-  echo "  browser prompt (Caddy): user tether, password in $ETC/grafana-web.pass"
+  echo "  browser prompt ($PROXY): user tether, password in $ETC/grafana-web.pass"
   echo "  Grafana login: user admin, password in $ETC/grafana-admin.pass (first start only)"
   echo "Keep both passwords in your password manager: sudo cat $ETC/grafana-web.pass $ETC/grafana-admin.pass"
 fi

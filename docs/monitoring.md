@@ -126,6 +126,24 @@ The admin API stays off: the Caddyfile turns on the `metrics` global option and 
 `metrics` handler on a site bound to 127.0.0.1:21125. Useful series: `caddy_http_requests_total`,
 `caddy_http_request_duration_seconds`, `caddy_http_requests_in_flight`, `caddy_http_response_size_bytes`.
 
+### nginx (nodes installed with `PROXY=nginx`, 127.0.0.1:21125/metrics)
+
+nginx-prometheus-exporter (`tether-nginx-exporter.service`) reads nginx's `stub_status` on
+127.0.0.1:21126 and serves it where Caddy's metrics would be; Prometheus' job is then `nginx`
+(on the monitoring node `REMOTE_PROXY=nginx` for the other node, see
+[proxy-benchmark.md](proxy-benchmark.md) "Migration"). Series: `nginx_up`,
+`nginx_connections_active` / `_reading` / `_writing` / `_waiting` (waiting = idle WebSockets and
+keep-alive), `nginx_connections_accepted` / `_handled` (a difference means `worker_connections`
+ran out), `nginx_http_requests_total`. No per-request latency histograms (that would need NGINX
+Plus or log parsing); the API dashboard's nginx row shows connections, requests and drops. On the
+other node they come through `/_metrics/nginx`. The `/_metrics/*` and `/grafana/` snippets for
+nginx are `deploy/monitoring/nginx/*.conf` (+ `*.htpasswd`, bcrypt), installed into
+`/etc/tether/nginx.d/` and applied with a graceful `systemctl reload tether-https`.
+
+Scale-out alerts (`tether-headroom` group): `CapacityEgress`, `CapacityCpu`, `CapacityMemory`
+(> 40 %: what still fits under 65 % after losing the largest location, docs/scaling.md),
+`CapacitySignalling` (> 15 000 WebSockets on a front), `ListenQueueOverflow`.
+
 ### Hosts and probes
 
 node_exporter (127.0.0.1:9100): CPU, memory, disks and filesystems, network, conntrack

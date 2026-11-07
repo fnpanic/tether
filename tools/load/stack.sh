@@ -11,6 +11,9 @@
 # tether-api 25120; Caddy https://localhost:28443 and http://localhost:28080 (same routes);
 # client Caddy http://127.0.0.1:28081 -> https://localhost:28443.
 # Env: CADDY (default ~/caddy-dl/caddy), CADDYFILE (default server/caddy/Caddyfile), CADDY_ENV (front Caddy), HBBS_ENV / HBBR_ENV / API_ENV (extra "K=V ..." words).
+# FRONT=caddy|haproxy|nginx|envoy|traefik: the front under test (tools/proxy-bench/front.sh) with an
+# HAProxy client-side TLS layer instead of the client Caddy (docs/proxy-benchmark.md). caddy.pid is
+# then the front, whichever it is.
 set -euo pipefail
 cmd="$1"; HERE="$(cd "$(dirname "$0")" && pwd)"
 case "$cmd" in
@@ -22,7 +25,7 @@ start)
   sed -e '/^\ttls {/,/^\t}/c\	tls internal' \
       -e 's/^{\$RELAY_HOST} {/https:\/\/localhost:28443, http:\/\/localhost:28080 {/' \
       -e 's/^\tadmin off/\tadmin off\n\tskip_install_trust\n\thttp_port 28082\n\thttps_port 28443/' \
-      -e 's/2111\([5-9]\)/2511\1/g; s/2112\([0-2]\)/2512\1/g' \
+      -e 's/2111\([5-9]\)/2511\1/g; s/2112\([0-6]\)/2512\1/g' \
       -e "s#/var/lib/tether-api#$W/api#g" "${CADDYFILE:-$HERE/../../server/caddy/Caddyfile}" > "$W/Caddyfile"
   cat > "$W/Caddyfile.client" <<C
 {
@@ -45,8 +48,16 @@ C
   setsid env ${HBBR_ENV:-} HEALTH_PORT=25121 "$BIN/hbbr" -p 25117 -k _ > "$W/hbbr.log" 2>&1 & echo $! > "$W/hbbr.pid"
   setsid env ${HBBS_ENV:-} HEALTH_PORT=25122 "$BIN/hbbs" -p 25116 -k _ -r 'ws://127.0.0.1:25119' > "$W/hbbs.log" 2>&1 & echo $! > "$W/hbbs.pid"
   setsid env ${API_ENV:-} ADMIN_PUB_KEY= "$BIN/tether-api" --data "$W/api" --listen 127.0.0.1:25120 > "$W/api.log" 2>&1 & echo $! > "$W/api.pid"
-  XDG_DATA_HOME="$W/caddy" XDG_CONFIG_HOME="$W/caddy" setsid env ${CADDY_ENV:-} "$CADDY" run --config "$W/Caddyfile" --adapter caddyfile > "$W/caddy.log" 2>&1 & echo $! > "$W/caddy.pid"
-  XDG_DATA_HOME="$W/caddy2" XDG_CONFIG_HOME="$W/caddy2" setsid "$CADDY" run --config "$W/Caddyfile.client" --adapter caddyfile > "$W/caddy2.log" 2>&1 & echo $! > "$W/caddy2.pid"
+  if [ -z "${FRONT:-}" ] || [ "$FRONT" = caddy ]; then
+    XDG_DATA_HOME="$W/caddy" XDG_CONFIG_HOME="$W/caddy" setsid env ${CADDY_ENV:-} "$CADDY" run --config "$W/Caddyfile" --adapter caddyfile > "$W/caddy.log" 2>&1 & echo $! > "$W/caddy.pid"
+  else
+    "$HERE/../proxy-bench/front.sh" start "$FRONT" "$W"
+  fi
+  if [ -n "${FRONT:-}" ]; then
+    "$HERE/../proxy-bench/front.sh" client "$W"
+  else
+    XDG_DATA_HOME="$W/caddy2" XDG_CONFIG_HOME="$W/caddy2" setsid "$CADDY" run --config "$W/Caddyfile.client" --adapter caddyfile > "$W/caddy2.log" 2>&1 & echo $! > "$W/caddy2.pid"
+  fi
   for _ in $(seq 100); do [ -s "$W/hb/id_ed25519.pub" ] && curl -sk -o /dev/null https://localhost:28443/ && curl -sf -o /dev/null localhost:25121/readyz && curl -sf -o /dev/null localhost:25122/readyz && break; sleep 0.1; done
   echo "key=$(cat "$W/hb/id_ed25519.pub")"
   ;;
@@ -61,6 +72,7 @@ stop)
   pkill -9 -f -- "-p 2511[67] -k _" 2>/dev/null || true
   pkill -9 -f -- "--listen 127.0.0.1:25120" 2>/dev/null || true
   pkill -9 -f -- "--config $W/Caddyfile" 2>/dev/null || true
+  "$HERE/../proxy-bench/front.sh" stop "$W" 2>/dev/null || true
   sleep 0.5
   ;;
 *) echo "usage: stack.sh start <bin-dir> <work-dir> | stop <work-dir>" >&2; exit 2 ;;

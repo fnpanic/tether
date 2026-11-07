@@ -1,0 +1,16 @@
+tls:
+  certificates: [{ certFile: "@W@/tls/localhost.crt", keyFile: "@W@/tls/localhost.key" }]
+  options: { default: { minVersion: VersionTLS12 } }
+http:
+  routers:
+    id: { rule: "Path(`/ws/id`)", service: hbbs, tls: {} }
+    relay: { rule: "Path(`/ws/relay`)", service: hbbr, tls: {} }
+    api: { rule: "PathPrefix(`/api/`)", service: api, tls: {}, middlewares: [buf] }
+    files: { rule: "PathPrefix(`/download/`)", service: files, tls: {} }
+  middlewares:
+    buf: { buffering: { memRequestBodyBytes: 524288 } }
+  services:
+    hbbs: { loadBalancer: { servers: [{ url: "http://127.0.0.1:25118" }] } }
+    hbbr: { loadBalancer: { servers: [{ url: "http://127.0.0.1:25119" }] } }
+    api: { loadBalancer: { servers: [{ url: "http://127.0.0.1:25120" }] } }
+    files: { loadBalancer: { servers: [{ url: "http://127.0.0.1:28126" }] } }

@@ -79,7 +79,7 @@ SSL_CERT_FILE="$CA" run blackbox "$BBX" --config.file="$W/etc/blackbox.yml" --we
 
 # ---- Prometheus + Alertmanager: the production files, filled in for localhost ----
 echo -n "$PASS" > etc/scrape.pass
-sed -e "s|@ETC@|$W/etc|g; s|@LOCAL@|a|g; s|@REMOTE@|b|g; s|@LOCAL_HOST@|localhost:18443|g; s|@REMOTE_HOST@|localhost:18443|g; s|@REMOTE_ADDR@|localhost:18443|g" \
+sed -e "s|@ETC@|$W/etc|g; s|@LOCAL@|a|g; s|@REMOTE@|b|g; s|@LOCAL_HOST@|localhost:18443|g; s|@REMOTE_HOST@|localhost:18443|g; s|@REMOTE_ADDR@|localhost:18443|g; s|@LOCAL_PROXY@|caddy|g; s|@REMOTE_PROXY@|caddy|g" \
     -e "s|scheme: @REMOTE_SCHEME@|scheme: https\n    tls_config: { ca_file: $CA }|" \
     -e "s|localhost:18443:2111\([67]\)|127.0.0.1:2111\1|; s|localhost:18443:443|localhost:18443|" \
     -e "s|scrape_interval: 30s|scrape_interval: 5s|; s|scrape_timeout: 10s|scrape_timeout: 4s|; s|evaluation_interval: 30s|evaluation_interval: 5s|" \
@@ -168,6 +168,9 @@ for f in sorted(os.listdir(sys.argv[1])):
                 res = r["result"]
             ok = bool(res)
             # systemd units of a relay node (tether-*, firewalld, ...) do not exist on the test machine
+            # the test stack runs Caddy; the nginx panels fill on nodes installed with PROXY=nginx
+            if not ok and p["title"].startswith("nginx "):
+                print(f"  skip  {d['uid']:<17} {p['title'][:42]} (front end here is Caddy)"); continue
             if not ok and p["title"] == "Service units":
                 print(f"  skip  {d['uid']:<17} Service units (no relay units here)"); continue
             bad += not ok

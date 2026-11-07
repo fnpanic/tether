@@ -1,0 +1,5 @@
+{"errors":0,"latency_ms":{"max":3.7,"n":7266,"p50":0.4,"p99":1.6},"status":{"heartbeat:204":30,"heartbeat:429":2392,"policy:404":2422,"server-keys:404":2422},"t":5}
+{"errors":0,"latency_ms":{"max":6.1000000000000005,"n":7674,"p50":0.4,"p99":1.1},"status":{"heartbeat:429":2558,"policy:404":2558,"server-keys:404":2558},"t":10}
+{"errors":0,"latency_ms":{"max":9.3,"n":7527,"p50":0.5,"p99":2.0},"status":{"heartbeat:429":2509,"policy:404":2509,"server-keys:404":2509},"t":15}
+{"errors":0,"latency_ms":{"max":2.5,"n":7529,"p50":0.4,"p99":1.2000000000000002},"status":{"heartbeat:429":2509,"policy:404":2509,"server-keys:404":2511},"t":20}
+{"errors":0,"final":true,"latency_ms":{"max":0.6000000000000001,"n":4,"p50":0.5,"p99":0.6000000000000001},"status":{"heartbeat:429":2,"policy:404":2},"t":22}

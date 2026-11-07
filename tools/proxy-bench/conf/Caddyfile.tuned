@@ -1,0 +1,121 @@
+# Tether relay front end: everything clients need over TCP 443 (TLS + WebSocket).
+# {$RELAY_HOST} comes from /etc/tether/server.env.
+{
+	admin off
+	# Prometheus metrics of the HTTP server (requests, latency), read at 127.0.0.1:21125 below.
+	metrics
+}
+
+# Metrics for Prometheus, localhost only (docs/monitoring.md). The admin API (which would serve
+# them otherwise) stays off.
+http://:21125 {
+	bind 127.0.0.1
+	metrics /metrics
+}
+
+{$RELAY_HOST} {
+	tls {
+		issuer acme {
+			# Certificate via TLS-ALPN-01 on 443 only: no port 80 needed.
+			disable_http_challenge
+		}
+	}
+
+	# Rendezvous (hbbs) and relay (hbbr) WebSocket endpoints. Only Caddy can reach these ports.
+	# The client IP they use: hbbs takes the last X-Forwarded-For hop (the peer Caddy saw), hbbr
+	# X-Real-IP, which Caddy overwrites so a client-sent one never reaches them.
+	handle /ws/id {
+		reverse_proxy 127.0.0.1:21118 {
+			header_up X-Real-IP {remote_host}
+			flush_interval -1
+			# Caddy 2.11+: per-direction WebSocket copy buffer (default 32 KiB).
+			stream_buffer_size 4096
+		}
+	}
+	handle /ws/relay {
+		reverse_proxy 127.0.0.1:21119 {
+			header_up X-Real-IP {remote_host}
+			flush_interval -1
+			# Caddy 2.11+: per-direction WebSocket copy buffer (default 32 KiB).
+			stream_buffer_size 4096
+		}
+	}
+
+	# Relay readiness for the other relays' hbbs (HA, docs/relay-ha.md): 200 "ready sessions=N",
+	# 503 while hbbr drains.
+	handle /readyz/relay {
+		rewrite * /readyz
+		reverse_proxy 127.0.0.1:21121
+	}
+
+	# Public key hbbs signs with (one base64 line; 404 without a signing key). Tether Manage reads
+	# it to see that this relay switched during a server key rotation (docs/key-rotation.md).
+	handle /rendezvous/pubkey {
+		rewrite * /pubkey
+		reverse_proxy 127.0.0.1:21122
+	}
+
+	# Relay API (tether-api). Caddy ignores client-sent X-Forwarded-For and sets the real peer.
+	# Small bodies are read whole by Caddy first, so a slow client waits here, not in tether-api.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:21120 {
+			request_buffers 512k
+		}
+	}
+
+	# Optional extras from the monitoring installer (deploy/monitoring/install.sh): /_metrics/* for
+	# the Prometheus on the other node, /grafana/* on the monitoring node. None by default.
+	import /etc/tether/caddy.d/*.caddy
+
+	# Private custom-app download links (GET /q/<token>, docs/api.md "Custom apps"). No access log
+	# is configured: the tokens are secrets.
+	# tether-api checks the token and names a prepared file (X-Accel-Redirect); Caddy sends it,
+	# so a slow download does not hold one of tether-api's 32 workers. qcache/ is not under
+	# download/, so it is reachable only this way.
+	handle /q/* {
+		reverse_proxy 127.0.0.1:21120 {
+			header_up X-Tether-Accel 1
+			@accel header X-Accel-Redirect *
+			handle_response @accel {
+				root * /var/lib/tether-api
+				rewrite * {rp.header.X-Accel-Redirect}
+				header Content-Type application/vnd.microsoft.portable-executable
+				header Content-Disposition {rp.header.Content-Disposition}
+				header Cache-Control no-store
+				header X-Content-Type-Options nosniff
+				file_server
+			}
+		}
+	}
+
+	# Release downloads and update manifests written by tether-api. Caddy (user tether-https)
+	# reads them through membership in group tether-api; see install.sh.
+	handle /download/* {
+		root * /var/lib/tether-api
+		@manifest path */latest.json
+		header @manifest Cache-Control "no-cache"
+		file_server
+	}
+
+	# Download page, if one was published; otherwise the plain marker text.
+	handle / {
+		root * /var/lib/tether-api/download
+		@page file /index.html
+		handle @page {
+			rewrite * /index.html
+			file_server
+		}
+		handle {
+			respond "Tether relay" 200
+		}
+	}
+
+	handle {
+		respond "Tether relay" 200
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+	}
+}

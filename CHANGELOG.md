@@ -13,6 +13,48 @@ Relays: scaling to 10 000 devices and 3 000 concurrent sessions ([docs/scaling.m
 capacity model, load tests, architecture, cost, rollout). Server-side only; clients and wire
 formats are unchanged and old clients keep working.
 
+Relays: **nginx as an alternative HTTPS front end** to Caddy, after benchmarking Caddy (2.10/2.11,
+tuned), nginx, HAProxy, Envoy and Traefik for Tether's load ([docs/proxy-benchmark.md](docs/proxy-benchmark.md)).
+Caddy stays the default; `PROXY=nginx` switches a node.
+
+### Added
+- **`PROXY=nginx` in `server/install.sh`**: nginx mainline and its official ACME module
+  (Let's Encrypt via TLS-ALPN-01 on 443, like Caddy) from nginx.org's signed repository (dnf or
+  apt, patched by the OS's updates), `server/nginx/nginx.conf` with every Caddyfile route
+  (`/ws/id`, `/ws/relay`, `/api/` with buffered bodies, `/download/`, `/q/` via
+  `X-Accel-Redirect`, `/readyz/relay`, `/rendezvous/pubkey`, HSTS, HTTP→HTTPS), the same
+  `tether-https.service` name with a graceful `reload` that keeps WebSockets, SELinux labels and
+  booleans for the confined `httpd_t`, nginx-prometheus-exporter on 127.0.0.1:21125 (where
+  Caddy's metrics are). Re-running with `PROXY=caddy` switches back. Per idle TLS WebSocket nginx
+  needs 41 KB instead of Caddy's 111 KB (2.7×) and ~45 % less CPU; relaying costs about the same.
+- Download budget in the nginx front: `/download/` and `/q/` share 32 parallel downloads × 512 KB/s
+  per node (the manifest `latest.json` is exempt), so a release day cannot starve relayed sessions.
+- Monitoring for nginx fronts: `deploy/monitoring/nginx/` snippets (`/_metrics/<job>` by source
+  IP + bcrypt, `/grafana/` behind basic auth), installed by `deploy/monitoring/install.sh`
+  according to the node's `PROXY=`; Prometheus job `nginx` (`REMOTE_PROXY=nginx` for the other
+  node), nginx panels on the API dashboard, `TargetDown` covers it.
+- Headroom alerts (`tether-headroom` group): egress, CPU and memory above 40 % (what still fits
+  under 65 % after losing the largest location), a front above 15 000 WebSockets, listen-queue
+  overflows; promtool tests.
+- `tools/proxy-bench/`: front-end benchmark (`run.sh`, `summary.sh`, configs for every candidate,
+  HAProxy as the uniform client-side TLS layer) and `e2e-nginx.sh`, the end-to-end test of the
+  nginx front in WSL (ACME against Pebble, every route, WebSockets and relay-harness through it,
+  graceful reloads, uploads, `/q/`, basic auth, metrics restriction). `tools/load/stack.sh`
+  takes `FRONT=`.
+
+### Changed
+- docs/scaling.md: target architecture revised for failures with headroom: 8 × AX41 over FSN1,
+  NBG1 and HEL1 (€472/month) carry the pessimistic peak at 53 % of port and CPU with a whole
+  location down, with the step-by-step path from today's two nodes by device count. Relay CPU
+  re-measured at 1 Gbit/s per node: 3.2–3.5 PC cores per relayed Gbit/s (was 4.4, from one
+  0.5 Gbit/s run).
+- Monitoring basic-auth hashes are bcrypt cost 5 (Caddy and nginx accept them; nginx checks them
+  in the worker that carries the WebSockets). Existing hashes keep working.
+- `ip_local_reserved_ports` now 21114-21126 (nginx `stub_status`).
+
+### Fixed
+- `tools/load/stack.sh` moved the bench Caddy's metrics port too (it took the production 21125).
+
 ### Added
 - **Mac build runner** ([docs/mac-build-runner.md](docs/mac-build-runner.md)): builds on the Mac
   start from the PC through Tether file transfer alone, also while the Mac's screen is locked, for

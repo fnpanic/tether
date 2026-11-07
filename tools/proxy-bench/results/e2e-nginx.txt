@@ -1,0 +1,84 @@
+ok   nginx -t accepts the production config
+ok   ACME (TLS-ALPN-01, Pebble): certificate issued and trusted
+     issuer: issuer=CN = Pebble Intermediate CA 4e00a9
+ok   certificate kept across restart (state_path)
+ok   TLS 1.3
+ok   TLS 1.2 (ECDHE AEAD)
+ok   TLS 1.1 refused
+ok   TLS 1.2 CBC cipher refused
+ok   HTTP/2 on normal routes
+ok   HSTS header
+ok   Server header has no version
+ok   HTTP on 80 redirects to HTTPS (301 https://localhost/x?y=1)
+ok   / marker
+ok   unknown path marker
+ok   / serves the published download page
+ok   /readyz/relay -> hbbr /readyz
+ok   /rendezvous/pubkey -> hbbs /pubkey
+ok   download 6 MB intact
+ok   download content type
+ok   latest.json: application/json + no-cache + HSTS
+ok   download rate limit (3 MB in >= 3.5 s)
+ok   33rd parallel download: 503, latest.json still served
+ok   range request (resumed download)
+ok   no traversal: /download/../devices.json
+ok   no traversal: /download/%2e%2e/devices.json
+ok   no traversal: /download/..%2fdevices.json
+ok   heartbeat through nginx (204)
+ok   /api/policy reaches tether-api (404 no policy)
+ok   tether-api sees the real peer, not the client's X-Forwarded-For
+ok   diag upload 1.9 MB (204), stored intact
+     HTTP/2 200 
+     content-type: application/vnd.microsoft.portable-executable
+     content-length: 6000019
+     content-disposition: attachment; filename="ACME-Support.exe"
+     cache-control: no-store
+     x-content-type-options: nosniff
+ok   /q/: 200, exe with trailer
+ok   /q/: sent by nginx from qcache (X-Accel-Redirect not leaked)
+ok   /q/: content type, disposition, no-store, nosniff, HSTS
+ok   /q/ bad token 404
+ok   qcache not reachable by URL: /qcache/acme--TetherQS-9.9.9.exe
+ok   qcache not reachable by URL: /download/../qcache/acme--TetherQS-9.9.9.exe
+ok   qcache not reachable by URL: /download/%2e%2e/qcache/acme--TetherQS-9.9.9.exe
+ok   /grafana redirects to /grafana/
+ok   /grafana/ without password: 401
+ok   /grafana/ wrong password: 401
+ok   /grafana/ with password reaches Grafana, Authorization stripped
+ok   /_metrics/hbbs from the scraper with password
+ok   /_metrics/hbbr, /_metrics/api
+ok   /_metrics/nginx (exporter)
+ok   /_metrics/probe keeps the query
+ok   /_metrics/node
+ok   forwarded headers: X-Forwarded-For / X-Real-IP = peer, no client X-Tether-Accel
+ok   /_metrics/ without password: 401
+ok   /_metrics/ from another IP, right password: 403
+ok   /_metrics/unknown: 404
+ok   exporter on localhost: requests counted
+ok   stub_status not public
+     {"closed":0,"connect_fail":0,"connected":200,"connects":200,"other_refusal":0,"ping_rtt_ms":{"max":6.0,"n":7965,"p50":0.30000000000000004,"p99":0.6000000000000001},"punch_fail":0,"punch_failures":{},"punch_ok":199,"punchhole_ms":{"max":0.6000000000000001,"n":199,"p50":0.30000000000000004,"p99":0.5},"reg_ms":{"max":24.0,"n":200,"p50":2.4000000000000004,"p99":14.0},"registered":200,"relay_respo
+ok   200 WebSocket hosts registered through nginx
+ok   two graceful reloads: no WebSocket dropped
+ok   viewers reached hosts (PunchHole + RelayResponse)
+     {
+  "frame_bytes": 1024,
+  "frame_ms": 20,
+  "hbbs": [
+    "ws://127.0.0.1:28081/ws/id"
+  ],
+  "incomplete_sessions": 0,
+  "max_gap_ms": 0,
+  "max_stall_ms": 21,
+  "per_session": [
+    {
+      "completed": true,
+      "frames": 700,
+      "gaps_ms": [],
+      "id": "hb81cf300000",
+      "latency_p50_ms": 0.377,
+      "latency_p99_ms": 0.708,
+      "max_gap_ms": 0,
+      "max_stall_ms": 20,
+      "
+ok   relay-harness through nginx: 4 sessions, frames delivered, no breaks
+passed 55, failed 0
