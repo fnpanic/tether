@@ -599,7 +599,7 @@ closed), then 2 → 3 (W9 fixed, safe rollouts), then 4 (seconds), 6, and 7 if d
   (§5.6).
 - **D2**: clients from this release verify the signed index whenever present; once a device has
   accepted one it never accepts an unsigned manifest again (the highest serial is persisted); from
-  the next release the signed index is required (`tether_trust::release::REQUIRE_SIGNED_INDEX`).
+  the next release the signed index is required (`tether_trust::release::REQUIRE_SIGNED_INDEX`, on since 0.5.25).
 - **D3**: expiry 30 days, warn only ("Update information is out of date" in Diagnostics/Settings),
   never refuse.
 - **D4**: staged rollout default 1 % → 10 % → 50 % → 100 % over 24 h (signed ramp), stable

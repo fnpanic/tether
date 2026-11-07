@@ -28,9 +28,9 @@ pub const MAX_INDEX: usize = 64 * 1024;
 /// Largest artifact a client downloads (also the relay's upload limit).
 pub const MAX_ARTIFACT: u64 = 200 << 20;
 /// Decision D2 (2026-11-07): builds with this set never use unsigned `latest.json` metadata, even
-/// before they accepted a first signed index. Off for the first release with the index; turn it on
-/// for the next one, once every relay and Manage write `releases.json`.
-pub const REQUIRE_SIGNED_INDEX: bool = false;
+/// before they accepted a first signed index. On since 0.5.25 (0.5.24 was the first release with the
+/// index; every relay and Manage write `releases.json` since then).
+pub const REQUIRE_SIGNED_INDEX: bool = true;
 /// Decision D3: Manage signs indexes valid for 30 days; past `expires` clients only warn.
 pub const EXPIRY_SECS: u64 = 30 * 86_400;
 /// Cloudflare Workers Static Assets limit per file (decision D1): larger files stay relay-only.

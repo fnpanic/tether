@@ -51,7 +51,7 @@ the UI process mirrors every second.
   older serials are refused, from any relay, also after the cache is deleted.
 - Once a device accepted one index it **never uses `latest.json` again** (no unsigned
   `mandatory`/`minimumVersion` can block it any more). Builds with
-  `tether_trust::release::REQUIRE_SIGNED_INDEX = true` (planned for the release after this one,
+  `tether_trust::release::REQUIRE_SIGNED_INDEX = true` (0.5.25 and later,
   decision D2) never use `latest.json` at all.
 - A download is accepted only if size, sha256, the minisign signature and the signed trusted
   comment (`file:` and `version:`) all match the entry. The download hosts are untrusted: the CDN,

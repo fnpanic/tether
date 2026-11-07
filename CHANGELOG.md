@@ -6,6 +6,9 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+## [0.5.25] — 2026-11-07
+Tether / TetherQS 0.5.25 (Windows and macOS), Tether Manage 0.5.8; relays: tether-api and Caddy/nginx config (deployed 2026-11-07). The signed release index is required from this release on (`REQUIRE_SIGNED_INDEX`).
+
 ### Added
 - **Tether Manage: delete download page templates** you no longer need (bin next to the Template list,
   asks first). The template the published Custom page is built from cannot be deleted.

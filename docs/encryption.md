@@ -532,7 +532,7 @@ Fix (next release, [update-design.md](update-design.md)):
   Every byte of a download is checked against it, so download hosts (relays, the CDN) are not
   trusted. A serial floor per channel (`releases-<channel>.serial`) refuses older indexes; once a
   device accepted one, it never uses the unsigned `latest.json` again (and builds with
-  `REQUIRE_SIGNED_INDEX`, the release after this one, never do).
+  `REQUIRE_SIGNED_INDEX`, 0.5.25 and later, never do).
 - Expiry (30 days) only warns ("update information is out of date"): a relay can still freeze a
   device that reaches no other source, until it notices.
 - Remaining: a stolen admin key can block sessions (as through policy); code still needs the
