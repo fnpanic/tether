@@ -12,6 +12,8 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # Release uploads are up to 200 MiB (ingress-nginx refuses more than 1 MiB by default).
+    nginx.ingress.kubernetes.io/proxy-body-size: "201m"
 spec:
   ingressClassName: nginx
   tls:
@@ -27,7 +29,8 @@ spec:
           - { path: /ws/relay/0, pathType: Exact, backend: { service: { name: tether-relay-hbbr-0, port: { number: 21119 } } } }
           - { path: /ws/relay/1, pathType: Exact, backend: { service: { name: tether-relay-hbbr-1, port: { number: 21119 } } } }
           - { path: /ws/relay/2, pathType: Exact, backend: { service: { name: tether-relay-hbbr-2, port: { number: 21119 } } } }
-          # With api.enabled=true:
-          - { path: /api, pathType: Prefix, backend: { service: { name: tether-relay-api, port: { number: 21120 } } } }
-          - { path: /q, pathType: Prefix, backend: { service: { name: tether-relay-api, port: { number: 21120 } } } }
+          # With api.enabled=true. Port 8081 is the api pod's Caddy: it passes the client IP
+          # (X-Forwarded-For) to tether-api and sends /q/ files itself.
+          - { path: /api, pathType: Prefix, backend: { service: { name: tether-relay-api, port: { number: 8081 } } } }
+          - { path: /q, pathType: Prefix, backend: { service: { name: tether-relay-api, port: { number: 8081 } } } }
           - { path: /download, pathType: Prefix, backend: { service: { name: tether-relay-api, port: { number: 8081 } } } }

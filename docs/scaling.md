@@ -194,6 +194,14 @@ is more (k8s pods, 10G servers).
 | all 10 000 devices in 20 s (1 500 req/s) | 74–89 % | 5 MB | p99 6 ms | no 503; `devices.json` 1.36 MB |
 | 30 slow `/q/` downloads (2 Mbit/s each) + 8 API clients, before | | | | 30 of 32 workers held; 503 to heartbeats and policy fetches |
 | same, after (Caddy sends the file) | | | | 0 × 503, tether-api 35 threads instead of 65 |
+| 40 release uploads, 1 byte / 25 s (forged `Tether-Sig` with a current `ts`) + 1 heartbeat/s for 90 s, before | | | | 32 uploads held every worker for the whole run: 83 of 83 heartbeats `503` |
+| same, after (4 upload slots, 16 KiB/s minimum after 30 s) | | | slowest 2 ms | 83 of 83 heartbeats `200`; 36 uploads `503` + `Retry-After` at once, 4 cut off with `408` |
+| 50 000 devices (`MAX_DEVICES`): start, admin list, 16 team lists at once, periodic flush, before | | peak 40 → 43.5 → **85.4 MB**, steady 30 MB | | above `MemoryMax=64M`: an OOM restart (the startup flush runs again) |
+| same, after (lists via a temp file, flush streamed from the map) | | peak 40.3 MB (loading `devices.json` at start), steady 29.8 MB; lists and flush add nothing | | |
+
+The last two rows: `cargo test --release --test api -- --ignored --nocapture many_devices_memory`
+in `server/api` (VmHWM/VmRSS of the process; `TETHER_API_BIN` measures another build); the
+slow-upload rows with a local script against 127.0.0.1 (WSL, both builds side by side).
 
 tether-api's cost grows with its open file descriptors (each request scans `/proc/self/fd` to
 set socket timeouts): fine at Caddy's keep-alive pool sizes, the reason the 1 500 req/s run used

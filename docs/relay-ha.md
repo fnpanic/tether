@@ -293,6 +293,8 @@ scp -i ~/.ssh/tether_oracle -r dist/linux-relay opc@tether-desk.duckdns.org:/tmp
 ssh -i ~/.ssh/tether_oracle opc@tether-desk.duckdns.org
 cd /tmp/linux-relay && sudo RELAY_SERVERS='tether-desk.duckdns.org|http://127.0.0.1:21121/readyz,tether-desk2.duckdns.org|https://tether-desk2.duckdns.org/readyz/relay' ./install.sh tether-desk.duckdns.org
 # keeps /etc/tether/api.env and duckdns.env; rewrites server.env; restarts all services
+# Re-runs (updates) keep server.env's RELAY_SERVERS and PROXY unless given (the install.sh of
+# 0.5.25 and older reset RELAY_SERVERS to this host alone: pass it to those).
 curl -s https://tether-desk.duckdns.org/readyz/relay     # -> ready sessions=0
 ```
 

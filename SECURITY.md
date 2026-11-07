@@ -278,7 +278,20 @@ works; Alt+Tab leaves; a lone Alt and Alt+F4 on TetherQS do not stall it).
   capped at 50/s ([docs/stun-turn.md](docs/stun-turn.md)).
 - tether-api serves up to 32 requests at once with 30 s read/write timeouts and a whole-body
   deadline, reading bodies outside its state lock, so a slow or stalled client holds only its own
-  request.
+  request. A body that averages under 16 KiB/s after 30 s is cut off (`408`). The large uploads it
+  streams to disk (release, diagnostics) run at most 4 at a time (more: `503` + `Retry-After`), so
+  heartbeats always keep 28 workers, and are refused before their body is read when they cannot
+  succeed: no admin keys, no `Tether-Sig` header or its timestamp outside ±300 s, an invalid path,
+  no open diagnostics ticket. A refused body is not read on: the socket's read side is shut and
+  the connection closed (tiny_http, patched in `server/api/patched/tiny_http`, used to read the
+  rest, and allocated the whole declared `Content-Length` to do so, so one request with a huge one
+  ended the process). The release signature (over up to 200 MiB), audit log queries and preparing
+  a `/q/` copy run outside the state lock. Device lists and `devices.json` are written from the
+  device map without copying it, the lists through a temp file (MemoryMax 64M at 50 000 devices,
+  [docs/scaling.md](docs/scaling.md)); custom-app profiles are read from disk when needed.
+- hbbs: messages for a host on its WebSocket/TCP signalling path go through a queue of 64 per
+  connection (more are dropped), and a write that does not complete within 5 s closes that
+  connection, so a host that stops reading costs neither unbounded memory nor a stuck task.
 - hbbs stores its key pair and a registry of ID, machine uuid, device public key and IP
   (`vendor/rustdesk-server/src/database.rs`); tether-api stores heartbeats, policies, releases,
   the team roster and the audit log ([docs/api.md](docs/api.md)). No relay process sees session

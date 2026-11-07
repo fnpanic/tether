@@ -9,7 +9,7 @@ generated from `patches/*.patch`.
 Reviewed 2026-11-07 (branch `debt`): of the 11 markers, 5 were fixed, 2 removed (no longer a
 shortcut) and 4 kept, each now with a trigger that can be observed.
 
-## Open (4)
+## Open (5)
 
 - `apps/desktop/src-tauri/src/netpolicy.rs:217` and `apps/quick/src-tauri/src/netpolicy.rs:212`:
   corporate proxy on macOS. ceiling: static HTTPS proxy from `scutil --proxy` only; a network that
@@ -26,6 +26,12 @@ shortcut) and 4 kept, each now with a trigger that can be observed.
   relay. Moot today: one primary relay, the others are backups, and hbbs always picks the primary.
   upgrade: once two or more primaries run (docs/scaling.md's 8-node plan) and a burst can reach a
   relay's headroom; then count handed-out sessions locally. KEPT.
+
+- `server/api/src/main.rs:1485`: a `/q/` cache copy (qcache) whose custom app is deleted while its first
+  download is still being prepared stays on disk, unreachable (the name contains a key of token and
+  profile, so it is never served). ceiling: one orphan file per such race, about 35 MB. upgrade: when
+  qcache shows orphans in practice (`du` of qcache vs. the custom apps), sweep copies without an app
+  on start. KEPT (added 2026-11-08 with the relay hardening).
 
 ## Done
 

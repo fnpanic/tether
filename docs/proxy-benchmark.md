@@ -345,8 +345,9 @@ TLS front is down until nginx has its certificate, typically under a minute).
    `sudo cp /etc/systemd/system/tether-https.service /etc/tether.bak-$(date +%F)/`. Caddy's
    certificate stays where it is (`/var/lib/tether-https/caddy/…`), so a rollback issues no new
    certificate.
-3. **Switch**: `sudo PROXY=nginx RELAY_SERVERS='<the node's current line from /etc/tether/server.env>' ./server/install.sh <host>`
-   (install.sh rewrites `server.env`; pass `RELAY_SERVERS` as before, `ADMIN_PUB_KEY` only to
+3. **Switch**: `sudo PROXY=nginx ./server/install.sh <host>`
+   (install.sh rewrites `server.env` and keeps its `RELAY_SERVERS` unless you pass one; the install.sh of
+   0.5.25 and older fell back to this host alone, so pass it to those; `ADMIN_PUB_KEY` only to
    change it). It adds the nginx.org repository, installs `nginx` + `nginx-module-acme`, the
    exporter, renders `/etc/tether/nginx.conf`, tests it, sets the SELinux labels, installs the nginx
    `tether-https.service` and restarts the services.
@@ -367,7 +368,7 @@ TLS front is down until nginx has its certificate, typically under a minute).
    front is read from its `server.env`). Prometheus' job for this node becomes `nginx`.
 6. Watch a week (dashboards, `tether-headroom` alerts, probes), then the next node.
 
-**Rollback** (minutes): `sudo PROXY=caddy RELAY_SERVERS='…' ./server/install.sh <host>`
+**Rollback** (minutes): `sudo PROXY=caddy ./server/install.sh <host>`
 (Caddy's binary and certificate are still there; the Caddy unit replaces the nginx one and the
 exporter is removed), then the monitoring installers again (`REMOTE_PROXY=caddy` on the
 monitoring node). Without the checkout: `sudo cp /etc/tether.bak-<date>/tether-https.service

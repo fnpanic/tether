@@ -67,13 +67,14 @@ release generation, bumped by every change of a `releases.json` or `latest.json`
 sees it change checks for updates (after a random delay); it is unsigned and only triggers a fetch.
 Clients up to 0.5.23 accept any 2xx and ignore the body. `429` when the same uuid posts more than once per 60 s or an IP more than 30 per
 minute. The server stores `{…, "ip": <client ip from X-Forwarded-For>, "last_seen": unix}` per uuid,
-at most 10 000 devices (oldest `last_seen` evicted), entries older than 180 days dropped.
+at most 50 000 devices (oldest `last_seen` evicted; ~30 MB of memory, [scaling.md](scaling.md)), entries older than 180 days dropped.
 Clients send it after each policy check.
 
 ### `POST /api/diag/<ticket>`
 Upload a diagnostics zip for a ticket an admin opened. `<ticket>` is 8 characters `[A-HJ-NP-Z2-9]`
 (no ambiguous letters). Body `application/zip`, ≤ 2 MiB. `204` if the ticket is open and
-unused, else `404`. One upload per ticket. Stored 7 days.
+unused, else `404` (answered before the body is read). One upload per ticket. Stored 7 days.
+Upload limits as for release uploads ("Limits" below).
 
 ### `POST /api/audit/conn`, `POST /api/audit/file`, `POST /api/audit/alarm` (session audit log)
 The host side of every Tether app (`vendor/rustdesk/src/server/connection.rs`, `post_conn_audit` /
@@ -132,7 +133,7 @@ Failure: `401` with a short reason. Bodies over the limits: `413`.
 | `POST /api/admin/diag-ticket` | `{"note":"…"}` (≤ 256 chars) | `{"ticket":"K7Q2M9XD","expires":unix}` (open 24 h) |
 | `GET /api/admin/diag` | – | `[{ticket,note,created,uploaded,size}]` |
 | `GET /api/admin/diag/<ticket>` | – | the zip (`application/zip`) or `404` |
-| `PUT /api/admin/release/<channel>/<path>` | file bytes (≤ 200 MiB) | `204`. Writes `download/<channel>/<path>` atomically. `<channel>` `[a-z0-9-]{1,32}`; `<path>` segments `[A-Za-z0-9._-]`, no `..`. Upload artifacts first, `latest.json` last. |
+| `PUT /api/admin/release/<channel>/<path>` | file bytes (≤ 200 MiB) | `204`. Writes `download/<channel>/<path>` atomically. `<channel>` `[a-z0-9-]{1,32}`; `<path>` segments `[A-Za-z0-9._-]`, no `..`. Upload artifacts first, `latest.json` last. Refused before the body is read: admin API off (`503`), bad path (`400`), no `Tether-Sig` or its `ts` outside ±300 s (`401`); the signature itself is checked after the body arrived. At most 4 release and diagnostics uploads at once (`503`, `Retry-After: 30`). |
 | `DELETE /api/admin/release/<channel>/<path>[?force=1]` | – | `204`; `404` if missing. `409 "published release: …"` for `releases.json`, any `latest.json`, and every file of the version the channel's release index or the folder's `latest.json` publishes, unless `?force=1` (part of the signed URL). Forced deletes are logged (`release-prune.jsonl`, journal). |
 | `POST /api/admin/releases/prune` | JSON (≤ 64 KiB, below) | Release clean-up: the plan (`dry_run: true`) or the deletion of the listed versions (below). |
 | `GET /api/admin/releases` | – | `[{channel,path,size,modified}]` |
@@ -300,7 +301,7 @@ works on any relay. The relay never modifies the profile; TetherQS verifies the 
 | `GET /q/<token>/windows`, `GET /q/<token>/mac` (public) | – | The same link for one platform, whatever the browser. `/mac`: the channel's `TetherQS-<v>-universal.zip` (`customer/darwin-universal/latest.json`, key `darwin-universal`) with its one top-level `TetherQS.app` folder renamed to `<Name>-Support [<mac id>].app` (also in `__MACOSX/`), `Content-Type: application/zip`, `filename="<Name>-Support.zip"`. Only the names in the zip headers change (data, CRCs, modes, the signature inside are byte-for-byte the same; zip64 refused). |
 | `GET /q/m/<mac id>` (public) | – | The signed profile document of the custom app whose token gives this mac id (`custom::mac_id`: the first 16 hex characters of SHA-256 over `"tetherqs-mac-id\0" + token`), `Cache-Control: no-store`. Answers also after the link expired (a copy downloaded before keeps its branding, as on Windows); `404` once the app is deleted or got a new link. Not counted as a download. |
 
-Caddy routes `/q/*` to `tether-api`, which checks the token and, when Caddy sends `X-Tether-Accel: 1`, answers with `X-Accel-Redirect: /qcache/<id>--<file>` and the `Content-Type` (the exe with the trailer or the renamed zip, prepared once in the data dir outside `download/`; the exe and the zip copy of an app exist side by side); Caddy then sends that file, so slow downloads hold no worker ([scaling.md](scaling.md)). Without the header the file is streamed (the zip always from its prepared copy: the rename streams file to file). Tokens are 256-bit random (`custom::new_token`), compared
+Caddy routes `/q/*` to `tether-api`, which checks the token and, when Caddy sends `X-Tether-Accel: 1`, answers with `X-Accel-Redirect: /qcache/<id>--<key>--<file>` (`<key>`: 16 hex characters of a SHA-256 over the token and profile it was made from) and the `Content-Type` (the exe with the trailer or the renamed zip, prepared once in the data dir outside `download/`; the exe and the zip copy of an app exist side by side); Caddy then sends that file, so slow downloads hold no worker ([scaling.md](scaling.md)). Without the header the file is streamed (the zip always from its prepared copy: the rename streams file to file). Tokens are 256-bit random (`custom::new_token`), compared
 exactly; links are not listed anywhere public. TetherQS self-updates keep the profile: after
 verifying a new plain exe it re-appends its own trailer.
 
@@ -319,6 +320,12 @@ Evidence and limits: [macos.md](macos.md#custom-apps).
 
 `tether-api` is a `tiny_http` service with `MemoryMax=64M`. It serves up to 32 requests at once
 (more get 503) and keeps its state behind one lock that is never held while a body is read or a
-response written; each read and write times out after 30 s, and a body must arrive within 60 s
-plus 64 KiB/s. Request bodies are streamed to disk for uploads (release, diagnostics) and held in
-memory otherwise (512 KiB at most); every JSON write is temp file + rename; no database.
+response written, nor for the release signature check, audit log queries or preparing a `/q/`
+copy; each read and write times out after 30 s, and a body must arrive within 60 s plus 64 KiB/s
+and, after its first 30 s, average at least 16 KiB/s (else `408` for uploads, `400` otherwise).
+Request bodies are streamed to disk for uploads (release, diagnostics; at most 4 at a time, more
+get `503` with `Retry-After: 30`, so heartbeats keep 28 workers) and held in memory otherwise
+(512 KiB at most). A request refused before its body was read is answered with
+`Connection: close` and the rest of the body is not read. Device lists are written through a temp
+file, not a buffer; custom-app profiles stay on disk (`custom/<id>.json`). Every JSON write is temp
+file + rename; no database.

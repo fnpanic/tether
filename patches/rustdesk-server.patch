@@ -2737,7 +2737,7 @@ index 0ec190a..ad44169 100644
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..764cd66 100644
+index dff45eb..e2868d4 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,14 @@ use std::{
@@ -2756,7 +2756,7 @@ index dff45eb..764cd66 100644
  type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
  type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
  enum Sink {
-@@ -57,17 +61,81 @@ enum Sink {
+@@ -57,17 +61,85 @@ enum Sink {
  type Sender = mpsc::UnboundedSender<Data>;
  type Receiver = mpsc::UnboundedReceiver<Data>;
  static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
@@ -2791,7 +2791,11 @@ index dff45eb..764cd66 100644
 +
 +// Hosts registered over TCP/WebSocket (443-only clients): messages for their address go over
 +// their connection instead of UDP.
-+type TcpPeerTx = mpsc::UnboundedSender<RendezvousMessage>;
++// Tether: bounded, filled with try_send (a host that does not read loses messages, not hbbs
++// memory), and each write on the connection gives up after PEER_SEND_TIMEOUT_MS, closing it.
++type TcpPeerTx = mpsc::Sender<RendezvousMessage>;
++const PEER_QUEUE: usize = 64;
++const PEER_SEND_TIMEOUT_MS: u64 = 5_000;
 +static TCP_PEERS: Lazy<TokioMutex<HashMap<SocketAddr, (TcpPeerTx, String)>>> =
 +    Lazy::new(|| TokioMutex::new(HashMap::new()));
 +
@@ -2839,7 +2843,7 @@ index dff45eb..764cd66 100644
  
  #[derive(Clone)]
  struct Inner {
-@@ -84,7 +152,7 @@ pub struct RendezvousServer {
+@@ -84,7 +156,7 @@ pub struct RendezvousServer {
      tcp_punch: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
      pm: PeerMap,
      tx: Sender,
@@ -2848,7 +2852,7 @@ index dff45eb..764cd66 100644
      relay_servers0: Arc<RelayServers>,
      rendezvous_servers: Arc<Vec<String>>,
      inner: Arc<Inner>,
-@@ -101,6 +169,10 @@ impl RendezvousServer {
+@@ -101,6 +173,10 @@ impl RendezvousServer {
      #[tokio::main(flavor = "multi_thread")]
      pub async fn start(port: i32, serial: i32, key: &str, rmem: usize) -> ResultType<()> {
          let (key, sk) = Self::get_server_sk(key);
@@ -2859,7 +2863,7 @@ index dff45eb..764cd66 100644
          let nat_port = port - 1;
          let ws_port = port + 2;
          let pm = PeerMap::new().await?;
-@@ -108,8 +180,15 @@ impl RendezvousServer {
+@@ -108,8 +184,15 @@ impl RendezvousServer {
          let rendezvous_servers = get_servers(&get_arg("rendezvous-servers"), "rendezvous-servers");
          log::info!("Listening on tcp/udp :{}", port);
          log::info!("Listening on tcp :{}, extra port for NAT test", nat_port);
@@ -2876,7 +2880,7 @@ index dff45eb..764cd66 100644
          let (tx, mut rx) = mpsc::unbounded_channel::<Data>();
          let software_url = get_arg("software-url");
          let version = hbb_common::get_version_from_url(&software_url);
-@@ -147,9 +226,10 @@ impl RendezvousServer {
+@@ -147,9 +230,10 @@ impl RendezvousServer {
          log::info!("local-ip: {:?}", rs.inner.local_ip);
          std::env::set_var("PORT_FOR_API", port.to_string());
          rs.parse_relay_servers(&get_arg("relay-servers"));
@@ -2888,7 +2892,7 @@ index dff45eb..764cd66 100644
          let test_addr = std::env::var("TEST_HBBS").unwrap_or_default();
          if std::env::var("ALWAYS_USE_RELAY")
              .unwrap_or_default()
-@@ -216,12 +296,20 @@ impl RendezvousServer {
+@@ -216,12 +300,20 @@ impl RendezvousServer {
                      }
                      LoopFailure::Listener3 => {
                          drop(listener3);
@@ -2911,7 +2915,7 @@ index dff45eb..764cd66 100644
          tokio::select!(
              res = main_task => res,
              res = listen_signal => res,
-@@ -237,6 +325,9 @@ impl RendezvousServer {
+@@ -237,6 +329,9 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> LoopFailure {
@@ -2921,7 +2925,7 @@ index dff45eb..764cd66 100644
          let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
          loop {
              tokio::select! {
-@@ -251,9 +342,25 @@ impl RendezvousServer {
+@@ -251,9 +346,25 @@ impl RendezvousServer {
                  }
                  Some(data) = rx.recv() => {
                      match data {
@@ -2929,7 +2933,7 @@ index dff45eb..764cd66 100644
 +                        Data::Msg(msg, addr) => {
 +                            let tcp_tx = TCP_PEERS.lock().await.get(&try_into_v4(addr)).cloned();
 +                            match tcp_tx {
-+                                Some((tx, _)) => { tx.send(*msg).ok(); }
++                                Some((tx, _)) => { tx.try_send(*msg).ok(); }
 +                                None => { allow_err!(socket.send(msg.as_ref(), addr).await); }
 +                            }
 +                        }
@@ -2949,7 +2953,7 @@ index dff45eb..764cd66 100644
                      }
                  }
                  res = socket.next() => {
-@@ -321,10 +428,21 @@ impl RendezvousServer {
+@@ -321,10 +432,21 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> ResultType<()> {
@@ -2971,7 +2975,7 @@ index dff45eb..764cd66 100644
                      if !rp.id.is_empty() {
                          log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
                          self.update_addr(rp.id, addr, socket).await?;
-@@ -340,89 +458,9 @@ impl RendezvousServer {
+@@ -340,89 +462,9 @@ impl RendezvousServer {
                      }
                  }
                  Some(rendezvous_message::Union::RegisterPk(rk)) => {
@@ -2984,9 +2988,7 @@ index dff45eb..764cd66 100644
 -                        return send_rk_res(socket, addr, UUID_MISMATCH).await;
 -                    } else if !self.check_ip_blocker(&ip, &id).await {
 -                        return send_rk_res(socket, addr, TOO_FREQUENT).await;
-+                    if let Some(msg_out) = self.register_pk(rk, addr).await {
-+                        socket.send(&msg_out, addr).await?
-                     }
+-                    }
 -                    let peer = self.pm.get_or(&id).await;
 -                    let (changed, ip_changed) = {
 -                        let peer = peer.read().await;
@@ -3050,7 +3052,9 @@ index dff45eb..764cd66 100644
 -                                (Instant::now(), HashMap::from([(ip.clone(), 1)])),
 -                            );
 -                        }
--                    }
++                    if let Some(msg_out) = self.register_pk(rk, addr).await {
++                        socket.send(&msg_out, addr).await?
+                     }
 -                    if changed {
 -                        self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
 -                    }
@@ -3063,11 +3067,11 @@ index dff45eb..764cd66 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // UDP PunchHoleRequest is intentionally unsupported.
-@@ -479,9 +517,34 @@ impl RendezvousServer {
+@@ -479,9 +521,34 @@ impl RendezvousServer {
          addr: SocketAddr,
          key: &str,
          ws: bool,
-+        peer_tx: &mpsc::UnboundedSender<RendezvousMessage>,
++        peer_tx: &TcpPeerTx,
      ) -> bool {
          if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
              match msg_in.union {
@@ -3098,7 +3102,7 @@ index dff45eb..764cd66 100644
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // there maybe several attempt, so sink can be none
                      if let Some(sink) = sink.take() {
-@@ -521,8 +584,18 @@ impl RendezvousServer {
+@@ -521,8 +588,18 @@ impl RendezvousServer {
                              rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
                          }
                      }
@@ -3118,7 +3122,7 @@ index dff45eb..764cd66 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
                      allow_err!(self.handle_hole_sent(phs, addr, None).await);
-@@ -545,14 +618,31 @@ impl RendezvousServer {
+@@ -545,14 +622,31 @@ impl RendezvousServer {
                      msg_out.set_test_nat_response(res);
                      Self::send_to_sink(sink, msg_out).await;
                  }
@@ -3158,7 +3162,7 @@ index dff45eb..764cd66 100644
                  }
                  _ => {}
              }
-@@ -567,6 +657,12 @@ impl RendezvousServer {
+@@ -567,6 +661,12 @@ impl RendezvousServer {
          socket_addr: SocketAddr,
          socket: &mut FramedSocket,
      ) -> ResultType<()> {
@@ -3171,7 +3175,7 @@ index dff45eb..764cd66 100644
          let (request_pk, ip_change) = if let Some(old) = self.pm.get_in_memory(&id).await {
              let mut old = old.write().await;
              let ip = socket_addr.ip();
-@@ -601,7 +697,113 @@ impl RendezvousServer {
+@@ -601,7 +701,113 @@ impl RendezvousServer {
              request_pk,
              ..Default::default()
          });
@@ -3286,7 +3290,7 @@ index dff45eb..764cd66 100644
      }
  
      #[inline]
-@@ -620,17 +822,25 @@ impl RendezvousServer {
+@@ -620,17 +826,25 @@ impl RendezvousServer {
              &addr
          );
          let mut msg_out = RendezvousMessage::new();
@@ -3313,7 +3317,7 @@ index dff45eb..764cd66 100644
              socket.send(&msg_out, addr_a).await?;
          } else {
              self.send_to_tcp(msg_out, addr_a).await;
-@@ -658,6 +868,7 @@ impl RendezvousServer {
+@@ -658,6 +872,7 @@ impl RendezvousServer {
              socket_addr: la.local_addr.clone(),
              pk: self.get_pk(&la.version, la.id).await,
              relay_server: la.relay_server,
@@ -3321,7 +3325,7 @@ index dff45eb..764cd66 100644
              ..Default::default()
          };
          p.set_is_local(true);
-@@ -679,8 +890,9 @@ impl RendezvousServer {
+@@ -679,8 +894,9 @@ impl RendezvousServer {
          ws: bool,
      ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
          let mut ph = ph;
@@ -3332,7 +3336,7 @@ index dff45eb..764cd66 100644
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
                  failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
-@@ -700,6 +912,7 @@ impl RendezvousServer {
+@@ -700,6 +916,7 @@ impl RendezvousServer {
                  (r.last_reg_time.elapsed().as_millis() as i64, r.socket_addr)
              };
              if elapsed >= REG_TIMEOUT {
@@ -3340,7 +3344,7 @@ index dff45eb..764cd66 100644
                  let mut msg_out = RendezvousMessage::new();
                  msg_out.set_punch_hole_response(PunchHoleResponse {
                      failure: punch_hole_response::Failure::OFFLINE.into(),
-@@ -721,7 +934,12 @@ impl RendezvousServer {
+@@ -721,7 +938,12 @@ impl RendezvousServer {
                          break;
                      }
                  }
@@ -3354,7 +3358,7 @@ index dff45eb..764cd66 100644
              }
  
              let mut msg_out = RendezvousMessage::new();
-@@ -744,6 +962,7 @@ impl RendezvousServer {
+@@ -744,6 +966,7 @@ impl RendezvousServer {
                      }
                  });
              let socket_addr = AddrMangle::encode(addr).into();
@@ -3362,7 +3366,7 @@ index dff45eb..764cd66 100644
              if same_intranet {
                  log::debug!(
                      "Fetch local addr {:?} {:?} request from {:?}",
-@@ -754,6 +973,7 @@ impl RendezvousServer {
+@@ -754,6 +977,7 @@ impl RendezvousServer {
                  msg_out.set_fetch_local_addr(FetchLocalAddr {
                      socket_addr,
                      relay_server,
@@ -3370,7 +3374,7 @@ index dff45eb..764cd66 100644
                      ..Default::default()
                  });
              } else {
-@@ -763,15 +983,29 @@ impl RendezvousServer {
+@@ -763,15 +987,29 @@ impl RendezvousServer {
                      peer_addr,
                      addr
                  );
@@ -3400,7 +3404,7 @@ index dff45eb..764cd66 100644
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
                  failure: punch_hole_response::Failure::ID_NOT_EXIST.into(),
-@@ -787,6 +1021,13 @@ impl RendezvousServer {
+@@ -787,6 +1025,13 @@ impl RendezvousServer {
          stream: &mut FramedStream,
          peers: Vec<String>,
      ) -> ResultType<()> {
@@ -3414,7 +3418,7 @@ index dff45eb..764cd66 100644
          let mut states = BytesMut::zeroed((peers.len() + 7) / 8);
          for (i, peer_id) in peers.iter().enumerate() {
              if let Some(peer) = self.pm.get_in_memory(peer_id).await {
-@@ -805,9 +1046,7 @@ impl RendezvousServer {
+@@ -805,9 +1050,7 @@ impl RendezvousServer {
              states: states.into(),
              ..Default::default()
          });
@@ -3425,7 +3429,7 @@ index dff45eb..764cd66 100644
      }
  
      #[inline]
-@@ -821,19 +1060,57 @@ impl RendezvousServer {
+@@ -821,19 +1064,57 @@ impl RendezvousServer {
      #[inline]
      async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) {
          if let Some(sink) = sink.as_mut() {
@@ -3446,14 +3450,14 @@ index dff45eb..764cd66 100644
 +            match sink {
 +                Sink::TcpStream(s) => {
 +                    allow_err!(s.send(Bytes::from(bytes)).await);
-+                }
+                 }
 +                Sink::Ws(ws) => {
 +                    allow_err!(ws.send(tungstenite::Message::Binary(bytes)).await);
-                 }
-             }
-         }
-     }
- 
++                }
++            }
++        }
++    }
++
 +    /// Send to the controller's punch socket and keep it for later messages (ICE candidates);
 +    /// it is dropped when that connection closes.
 +    /// The lock is held while sending so a candidate racing this message is not lost; a peer that
@@ -3464,10 +3468,10 @@ index dff45eb..764cd66 100644
 +        if let Some(sink) = punch.get_mut(&key) {
 +            if timeout(500, Self::send_sink(sink, msg)).await.is_err() {
 +                punch.remove(&key);
-+            }
-+        }
-+    }
-+
+             }
+         }
+     }
+ 
 +    /// Tether: WebRTC trickle ICE between the two peers. From the host (on its own connection)
 +    /// `socket_addr` names the controller's punch socket; from the controller `id` names the
 +    /// host, reached over its registration. Candidates are opaque here: the peers check the
@@ -3491,7 +3495,7 @@ index dff45eb..764cd66 100644
      #[inline]
      async fn send_to_tcp_sync(
          &mut self,
-@@ -880,6 +1157,17 @@ impl RendezvousServer {
+@@ -880,6 +1161,17 @@ impl RendezvousServer {
          Ok(())
      }
  
@@ -3509,7 +3513,7 @@ index dff45eb..764cd66 100644
      async fn check_ip_blocker(&self, ip: &str, id: &str) -> bool {
          let mut lock = IP_BLOCKER.lock().await;
          let now = Instant::now();
-@@ -887,7 +1175,8 @@ impl RendezvousServer {
+@@ -887,7 +1179,8 @@ impl RendezvousServer {
              let counter = &mut old.0;
              if counter.1.elapsed().as_secs() > IP_BLOCK_DUR {
                  counter.0 = 0;
@@ -3519,7 +3523,7 @@ index dff45eb..764cd66 100644
                  return false;
              }
              counter.0 += 1;
-@@ -897,7 +1186,10 @@ impl RendezvousServer {
+@@ -897,7 +1190,10 @@ impl RendezvousServer {
              let is_new = counter.0.get(id).is_none();
              if counter.1.elapsed().as_secs() > DAY_SECONDS {
                  counter.0.clear();
@@ -3531,7 +3535,7 @@ index dff45eb..764cd66 100644
                  return !is_new;
              }
              if is_new {
-@@ -911,19 +1203,28 @@ impl RendezvousServer {
+@@ -911,19 +1207,28 @@ impl RendezvousServer {
      }
  
      fn parse_relay_servers(&mut self, relay_servers: &str) {
@@ -3569,7 +3573,7 @@ index dff45eb..764cd66 100644
      }
  
      async fn check_cmd(&self, cmd: &str) -> String {
-@@ -948,8 +1249,9 @@ impl RendezvousServer {
+@@ -948,8 +1253,9 @@ impl RendezvousServer {
                  if let Some(rs) = fds.next() {
                      self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                  } else {
@@ -3581,13 +3585,13 @@ index dff45eb..764cd66 100644
                      }
                  }
              }
-@@ -1148,20 +1450,22 @@ impl RendezvousServer {
+@@ -1148,20 +1454,22 @@ impl RendezvousServer {
          key: &str,
          ws: bool,
      ) -> ResultType<()> {
 +        let _conn = crate::metrics::Open::new(&crate::metrics::CONNECTIONS[crate::metrics::transport(ws)]);
 +        // Messages queued for this connection (signalling for a host registered over it).
-+        let (peer_tx, mut peer_rx) = mpsc::unbounded_channel::<RendezvousMessage>();
++        let (peer_tx, mut peer_rx) = mpsc::channel::<RendezvousMessage>(PEER_QUEUE);
          let mut sink;
          if ws {
              use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
@@ -3612,7 +3616,7 @@ index dff45eb..764cd66 100644
                      }
                  }
                  Ok(response)
-@@ -1169,22 +1473,87 @@ impl RendezvousServer {
+@@ -1169,22 +1477,95 @@ impl RendezvousServer {
              let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
              let (a, mut b) = ws_stream.split();
              sink = Some(Sink::Ws(a));
@@ -3635,13 +3639,15 @@ index dff45eb..764cd66 100644
 +                tokio::select! {
 +                    Ok(()) = release.changed(), if registered.is_some() => {
 +                        let g = *release.borrow_and_update();
-+                        Self::send_to_sink(&mut sink, release_hint(g)).await;
++                        if timeout(PEER_SEND_TIMEOUT_MS, Self::send_to_sink(&mut sink, release_hint(g))).await.is_err() {
++                            break;
++                        }
 +                        crate::metrics::RELEASE_HINTS[0].inc();
 +                        crate::metrics::RELEASE_HINT_PEERS.inc();
 +                    }
 +                    _ = heartbeat.tick(), if registered.is_some() => {
 +                        if let Some(Sink::Ws(ws)) = sink.as_mut() {
-+                            if ws.send(tungstenite::Message::Binary(Vec::new())).await.is_err() {
++                            if !matches!(timeout(PEER_SEND_TIMEOUT_MS, ws.send(tungstenite::Message::Binary(Vec::new()))).await, Ok(Ok(()))) {
 +                                break;
 +                            }
 +                        }
@@ -3662,7 +3668,9 @@ index dff45eb..764cd66 100644
 +                            // during a push learns of the release on reconnect.
 +                            let g = *release.borrow_and_update();
 +                            if !was && registered.is_some() && g > 0 {
-+                                Self::send_to_sink(&mut sink, release_hint(g)).await;
++                                if timeout(PEER_SEND_TIMEOUT_MS, Self::send_to_sink(&mut sink, release_hint(g))).await.is_err() {
++                                    break;
++                                }
 +                                crate::metrics::RELEASE_HINTS[1].inc();
 +                                crate::metrics::RELEASE_HINT_PEERS.inc();
 +                            }
@@ -3671,7 +3679,9 @@ index dff45eb..764cd66 100644
 +                        _ => break,
 +                    },
 +                    Some(msg) = peer_rx.recv() => {
-+                        Self::send_to_sink(&mut sink, msg).await;
++                        if timeout(PEER_SEND_TIMEOUT_MS, Self::send_to_sink(&mut sink, msg)).await.is_err() {
++                            break;
++                        }
                      }
                  }
              }
@@ -3692,7 +3702,9 @@ index dff45eb..764cd66 100644
 +                        _ => break,
 +                    },
 +                    Some(msg) = peer_rx.recv() => {
-+                        Self::send_to_sink(&mut sink, msg).await;
++                        if timeout(PEER_SEND_TIMEOUT_MS, Self::send_to_sink(&mut sink, msg)).await.is_err() {
++                            break;
++                        }
 +                    }
                  }
              }
@@ -3707,7 +3719,7 @@ index dff45eb..764cd66 100644
          if sink.is_none() {
              self.tcp_punch.lock().await.remove(&try_into_v4(addr));
          }
-@@ -1268,24 +1637,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
+@@ -1268,24 +1649,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
      let mut futs = Vec::new();
      let rs = Arc::new(Mutex::new(Vec::new()));
      for x in rs0.iter() {
@@ -3765,7 +3777,7 @@ index dff45eb..764cd66 100644
      if !rs.is_empty() {
          tx.send(Data::RelayServers(rs)).ok();
      }
-@@ -1330,17 +1726,14 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+@@ -1330,17 +1738,14 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
  }
  
  #[inline]
@@ -3786,13 +3798,13 @@ index dff45eb..764cd66 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1754,421 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1766,472 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
 +
 +/// The host id this connection is the signalling path of, if any.
-+async fn registered_id(addr: SocketAddr, peer_tx: &mpsc::UnboundedSender<RendezvousMessage>) -> Option<String> {
++async fn registered_id(addr: SocketAddr, peer_tx: &TcpPeerTx) -> Option<String> {
 +    TCP_PEERS
 +        .lock()
 +        .await
@@ -3990,9 +4002,9 @@ index dff45eb..764cd66 100644
 +            let host: SocketAddr = "198.51.100.10:40000".parse().unwrap();
 +            let host2: SocketAddr = "198.51.100.10:40002".parse().unwrap();
 +            let evil: SocketAddr = "203.0.113.66:40001".parse().unwrap();
-+            let (host_tx, _h) = mpsc::unbounded_channel();
-+            let (host2_tx, _h2) = mpsc::unbounded_channel();
-+            let (evil_tx, _e) = mpsc::unbounded_channel();
++            let (host_tx, _h) = mpsc::channel(PEER_QUEUE);
++            let (host2_tx, _h2) = mpsc::channel(PEER_QUEUE);
++            let (evil_tx, _e) = mpsc::channel(PEER_QUEUE);
 +
 +            // The host registers its key: this connection is its signalling path.
 +            assert!(rs.handle_tcp(&register_pk(id, b"host-uuid", b"host-pk"), &mut None, host, "", true, &host_tx).await);
@@ -4031,7 +4043,7 @@ index dff45eb..764cd66 100644
 +            std::env::set_var("DB_URL", db.to_str().unwrap());
 +            let mut rs = server(PeerMap::new().await.unwrap());
 +            let host: SocketAddr = "198.51.100.20:40000".parse().unwrap();
-+            let (tx, _h) = mpsc::unbounded_channel();
++            let (tx, _h) = mpsc::channel(PEER_QUEUE);
 +            assert!(rs.handle_tcp(&register_pk("online1", b"online-uuid", b"online-pk"), &mut None, host, "", true, &tx).await);
 +            let ids: Vec<String> = ["nobody", "online1", "x", "y", "z", "a", "b", "c", "online1"].iter().map(|s| s.to_string()).collect();
 +            let m = rs.online_response(&ids).await;
@@ -4162,6 +4174,57 @@ index dff45eb..764cd66 100644
 +            assert_eq!(crate::metrics::RELEASE_GENERATION.get(), 8);
 +            assert!(next(&mut idle, 500).await.is_none(), "unregistered connection got a hint");
 +            assert!(next(&mut host, 500).await.is_none(), "one hint per change");
++        });
++    }
++
++    /// A registered host that stops reading: messages for it are dropped once its queue is full
++    /// (hbbs memory stays bounded), and the blocked write closes the connection after
++    /// PEER_SEND_TIMEOUT_MS, which also ends it as the host's signalling path.
++    #[test]
++    fn stalled_host_queue_is_bounded_and_dropped() {
++        use tokio_tungstenite::tungstenite::Message as WsMsg;
++        let _g = DB_ENV.lock().unwrap_or_else(|e| e.into_inner());
++        tokio::runtime::Runtime::new().unwrap().block_on(async {
++            let db = std::env::temp_dir().join(format!("hbbs-stall-{}.sqlite3", std::process::id()));
++            let _ = std::fs::remove_file(&db);
++            std::env::set_var("DB_URL", db.to_str().unwrap());
++            let rs = server(PeerMap::new().await.unwrap());
++            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++            let port = listener.local_addr().unwrap().port();
++            tokio::spawn(async move {
++                loop {
++                    let (stream, addr) = listener.accept().await.unwrap();
++                    let mut rs = rs.clone();
++                    tokio::spawn(async move { rs.handle_listener_inner(stream, addr, "", true).await });
++                }
++            });
++            let pause = || hbb_common::tokio::time::sleep(Duration::from_millis(20));
++            let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
++            let addr = try_into_v4(tcp.local_addr().unwrap());
++            let mut host = tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws/id"), tcp).await.unwrap().0;
++            host.send(WsMsg::Binary(register_pk("stallhost1", b"stall-uuid", b"stall-pk"))).await.unwrap();
++            let tx = loop {
++                if let Some((tx, _)) = TCP_PEERS.lock().await.get(&addr).cloned() {
++                    break tx;
++                }
++                pause().await;
++            };
++            // The host never reads again. Flood it the way the main loop does (try_send).
++            let mut big = RendezvousMessage::new();
++            big.set_ice_candidate(IceCandidate { candidate: "x".repeat(60_000), ..Default::default() });
++            let mut queued = 0;
++            for _ in 0..2_000 {
++                queued += tx.try_send(big.clone()).is_ok() as usize;
++                hbb_common::tokio::task::yield_now().await;
++            }
++            assert!(queued < 1_000, "{queued} messages of 60 KB queued for a host that does not read");
++            let t = std::time::Instant::now();
++            while is_signalling_path(addr).await {
++                assert!(t.elapsed() < Duration::from_secs(20), "stalled connection still the host's path");
++                pause().await;
++            }
++            drop(host);
++            let _ = std::fs::remove_file(&db);
 +        });
 +    }
 +

@@ -16,3 +16,7 @@ libc = "0.2"
 lto = true
 codegen-units = 1
 strip = true
+
+# tiny_http with a bounded body drain (patched/tiny_http/src/util/equal_reader.rs).
+[patch.crates-io]
+tiny_http = { path = "patched/tiny_http" }

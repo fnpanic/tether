@@ -4,7 +4,8 @@
 # or nginx with PROXY=nginx).
 #   sudo ADMIN_PUB_KEY=<b64>[,<b64>] ./install.sh relay.example.com [path/to/binaries]
 # Optional env: DUCKDNS_DOMAIN + DUCKDNS_TOKEN (keep the name pointed at this host),
-# RELAY_SERVERS (every relay hbbs hands out, for several relays; see docs/relay-ha.md),
+# RELAY_SERVERS (every relay hbbs hands out, for several relays; default: the list installed
+# before, else this host; see docs/relay-ha.md),
 # PROXY=caddy|nginx (front end; default: the one installed before, else caddy; nginx comes from
 # nginx.org's signed repository, see docs/proxy-benchmark.md), CADDY_VERSION (default below).
 # Safe to re-run; an existing /etc/tether/api.env is kept unless ADMIN_PUB_KEY is given.
@@ -22,6 +23,9 @@ declare -A NGX_EXPORTER_SUM=(
 # The front end: as asked, else the one this host already runs, else Caddy.
 PROXY="${PROXY:-$(sed -n 's/^PROXY=//p' /etc/tether/server.env 2>/dev/null)}"
 PROXY="${PROXY:-caddy}"
+# The relay list: as asked, else the one this host already uses (a re-run must not drop the other
+# relays of an HA setup), else this host alone (below).
+RELAY_SERVERS="${RELAY_SERVERS:-$(sed -n 's/^RELAY_SERVERS=//p' /etc/tether/server.env 2>/dev/null)}"
 case "$PROXY" in caddy | nginx) ;; *) echo "PROXY must be caddy or nginx" >&2; exit 1 ;; esac
 case "$(uname -m)" in
   x86_64 | amd64) DEFAULT_BIN="$HERE/bin"; GOARCH=amd64 ;;

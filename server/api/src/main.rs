@@ -18,13 +18,13 @@ mod team;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::mem::ManuallyDrop;
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::os::unix::io::FromRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -36,7 +36,8 @@ use tiny_http::{Header, Request, Response, Server};
 
 const DAY: u64 = 86_400;
 /// Devices kept (oldest seen dropped first). 10 000 users plus reinstalls within DEVICE_TTL need
-/// headroom; 50 000 is ~7 MB of devices.json and ~25 MB of memory (docs/scaling.md).
+/// headroom; 50 000 is ~7 MB of devices.json and ~30 MB of memory, 40 MB at the peak while
+/// loading (measured, docs/scaling.md; MemoryMax=64M).
 const MAX_DEVICES: usize = 50_000;
 const DEVICE_TTL: u64 = 180 * DAY;
 const HB_UUID_INTERVAL: u64 = 60;
@@ -62,11 +63,19 @@ const Q_IP_PER_MIN: u32 = 30;
 const MAX_WORKERS: usize = 32;
 /// Longest wait for one read or write on a client connection.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// Large uploads (release, diagnostics) read at once; more get 503 with Retry-After, so slow
+/// uploads never hold more than these of the MAX_WORKERS (heartbeats keep the rest).
+const MAX_UPLOADS: usize = 4;
+/// A body read that averages under MIN_RATE bytes/s once MIN_RATE_AFTER has passed is aborted.
+const MIN_RATE: u64 = 16 << 10;
+const MIN_RATE_AFTER: Duration = Duration::from_secs(30);
 
 static STOP: AtomicBool = AtomicBool::new(false);
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+static UPLOADS: AtomicUsize = AtomicUsize::new(0);
 
 type Resp = Response<Box<dyn Read + Send>>;
+type Later = Box<dyn FnOnce(&Mutex<App>) -> Result<Resp, Resp> + Send>;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,9 +152,10 @@ struct CustomRequest {
     channel: String,
 }
 
-/// `custom/<id>.json`. The signed profile is kept as sent; TetherQS verifies it itself.
+/// A custom app as kept in memory (and listed): everything but its profile, which is up to
+/// LIMIT_CUSTOM and read from `custom/<id>.json` when a download or the macOS app needs it.
 #[derive(Serialize, Deserialize, Clone)]
-struct CustomApp {
+struct CustomMeta {
     id: String,
     name: String,
     token: String,
@@ -154,7 +164,18 @@ struct CustomApp {
     created: u64,
     downloads: u64,
     last_download: Option<u64>,
+}
+
+/// `custom/<id>.json`. The signed profile is kept as sent; TetherQS verifies it itself.
+#[derive(Serialize, Deserialize)]
+struct CustomApp {
+    #[serde(flatten)]
+    meta: CustomMeta,
     profile: serde_json::Value,
+}
+
+fn read_custom(data: &Path, id: &str) -> io::Result<CustomApp> {
+    serde_json::from_slice(&fs::read(data.join("custom").join(format!("{id}.json")))?).map_err(io::Error::other)
 }
 
 /// Just the header fields of a stored bundle (history listing, startup).
@@ -168,8 +189,9 @@ struct BundleMeta {
 enum Body {
     Mem(Vec<u8>),
     /// The large uploads (release, diagnostics), streamed to a temp file that is removed on drop
-    /// unless the handler renamed it into place.
-    File(PathBuf, u64),
+    /// unless the handler renamed it into place. `nonce`: of the admin signature already
+    /// verified over the file (release uploads), still to be checked for replay.
+    File { path: PathBuf, len: u64, nonce: Option<String> },
 }
 
 impl Body {
@@ -182,7 +204,7 @@ impl Body {
 
     fn file(&self) -> Result<(&Path, u64), Resp> {
         match self {
-            Body::File(p, n) => Ok((p, *n)),
+            Body::File { path, len, .. } => Ok((path, *len)),
             Body::Mem(_) => Err(internal("upload not streamed to a file")),
         }
     }
@@ -190,41 +212,78 @@ impl Body {
 
 impl Drop for Body {
     fn drop(&mut self) {
-        if let Body::File(p, _) = self {
-            let _ = fs::remove_file(p);
+        if let Body::File { path, .. } = self {
+            let _ = fs::remove_file(path);
         }
     }
 }
 
-/// Fails a body read once its whole-body deadline has passed (IO_TIMEOUT bounds each read).
-struct Deadline<R>(R, Instant);
+/// Fails a body read once its whole-body deadline has passed (a minute plus 64 KiB/s of the
+/// limit; 200 MiB: about 55 min) or, after MIN_RATE_AFTER, while it averages under MIN_RATE: a
+/// trickle would otherwise hold its worker until the deadline. IO_TIMEOUT bounds each read.
+struct Deadline<R> {
+    r: R,
+    start: Instant,
+    end: Instant,
+    n: u64,
+}
+
+impl<R: Read> Deadline<R> {
+    fn new(r: R, limit: u64) -> Self {
+        let start = Instant::now();
+        Deadline { r, start, end: start + Duration::from_secs(60 + limit / (64 << 10)), n: 0 }
+    }
+}
 
 impl<R: Read> Read for Deadline<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if Instant::now() > self.1 {
+        let took = self.start.elapsed();
+        if Instant::now() > self.end || (took > MIN_RATE_AFTER && self.n < MIN_RATE * took.as_secs()) {
             return Err(io::ErrorKind::TimedOut.into());
         }
-        self.0.read(buf)
+        let n = self.r.read(buf)?;
+        self.n += n as u64;
+        Ok(n)
     }
 }
 
-/// Reading `limit` bytes may take a minute plus 64 KiB/s (200 MiB: about 55 min).
-fn body_deadline(limit: u64) -> Instant {
-    Instant::now() + Duration::from_secs(60 + limit / (64 << 10))
+/// One of the MAX_UPLOADS upload slots, released on drop.
+struct UploadSlot;
+
+impl UploadSlot {
+    fn take() -> Option<Self> {
+        if UPLOADS.fetch_add(1, Ordering::SeqCst) < MAX_UPLOADS {
+            return Some(UploadSlot);
+        }
+        UPLOADS.fetch_sub(1, Ordering::SeqCst);
+        None
+    }
 }
 
-/// tiny_http does not expose a request's socket: find it by its peer address among our fds to
-/// set (or with `None` clear) its read and write timeouts.
-fn set_io_timeouts(peer: SocketAddr, t: Option<Duration>) {
+impl Drop for UploadSlot {
+    fn drop(&mut self) {
+        UPLOADS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// tiny_http does not expose a request's socket: find it by its peer address among our fds.
+fn with_socket(peer: SocketAddr, f: impl Fn(&TcpStream)) {
     let Ok(fds) = fs::read_dir("/proc/self/fd") else { return };
     for fd in fds.flatten().filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok()) {
         // Borrowed, never closed here; getpeername fails on anything that is not a TCP connection.
         let s = ManuallyDrop::new(unsafe { TcpStream::from_raw_fd(fd) });
         if s.peer_addr().is_ok_and(|a| a == peer) {
-            let _ = s.set_read_timeout(t);
-            let _ = s.set_write_timeout(t);
+            f(&s);
         }
     }
+}
+
+/// Sets (or with `None` clears) the read and write timeouts of a request's socket.
+fn set_io_timeouts(peer: SocketAddr, t: Option<Duration>) {
+    with_socket(peer, |s| {
+        let _ = s.set_read_timeout(t);
+        let _ = s.set_write_timeout(t);
+    });
 }
 
 struct App {
@@ -238,7 +297,9 @@ struct App {
     audit_ip_hits: HashMap<String, (u64, u32)>,
     audit_dev_hits: HashMap<String, (u64, u32)>,
     audit: audit::Log,
-    custom: Vec<CustomApp>,
+    custom: Vec<CustomMeta>,
+    /// Set by a handler (`App::defer`) whose file work runs after the state lock is released.
+    later: Option<Later>,
     nonces: HashMap<String, u64>,
     tickets: Vec<Ticket>,
     policy_serial: Option<u64>,
@@ -299,6 +360,10 @@ fn not_found() -> Resp {
     text(404, "not found")
 }
 
+fn admin_disabled() -> Resp {
+    text(503, "admin API disabled: ADMIN_PUB_KEY not set")
+}
+
 fn too_large() -> Resp {
     text(413, "body too large")
 }
@@ -331,7 +396,7 @@ fn read_body(rq: &mut Request, limit: u64) -> Result<Vec<u8>, Resp> {
         return Err(too_large());
     }
     let mut buf = Vec::new();
-    Deadline(rq.as_reader(), body_deadline(limit))
+    Deadline::new(rq.as_reader(), limit)
         .take(limit + 1)
         .read_to_end(&mut buf)
         .map_err(|e| {
@@ -364,31 +429,65 @@ fn body_to_file(rq: &mut Request, data: &Path, limit: u64, mode: u32) -> Result<
     let tmp = tmp_path(data);
     let r = (|| -> io::Result<u64> {
         let mut f = OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
-        let n = io::copy(&mut Deadline(rq.as_reader(), body_deadline(limit)).take(limit + 1), &mut f)?;
+        let n = io::copy(&mut Deadline::new(rq.as_reader(), limit).take(limit + 1), &mut f)?;
         f.sync_all()?;
         Ok(n)
     })();
-    let body = Body::File(tmp, *r.as_ref().unwrap_or(&0));
+    let body = Body::File { path: tmp, len: *r.as_ref().unwrap_or(&0), nonce: None };
     match r {
         Ok(n) if n <= limit => Ok(body),
         Ok(_) => Err(too_large()),
         Err(e) => {
             metrics::body_error(&e);
-            Err(internal(format!("upload failed: {e}")))
+            match e.kind() {
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => Err(text(408, "request body too slow")),
+                _ => Err(internal(format!("upload failed: {e}"))),
+            }
         }
     }
 }
 
+/// The admin signature of a request under any of `keys`. Needs no state, so a large body is
+/// checked before the state lock; the returned nonce still goes through `App::use_nonce`.
+fn verify_sig(keys: &[VerifyingKey], rq: &Request, method: &str, url: &str, body: &[u8], t: u64) -> Result<String, Resp> {
+    let sig = header(rq, reqauth::HEADER).ok_or_else(|| text(401, "missing signature"))?;
+    let mut err = String::new();
+    for key in keys {
+        let mut nonce = String::new();
+        match reqauth::verify_request(&sig, key, method, url, body, t, |n| {
+            nonce = n.to_owned();
+            true
+        }) {
+            Ok(()) => return Ok(nonce),
+            // A mismatch under one key says nothing; keep the more specific reason.
+            Err(e) if err.is_empty() || e != "signature does not match" => err = e,
+            Err(_) => {}
+        }
+    }
+    Err(text(401, &err))
+}
+
 /// Reads the body a route takes, before any state is locked: the large uploads to a temp file,
 /// everything else into memory up to the largest in-memory limit (LIMIT_PAGE); each handler
-/// still applies its own limit.
-fn read_request_body(rq: &mut Request, data: &Path) -> Result<Body, Resp> {
-    let path = rq.url().split('?').next().unwrap_or("").to_owned();
-    match rq.method().as_str() {
-        "PUT" if path.starts_with("/api/admin/release/") => body_to_file(rq, data, LIMIT_RELEASE, 0o640),
-        "POST" if path.starts_with("/api/diag/") => body_to_file(rq, data, LIMIT_DIAG, 0o600),
-        _ => read_body(rq, LIMIT_PAGE).map(Body::Mem),
+/// still applies its own limit. An upload is first checked as far as it can be without its body
+/// and needs one of the MAX_UPLOADS slots; a release upload's signature is verified here.
+fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<Body, Resp> {
+    let url = rq.url().to_owned();
+    let path = url.split('?').next().unwrap_or("");
+    let (limit, mode, keys) = match (rq.method().as_str(), path) {
+        ("PUT", p) if p.starts_with("/api/admin/release/") => (LIMIT_RELEASE, 0o640, Some(lock(app).release_precheck(rq, p)?)),
+        ("POST", p) if p.starts_with("/api/diag/") => {
+            lock(app).open_ticket(&p["/api/diag/".len()..], now())?;
+            (LIMIT_DIAG, 0o600, None)
+        }
+        _ => return read_body(rq, LIMIT_PAGE).map(Body::Mem),
+    };
+    let _slot = UploadSlot::take().ok_or_else(|| text(503, "too many uploads at once, retry later").with_header(hdr("Retry-After", "30")))?;
+    let mut body = body_to_file(rq, data, limit, mode)?;
+    if let (Some(keys), Body::File { path, nonce, .. }) = (keys, &mut body) {
+        *nonce = Some(with_mapped(path, |b| verify_sig(&keys, rq, "PUT", &url, b, now())).map_err(internal)??);
     }
+    Ok(body)
 }
 
 fn lock(app: &Mutex<App>) -> MutexGuard<'_, App> {
@@ -396,7 +495,8 @@ fn lock(app: &Mutex<App>) -> MutexGuard<'_, App> {
 }
 
 /// One request on its own worker thread. Only routing holds the state lock; the body is read
-/// before it and the response written after it, each read and write bounded by IO_TIMEOUT.
+/// before it, file work a handler deferred (`App::defer`) and the response written after it,
+/// each read and write bounded by IO_TIMEOUT.
 fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
     let (start, endpoint) = (Instant::now(), metrics::endpoint(rq.method().as_str(), rq.url()));
     let peer = rq.remote_addr().copied();
@@ -414,9 +514,29 @@ fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
     if let Some(p) = peer {
         set_io_timeouts(p, Some(IO_TIMEOUT));
     }
-    let resp = match read_request_body(&mut rq, data) {
-        Ok(body) => lock(app).route(&mut rq, &body).unwrap_or_else(|e| e),
-        Err(e) => e,
+    let resp = match read_request_body(app, &mut rq, data) {
+        Ok(body) => {
+            let (r, later) = {
+                let mut a = lock(app);
+                let r = a.route(&mut rq, &body);
+                (r, a.later.take())
+            };
+            match (r, later) {
+                (Ok(_), Some(f)) => f(app),
+                (r, _) => r,
+            }
+            .unwrap_or_else(|e| e)
+        }
+        Err(e) => {
+            // Refused before (all of) the body was read: tiny_http would read the rest after the
+            // response, holding this worker for as long as a slow client keeps sending.
+            if let Some(p) = peer {
+                with_socket(p, |s| {
+                    let _ = s.shutdown(Shutdown::Read);
+                });
+            }
+            e.with_header(hdr("Connection", "close"))
+        }
     };
     let code = resp.status_code().0;
     let _ = rq.respond(resp);
@@ -564,8 +684,9 @@ fn stored_meta(raw: &[u8]) -> Option<BundleMeta> {
 }
 
 fn load_json<T: for<'de> Deserialize<'de> + Default>(p: &Path) -> T {
-    match fs::read(p) {
-        Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
+    // From a reader: devices.json at MAX_DEVICES is ~7 MB, not read into memory first.
+    match File::open(p) {
+        Ok(f) => serde_json::from_reader(BufReader::new(f)).unwrap_or_else(|e| {
             eprintln!("warning: ignoring unreadable {}: {e}", p.display());
             T::default()
         }),
@@ -594,7 +715,7 @@ impl App {
                 indexes.insert(ch, m);
             }
         }
-        let mut custom: Vec<CustomApp> = Vec::new();
+        let mut custom: Vec<CustomMeta> = Vec::new();
         for e in fs::read_dir(data.join("custom"))?.flatten() {
             let p = e.path();
             if p.extension().is_some_and(|x| x == "json") {
@@ -611,6 +732,7 @@ impl App {
             audit: audit::Log::open(data.join("audit"), audit_days, audit_max)?,
             team: team::Team::open(&data)?,
             custom,
+            later: None,
             devices: devices.into_iter().map(|d| (d.uuid.clone(), d)).collect(),
             devices_dirty: false,
             ip_hits: HashMap::new(),
@@ -627,11 +749,15 @@ impl App {
         })
     }
 
-    fn write_atomic(&mut self, dest: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    /// Writes `dest` through a temp file, fsync and rename; `write` streams into it.
+    fn write_atomic_with(&self, dest: &Path, mode: u32, write: impl FnOnce(&mut BufWriter<&File>) -> io::Result<()>) -> io::Result<()> {
         let tmp = tmp_path(&self.data);
         let r = (|| {
-            let mut f = OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
-            f.write_all(bytes)?;
+            let f = OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
+            let mut w = BufWriter::new(&f);
+            write(&mut w)?;
+            w.flush()?;
+            drop(w);
             f.sync_all()?;
             fs::rename(&tmp, dest)
         })();
@@ -641,9 +767,26 @@ impl App {
         r
     }
 
-    fn save<T: Serialize>(&mut self, name: &str, v: &T) -> io::Result<()> {
-        let bytes = serde_json::to_vec(v).map_err(io::Error::other)?;
-        self.write_atomic(&self.data.join(name), &bytes, 0o600)
+    fn write_atomic(&self, dest: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+        self.write_atomic_with(dest, mode, |w| w.write_all(bytes))
+    }
+
+    fn save<T: Serialize + ?Sized>(&self, name: &str, v: &T) -> io::Result<()> {
+        self.write_atomic_with(&self.data.join(name), 0o600, |w| serde_json::to_writer(w, v).map_err(io::Error::other))
+    }
+
+    /// A JSON response serialized into an (already unlinked) temp file instead of a buffer: a
+    /// device list at MAX_DEVICES is ~7 MB, and MAX_WORKERS of them must fit in MemoryMax.
+    fn json_file(&self, write: impl FnOnce(&mut BufWriter<&File>) -> serde_json::Result<()>) -> Result<Resp, Resp> {
+        let tmp = tmp_path(&self.data);
+        let mut f = OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&tmp).map_err(internal)?;
+        let _ = fs::remove_file(&tmp);
+        let mut w = BufWriter::new(&f);
+        write(&mut w).map_err(internal)?;
+        w.flush().map_err(internal)?;
+        drop(w);
+        f.rewind().map_err(internal)?;
+        Ok(Response::from_file(f).with_header(hdr("Content-Type", "application/json")).with_chunked_threshold(usize::MAX).boxed())
     }
 
     fn check_space(&self, incoming: u64) -> Result<(), Resp> {
@@ -651,25 +794,45 @@ impl App {
     }
 
     fn auth(&mut self, rq: &Request, method: &str, url: &str, body: &[u8]) -> Result<(), Resp> {
-        let sig = header(rq, reqauth::HEADER).ok_or_else(|| text(401, "missing signature"))?;
-        let t = now();
-        let mut err = String::new();
-        for key in &self.keys {
-            let nonces = &mut self.nonces;
-            let unused = |n: &str| nonces.insert(n.to_owned(), t).is_none();
-            match reqauth::verify_request(&sig, key, method, url, body, t, unused) {
-                Ok(()) => {
-                    // Persisted so a restart does not reopen the replay window.
-                    let nonces = self.nonces.clone();
-                    self.save("nonces.json", &nonces).map_err(internal)?;
-                    return Ok(());
-                }
-                // A mismatch under one key says nothing; keep the more specific reason.
-                Err(e) if err.is_empty() || e != "signature does not match" => err = e,
-                Err(_) => {}
-            }
+        let nonce = verify_sig(&self.keys, rq, method, url, body, now())?;
+        self.use_nonce(nonce)
+    }
+
+    /// Replay check of a verified signature's nonce.
+    fn use_nonce(&mut self, nonce: String) -> Result<(), Resp> {
+        if self.nonces.insert(nonce, now()).is_some() {
+            return Err(text(401, "replayed request"));
         }
-        Err(text(401, &err))
+        // Persisted so a restart does not reopen the replay window.
+        self.save("nonces.json", &self.nonces).map_err(internal)
+    }
+
+    /// The checks a release upload must pass before its body is read (the signature covers the
+    /// body, so it is verified after): the admin API is on, the path is valid, a signature with a
+    /// current timestamp is there. The trusted keys, for that verification.
+    fn release_precheck(&self, rq: &Request, path: &str) -> Result<Vec<VerifyingKey>, Resp> {
+        if self.keys.is_empty() {
+            return Err(admin_disabled());
+        }
+        release_path(&self.data, &path["/api/admin/release/".len()..])?;
+        let sig = header(rq, reqauth::HEADER).ok_or_else(|| text(401, "missing signature"))?;
+        let ts = sig.split_whitespace().find_map(|p| p.strip_prefix("ts=")?.parse::<u64>().ok());
+        if !ts.is_some_and(|ts| now().abs_diff(ts) <= reqauth::MAX_SKEW_SECS) {
+            return Err(text(401, "request timestamp outside allowed clock skew"));
+        }
+        Ok(self.keys.clone())
+    }
+
+    /// Index of the open diagnostics ticket `ticket`, or 404.
+    fn open_ticket(&self, ticket: &str, t: u64) -> Result<usize, Resp> {
+        self.tickets.iter().position(|k| k.ticket == ticket && k.uploaded.is_none() && t < k.created + TICKET_OPEN).ok_or_else(not_found)
+    }
+
+    /// Lets `f` make the response after the state lock is released (file work that needs no
+    /// state, or takes the lock again itself); the response returned here is replaced by f's.
+    fn defer(&mut self, f: impl FnOnce(&Mutex<App>) -> Result<Resp, Resp> + Send + 'static) -> Result<Resp, Resp> {
+        self.later = Some(Box::new(f));
+        Ok(empty(500))
     }
 
     fn route(&mut self, rq: &mut Request, body: &Body) -> Result<Resp, Resp> {
@@ -787,7 +950,7 @@ impl App {
     }
 
     /// `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>`.
-    fn audit_read(&self, url: &str) -> Result<Resp, Resp> {
+    fn audit_read(&mut self, url: &str) -> Result<Resp, Resp> {
         let (mut since, mut limit, mut device) = (0, 1000, String::new());
         for kv in url.split_once('?').map_or("", |(_, q)| q).split('&').filter(|s| !s.is_empty()) {
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
@@ -799,16 +962,13 @@ impl App {
                 _ => return Err(text(400, &format!("unknown parameter {k}"))),
             }
         }
-        Ok(json(&self.audit.read(since, limit, &device)))
+        let dir = self.audit.dir.clone();
+        self.defer(move |_| Ok(json(&audit::read(&dir, since, limit, &device))))
     }
 
     fn diag_upload(&mut self, body: &Body, ticket: &str) -> Result<Resp, Resp> {
         let t = now();
-        let idx = self
-            .tickets
-            .iter()
-            .position(|k| k.ticket == ticket && k.uploaded.is_none() && t < k.created + TICKET_OPEN)
-            .ok_or_else(not_found)?;
+        let idx = self.open_ticket(ticket, t)?;
         let (tmp, size) = body.file()?;
         fs::rename(tmp, self.data.join("diag").join(format!("{ticket}.zip"))).map_err(internal)?;
         self.tickets[idx].uploaded = Some(t);
@@ -820,12 +980,12 @@ impl App {
 
     fn admin(&mut self, rq: &mut Request, body: &Body, method: &str, url: &str, rest: &str) -> Result<Resp, Resp> {
         if self.keys.is_empty() {
-            return Err(text(503, "admin API disabled: ADMIN_PUB_KEY not set"));
+            return Err(admin_disabled());
         }
         if let Some(rel) = rest.strip_prefix("release/") {
             let dest = release_path(&self.data, rel)?;
             return match method {
-                "PUT" => self.put_release(rq, body, url, &dest),
+                "PUT" => self.put_release(body, &dest),
                 "DELETE" => {
                     self.auth(rq, method, url, body.bytes(LIMIT_SMALL)?)?;
                     self.delete_guarded(&dest, url)
@@ -863,22 +1023,12 @@ impl App {
             ("POST", "releases/prune") => self.prune(body),
             ("PUT", r) if r.starts_with("custom/") => self.put_custom(&r["custom/".len()..], body),
             ("DELETE", r) if r.starts_with("custom/") => self.delete_custom(&r["custom/".len()..]),
-            ("GET", "custom") => {
-                let list: Vec<_> = self
-                    .custom
-                    .iter()
-                    .map(|c| {
-                        serde_json::json!({"id": c.id, "name": c.name, "token": c.token, "expires": c.expires, "channel": c.channel,
-                            "created": c.created, "downloads": c.downloads, "last_download": c.last_download})
-                    })
-                    .collect();
-                Ok(json(&list))
-            }
+            ("GET", "custom") => Ok(json(&self.custom)),
             ("GET", "policy-history") => self.policy_history(),
             ("GET", "devices") => {
                 let mut v: Vec<&Device> = self.devices.values().collect();
                 v.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
-                Ok(json(&v))
+                self.json_file(|w| serde_json::to_writer(w, &v))
             }
             ("GET", "diag") => Ok(json(&self.tickets)),
             ("GET", "audit") => self.audit_read(url),
@@ -1011,13 +1161,13 @@ impl App {
             Some(o) if o.token == req.token => (o.created, o.downloads, o.last_download),
             _ => (t, 0, None),
         };
-        let entry = CustomApp { id: id.to_owned(), name: p.name, token: req.token, expires: req.expires, channel: req.channel, created, downloads, last_download, profile: req.profile };
+        let meta = CustomMeta { id: id.to_owned(), name: p.name, token: req.token, expires: req.expires, channel: req.channel, created, downloads, last_download };
         self.check_space(body.len() as u64)?;
-        self.save(&format!("custom/{id}.json"), &entry).map_err(internal)?;
-        self.qcache_drop(id, "");
+        self.save(&format!("custom/{id}.json"), &CustomApp { meta: meta.clone(), profile: req.profile }).map_err(internal)?;
+        qcache_drop(&self.data, id, "", "");
         match old {
-            Some(i) => self.custom[i] = entry,
-            None => self.custom.push(entry),
+            Some(i) => self.custom[i] = meta,
+            None => self.custom.push(meta),
         }
         Ok(empty(204))
     }
@@ -1025,7 +1175,7 @@ impl App {
     fn delete_custom(&mut self, id: &str) -> Result<Resp, Resp> {
         let i = self.custom.iter().position(|c| c.id == id && valid_custom_id(id)).ok_or_else(not_found)?;
         fs::remove_file(self.data.join("custom").join(format!("{id}.json"))).map_err(internal)?;
-        self.qcache_drop(id, "");
+        qcache_drop(&self.data, id, "", "");
         self.custom.remove(i);
         Ok(empty(204))
     }
@@ -1058,126 +1208,47 @@ impl App {
             return Err(not_found());
         }
         let c = self.custom.iter().find(|c| custom::mac_id(&c.token) == id).ok_or_else(not_found)?;
-        Ok(json(&c.profile).with_header(hdr("Cache-Control", "no-store")))
+        let app = read_custom(&self.data, &c.id).map_err(internal)?;
+        Ok(json(&app.profile).with_header(hdr("Cache-Control", "no-store")))
     }
 
     /// The channel's current TetherQS.exe plus the signed profile trailer, or for macOS its
     /// TetherQS zip with the `.app` named `<Name>-Support [<mac id>].app`. Unknown, revoked and
-    /// expired tokens get the same 404.
+    /// expired tokens get the same 404. Reading the release and preparing the copy (up to 200 MB,
+    /// with fsync) run after the state lock is released.
     fn custom_download(&mut self, rq: &Request, token: &str, mac: bool) -> Result<Resp, Resp> {
         let t = now();
         if !custom::valid_token(token) {
             return Err(not_found());
         }
-        let i = self.custom.iter().position(|c| c.token == token && t < c.expires).ok_or_else(not_found)?;
-        let c = &self.custom[i];
-        let (platform, ctype, ext) = if mac {
-            ("darwin-universal", "application/zip", "zip")
-        } else {
-            ("windows-x86_64", "application/vnd.microsoft.portable-executable", "exe")
-        };
-        let dir = self.data.join("download").join(&c.channel).join("customer").join(platform);
-        let exe = (|| {
-            let m: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("latest.json")).ok()?).ok()?;
-            let file = m["platforms"][platform]["url"].as_str()?.rsplit('/').next().filter(|f| valid_segment(f))?.to_owned();
-            let f = File::open(dir.join(&file)).ok()?;
-            let meta = f.metadata().ok().filter(|m| m.is_file())?;
-            Some((f, meta, file))
-        })();
-        let Some((mut f, meta, file)) = exe else {
-            eprintln!("custom app {} (token {}…): no {platform} TetherQS release in channel {}", c.id, token_hint(token), c.channel);
-            return Err(not_found());
-        };
-        let base = download_base(&c.name);
-        let disposition = format!("attachment; filename=\"{base}.{ext}\"");
-        let id = c.id.clone();
+        let c = self.custom.iter().find(|c| c.token == token && t < c.expires).ok_or_else(not_found)?.clone();
+        let (data, token) = (self.data.clone(), token.to_owned());
         let accel = header(rq, "X-Tether-Accel").as_deref() == Some("1");
-        // Behind the Caddyfile's handle_response (it sets X-Tether-Accel): answer with the path of a
-        // prepared copy and let Caddy send it, so a slow download does not hold a worker.
-        let accel_resp = |rel: &str| empty(204).with_header(hdr("X-Accel-Redirect", rel)).with_header(hdr("Content-Type", ctype)).with_header(hdr("Content-Disposition", &disposition));
-        let resp = if mac {
-            // Always prepared on disk: the rename streams file to file, never through memory.
-            let bundle = custom::mac_bundle_name(&base, &custom::mac_id(token));
-            let rel = self.qcache(&id, &file, &meta, None, |out| maczip::rename_app(&mut f, out, &bundle).map(drop)).map_err(|e| {
-                eprintln!("custom app {id}: could not prepare the macOS zip from {file}: {e}");
-                not_found()
-            })?;
-            if accel {
-                accel_resp(&rel)
-            } else {
-                let f = File::open(self.data.join(rel.trim_start_matches('/'))).map_err(internal)?;
-                let len = f.metadata().map_err(internal)?.len();
-                download(f, len, ctype, &disposition)
-            }
-        } else {
-            let len = meta.len();
-            let trailer = custom::trailer(&serde_json::to_vec(&c.profile).map_err(internal)?);
-            let size = len + trailer.len() as u64;
-            if accel {
-                let rel = self
-                    .qcache(&id, &file, &meta, Some(size), |out| {
-                        io::copy(&mut f, out)?;
-                        out.write_all(&trailer)
-                    })
-                    .map_err(internal)?;
-                accel_resp(&rel)
-            } else {
-                download(f.take(len).chain(io::Cursor::new(trailer)), size, ctype, &disposition)
-            }
-        };
-        let c = &mut self.custom[i];
+        self.defer(move |app| {
+            let resp = custom_file(&data, &c, &token, mac, accel)?;
+            lock(app).count_download(&c.id, &token, t);
+            Ok(resp)
+        })
+    }
+
+    /// Counts a `/q/` download in memory and in `custom/<id>.json`, unless the link changed since.
+    fn count_download(&mut self, id: &str, token: &str, t: u64) {
+        let Some(c) = self.custom.iter_mut().find(|c| c.id == id && c.token == token) else { return };
         c.downloads += 1;
         c.last_download = Some(t);
-        let entry = c.clone();
-        if let Err(e) = self.save(&format!("custom/{}.json", entry.id), &entry) {
-            eprintln!("custom app {}: could not save the download count: {e}", entry.id);
-        }
-        Ok(resp)
-    }
-
-    /// `qcache/<id>--<release file>`: the release with this app's trailer (exe) or renamed bundle
-    /// (zip), as Caddy serves it for `/q/` (path relative to the data dir). Rebuilt when the
-    /// release is newer or the copy is not `len` long; other copies of the app are removed, and
-    /// every profile or token change drops them. The directory is not under `download/`, so it is
-    /// reachable only through the X-Accel-Redirect of a valid token.
-    fn qcache(&self, id: &str, file: &str, meta: &fs::Metadata, len: Option<u64>, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<String> {
-        let dir = self.data.join("qcache");
-        mkdirs(&dir, 0o750)?;
-        let name = format!("{id}--{file}");
-        let dest = dir.join(&name);
-        let fresh = fs::metadata(&dest).is_ok_and(|m| len.map_or(true, |l| m.len() == l) && m.modified().ok() >= meta.modified().ok());
-        if !fresh {
-            self.qcache_drop(id, Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or(""));
-            let tmp = tmp_path(&self.data);
-            let r = (|| {
-                let mut f = OpenOptions::new().write(true).create_new(true).mode(0o640).open(&tmp)?;
-                write(&mut f)?;
-                f.sync_all()?;
-                fs::rename(&tmp, &dest)
-            })();
-            if r.is_err() {
-                let _ = fs::remove_file(&tmp);
-            }
-            r?;
-        }
-        Ok(format!("/qcache/{name}"))
-    }
-
-    /// Removes the prepared `/q/` copies of an app (its profile or token changed, or it was
-    /// revoked), or with `ext` only those of one platform (`exe`, `zip`).
-    fn qcache_drop(&self, id: &str, ext: &str) {
-        let prefix = format!("{id}--");
-        for e in fs::read_dir(self.data.join("qcache")).into_iter().flatten().flatten() {
-            if e.file_name().to_str().is_some_and(|n| n.starts_with(&prefix) && n.ends_with(ext)) {
-                let _ = fs::remove_file(e.path());
-            }
+        let meta = c.clone();
+        let r = read_custom(&self.data, id).and_then(|f| self.save(&format!("custom/{id}.json"), &CustomApp { meta, profile: f.profile }));
+        if let Err(e) = r {
+            eprintln!("custom app {id}: could not save the download count: {e}");
         }
     }
 
-    fn put_release(&mut self, rq: &mut Request, body: &Body, url: &str, dest: &Path) -> Result<Resp, Resp> {
-        let (tmp, _) = body.file()?;
-        with_mapped(tmp, |body| self.auth(rq, "PUT", url, body)).map_err(internal)??;
+    /// The signature over the body was verified before the state lock (`read_request_body`).
+    fn put_release(&mut self, body: &Body, dest: &Path) -> Result<Resp, Resp> {
+        let Body::File { path: tmp, nonce: Some(nonce), .. } = body else { return Err(internal("release upload not verified")) };
+        self.use_nonce(nonce.clone())?;
         let index = self.index_channel(dest);
+        let mut new_index = None;
         if let Some(ch) = &index {
             // The signed release index: verified like a policy, serials only go up. The same
             // document again (Manage's "publish to missing relays") is accepted unchanged.
@@ -1191,10 +1262,14 @@ impl App {
                     return Err(text(409, "serial must be greater than the current release index's"));
                 }
             }
-            self.indexes.insert(ch.clone(), (ix.serial, ix.expires));
+            new_index = Some((ch.clone(), (ix.serial, ix.expires)));
         }
         mkdirs(dest.parent().expect("under download/"), 0o750).map_err(internal)?;
         fs::rename(tmp, dest).map_err(internal)?;
+        // Only now: after a failed rename the old index is still what is served.
+        if let Some((ch, m)) = new_index {
+            self.indexes.insert(ch, m);
+        }
         self.bump_generation(dest);
         Ok(empty(204))
     }
@@ -1325,10 +1400,114 @@ impl App {
 
     fn flush_devices(&mut self) {
         if self.devices_dirty {
-            let v: Vec<Device> = self.devices.values().cloned().collect();
-            if self.save("devices.json", &v).map_err(internal).is_ok() {
+            // Straight from the map into the file: no copy of up to MAX_DEVICES devices.
+            let write = |w: &mut BufWriter<&File>| serde::Serializer::collect_seq(&mut serde_json::Serializer::new(w), self.devices.values()).map_err(io::Error::other);
+            if self.write_atomic_with(&self.data.join("devices.json"), 0o600, write).map_err(internal).is_ok() {
                 self.devices_dirty = false;
             }
+        }
+    }
+}
+
+
+/// The `/q/` download of custom app `c` (no state lock held: reads the release and the profile,
+/// may prepare a copy).
+fn custom_file(data: &Path, c: &CustomMeta, token: &str, mac: bool, accel: bool) -> Result<Resp, Resp> {
+    let (platform, ctype, ext) = if mac {
+        ("darwin-universal", "application/zip", "zip")
+    } else {
+        ("windows-x86_64", "application/vnd.microsoft.portable-executable", "exe")
+    };
+    let dir = data.join("download").join(&c.channel).join("customer").join(platform);
+    let exe = (|| {
+        let m: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("latest.json")).ok()?).ok()?;
+        let file = m["platforms"][platform]["url"].as_str()?.rsplit('/').next().filter(|f| valid_segment(f))?.to_owned();
+        let f = File::open(dir.join(&file)).ok()?;
+        let meta = f.metadata().ok().filter(|m| m.is_file())?;
+        Some((f, meta, file))
+    })();
+    let Some((mut f, meta, file)) = exe else {
+        eprintln!("custom app {} (token {}…): no {platform} TetherQS release in channel {}", c.id, token_hint(token), c.channel);
+        return Err(not_found());
+    };
+    // Deleted since the lookup: the same 404 as an unknown token.
+    let doc = serde_json::to_vec(&read_custom(data, &c.id).map_err(|_| not_found())?.profile).map_err(internal)?;
+    // The prepared copy is named after what it is made of (any SHA-256 would do), so a copy built
+    // from a profile or token that changed meanwhile is never taken for the current one.
+    let key = custom::mac_id(&format!("{token}\n{}", String::from_utf8_lossy(&doc)));
+    let base = download_base(&c.name);
+    let disposition = format!("attachment; filename=\"{base}.{ext}\"");
+    let id = &c.id;
+    // Behind the Caddyfile's handle_response (it sets X-Tether-Accel): answer with the path of a
+    // prepared copy and let Caddy send it, so a slow download does not hold a worker.
+    let accel_resp = |rel: &str| empty(204).with_header(hdr("X-Accel-Redirect", rel)).with_header(hdr("Content-Type", ctype)).with_header(hdr("Content-Disposition", &disposition));
+    if mac {
+        // Always prepared on disk: the rename streams file to file, never through memory.
+        let bundle = custom::mac_bundle_name(&base, &custom::mac_id(token));
+        let rel = qcache(data, id, &key, &file, &meta, None, |out| maczip::rename_app(&mut f, out, &bundle).map(drop)).map_err(|e| {
+            eprintln!("custom app {id}: could not prepare the macOS zip from {file}: {e}");
+            not_found()
+        })?;
+        if accel {
+            return Ok(accel_resp(&rel));
+        }
+        let f = File::open(data.join(rel.trim_start_matches('/'))).map_err(internal)?;
+        let len = f.metadata().map_err(internal)?.len();
+        return Ok(download(f, len, ctype, &disposition));
+    }
+    let len = meta.len();
+    let trailer = custom::trailer(&doc);
+    let size = len + trailer.len() as u64;
+    if accel {
+        let rel = qcache(data, id, &key, &file, &meta, Some(size), |out| {
+            io::copy(&mut f, out)?;
+            out.write_all(&trailer)
+        })
+        .map_err(internal)?;
+        return Ok(accel_resp(&rel));
+    }
+    Ok(download(f.take(len).chain(io::Cursor::new(trailer)), size, ctype, &disposition))
+}
+
+/// `qcache/<id>--<key>--<release file>`: the release with this app's trailer (exe) or renamed
+/// bundle (zip), as Caddy serves it for `/q/` (path relative to the data dir). Rebuilt when the
+/// release is newer or the copy is not `len` long; other copies of the app's platform are
+/// removed, and every profile or token change drops them all. Concurrent first downloads each
+/// write their own temp file and rename it into place. The directory is not under `download/`,
+/// so it is reachable only through the X-Accel-Redirect of a valid token.
+fn qcache(data: &Path, id: &str, key: &str, file: &str, meta: &fs::Metadata, len: Option<u64>, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<String> {
+    let dir = data.join("qcache");
+    mkdirs(&dir, 0o750)?;
+    let name = format!("{id}--{key}--{file}");
+    let dest = dir.join(&name);
+    let fresh = fs::metadata(&dest).is_ok_and(|m| len.map_or(true, |l| m.len() == l) && m.modified().ok() >= meta.modified().ok());
+    if !fresh {
+        // shortcut: a copy that finishes after its app was deleted stays on disk (unreachable: no
+        // token names it) until an app with that id prepares one; sweep qcache/ in maintain() if
+        // deletes during first downloads become common.
+        qcache_drop(data, id, Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or(""), &name);
+        let tmp = tmp_path(data);
+        let r = (|| {
+            let mut f = OpenOptions::new().write(true).create_new(true).mode(0o640).open(&tmp)?;
+            write(&mut f)?;
+            f.sync_all()?;
+            fs::rename(&tmp, &dest)
+        })();
+        if r.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        r?;
+    }
+    Ok(format!("/qcache/{name}"))
+}
+
+/// Removes the prepared `/q/` copies of an app (its profile or token changed, or it was
+/// revoked), or with `ext` only those of one platform (`exe`, `zip`), except `keep`.
+fn qcache_drop(data: &Path, id: &str, ext: &str, keep: &str) {
+    let prefix = format!("{id}--");
+    for e in fs::read_dir(data.join("qcache")).into_iter().flatten().flatten() {
+        if e.file_name().to_str().is_some_and(|n| n.starts_with(&prefix) && n.ends_with(ext) && n != keep) {
+            let _ = fs::remove_file(e.path());
         }
     }
 }
