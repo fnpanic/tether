@@ -132,7 +132,8 @@ try {
   check("single DELETE of the published exe is refused (409)", err?.includes("HTTP 409") && err.includes("published release") && has("TetherQS-0.5.5.exe"), err ?? "deleted");
 
   // Automatic clean-up after a publish, keep 0.
-  await invoke("settings_set", { settings: { server: PROXY, prune: { auto: true, keep: 0 } } });
+  // settings_set wants https:// relays; this test's stand-in is http, so write the file.
+  writeFileSync(join(vault, "settings.json"), JSON.stringify({ server: PROXY, prune: { auto: true, keep: 0 } }));
   const pub = await publish("0.5.6");
   const line = pub.find((x) => x.server === "Cleanup");
   check("publish with auto clean-up reports a Cleanup line", line?.ok && /2 old versions deleted/.test(line.detail?.published?.[0] ?? ""), JSON.stringify(line));
