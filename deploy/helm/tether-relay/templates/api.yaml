@@ -21,7 +21,8 @@ metadata:
   name: {{ $fn }}-files
   labels: {{- include "tr.labels" . | nindent 4 }}
 data:
-  # Same /download, /q and / handling as server/caddy/Caddyfile, reading tether-api's data volume.
+  # Same /api, /download, /q and / handling as server/caddy/Caddyfile, reading tether-api's data
+  # volume.
   Caddyfile: |
     {
       admin off
@@ -32,6 +33,12 @@ data:
       }
     }
     :8081 {
+      # The relay API. tether-api trusts X-Forwarded-For only from loopback, so every request
+      # goes through here (the Service has no tether-api port). Bodies stream through; the proxy
+      # pod reads small ones whole first.
+      handle /api/* {
+        reverse_proxy 127.0.0.1:21120
+      }
       # Custom-app links: tether-api checks the token and names a prepared file under /data
       # (X-Accel-Redirect); this Caddy sends it, so a slow download holds no tether-api worker.
       handle /q/* {
@@ -133,6 +140,5 @@ metadata:
 spec:
   selector: {{- include "tr.selector" $ctx | nindent 4 }}
   ports:
-    - { name: api, port: 21120 }
     - { name: files, port: 8081 }
 {{- end }}

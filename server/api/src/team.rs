@@ -31,6 +31,17 @@ struct Tags {
     updated_at: u64,
 }
 
+/// A device as members see it (no IP).
+#[derive(Serialize)]
+struct MemberDevice<'a> {
+    uuid: &'a str,
+    id: &'a str,
+    profile: &'a str,
+    version: &'a str,
+    os: &'a str,
+    last_seen: u64,
+}
+
 #[derive(Default)]
 pub struct Team {
     roster: Roster,
@@ -96,11 +107,8 @@ impl App {
             ("GET", "devices") => {
                 let mut v: Vec<_> = self.devices.values().collect();
                 v.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
-                let out: Vec<_> = v
-                    .iter()
-                    .map(|d| serde_json::json!({"uuid": d.uuid, "id": d.id, "profile": d.profile, "version": d.version, "os": d.os, "last_seen": d.last_seen}))
-                    .collect();
-                Ok(json(&out))
+                let out = v.iter().map(|d| MemberDevice { uuid: &d.uuid, id: &d.id, profile: &d.profile, version: &d.version, os: &d.os, last_seen: d.last_seen });
+                self.json_file(|w| serde::Serializer::collect_seq(&mut serde_json::Serializer::new(w), out))
             }
             ("GET", "tags") => Ok(json(&self.team.tags)),
             ("PUT", "tags") => {
@@ -176,7 +184,7 @@ impl App {
     }
 
     /// `GET /api/team/audit?device=<id or uuid>&since=<unix>&limit=<1..500>`.
-    fn team_audit(&self, url: &str) -> Result<Resp, Resp> {
+    fn team_audit(&mut self, url: &str) -> Result<Resp, Resp> {
         let (mut since, mut limit, mut device) = (0, AUDIT_DEFAULT, String::new());
         for kv in url.split_once('?').map_or("", |(_, q)| q).split('&').filter(|s| !s.is_empty()) {
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
@@ -191,6 +199,7 @@ impl App {
         if device.is_empty() {
             return Err(text(400, "device required"));
         }
-        Ok(json(&self.audit.read(since, limit, &device)))
+        let dir = self.audit.dir.clone();
+        self.defer(move |_| Ok(json(&audit::read(&dir, since, limit, &device))))
     }
 }

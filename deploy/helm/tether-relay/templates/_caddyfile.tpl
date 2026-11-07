@@ -38,9 +38,11 @@
     reverse_proxy {{ $fn }}-hbbs-0:21122
   }
   {{- if .Values.api.enabled }}
+  # Through the api pod's Caddy, which hands tether-api the client IP from X-Forwarded-For
+  # (tether-api trusts it only from loopback: direct, every client would be this pod's IP).
   handle /api/* {
     # Small bodies are read whole first: a slow client waits in Caddy, not in tether-api.
-    reverse_proxy {{ $fn }}-api:21120 {
+    reverse_proxy {{ $fn }}-api:8081 {
       request_buffers 512k
     }
   }

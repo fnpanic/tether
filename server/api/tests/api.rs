@@ -5,7 +5,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tether_trust::{custom, envelope, generate_key, key_to_b64, reqauth, SigningKey};
 
@@ -441,7 +441,7 @@ fn custom_apps() {
     assert_eq!((r.status, r.body.len()), (204, 0));
     assert_eq!(r.header("Content-Disposition"), Some("attachment; filename=\"ACME GmbH-Support.exe\""));
     let rel = r.header("X-Accel-Redirect").unwrap().to_owned();
-    assert_eq!(rel, "/qcache/acme-1--TetherQS-0.4.1.exe");
+    assert!(rel.starts_with("/qcache/acme-1--") && rel.ends_with("--TetherQS-0.4.1.exe"), "{rel}");
     let cached = s.dir.join(rel.trim_start_matches('/'));
     assert_eq!(std::fs::read(&cached).unwrap(), s.req("GET", &q, &[], b"").body);
     {
@@ -491,7 +491,7 @@ fn custom_apps() {
     let r = s.req("GET", &format!("{q}/mac"), &[("X-Tether-Accel", "1")], b"");
     assert_eq!((r.status, r.header("Content-Type")), (204, Some("application/zip")));
     let mcached = r.header("X-Accel-Redirect").unwrap().to_owned();
-    assert_eq!(mcached, "/qcache/acme-1--TetherQS-0.4.1-universal.zip");
+    assert!(mcached.starts_with("/qcache/acme-1--") && mcached.ends_with("--TetherQS-0.4.1-universal.zip"), "{mcached}");
     assert_eq!(std::fs::read(s.dir.join(mcached.trim_start_matches('/'))).unwrap(), mac_zip);
     assert_eq!(s.req("GET", &q, &[("X-Tether-Accel", "1")], b"").header("X-Accel-Redirect"), Some(rel.as_str()));
     assert!(cached.exists() && s.dir.join(mcached.trim_start_matches('/')).exists());
@@ -899,4 +899,337 @@ fn release_generation_persists() {
     let k = generate_key();
     let s = start_env(&key_to_b64(&k.verifying_key()), &[], |d| std::fs::write(d.join("release-generation"), "41\n").unwrap());
     assert_eq!(generation(&s, "persist-g1"), 41);
+}
+
+/// Sends the head of a `method` request with `len` bytes of declared body and one byte of it.
+fn partial_upload(s: &Srv, method: &str, path: &str, headers: &[(&str, &str)], len: u64) -> TcpStream {
+    let mut c = TcpStream::connect(&s.addr).unwrap();
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: t\r\nContent-Length: {len}\r\n");
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
+    c.write_all(head.as_bytes()).unwrap();
+    c.write_all(b"x").unwrap();
+    c
+}
+
+/// The response head on `c`, if one arrives within `wait`.
+fn head_of(c: &mut TcpStream, wait: Duration) -> Option<String> {
+    c.set_read_timeout(Some(wait)).unwrap();
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+        match c.read(&mut buf) {
+            Ok(n) if n > 0 => raw.extend_from_slice(&buf[..n]),
+            _ => return None,
+        }
+    }
+    Some(String::from_utf8_lossy(&raw).into_owned())
+}
+
+/// Release and diagnostics uploads that send slowly hold at most MAX_UPLOADS (4) workers; the
+/// rest are refused at once, and so is an upload that fails the checks possible before its body.
+#[test]
+fn slow_uploads_leave_workers_for_heartbeats() {
+    let (s, k) = admin_server();
+    let p = "/api/admin/release/stable/technician/windows-x86_64/big.exe";
+    let sig = reqauth::sign_request(&k, "PUT", p, b"", now());
+    let mut conns: Vec<TcpStream> = (0..40).map(|_| partial_upload(&s, "PUT", p, &[(reqauth::HEADER, &sig)], 100_000_000)).collect();
+    std::thread::sleep(Duration::from_millis(500));
+    let refused: Vec<String> = conns.iter_mut().filter_map(|c| head_of(c, Duration::from_millis(1500))).collect();
+    assert_eq!(refused.len(), 36, "{refused:?}");
+    assert!(refused.iter().all(|h| h.starts_with("HTTP/1.1 503") && h.contains("Retry-After: 30")), "{refused:?}");
+    for i in 0..10 {
+        let r = s.req("POST", "/api/heartbeat", &[("X-Forwarded-For", "192.0.2.77")], hb(&format!("slow-{i:04}")).as_bytes());
+        assert_eq!(r.status, 200, "heartbeat {i} while uploads stall");
+    }
+    // Refused before the body is read, while all upload slots are taken.
+    let t0 = Instant::now();
+    let stale = reqauth::sign_request(&k, "PUT", p, b"", now() - 1000);
+    for (method, path, h, want) in [
+        ("PUT", p, vec![], "HTTP/1.1 401"),
+        ("PUT", p, vec![(reqauth::HEADER, stale.as_str())], "HTTP/1.1 401"),
+        ("PUT", "/api/admin/release/stable/../x", vec![(reqauth::HEADER, sig.as_str())], "HTTP/1.1 400"),
+        ("POST", "/api/diag/AAAAAAAA", vec![], "HTTP/1.1 404"),
+    ] {
+        let mut c = partial_upload(&s, method, path, &h, 100_000_000);
+        let got = head_of(&mut c, Duration::from_secs(3)).unwrap_or_default();
+        assert!(got.starts_with(want), "{method} {path}: {got}");
+    }
+    assert!(t0.elapsed() < Duration::from_secs(3));
+    drop(conns);
+}
+
+/// An upload that trickles (1 byte a second) is cut off once it averages under 16 KiB/s after
+/// 30 s, instead of holding its worker until the 200 MiB deadline (about 55 min).
+#[test]
+fn trickled_upload_is_cut_off() {
+    let (s, k) = admin_server();
+    let p = "/api/admin/release/stable/technician/windows-x86_64/big.exe";
+    let sig = reqauth::sign_request(&k, "PUT", p, b"", now());
+    let mut c = partial_upload(&s, "PUT", p, &[(reqauth::HEADER, &sig)], 10_000_000);
+    let t0 = Instant::now();
+    let head = loop {
+        if let Some(h) = head_of(&mut c, Duration::from_secs(1)) {
+            break h;
+        }
+        let _ = c.write_all(b"x");
+        assert!(t0.elapsed() < Duration::from_secs(50), "trickle not cut off");
+    };
+    let took = t0.elapsed().as_secs();
+    assert!(head.starts_with("HTTP/1.1 408"), "{head}");
+    assert!((29..45).contains(&took), "{took} s");
+}
+
+/// tiny_http allocated the whole remaining Content-Length to discard an unread body: one request
+/// with a huge one aborted the process.
+#[test]
+fn huge_content_length_is_refused_without_a_crash() {
+    let (s, k) = admin_server();
+    let p = "/api/admin/release/stable/technician/windows-x86_64/big.exe";
+    let sig = reqauth::sign_request(&k, "PUT", p, b"", now());
+    for (method, path, h, want) in [
+        ("POST", "/api/heartbeat", vec![], "HTTP/1.1 413"),
+        ("POST", "/api/diag/AAAAAAAA", vec![], "HTTP/1.1 404"),
+        ("PUT", p, vec![(reqauth::HEADER, sig.as_str())], "HTTP/1.1 413"),
+    ] {
+        let mut c = partial_upload(&s, method, path, &h, 100_000_000_000_000);
+        let got = head_of(&mut c, Duration::from_secs(5)).unwrap_or_default();
+        assert!(got.starts_with(want), "{method} {path}: {got}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").status, 200, "server gone after {method} {path}");
+    }
+}
+
+/// `devices.json` with `n` devices (newest first by index).
+fn devices_json(n: usize) -> String {
+    let t = now();
+    let v: Vec<serde_json::Value> = (0..n)
+        .map(|i| {
+            serde_json::json!({"uuid": format!("{i:08x}-1111-2222-3333-444455556666"), "id": format!("{}", 100_000_000 + i), "profile": "customer",
+                "version": "0.5.25", "os": "windows 10.0.26100 x86_64", "serial": 12, "server_keys_serial": 3, "release_serial": 7,
+                "update_state": "idle", "update_version": "", "ip": format!("198.51.{}.{}", i / 256 % 256, i % 256), "last_seen": t - i as u64})
+        })
+        .collect();
+    serde_json::to_string(&v).unwrap()
+}
+
+fn sigterm_and_wait(s: &mut Srv) {
+    let st = Command::new("kill").args(["-TERM", &s.child.id().to_string()]).status().unwrap();
+    assert!(st.success());
+    let _ = s.child.wait();
+}
+
+/// Team access for one member (`key`), via the admin API.
+fn add_member(s: &Srv, admin: &SigningKey, key: &SigningKey) {
+    let roster = serde_json::json!({"members": [{"name": "M", "key": key_to_b64(&key.verifying_key()), "write": false, "audit": true}]});
+    assert_eq!(s.admin(admin, "PUT", "/api/admin/team", roster.to_string().as_bytes()).status, 204);
+}
+
+/// Device lists and the devices.json flush are written from the map (no copy of every device);
+/// same results as before.
+#[test]
+fn many_devices_lists_and_flush() {
+    let k = generate_key();
+    let n = 5000;
+    let mut s = start_env(&key_to_b64(&k.verifying_key()), &[], |d| std::fs::write(d.join("devices.json"), devices_json(n)).unwrap());
+    let member = generate_key();
+    add_member(&s, &k, &member);
+    let all = s.admin(&k, "GET", "/api/admin/devices", b"");
+    assert_eq!(all.header("Content-Type"), Some("application/json"));
+    let all = all.json();
+    assert_eq!(all.as_array().unwrap().len(), n);
+    assert_eq!(all[0]["uuid"], "00000000-1111-2222-3333-444455556666", "newest first");
+    assert_eq!(all[n - 1]["ip"], format!("198.51.{}.{}", (n - 1) / 256 % 256, (n - 1) % 256));
+    let r = s.admin(&member, "GET", "/api/team/devices", b"");
+    let team = r.json();
+    assert_eq!(team.as_array().unwrap().len(), n);
+    assert_eq!(team[0], serde_json::json!({"uuid": all[0]["uuid"], "id": all[0]["id"], "profile": "customer", "version": "0.5.25",
+        "os": "windows 10.0.26100 x86_64", "last_seen": all[0]["last_seen"]}));
+    assert!(!String::from_utf8_lossy(&r.body).contains("198.51."), "IPs in the member list");
+    // Flushed on shutdown with the new device.
+    assert_eq!(s.req("POST", "/api/heartbeat", &[("X-Forwarded-For", "192.0.2.5")], hb("flushed-0001").as_bytes()).status, 200);
+    sigterm_and_wait(&mut s);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(s.dir.join("devices.json")).unwrap()).unwrap();
+    let saved = saved.as_array().unwrap();
+    assert_eq!(saved.len(), n + 1);
+    assert!(saved.iter().any(|d| d["uuid"] == "flushed-0001" && d["ip"] == "192.0.2.5"));
+}
+
+/// "<peak RSS>/<RSS> KiB" of a process.
+fn vm_hwm_kib(pid: u32) -> String {
+    let st = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let kib = |k: &str| st.lines().find_map(|l| l.strip_prefix(k)).unwrap().trim().trim_end_matches(" kB").trim().to_owned();
+    format!("{}/{}", kib("VmHWM:"), kib("VmRSS:"))
+}
+
+/// Peak RSS at MAX_DEVICES (docs/scaling.md). Run by hand:
+/// `cargo test --release --test api -- --ignored --nocapture many_devices_memory`, with
+/// TETHER_API_BIN=<other build> to measure another binary. Takes about 70 s (waits for the
+/// periodic flush).
+#[test]
+#[ignore]
+fn many_devices_memory() {
+    let k = generate_key();
+    let n = 50_000;
+    let bin = std::env::var("TETHER_API_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_tether-api").to_owned());
+    let dir = std::env::temp_dir().join(format!("tether-api-mem-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("devices.json"), devices_json(n)).unwrap();
+    let mut child = Command::new(bin)
+        .args(["--data", dir.to_str().unwrap(), "--listen", "127.0.0.1:0"])
+        .env("ADMIN_PUB_KEY", key_to_b64(&k.verifying_key()))
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let addr = line.trim().strip_prefix("listening on ").unwrap().to_owned();
+    let pid = child.id();
+    let s = Srv { child, addr, dir };
+    let member = generate_key();
+    add_member(&s, &k, &member);
+    let start = vm_hwm_kib(pid);
+    // Status only: older builds send large lists chunked, which this client does not decode.
+    assert_eq!(s.admin(&k, "GET", "/api/admin/devices", b"").status, 200);
+    let admin_list = vm_hwm_kib(pid);
+    std::thread::scope(|sc| {
+        for _ in 0..16 {
+            sc.spawn(|| assert_eq!(s.admin(&member, "GET", "/api/team/devices", b"").status, 200));
+        }
+    });
+    let team_lists = vm_hwm_kib(pid);
+    let before = std::fs::metadata(s.dir.join("devices.json")).unwrap().modified().unwrap();
+    assert_eq!(s.req("POST", "/api/heartbeat", &[("X-Forwarded-For", "192.0.2.6")], hb("memtest-0001").as_bytes()).status, 200);
+    let t0 = Instant::now();
+    while std::fs::metadata(s.dir.join("devices.json")).unwrap().modified().unwrap() == before {
+        assert!(t0.elapsed() < Duration::from_secs(90), "no flush");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    let flush = vm_hwm_kib(pid);
+    println!("devices={n} peak/current RSS KiB: after start {start}, after admin list {admin_list}, after 16 concurrent team lists {team_lists}, after flush {flush}");
+}
+
+/// mkfifo: a "file" whose open blocks until a writer comes, to hold a handler inside its file work.
+fn fifo(p: &std::path::Path) {
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    assert!(Command::new("mkfifo").arg(p).status().unwrap().success());
+}
+
+/// Lets the reader blocked on `p` go on (it sees an empty file).
+fn release_fifo(p: &std::path::Path) {
+    // Non-blocking: without a reader (the handler never got there) this fails instead of hanging.
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(p);
+}
+
+/// The audit read and the preparation of a `/q/` copy run without the state lock: a heartbeat is
+/// answered while either is stuck in its file work.
+#[test]
+fn file_work_runs_without_the_state_lock() {
+    let (s, k) = admin_server();
+    let tok = custom::new_token();
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/custom/lock-1", &custom_body(&k, "lock-1", "Lock", &tok, now() + 3600)).status, 204);
+    let dir = s.dir.join("download/stable/customer/windows-x86_64");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("latest.json"), br#"{"version":"0.5.25","platforms":{"windows-x86_64":{"signature":"x","url":"https://r/download/stable/customer/windows-x86_64/TetherQS-0.5.25.exe"}}}"#).unwrap();
+    let audit_fifo = s.dir.join("audit/2099-01-01.jsonl");
+    let release_fifo_path = dir.join("TetherQS-0.5.25.exe");
+    fifo(&audit_fifo);
+    fifo(&release_fifo_path);
+    let q = format!("/q/{tok}");
+    std::thread::scope(|sc| {
+        let audit = sc.spawn(|| s.admin(&k, "GET", "/api/admin/audit?device=dev-1", b"").status);
+        let download = sc.spawn(|| s.req("GET", &q, &[("X-Tether-Accel", "1")], b"").status);
+        std::thread::sleep(Duration::from_millis(500));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let s = &s;
+        sc.spawn(move || tx.send(s.req("POST", "/api/heartbeat", &[("X-Forwarded-For", "192.0.2.8")], hb("lockfree-01").as_bytes()).status));
+        let got = rx.recv_timeout(Duration::from_secs(5));
+        release_fifo(&audit_fifo);
+        release_fifo(&release_fifo_path);
+        assert_eq!(got.ok(), Some(200), "heartbeat blocked by file work under the lock");
+        assert_eq!(audit.join().unwrap(), 200);
+        assert_eq!(download.join().unwrap(), 404, "a FIFO is not a release file");
+    });
+}
+
+/// Custom-app profiles are not kept in memory: the macOS profile and the exe trailer come from
+/// `custom/<id>.json`, and saving the download counter keeps the profile in it.
+#[test]
+fn custom_profile_is_read_from_disk() {
+    let (s, k) = admin_server();
+    let tok = custom::new_token();
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/custom/disk-1", &custom_body(&k, "disk-1", "Disk", &tok, now() + 3600)).status, 204);
+    let f = s.dir.join("custom/disk-1.json");
+    let mut doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+    doc["profile"] = serde_json::to_value(envelope::sign(br#"{"changed":true}"#, &k)).unwrap();
+    std::fs::write(&f, doc.to_string()).unwrap();
+    let r = s.req("GET", &format!("/q/m/{}", custom::mac_id(&tok)), &[], b"");
+    assert_eq!((r.status, r.json()), (200, doc["profile"].clone()));
+
+    let exe = vec![0x4du8; 1000];
+    let rel = "/api/admin/release/stable/customer/windows-x86_64";
+    assert_eq!(s.admin(&k, "PUT", &format!("{rel}/TetherQS-0.5.25.exe"), &exe).status, 204);
+    let latest = br#"{"version":"0.5.25","platforms":{"windows-x86_64":{"signature":"x","url":"https://r/download/stable/customer/windows-x86_64/TetherQS-0.5.25.exe"}}}"#;
+    assert_eq!(s.admin(&k, "PUT", &format!("{rel}/latest.json"), latest).status, 204);
+    let r = s.req("GET", &format!("/q/{tok}"), &[], b"");
+    assert_eq!(r.status, 200);
+    assert_eq!(custom::split(&r.body).1.unwrap(), serde_json::to_vec(&doc["profile"]).unwrap());
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+    assert_eq!((saved["downloads"].as_u64(), &saved["profile"]), (Some(1), &doc["profile"]));
+}
+
+/// Concurrent first downloads behind the proxy prepare the copy at the same time: every answer
+/// names one complete copy.
+#[test]
+fn concurrent_first_q_downloads() {
+    let (s, k) = admin_server();
+    let tok = custom::new_token();
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/custom/race-1", &custom_body(&k, "race-1", "Race", &tok, now() + 3600)).status, 204);
+    let exe: Vec<u8> = (0..3_000_000u32).map(|i| i as u8).collect();
+    let rel = "/api/admin/release/stable/customer/windows-x86_64";
+    assert_eq!(s.admin(&k, "PUT", &format!("{rel}/TetherQS-0.5.25.exe"), &exe).status, 204);
+    let latest = br#"{"version":"0.5.25","platforms":{"windows-x86_64":{"signature":"x","url":"https://r/download/stable/customer/windows-x86_64/TetherQS-0.5.25.exe"}}}"#;
+    assert_eq!(s.admin(&k, "PUT", &format!("{rel}/latest.json"), latest).status, 204);
+    let q = format!("/q/{tok}");
+    let paths: Vec<String> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..8).map(|_| sc.spawn(|| s.req("GET", &q, &[("X-Tether-Accel", "1")], b""))).collect();
+        hs.into_iter()
+            .map(|h| {
+                let r = h.join().unwrap();
+                assert_eq!(r.status, 204);
+                r.header("X-Accel-Redirect").unwrap().to_owned()
+            })
+            .collect()
+    });
+    assert!(paths.iter().all(|p| *p == paths[0]), "{paths:?}");
+    let want = s.req("GET", &q, &[], b"").body;
+    assert_eq!(std::fs::read(s.dir.join(paths[0].trim_start_matches('/'))).unwrap(), want);
+    assert_eq!(std::fs::read_dir(s.dir.join("qcache")).unwrap().count(), 1);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/custom", b"").json()[0]["downloads"], 9);
+}
+
+/// The in-memory index serial changes only once the new index is in place: after a failed rename
+/// the old one is still served, with its serial.
+#[test]
+fn failed_index_rename_keeps_the_serial() {
+    let (s, k) = admin_server();
+    let p = "/api/admin/release/stable/releases.json";
+    assert_eq!(s.admin(&k, "PUT", p, &index_doc(&k, "stable", 1)).status, 204);
+    let f = s.dir.join("download/stable/releases.json");
+    let old = std::fs::read(&f).unwrap();
+    // A non-empty directory where the index goes: the rename fails.
+    std::fs::remove_file(&f).unwrap();
+    std::fs::create_dir_all(f.join("x")).unwrap();
+    assert_eq!(s.admin(&k, "PUT", p, &index_doc(&k, "stable", 2)).status, 500);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").json()["release_indexes"]["stable"]["serial"], 1);
+    std::fs::remove_dir_all(&f).unwrap();
+    std::fs::write(&f, &old).unwrap();
+    assert_eq!(s.req("GET", "/download/stable/releases.json", &[], b"").header("ETag"), Some("\"1\""));
+    assert_eq!(s.admin(&k, "PUT", p, &index_doc(&k, "stable", 2)).status, 204);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").json()["release_indexes"]["stable"]["serial"], 2);
 }

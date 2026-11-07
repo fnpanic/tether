@@ -12,7 +12,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::IpAddr;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -220,7 +220,7 @@ pub fn date(t: u64) -> String {
 }
 
 pub struct Log {
-    dir: PathBuf,
+    pub dir: PathBuf,
     /// 0: records are accepted and dropped (audit log off).
     pub retention_days: u64,
     max_bytes: u64,
@@ -231,21 +231,8 @@ pub struct Log {
 impl Log {
     pub fn open(dir: PathBuf, retention_days: u64, max_bytes: u64) -> io::Result<Self> {
         let mut l = Log { dir, retention_days, max_bytes, total: 0, nonces: HashMap::new() };
-        l.total = l.files().iter().map(|(_, n)| n).sum();
+        l.total = files(&l.dir).iter().map(|(_, n)| n).sum();
         Ok(l)
-    }
-
-    /// `(day, size)` of every log file, oldest first.
-    fn files(&self) -> Vec<(String, u64)> {
-        let mut v: Vec<(String, u64)> = fs::read_dir(&self.dir)
-            .map(|rd| {
-                rd.flatten()
-                    .filter_map(|e| Some((e.file_name().to_str()?.strip_suffix(".jsonl")?.to_owned(), e.metadata().ok()?.len())))
-                    .collect()
-            })
-            .unwrap_or_default();
-        v.sort();
-        v
     }
 
     /// Retention and size cap: whole days, oldest first, never `today`.
@@ -253,7 +240,7 @@ impl Log {
         let cutoff = date(t.saturating_sub(self.retention_days.saturating_mul(DAY)));
         let today = date(t);
         let mut total: u64 = 0;
-        let files = self.files();
+        let files = files(&self.dir);
         let mut over = files.iter().map(|(_, n)| n).sum::<u64>() + need;
         for (day, n) in files {
             if day != today && (day < cutoff || over > self.max_bytes) {
@@ -295,32 +282,53 @@ impl Log {
         }
         Ok(())
     }
+}
 
-    /// Records with `ts >= since` (and `id` or `uuid` == `device` if given), newest first.
-    pub fn read(&self, since: u64, limit: usize, device: &str) -> Vec<Value> {
-        let first = date(since);
-        let mut out = Vec::new();
-        for (day, _) in self.files().into_iter().rev() {
-            if day < first || out.len() >= limit {
-                break;
-            }
-            let Ok(f) = fs::File::open(self.dir.join(format!("{day}.jsonl"))) else { continue };
-            // Lines are in time order: keep the last `limit` matches of the day.
-            let mut keep = VecDeque::new();
-            for line in BufReader::new(f).lines().map_while(Result::ok) {
-                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-                if v["ts"].as_u64().unwrap_or(0) < since || (!device.is_empty() && v["id"] != device && v["uuid"] != device) {
-                    continue;
-                }
-                keep.push_back(v);
-                if keep.len() > limit - out.len() {
-                    keep.pop_front();
-                }
-            }
-            out.extend(keep.into_iter().rev());
+/// `(day, size)` of every log file in `dir`, oldest first.
+fn files(dir: &Path) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| Some((e.file_name().to_str()?.strip_suffix(".jsonl")?.to_owned(), e.metadata().ok()?.len())))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// Records in the log at `dir` with `ts >= since` (and `id` or `uuid` == `device` if given),
+/// newest first. Needs no `Log` (runs without the state lock): files are only appended to, a
+/// half-written last line does not parse and is skipped, a file pruned meanwhile is skipped.
+pub fn read(dir: &Path, since: u64, limit: usize, device: &str) -> Vec<Value> {
+    let first = date(since);
+    // A line without the device's text cannot match: skipped unparsed. Valid while serde_json
+    // writes the value unescaped (no quote, backslash or control character in it).
+    let quick = !device.is_empty() && !device.chars().any(|c| c == '"' || c == '\\' || c.is_control());
+    let mut out = Vec::new();
+    for (day, _) in files(dir).into_iter().rev() {
+        if day < first || out.len() >= limit {
+            break;
         }
-        out
+        let Ok(f) = fs::File::open(dir.join(format!("{day}.jsonl"))) else { continue };
+        // Lines are in time order: keep the last `limit` matches of the day.
+        let mut keep = VecDeque::new();
+        for line in BufReader::new(f).lines().map_while(Result::ok) {
+            if quick && !line.contains(device) {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+            if v["ts"].as_u64().unwrap_or(0) < since || (!device.is_empty() && v["id"] != device && v["uuid"] != device) {
+                continue;
+            }
+            keep.push_back(v);
+            if keep.len() > limit - out.len() {
+                keep.pop_front();
+            }
+        }
+        out.extend(keep.into_iter().rev());
     }
+    out
 }
 
 /// `application/x-www-form-urlencoded` value.
@@ -355,6 +363,21 @@ mod tests {
         assert_eq!(date(0), "1970-01-01");
         assert_eq!(date(951_782_400), "2000-02-29");
         assert_eq!(date(1_794_009_599), "2026-11-06");
+    }
+
+    #[test]
+    fn read_filters_by_device_also_with_escaped_ids() {
+        let dir = std::env::temp_dir().join(format!("tether-audit-read-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let t = 1_794_009_599;
+        let mut f = fs::File::create(dir.join(format!("{}.jsonl", date(t)))).unwrap();
+        for id in ["a\"b", "a\\b", "abc", "xyz"] {
+            writeln!(f, "{}", json!({"ts": t, "id": id, "uuid": "u-1"})).unwrap();
+        }
+        for (device, n) in [("a\"b", 1), ("a\\b", 1), ("abc", 1), ("u-1", 4), ("b", 0), ("", 4)] {
+            assert_eq!(read(&dir, 0, 10, device).len(), n, "{device}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

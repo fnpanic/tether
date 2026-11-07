@@ -8,7 +8,8 @@ client ──wss──► LB / ingress (TLS) ──► proxy (Caddy, Deployment 
                                          /ws/id/<n>    → Service <rel>-hbbs-<n>  → pod hbbs-<n>
                                          /ws/id        → hbbs-0 (single-server clients)
                                          /ws/relay/<n> → Service <rel>-hbbr-<n>  → pod hbbr-<n>
-                                         /api, /download, / → tether-api (optional, PVC)
+                                         /api, /q, /download, / → api pod's Caddy :8081
+                                           → tether-api 127.0.0.1:21120 (optional, PVC)
 hbbs-<n> -r "<publicUrl>/ws/relay/<i>|http://<rel>-hbbr-<i>:21121/readyz", for every i
 ```
 
@@ -73,6 +74,14 @@ The WebSocket ports (hbbs 21118, hbbr 21119) listen on 127.0.0.1 by default (`WS
 hbbs and hbbr take the client IP from `X-Forwarded-For`/`X-Real-IP`. The proxy runs in its own pod
 here, so the chart sets `WS_BIND=0.0.0.0`: keep these ports on the cluster network (ClusterIP
 Services, a NetworkPolicy if other workloads share the cluster), never on a LoadBalancer.
+
+tether-api trusts `X-Forwarded-For` only from a loopback peer (its per-IP heartbeat, audit and
+`/q/` limits). So every API request goes through the Caddy in the api pod (`<rel>-api:8081`),
+which keeps the proxy pods' `X-Forwarded-For` (trusted: private ranges) and connects to tether-api
+over loopback; the Service has no tether-api port. Before, the proxy sent `/api/*` to tether-api
+directly and every client counted as the proxy pod's IP: 30 new devices per minute for the whole
+cluster. A bring-your-own ingress points `/api` and `/q` at port 8081 too
+(`examples/ingress-nginx.yaml`).
 
 ## Rollout procedure
 
