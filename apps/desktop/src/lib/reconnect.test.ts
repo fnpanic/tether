@@ -45,6 +45,14 @@ describe("reconnect", () => {
     }
   });
 
+  it("reconnects after Restart remote computer", () => {
+    for (const type of ["restarting", "restarting-show"]) {
+      const k = classify({ type, title: "Restarting remote device", text: "Connection in progress. Please wait." });
+      expect(k).toBe("retryable");
+      expect(onFailure(null, k, 0, 10).kind).toBe("retry");
+    }
+  });
+
   it("retries transport failures", () => {
     expect(classify(err("Reset by the peer"))).toBe("retryable");
     expect(classify(err("Timeout"))).toBe("retryable");

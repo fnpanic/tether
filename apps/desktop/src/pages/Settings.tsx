@@ -106,6 +106,7 @@ function Access({ status }: { status: Status | null }) {
   const [pw, setPw] = useState("");
   const [pw2, setPw2] = useState("");
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [svcErr, setSvcErr] = useState<string | null>(null);
   const [verify, setVerify] = useOption("verification-method", "both");
   const eff = usePolicy();
   const st = passwordStrength(pw);
@@ -170,9 +171,13 @@ function Access({ status }: { status: Status | null }) {
       <TwoFactor />
       {status && !status.installed && isOn(eff, "security.unattended") && (
         <Row title="Install as service" desc="Starts with the computer and stays reachable when nobody is logged in. Requires administrator rights." feature="security.unattended">
-          <Button size="sm" onClick={() => api.installService()}>
-            Install
-          </Button>
+          <div className="flex flex-col items-end gap-1">
+            {/* On success Tether restarts with the service; the call only returns on failure or cancel. */}
+            <Button size="sm" onClick={() => { setSvcErr(null); api.installService().catch((e) => setSvcErr(errorText(e))); }}>
+              Install
+            </Button>
+            {svcErr && <div className="text-footnote text-danger">{svcErr}</div>}
+          </div>
         </Row>
       )}
     </>

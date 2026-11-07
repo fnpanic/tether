@@ -207,7 +207,9 @@ fn parse_proxy_list(list: &str) -> Option<String> {
 
 #[cfg(windows)]
 fn platform_proxy(target: &str) -> Option<String> {
-    winhttp::proxy_for(target)
+    // The service (LocalSystem) has no IE settings of its own: like other Windows services it also
+    // honours the machine WinHTTP proxy (`netsh winhttp set proxy`, GPO). User apps are unchanged.
+    winhttp::proxy_for(target).or_else(|| if librustdesk::platform::is_root() { winhttp::machine_proxy() } else { None })
 }
 
 #[cfg(target_os = "macos")]
@@ -268,6 +270,22 @@ mod winhttp {
                 }
             }
             static_proxy.as_deref().and_then(super::parse_proxy_list)
+        }
+    }
+
+    /// Machine-wide WinHTTP default proxy (`netsh winhttp show proxy`), None for direct access.
+    pub fn machine_proxy() -> Option<String> {
+        unsafe {
+            let mut info: WINHTTP_PROXY_INFO = std::mem::zeroed();
+            if WinHttpGetDefaultProxyConfiguration(&mut info) == 0 {
+                return None;
+            }
+            let list = take(info.lpszProxy);
+            let _ = take(info.lpszProxyBypass);
+            if info.dwAccessType != WINHTTP_ACCESS_TYPE_NAMED_PROXY {
+                return None;
+            }
+            list.as_deref().and_then(super::parse_proxy_list)
         }
     }
 
@@ -343,5 +361,14 @@ mod tests {
         let env = |k: &str| (k == "https_proxy").then(|| "corp-proxy:3128".to_owned());
         assert_eq!(from_env(env).as_deref(), Some("http://corp-proxy:3128"));
         assert_eq!(from_env(|_| None), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn machine_proxy_is_a_proxy_url_or_direct() {
+        // Whatever this machine has configured: direct (None) or a normalized URL, never garbage.
+        if let Some(p) = winhttp::machine_proxy() {
+            assert!(p.contains("://"), "{p}");
+        }
     }
 }

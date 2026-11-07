@@ -30,6 +30,8 @@ const FATAL = /password|reject|denied|declin|manually|not allowed|restricted|pol
 
 export function classify(m: { type: string; title: string; text: string; retry?: boolean }): FailureKind {
   const t = m.text.toLowerCase();
+  // "Restart remote computer": the core ends the session as the peer goes down; bring it back.
+  if (m.type.startsWith("restarting")) return "retryable";
   // While the peer restarts it is offline, then briefly has no signed key (E2E refused).
   if (t.includes("offline") || t.includes("not exist") || t.includes("end-to-end encrypted")) return "transient";
   if (m.type.includes("password") || FATAL.test(m.text) || FATAL.test(m.title)) return "fatal";

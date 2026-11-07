@@ -6,6 +6,21 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Fixed
+- **Unattended access: *Install as service* works on installed Tether (Windows)**. The installer wrote
+  `InstallLocation` with quotes, so installing the service failed ("Installer path or name contains
+  characters unsafe for cmd.exe", in a box titled "RustDesk Output") and `tether.exe --install-service`
+  failed with exit code 0. The value is now unquoted (existing installs get it with the next update), the
+  button only creates and starts the service (never the core's full self-install) and shows errors in
+  Settings, the row is shown while the service is not running, `--install-service` exits 1 on failure.
+- **The service honours the machine proxy**: as LocalSystem it has no IE proxy settings; it now also uses
+  the WinHTTP proxy (`netsh winhttp set proxy`, GPO), so it is reachable behind a proxy-only network, at the
+  logon screen too. Apps in the user's session are unchanged.
+- **Settings made before installing the service are kept**: the permanent password, accepted passwords and
+  2FA set before *Install as service* were not copied to the service (the core only imported a config older
+  than the exe).
+- **The viewer reconnects after *Restart remote computer*** instead of staying at "Restarting remote device".
+
 ## [0.5.23] — 2026-11-07
 Tether / TetherQS 0.5.23 (Windows and macOS); hbbs and hbbr for the WebSocket bind (W5).
 
