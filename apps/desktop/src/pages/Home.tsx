@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Copy, Eye, EyeOff, FolderSync, Lock, MoreHorizontal, RefreshCw, Search, Settings as SettingsIcon, Trash2, Video } from "lucide-react";
+import { ArrowRight, Copy, Eye, EyeOff, FolderSync, LayoutList, Lock, MoreHorizontal, RefreshCw, Search, Settings as SettingsIcon, Trash2, Video } from "lucide-react";
 import { api, formatId, invoke, type Peer, type Status } from "../lib/ipc";
 import { Button, IconButton, Logo, PlatformIcon, StatusDot, TitleBar, useToast } from "../components/ui";
 import { Settings } from "./Settings";
 import { UpdateCard } from "../components/UpdateCard";
 import { errorText, usePolicy } from "../lib/policy";
+import { useMode } from "../lib/mode";
 import { Recordings, recordingsHidden, useRecordings } from "./Recordings";
 import { RecordingSaved } from "../components/RecordingSaved";
 
@@ -216,6 +217,7 @@ export function Home() {
   const rec = useRecordings();
   const eff = usePolicy();
   const toast = useToast();
+  const mode = useMode();
 
   const loadPeers = useCallback(() => api.recentPeers().then(setPeers).catch(() => {}), []);
   useEffect(() => {
@@ -237,6 +239,11 @@ export function Home() {
         <span className="text-caption font-semibold">Tether</span>
         <div className="flex-1" data-tauri-drag-region />
         <StatusPill s={s} />
+        {mode.policy !== "off" && (
+          <Button size="sm" variant="ghost" className="no-drag" onClick={() => mode.set("advanced")} title="Advanced mode: all hosts with search, tags and sessions">
+            <LayoutList size={16} /> Hosts
+          </Button>
+        )}
         {!recordingsHidden(eff, rec.st) && (
           <IconButton label="Recordings" className="no-drag" onClick={() => setRecordings(true)}>
             <Video size={17} />

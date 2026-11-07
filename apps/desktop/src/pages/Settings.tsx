@@ -7,6 +7,7 @@ import { Diagnostics } from "./Diagnostics";
 import { updateApi, type UpdateStatus } from "../components/UpdateCard";
 import { getThemePref, setThemePref, type ThemePref } from "../lib/theme";
 import { Button, IconButton, Segmented, TextField, Toggle } from "../components/ui";
+import { useMode } from "../lib/mode";
 import { passwordStrength } from "../lib/security";
 import { recordingsApi, retentionText, uploadText, type RecordingsState } from "../lib/recordings";
 
@@ -262,9 +263,28 @@ function TwoFactor() {
   );
 }
 
+function HomeView() {
+  const m = useMode();
+  if (m.policy === "off") return null;
+  return (
+    <Row title="Home view" desc="Advanced shows all your hosts with search, tags, saved searches and sessions instead of the ID box and recent cards." feature="ui.advanced">
+      <Segmented
+        value={m.mode}
+        onChange={(v) => m.set(v)}
+        options={[
+          { value: "simple", label: "Simple" },
+          { value: "advanced", label: "Advanced" },
+        ]}
+      />
+    </Row>
+  );
+}
+
 function Appearance() {
   const [theme, setTheme] = useState<ThemePref>(getThemePref());
   return (
+    <>
+    <HomeView />
     <Row title="Theme">
       <div className="flex gap-2">
         {(
@@ -288,6 +308,7 @@ function Appearance() {
         ))}
       </div>
     </Row>
+    </>
   );
 }
 

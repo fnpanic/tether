@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tether_trust::custom::{self, CustomProfile};
 use tether_trust::policy::{self, Bundle, Effective, Layer};
 use tether_trust::serverkeys::{KeyList, ServerKey};
+use tether_trust::team::Roster;
 use tether_trust::{envelope, SigningKey, VerifyingKey};
 
 const DEFAULT_SERVER: &str = "https://tether-desk.duckdns.org";
@@ -1176,6 +1177,39 @@ async fn custom_delete(app: State<'_, App>, id: String) -> R<Vec<RelayResult>> {
     Ok(out)
 }
 
+// ---- team (technician access) ----
+
+/// The team roster of every relay (`GET /api/admin/team`): the first answer, plus the relays
+/// whose roster differs and those that failed.
+#[tauri::command]
+async fn team_load(app: State<'_, App>) -> R<Value> {
+    let (mut first, mut differ, mut failed) = (None::<Roster>, Vec::new(), Vec::new());
+    for sv in app.servers() {
+        let r = app.call_on(&sv, "GET", "/api/admin/team", Vec::new(), "application/json").await;
+        match r.and_then(|b| serde_json::from_slice::<Roster>(&b).map_err(|_| "unexpected team roster".to_owned())) {
+            Ok(r) => match &first {
+                None => first = Some(r),
+                Some(f) if *f != r => differ.push(sv),
+                Some(_) => {}
+            },
+            Err(e) => failed.push(format!("{sv}: {e}")),
+        }
+    }
+    let roster = first.ok_or_else(|| failed.join("; "))?;
+    Ok(json!({ "roster": roster, "differ": differ, "failed": failed }))
+}
+
+/// `PUT /api/admin/team` to every relay (validated here first, the relays validate again).
+#[tauri::command]
+async fn team_publish(app: State<'_, App>, roster: Roster) -> R<Vec<RelayResult>> {
+    roster.validate()?;
+    let out = app.fan_out("PUT", "/api/admin/team", serde_json::to_vec(&roster).map_err(err)?, "application/json").await;
+    match none_ok(&out) {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
+}
+
 // ---- diagnostics ----
 
 #[derive(Serialize)]
@@ -1266,6 +1300,8 @@ fn main() {
             custom_save,
             custom_list,
             custom_delete,
+            team_load,
+            team_publish,
             diag_open,
             diag_save
         ])

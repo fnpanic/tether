@@ -3,9 +3,11 @@
 //! Layout: `policy.json`, `policy-history/<serial>.json`, `server-keys.json` (signed server key
 //! list, docs/key-rotation.md), `devices.json`, `nonces.json`,
 //! `diag/tickets.json` + `diag/<ticket>.zip`, `custom/<id>.json` (custom TetherQS apps),
-//! `audit/<YYYY-MM-DD>.jsonl` (session audit log, `audit.rs`), `download/…` (served by Caddy), `tmp/`.
+//! `audit/<YYYY-MM-DD>.jsonl` (session audit log, `audit.rs`), `team/roster.json` + `team/tags.json`
+//! (technician access, `team.rs`), `download/…` (served by Caddy), `tmp/`.
 
 mod audit;
+mod team;
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -214,6 +216,7 @@ struct App {
     tickets: Vec<Ticket>,
     policy_serial: Option<u64>,
     server_keys_serial: Option<u64>,
+    team: team::Team,
 }
 
 fn now() -> u64 {
@@ -503,6 +506,7 @@ impl App {
             audit_ip_hits: HashMap::new(),
             audit_dev_hits: HashMap::new(),
             audit: audit::Log::open(data.join("audit"), audit_days, audit_max)?,
+            team: team::Team::open(&data)?,
             custom,
             devices: devices.into_iter().map(|d| (d.uuid.clone(), d)).collect(),
             devices_dirty: false,
@@ -575,6 +579,7 @@ impl App {
             ("POST", "/api/audit/alarm") => self.audit_post(rq, body, "alarm"),
             ("POST", p) if p.starts_with("/api/diag/") => self.diag_upload(body, &p["/api/diag/".len()..]),
             ("GET", p) if p.starts_with("/q/") => self.custom_download(rq, &p["/q/".len()..]),
+            (m, p) if p.starts_with("/api/team/") => self.team_route(rq, body, m, &url, &p["/api/team/".len()..]),
             (m, p) if p.starts_with("/api/admin/") => self.admin(rq, body, m, &url, &p["/api/admin/".len()..]),
             _ => Err(not_found()),
         }
@@ -706,10 +711,11 @@ impl App {
             ("PUT", "policy") => LIMIT_POLICY,
             ("PUT", "server-keys") => LIMIT_SERVER_KEYS,
             ("PUT", "download-page") => LIMIT_PAGE,
+            ("PUT", "team") => team::LIMIT_ROSTER,
             ("POST", "diag-ticket") => LIMIT_SMALL,
             ("PUT", r) if r.starts_with("custom/") => LIMIT_CUSTOM,
             ("DELETE", r) if r.starts_with("custom/") => LIMIT_SMALL,
-            ("GET", "policy-history" | "devices" | "diag" | "releases" | "status" | "custom" | "audit") => LIMIT_SMALL,
+            ("GET", "policy-history" | "devices" | "diag" | "releases" | "status" | "custom" | "audit" | "team") => LIMIT_SMALL,
             ("GET", r) if r.starts_with("diag/") || r.starts_with("policy-history/") => LIMIT_SMALL,
             _ => return Err(not_found()),
         };
@@ -718,6 +724,8 @@ impl App {
         match (method, rest) {
             ("PUT", "policy") => self.put_policy(body),
             ("PUT", "server-keys") => self.put_server_keys(body),
+            ("PUT", "team") => self.put_team(body),
+            ("GET", "team") => self.get_team(),
             ("PUT", "download-page") => {
                 self.check_space(body.len() as u64)?;
                 let dest = self.data.join("download/index.html");
@@ -996,6 +1004,7 @@ impl App {
         self.audit_ip_hits.retain(|_, (start, _)| t < *start + 60);
         self.audit_dev_hits.retain(|_, (start, _)| t < *start + 60);
         self.audit.prune(t, 0);
+        self.team.maintain(t);
         let n = self.nonces.len();
         self.nonces.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
         if self.nonces.len() != n {

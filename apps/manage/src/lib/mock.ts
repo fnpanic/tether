@@ -159,6 +159,11 @@ let custom: any[] = [
   { id: "p0x7n2", name: "Praxis Weber", token: "UHJheGlzLVdlYmVyLXByZXZpZXctdG9rZW4tMDAwMDAy", expires: now + 86400 * 4, channel: "stable", created: now - 86400 * 26, downloads: 1, last_download: now - 86400 * 20, local: null },
 ];
 
+// Team roster (team_load / team_publish): relay 2 has not got Ben yet.
+const TEAM_A = { name: "Anna Berger", key: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", write: true, audit: true };
+const TEAM_B = { name: "Ben Kraus", key: "fe8A7xTX72RJlJypn8aBxG3NZHHxygCLPQqCWxbeev8=", write: false, audit: false };
+let team: Record<string, { members: unknown[] }> = { [R1]: { members: [TEAM_A, TEAM_B] }, [R2]: { members: [TEAM_A] } };
+
 // Server key rotation: relay 2 still serves the previous list.
 const SK_OLD = "fe8A7xTX72RJlJypn8aBxG3NZHHxygCLPQqCWxbeev8=";
 let skRotation: Record<string, unknown> = {};
@@ -255,6 +260,14 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
     },
     custom_delete: () => {
       custom = custom.filter((c) => c.id !== a.id);
+      return servers.map((s) => ok(s));
+    },
+    team_load: () => {
+      const first = team[servers[0]] ?? { members: [] };
+      return { roster: first, differ: servers.slice(1).filter((s) => JSON.stringify(team[s] ?? { members: [] }) !== JSON.stringify(first)), failed: [] };
+    },
+    team_publish: () => {
+      servers.forEach((s) => (team[s] = a.roster));
       return servers.map((s) => ok(s));
     },
     diag_open: () => ({

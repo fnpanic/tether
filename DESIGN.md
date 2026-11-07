@@ -110,6 +110,7 @@ and is never applied below 12px.
 | **Segmented control** | Pill track in `parchment`, selected segment filled `accent` with white semibold text (`SELECTED` in `ui.tsx`; the policy state control keeps “Default” neutral), caption text. Selected list rows, nav items and cards use the same accent fill or an accent ring, so a selection reads at a glance. |
 | **Status pill** | `parchment` pill, 6px status dot + footnote text. |
 | **Dialog** | `tile`, radius 18, padding 32, floating shadow, dim backdrop `rgba(0,0,0,.4)`. |
+| **Tag chip** (extension) | Neutral chip (`tile-2`, 1px `hairline`, radius 5, footnote) with a 7px colour dot; namespace in `muted`. The dot is the only colour (`--tag-*` tokens, identification, never a fill); rule tags use a dashed border. |
 | **Session toolbar** | Glass pill (radius full), 44 tall, white icons at 72% → 100%, active item `rgba(255,255,255,.14)`. |
 
 ## Layout

@@ -396,6 +396,29 @@ pub fn main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .build()
 }
 
+/// Advanced mode is the main window's home view (docs/advanced.md): it needs a wider window, so
+/// switching to it grows the window (never past the screen); switching back only relaxes the minimum.
+pub fn fit_main(app: &AppHandle, advanced: bool) -> tauri::Result<()> {
+    let Some(w) = app.get_webview_window("main") else { return Ok(()) };
+    if !advanced {
+        return w.set_min_size(Some(tauri::LogicalSize::new(820.0, 560.0)));
+    }
+    let s = w.scale_factor()?;
+    let cur = w.inner_size()?.to_logical::<f64>(s);
+    let (mut want_w, mut want_h) = (cur.width.max(1280.0), cur.height.max(800.0));
+    if let Ok(Some(m)) = w.current_monitor() {
+        let screen = m.size().to_logical::<f64>(m.scale_factor());
+        want_w = want_w.min(screen.width - 40.0);
+        want_h = want_h.min(screen.height - 80.0);
+    }
+    w.set_min_size(Some(tauri::LogicalSize::new(1000.0_f64.min(want_w), 600.0_f64.min(want_h))))?;
+    if want_w > cur.width + 1.0 || want_h > cur.height + 1.0 {
+        w.set_size(tauri::LogicalSize::new(want_w, want_h))?;
+        w.center()?;
+    }
+    Ok(())
+}
+
 fn cm_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let w = base(app, "cm", "/cm")?
         .inner_size(380.0, 560.0)
@@ -535,6 +558,23 @@ pub fn open_session(app: &AppHandle, peer: &str, conn: &str) -> tauri::Result<St
 
 /// Open session windows: key, peer, connection type.
 static WINDOWS: std::sync::Mutex<Vec<(String, String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Open session windows as `(key, peer, conn)`, oldest first (Advanced mode's session list).
+pub fn open_sessions() -> Vec<(String, String, String)> {
+    WINDOWS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Bring a session window to the front; false if it is gone.
+pub fn focus_session(app: &AppHandle, key: &str) -> bool {
+    match app.get_webview_window(&sink::session_label(key)) {
+        Some(w) => {
+            let _ = w.unminimize();
+            let _ = w.show();
+            w.set_focus().is_ok()
+        }
+        None => false,
+    }
+}
 
 /// `view_only`/`relay` are passed to the session page as `&view_only=1&relay=1`.
 /// One window per peer and connection type: a second request for it (a double-clicked Recent card,

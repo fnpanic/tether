@@ -5,6 +5,7 @@ mod cli;
 mod commands;
 mod diag;
 mod fluxrt;
+mod hosts;
 mod keys;
 mod netpolicy;
 mod policy;
@@ -12,6 +13,7 @@ mod recording;
 mod security;
 mod session_policy;
 mod sink;
+mod team;
 mod update;
 
 use std::process::ExitCode;

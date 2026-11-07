@@ -1,11 +1,29 @@
-import React from "react";
+import React, { Suspense, useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import "./styles.css";
 import { applyTheme } from "./lib/theme";
 import { Home } from "./pages/Home";
 import { Session } from "./pages/Session";
 import { ConnectionManager } from "./pages/ConnectionManager";
-import { inTauri } from "./lib/ipc";
+import { inTauri, invoke } from "./lib/ipc";
+import { useMode } from "./lib/mode";
+
+// Advanced mode is its own chunk: the simple home view never downloads or parses it.
+const Hosts = React.lazy(() => import("./pages/Hosts").then((m) => ({ default: m.Hosts })));
+const lazyHosts = (
+  <Suspense fallback={<div className="h-full bg-canvas" />}>
+    <Hosts />
+  </Suspense>
+);
+
+/** The main window's home view: Simple (Home) or Advanced (Hosts), docs/advanced.md. */
+function Main() {
+  const { mode } = useMode();
+  useEffect(() => {
+    invoke("main_window_fit", { advanced: mode === "advanced" }).catch(() => {});
+  }, [mode]);
+  return mode === "advanced" ? lazyHosts : <Home />;
+}
 
 applyTheme();
 
@@ -14,10 +32,11 @@ function route() {
   const [path, query = ""] = hash.split("?");
   const params = new URLSearchParams(query);
   if (path.startsWith("/session/")) {
-    return <Session sessionKey={path.slice("/session/".length)} peer={params.get("peer") ?? ""} conn={params.get("conn") ?? "default"} />;
+    return <Session sessionKey={path.slice("/session/".length)} peer={params.get("peer") ?? ""} conn={params.get("conn") ?? "default"} viewOnly={params.get("view_only") === "1"} />;
   }
+  if (path === "/hosts") return lazyHosts;
   if (path === "/cm") return <ConnectionManager />;
-  return <Home />;
+  return <Main />;
 }
 
 /** A page that throws shows what failed instead of an empty window. */

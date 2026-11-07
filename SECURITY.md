@@ -75,6 +75,34 @@ Every host reports its incoming connections to the first relay of its build
   days or 50 MB (`AUDIT_RETENTION_DAYS`, `AUDIT_MAX_MB`; `AUDIT_RETENTION_DAYS=0` stores nothing).
   CSV exports leave the relay: handle them like the records.
 
+### Team access
+
+Technicians get an org-scoped identity without the admin key: each technician app generates its own
+Ed25519 key, the admin adds its public key to the team roster in Tether Manage and publishes the
+roster to the relays (`PUT /api/admin/team`, admin-signed). Member requests (`/api/team/*`) are
+signed with the member key in the admin request format (method, path with query, timestamp, nonce,
+body hash; ±300 s; replayed nonces rejected, same persisted cache as admin requests).
+
+- **What a member can read**: the device list without IP addresses or policy serials (uuid, ID,
+  profile, version, OS, last seen), the shared tag document, and only with the `audit` flag the
+  session audit records of one device at a time (names, IPs and paths are personal data, so the
+  flag is off by default). A member cannot change policies, releases, the roster or anything else
+  admin-signed; a member key is never accepted as an admin key.
+- **What a member can write**: with `write`, the shared tag document (one JSON object, ≤ 512 KiB,
+  replaced as a whole with optimistic concurrency on `rev`). The relay does not interpret it, and
+  it must not be used for any security decision. Tags are **not secrets**: every member reads them;
+  never put passwords or keys in tags.
+- **Key theft**: a stolen member key gives its holder that member's rights until the admin removes
+  it from the roster and publishes; that takes effect at once on each relay that gets the roster.
+  Only the admin key changes the roster. Compare the fingerprint with the technician out of band
+  before adding a key.
+- **The roster is per relay**: each relay authorises against the roster it was given. A relay that
+  missed a publish still accepts a removed key, so publish to every relay (Tether Manage names relays
+  with a different roster).
+- **Limits**: 120 requests/min per member key, 60 failed signatures/min per IP (a failure tries every
+  roster key, at most 500, under the state lock), body limits 64 KiB (roster) and 512 KiB (tags);
+  `team/roster.json` and `team/tags.json` are `0600`.
+
 ## Least privilege and attack surface
 
 Settings below are **forced** for every Tether process (UI, server, service and connection manager).
