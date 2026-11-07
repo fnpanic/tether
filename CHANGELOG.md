@@ -6,6 +6,9 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+## [0.5.23] — 2026-11-07
+Tether / TetherQS 0.5.23 (Windows and macOS); hbbs and hbbr for the WebSocket bind (W5).
+
 ### Security
 - **Key exchange version 0 refused outside WebRTC** (Tether and TetherQS): version 0 runs one key
   and one nonce sequence in both directions (keystream and Poly1305 key reuse, reflected frames).
