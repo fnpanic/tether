@@ -4,7 +4,10 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
-## [Unreleased]
+## [0.5.22] — 2026-11-07
+
+Tether / TetherQS 0.5.22 (Windows and macOS), Tether Manage 0.5.6; relay parts as listed (hbbs, hbbr,
+tether-api, Caddyfile, sysctl, monitoring).
 
 Relays: scaling to 10 000 devices and 3 000 concurrent sessions ([docs/scaling.md](docs/scaling.md):
 capacity model, load tests, architecture, cost, rollout). Server-side only; clients and wire
