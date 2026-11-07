@@ -42,6 +42,20 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   updates were turned off.
 - **Packed downloads decoded by a proxy**: the size limit for the gzip URL is the larger of the
   packed and the plain size, so a body already decoded on the way is not cut off.
+- **Relays: tether-api no longer runs out of memory at 50 000 devices.** `devices.json` is written
+  straight from the device map and the device lists (admin, team) through a temp file: 40 MB peak
+  instead of 85 MB with 16 team lists at once (MemoryMax 64M, [docs/scaling.md](docs/scaling.md)).
+  Custom-app profiles are read from `custom/<id>.json` when needed instead of kept in memory.
+- **Relays: a failed release-index rename keeps the old serial** in tether-api (it was updated
+  before the file was in place).
+- **Relays: `install.sh` keeps `RELAY_SERVERS`** from `/etc/tether/server.env` on a re-run (it
+  fell back to this host alone, dropping the other relays of an HA setup).
+- **Kubernetes: per-IP limits per client again.** The chart's proxy sent `/api/*` to tether-api
+  directly, which trusts `X-Forwarded-For` only from loopback, so every client counted as the proxy
+  pod; `/api/*` now goes through the api pod's Caddy ([docs/kubernetes.md](docs/kubernetes.md)).
+- **Server CI** builds and tests what the deploy bundle contains (`scripts/build-relay.sh`,
+  `scripts/test-relay.sh`, tether-trust) and packages tether-api and the Caddy, nginx and sysctl
+  files; it also runs on changes to `crates/`, `patches/`, `vendor/`.
 
 ### Security
 - **Technician app: `session_policy_get` returns only the values the session window needs**
@@ -49,6 +63,26 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   from the webview.
 - **TetherQS: custom app profile fetch** reads at most the profile size limit instead of the whole
   answer first.
+- **Relays: one request could stop tether-api.** tiny_http allocated the whole declared
+  `Content-Length` to discard a body tether-api refused, so a `Content-Length` larger than the
+  machine's memory aborted the process (also through Caddy, which forwards the header). tiny_http
+  is now patched (`server/api/patched/tiny_http`): at most 1 MiB is discarded, and a refused body
+  is not read at all (read side shut, `Connection: close`).
+- **Relays: slow uploads can no longer take all of tether-api's workers.** Release and diagnostics
+  uploads (streamed to disk, up to 200 MiB) run at most 4 at a time (more: `503`, `Retry-After`),
+  are refused before their body is read when they cannot succeed (no admin keys, no `Tether-Sig`
+  or a timestamp outside ±300 s, bad path, no open ticket), and any body averaging under 16 KiB/s
+  after 30 s is cut off (`408`). Before, 32 uploads sending a byte every 25 s held every worker for
+  about 55 minutes and every heartbeat got `503`; now heartbeats keep 28 workers (measured, 83 of
+  83 answered). The release signature check (over up to 200 MiB), audit log queries and preparing
+  a `/q/` copy no longer run under the state lock.
+- **Relays: hbbs bounds what it queues for a host.** Messages for a host's WebSocket/TCP signalling
+  path were queued without limit and written without a timeout, so a host that stopped reading
+  plus a flood of requests for it grew hbbs's memory without bound. Now 64 per connection (more are
+  dropped) and a 5 s write timeout that closes the connection.
+- **Relays (nginx): request body limits.** `client_max_body_size` was unlimited for `/api/`
+  (bodies buffered to disk); now 1 MiB, 201 MiB for `/api/admin/release/` and 3 MiB for
+  `/api/diag/`, both unbuffered so tether-api's upload limits apply.
 
 ## [0.5.25] — 2026-11-07
 Tether / TetherQS 0.5.25 (Windows and macOS), Tether Manage 0.5.8; relays: tether-api and Caddy/nginx config (deployed 2026-11-07). The signed release index is required from this release on (`REQUIRE_SIGNED_INDEX`).

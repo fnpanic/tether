@@ -1482,6 +1482,9 @@ fn qcache(data: &Path, id: &str, key: &str, file: &str, meta: &fs::Metadata, len
     let dest = dir.join(&name);
     let fresh = fs::metadata(&dest).is_ok_and(|m| len.map_or(true, |l| m.len() == l) && m.modified().ok() >= meta.modified().ok());
     if !fresh {
+        // shortcut: a copy that finishes after its app was deleted stays on disk (unreachable: no
+        // token names it) until an app with that id prepares one; sweep qcache/ in maintain() if
+        // deletes during first downloads become common.
         qcache_drop(data, id, Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or(""), &name);
         let tmp = tmp_path(data);
         let r = (|| {
