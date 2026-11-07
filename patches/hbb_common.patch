@@ -199,19 +199,28 @@ index 126d08a..cc10310 100644
      /// cert, false for the peer's), used to bind the channel to the signed peer identity.
      /// Returns None for non-WebRTC transports, which authenticate via the secretbox key exchange.
 diff --git a/src/webrtc.rs b/src/webrtc.rs
-index f33f914..d1e167f 100644
+index f33f914..1703bbd 100644
 --- a/src/webrtc.rs
 +++ b/src/webrtc.rs
-@@ -47,6 +47,8 @@ use tokio::time::{timeout, timeout_at, Instant};
+@@ -47,6 +47,7 @@ use tokio::time::{timeout, timeout_at, Instant};
  use url::Url;
  
  use crate::config;
 +
-+static REMOTE_RELAY_AT: StdMutex<Option<std::time::Instant>> = StdMutex::new(None);
  use crate::protobuf::Message;
  use crate::rx_probe::RxProbe;
  use crate::sodiumoxide::crypto::secretbox::Key;
-@@ -141,6 +143,7 @@ struct RecvState {
+@@ -103,6 +104,9 @@ pub struct WebRTCStream {
+     // Shared by every clone, the `SESSIONS` entry included, because the receive path runs off a
+     // clone and the bound is about the pc, not about one handle.
+     max_recv_message: Arc<AtomicUsize>,
++    // Tether: when the peer last offered a TURN candidate (`remote_relay_candidate_within`). Per
++    // pc: another session's candidate says nothing about this one's connect race.
++    remote_relay_at: Arc<StdMutex<Option<std::time::Instant>>>,
+ }
+ 
+ /// Whether a pc `new_inner` built is still wanted, shared by every `NewStreamHandoff` handed out
+@@ -141,6 +145,7 @@ struct RecvState {
  // well under the limit so header+payload never reaches the exact-65536 boundary that the
  // receiver's reassembly would truncate with data loss.
  const MAX_FRAGMENT_PAYLOAD: usize = 60000;
@@ -219,7 +228,15 @@ index f33f914..d1e167f 100644
  /// Receive scratch size: must be >= 1 (fragment header) + `MAX_FRAGMENT_PAYLOAD` and fit the
  /// negotiated SCTP max message size.
  const RECV_BUF_SIZE: usize = 64 * 1024;
-@@ -491,11 +494,56 @@ impl WebRTCStream {
+@@ -254,6 +259,7 @@ impl Clone for WebRTCStream {
+             rx_probe: self.rx_probe.clone(),
+             disconnected: self.disconnected.clone(),
+             max_recv_message: self.max_recv_message.clone(),
++            remote_relay_at: self.remote_relay_at.clone(),
+         }
+     }
+ }
+@@ -491,11 +497,56 @@ impl WebRTCStream {
          // with no host and TURN entries with no credentials, i.e. exactly the ones that would
          // answer `true` here while being unusable — which is worse than answering `false`, since
          // the caller skips its "don't build a guaranteed-dead Relay-only pc" guard on our word.
@@ -281,7 +298,7 @@ index f33f914..d1e167f 100644
      }
  
      #[inline]
-@@ -511,6 +559,18 @@ impl WebRTCStream {
+@@ -511,6 +562,18 @@ impl WebRTCStream {
          ))
      }
  
@@ -300,7 +317,7 @@ index f33f914..d1e167f 100644
      /// The default UDP STUN servers as bare `host:port`, for application-level address probes.
      pub fn default_stun_servers() -> Vec<String> {
          DEFAULT_ICE_SERVERS
-@@ -573,12 +633,24 @@ impl WebRTCStream {
+@@ -573,12 +636,24 @@ impl WebRTCStream {
          remote_endpoint: &str,
          force_relay: bool,
          ms_timeout: u64,
@@ -326,7 +343,7 @@ index f33f914..d1e167f 100644
              .await
              .map_err(|err| anyhow::anyhow!("WebRTC setup task failed: {}", err))??
              .into_inner()
-@@ -589,6 +661,7 @@ impl WebRTCStream {
+@@ -589,6 +664,7 @@ impl WebRTCStream {
          remote_endpoint: String,
          force_relay: bool,
          ms_timeout: u64,
@@ -334,7 +351,7 @@ index f33f914..d1e167f 100644
      ) -> ResultType<NewStreamHandoff> {
          // The endpoint contains a Base64-encoded SDP with host addresses and live ICE
          // credentials. Log only its size so debug logs cannot disclose that information.
-@@ -639,25 +712,46 @@ impl WebRTCStream {
+@@ -639,25 +715,46 @@ impl WebRTCStream {
          if !remote_endpoint.is_empty() {
              s.set_ice_max_binding_requests(Some(Self::ICE_MAX_BINDING_REQUESTS));
          }
@@ -385,7 +402,15 @@ index f33f914..d1e167f 100644
              ice_transport_policy: if force_relay {
                  RTCIceTransportPolicy::Relay
              } else {
-@@ -1102,6 +1196,16 @@ impl WebRTCStream {
+@@ -906,6 +1003,7 @@ impl WebRTCStream {
+             rx_probe: RxProbe::new(),
+             disconnected,
+             max_recv_message: Arc::new(AtomicUsize::new(MAX_RECV_MESSAGE)),
++            remote_relay_at: Default::default(),
+         };
+         // Insert into the session cache, but never `await pc.close()` while holding this lock:
+         // `close()` fires the peer-connection-state handler inline, which itself locks SESSIONS,
+@@ -1102,6 +1200,16 @@ impl WebRTCStream {
          Some(remote.split_whitespace().nth(3)?.matches(':').count() > 1)
      }
  
@@ -402,7 +427,7 @@ index f33f914..d1e167f 100644
      #[inline]
      pub fn take_local_ice_rx(&self) -> Option<mpsc::UnboundedReceiver<String>> {
          self.local_ice_rx.lock().ok().and_then(|mut rx| rx.take())
-@@ -1113,10 +1217,29 @@ impl WebRTCStream {
+@@ -1113,10 +1221,27 @@ impl WebRTCStream {
              return Ok(());
          }
          let candidate = serde_json::from_str::<RTCIceCandidateInit>(candidate_json)?;
@@ -413,17 +438,15 @@ index f33f914..d1e167f 100644
 +        let relay = candidate.candidate.contains(" typ relay");
          self.pc.add_ice_candidate(candidate).await?;
 +        if relay {
-+            *REMOTE_RELAY_AT.lock().unwrap() = Some(std::time::Instant::now());
++            *self.remote_relay_at.lock().unwrap() = Some(std::time::Instant::now());
 +        }
          Ok(())
      }
  
-+    /// Tether: whether a peer offered a TURN (relay) candidate in the last `ms`; the connect race
-+    /// then gives WebRTC over TURN more time than a direct attempt gets.
-+    // shortcut: process-wide, so two sessions starting together share it; per-session state
-+    // would have to be threaded through the race.
-+    pub fn remote_relay_candidate_within(ms: u64) -> bool {
-+        REMOTE_RELAY_AT
++    /// Tether: whether this stream's peer offered a TURN (relay) candidate in the last `ms`; the
++    /// connect race then gives WebRTC over TURN more time than a direct attempt gets.
++    pub fn remote_relay_candidate_within(&self, ms: u64) -> bool {
++        self.remote_relay_at
 +            .lock()
 +            .unwrap()
 +            .map_or(false, |at| at.elapsed() < Duration::from_millis(ms))
@@ -432,7 +455,7 @@ index f33f914..d1e167f 100644
      #[inline]
      pub fn session_key(&self) -> &str {
          &self.session_key
-@@ -1155,7 +1278,9 @@ impl WebRTCStream {
+@@ -1155,7 +1280,9 @@ impl WebRTCStream {
              return;
          };
          let pc = self.pc.clone();
@@ -442,7 +465,7 @@ index f33f914..d1e167f 100644
              if let Err(err) = pc.close().await {
                  log::debug!("WebRTC close failed: {}", err);
              }
-@@ -1163,6 +1288,20 @@ impl WebRTCStream {
+@@ -1163,6 +1290,20 @@ impl WebRTCStream {
          });
      }
  
@@ -463,7 +486,7 @@ index f33f914..d1e167f 100644
      #[inline]
      pub fn close_detached(&self) {
          self.close_detached_with(());
-@@ -1552,6 +1691,46 @@ mod tests {
+@@ -1552,6 +1693,46 @@ mod tests {
          WebRTCStream::new("", false, 10000).await.unwrap()
      }
  
@@ -510,7 +533,32 @@ index f33f914..d1e167f 100644
      #[test]
      fn test_webrtc_ice_url() {
          let turn = WebRTCStream::get_ice_server_from_url("turn://123:321@example.com:3478")
-@@ -2539,7 +2718,7 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
+@@ -2023,6 +2204,24 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
+         stream.close().await; // see test_webrtc_new_stream: no Drop on a raw WebRTCStream
+     }
+ 
++    // Two sessions connecting at once: a TURN candidate from one peer must not stretch the other
++    // session's connect race (the hold for WebRTC over TURN).
++    #[tokio::test]
++    async fn test_remote_relay_candidate_is_per_stream() {
++        let a = WebRTCStream::new("", false, 20000).await.unwrap();
++        let b = WebRTCStream::new("", false, 20000).await.unwrap();
++        let answerer = WebRTCStream::new(a.local_endpoint(), false, 20000).await.unwrap();
++        a.set_remote_endpoint(answerer.local_endpoint()).await.unwrap();
++        let turn = r#"{"candidate":"candidate:1 1 udp 16777215 203.0.113.5 3478 typ relay raddr 0.0.0.0 rport 0","sdpMid":"0","sdpMLineIndex":0}"#;
++        a.add_remote_ice_candidate(turn).await.unwrap();
++        assert!(a.remote_relay_candidate_within(5_000));
++        assert!(a.clone().remote_relay_candidate_within(5_000), "clones share the pc's state");
++        assert!(!b.remote_relay_candidate_within(5_000));
++        for s in [a, b, answerer] {
++            s.close().await;
++        }
++    }
++
+     async fn connect_loopback() -> (WebRTCStream, WebRTCStream) {
+         let mut offerer = WebRTCStream::new("", false, 20000).await.unwrap();
+         let offer = offerer.local_endpoint().to_owned();
+@@ -2539,7 +2738,7 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
          let builder = WEBRTC_RT
              .as_ref()
              .expect("WebRTC I/O runtime")
@@ -519,7 +567,7 @@ index f33f914..d1e167f 100644
              .await
              .expect("setup task")
              .expect("offerer builds");
-@@ -2579,7 +2758,7 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
+@@ -2579,7 +2778,7 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
          let builder = WEBRTC_RT
              .as_ref()
              .expect("WebRTC I/O runtime")
@@ -528,7 +576,7 @@ index f33f914..d1e167f 100644
              .await
              .expect("setup task")
              .expect("offerer builds");
-@@ -2726,6 +2905,24 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
+@@ -2726,6 +2925,24 @@ IHR5cCBzcmZseCByYWRkciAwLjAuMC4wIHJwb3J0IDY0MDA4XHJcbmE9ZW5kLW9mLWNhbmRpZGF0ZXNc
          answerer.close().await;
      }
  

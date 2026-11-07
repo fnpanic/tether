@@ -59,7 +59,7 @@ pub fn run(args: Vec<String>) {
         }
     }
     // A session request while Tether runs opens in that process instead of a second one.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     if let Mode::Connect { c, password } = &mode {
         if forward_to_running(&ctx.config().identifier, &cli::encode_forward(c, password.as_deref())) {
             return;
@@ -223,9 +223,9 @@ fn second_instance(app: &AppHandle, argv: &[String]) {
 }
 
 /// Hands a session request to a running Tether (its single-instance window), like the plugin does
-/// for a plain second start, but with our payload instead of this process's argv.
-/// shortcut: Windows only; elsewhere `--connect` still runs in its own process, as before.
-#[cfg(windows)]
+/// for a plain second start, but with our payload instead of this process's argv. Linux: none, so
+/// `--connect` runs in its own process.
+#[cfg(any(windows, target_os = "macos"))]
 fn forward_to_running(identifier: &str, payload: &str) -> bool {
     send_to_running(identifier, &format!("{}|{payload}", cli::FORWARD_ARG))
 }
@@ -251,13 +251,8 @@ pub fn host_session_ended_in_cm(app: &AppHandle) {
 
 fn tell_main(app: &AppHandle, args: &[&str]) {
     let identifier = &app.config().identifier;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     send_to_running(identifier, &args.join("|"));
-    // The single-instance plugin's socket and wire format (its macos.rs): "cwd\0\0argv0\0argv1".
-    #[cfg(target_os = "macos")]
-    if let Ok(mut s) = std::os::unix::net::UnixStream::connect(format!("/tmp/{}_si.sock", identifier.replace(['.', '-'], "_"))) {
-        let _ = std::io::Write::write_all(&mut s, format!("\0\0tether\0{}", args.join("\0")).as_bytes());
-    }
     let _ = (identifier, args);
 }
 
@@ -351,6 +346,20 @@ fn send_to_running(identifier: &str, args: &str) -> bool {
     let data = format!("|tether|{args}\0");
     let cds = COPYDATASTRUCT { dwData: 1542, cbData: data.len() as u32, lpData: data.as_ptr() as _ };
     unsafe { SendMessageW(hwnd, WM_COPYDATA, 0, &cds as *const _ as isize) == 1 }
+}
+
+/// macOS: the single-instance plugin's socket and wire format (its macos.rs): "cwd\0\0argv0\0argv1…".
+/// /tmp is shared by all users: only a socket this user owns gets the request (it can carry a password).
+#[cfg(target_os = "macos")]
+fn send_to_running(identifier: &str, args: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let path = format!("/tmp/{}_si.sock", identifier.replace(['.', '-'], "_"));
+    if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.uid() == unsafe { hbb_common::libc::getuid() }) {
+        return false;
+    }
+    std::os::unix::net::UnixStream::connect(&path)
+        .and_then(|mut s| std::io::Write::write_all(&mut s, format!("\0\0tether\0{}", args.replace('|', "\0")).as_bytes()))
+        .is_ok()
 }
 
 fn has_tray(app: &AppHandle) -> bool {

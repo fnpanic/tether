@@ -2014,10 +2014,10 @@ index 8da29a2..5c72db5 100644
  mod version;
 diff --git a/src/metrics.rs b/src/metrics.rs
 new file mode 100644
-index 0000000..042946a
+index 0000000..dfc52e2
 --- /dev/null
 +++ b/src/metrics.rs
-@@ -0,0 +1,533 @@
+@@ -0,0 +1,553 @@
 +//! Tether: Prometheus metrics of hbbs and hbbr (text exposition format 0.0.4), served on
 +//! `METRICS_ADDR`:`METRICS_PORT` (default 127.0.0.1, hbbs 21123, hbbr 21124; port 0 = off).
 +//! Labels come from fixed sets only (no peer IDs, IPs or keys); the one exception is the relay
@@ -2359,14 +2359,26 @@ index 0000000..042946a
 +    process(o);
 +}
 +
++/// Clock ticks per second of /proc/self/stat (USER_HZ), read once; 100 if sysconf fails.
++fn clk_tck() -> f64 {
++    static HZ: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
++    #[cfg(unix)]
++    let ticks = || unsafe { hbb_common::libc::sysconf(hbb_common::libc::_SC_CLK_TCK) } as i64;
++    #[cfg(not(unix))]
++    let ticks = || -1i64;
++    *HZ.get_or_init(|| hz_or_default(ticks()))
++}
++
++fn hz_or_default(ticks: i64) -> f64 {
++    if ticks > 0 { ticks as f64 } else { 100. }
++}
++
 +/// process_* metrics from /proc/self, named like the Prometheus client libraries do.
 +pub fn process(o: &mut String) {
 +    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
 +    let field = |k: &str| {
 +        status.lines().find_map(|l| l.strip_prefix(k)?.split_whitespace().next()?.parse::<f64>().ok())
 +    };
-+    // shortcut: assumes USER_HZ = 100 (true on Linux x86_64 and arm64); use sysconf if that changes.
-+    const HZ: f64 = 100.;
 +    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
 +    // Fields after "(comm) ": index 0 is field 3 (state); utime = 14, stime = 15, starttime = 22.
 +    let f: Vec<f64> = stat.rsplit_once(") ").map_or(vec![], |(_, r)| r.split(' ').map(|x| x.parse().unwrap_or(0.)).collect());
@@ -2383,13 +2395,13 @@ index 0000000..042946a
 +        .find_map(|l| l.strip_prefix("Max open files")?.split_whitespace().next()?.parse::<f64>().ok())
 +        .unwrap_or(0.);
 +    for (name, typ, help, v) in [
-+        ("process_cpu_seconds_total", "counter", "User and system CPU time spent in seconds.", (at(14) + at(15)) / HZ),
++        ("process_cpu_seconds_total", "counter", "User and system CPU time spent in seconds.", (at(14) + at(15)) / clk_tck()),
 +        ("process_resident_memory_bytes", "gauge", "Resident memory size in bytes.", field("VmRSS:").unwrap_or(0.) * 1024.),
 +        ("process_virtual_memory_bytes", "gauge", "Virtual memory size in bytes.", field("VmSize:").unwrap_or(0.) * 1024.),
 +        ("process_threads", "gauge", "Number of OS threads.", field("Threads:").unwrap_or(0.)),
 +        ("process_open_fds", "gauge", "Number of open file descriptors.", fds as f64),
 +        ("process_max_fds", "gauge", "Maximum number of open file descriptors.", max_fds),
-+        ("process_start_time_seconds", "gauge", "Start time of the process since unix epoch in seconds.", btime + at(22) / HZ),
++        ("process_start_time_seconds", "gauge", "Start time of the process since unix epoch in seconds.", btime + at(22) / clk_tck()),
 +    ] {
 +        header(o, name, typ, help);
 +        sample(o, name, "", v);
@@ -2444,6 +2456,14 @@ index 0000000..042946a
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
++
++    #[test]
++    fn clock_ticks_from_sysconf_or_100() {
++        assert_eq!(hz_or_default(250), 250.);
++        assert_eq!(hz_or_default(-1), 100.); // sysconf error
++        assert_eq!(hz_or_default(0), 100.);
++        assert!(clk_tck() > 0.);
++    }
 +
 +    fn value(text: &str, series: &str) -> f64 {
 +        text.lines()

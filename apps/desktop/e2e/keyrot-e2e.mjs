@@ -5,7 +5,9 @@
 // - tether.exe built with TETHER_SERVER=127.0.0.1:22116, TETHER_PUB_KEY=A, the test admin key
 //   (debug build: TETHER_DEV_API points its API at the local tether-api), as host "kr-host",
 //   viewer "kr-view" (gets the lists), "kr-stale" (cannot reach the API, never gets a list) and
-//   "kr-new" (a fresh install of the old build after the rotation).
+//   "kr-new" (a fresh install of the old build after the rotation). Before the rotation, a running
+//   "kr-view" also gets screen and file transfer to the host forwarded at once (two connect races in
+//   one process, as Advanced mode opens sessions).
 // - a small reverse proxy in this script stands in for Caddy: /api/* -> tether-api,
 //   /rendezvous/pubkey -> hbbs /pubkey (health port 22132); Tether Manage talks to it, so its
 //   "Every relay is switched" check sees the key the running hbbs signs with.
@@ -197,17 +199,48 @@ async function connect(env, id) {
     const s = await until("session page", () => pages(b).find((p) => p.url().includes("/session/")), 30000);
     let closed = false;
     s.on("close", () => (closed = true));
-    const out = await until("session outcome", () =>
-      closed ? `window closed (process ${alive(pid) ? "running" : "gone"})` : s.evaluate(() => {
-        // Connected: a frame is on the canvas (opacity 1) and the session is end-to-end encrypted.
-        if (document.querySelector("canvas")?.style.opacity === "1" && document.querySelector('[title^="End-to-end encrypted"]')) return "connected";
-        const t = document.body.innerText;
-        return /server key mismatch|connection blocked|offline|timed out|failed|refused|declined|error/i.test(t) ? t.replace(/\s+/g, " ").slice(0, 400) : null;
-      }), 60000, 300);
+    const out = await until("session outcome", () => (closed ? `window closed (process ${alive(pid) ? "running" : "gone"})` : outcome(s)), 60000, 300);
     await b.close().catch(() => {});
     return out;
   } finally {
     kill(pid);
+    await sleep(1500);
+  }
+}
+
+/** "connected" (a frame on the canvas, end-to-end encrypted; file transfer: the remote folder is
+ *  listed), the error text shown, or null. */
+const outcome = (s) =>
+  s.evaluate(() => {
+    if (document.querySelector("canvas")?.style.opacity === "1" && document.querySelector('[title^="End-to-end encrypted"]')) return "connected";
+    if (location.href.includes("conn=file-transfer") && document.querySelectorAll('[role="listbox"]')[1]?.querySelector('[role="option"]')) return "connected";
+    const t = document.body.innerText;
+    return /server key mismatch|connection blocked|offline|timed out|failed|refused|declined|error/i.test(t) ? t.replace(/\s+/g, " ").slice(0, 400) : null;
+  });
+
+/** Sessions started together in one process, as Advanced mode opens them: a running viewer gets
+ *  each `--connect` request (forwarded to it) at the same time. Outcomes, space-separated. */
+async function connectAtOnce(env, ids) {
+  const port = cdpPort++;
+  const main = hidden(TECH, "", { ...env, WEBVIEW2_USER_DATA_FOLDER: join(work, `wv2-${port}`), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` });
+  try {
+    const b = await until("viewer devtools", () => chromium.connectOverCDP(`http://127.0.0.1:${port}`), 60000, 500);
+    await until("viewer main window", () => pages(b).find((p) => !p.url().startsWith("devtools") && !p.url().includes("/session/")), 30000);
+    await sleep(2000); // single-instance window up
+    const fwd = ids.map((id) => hidden(TECH, `--connect ${id} --password-env TETHER_E2E_PW`, { ...env, TETHER_E2E_PW: PW }));
+    const sessions = await until("both session windows", () => {
+      const s = pages(b).filter((p) => p.url().includes("/session/"));
+      return s.length === ids.length && s;
+    }, 30000);
+    const forwarded = fwd.every((pid) => !alive(pid));
+    const out = await until("session outcomes", async () => {
+      const o = await Promise.all(sessions.map(outcome));
+      return o.every((x) => x) && o;
+    }, 60000, 300);
+    await b.close().catch(() => {});
+    return `${out.join(" ")}${forwarded ? "" : " (a --connect process kept running)"}`;
+  } finally {
+    kill(main);
     await sleep(1500);
   }
 }
@@ -245,6 +278,10 @@ async function main() {
   // Phase 0: everything on key A.
   check("before: viewer connects with the built-in key", (await connect(VIEW, hostId)) === "connected");
   check("before: stale viewer connects with the built-in key", (await connect(STALE, hostId)) === "connected");
+  // Two connect races at once in one process (each with its own WebRTC state); a second host on
+  // this PC would share the first one's direct port, so: screen and file transfer to one host.
+  const both = await connectAtOnce(VIEW, [hostId, `${hostId} --file-transfer`]);
+  check("before: screen and file transfer started at once in one viewer both connect", both === "connected connected", both.slice(0, 200));
 
   // Phase 1: Manage generates B and announces [A, B].
   await m.getByRole("button", { name: "Keys" }).click();

@@ -239,11 +239,41 @@ class Jobs(Base):
     def test_recover_after_restart(self):
         jid = self.send("alice", ["sleep", "30"], secrets=[(__file__, "s")])
         self.run_until(lambda: self.st("alice", jid).get("state") == "running")
+        proc = next(iter(self.r.running.values()))["proc"]
         self.r.running.clear()  # runner died; its child is still there
         r2 = runner.Runner(self.root)
         r2.recover(r2.cfg())
         self.assertEqual(self.st("alice", jid)["reason"], "runner restarted")
         self.assertFalse(os.path.exists(os.path.join(self.r.jobdir("alice", jid), "secrets")))
+        self.assertEqual(proc.wait(timeout=10), -9, "the job's group is killed")
+
+    def test_recover_spares_a_reused_pid(self):
+        # The recorded pid now belongs to a process started an hour after the job (reboot, wrap).
+        other = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            jid = self.send("alice", ["sleep", "30"])
+            self.run_until(lambda: self.st("alice", jid).get("state") == "running")
+            job = next(iter(self.r.running.values()))["proc"]
+            self.r.running.clear()
+            self.r.set_status("alice", jid, pid=other.pid, started_at=int(time.time()) - 3600)
+            r2 = runner.Runner(self.root)
+            r2.recover(r2.cfg())
+            self.assertEqual(self.st("alice", jid)["reason"], "runner restarted")
+            self.assertIsNone(other.poll(), "an unrelated process must survive")
+            runner.killpg(job.pid, 9)
+        finally:
+            other.kill()
+            other.wait()
+
+    def test_started_near(self):
+        p = subprocess.Popen(["sleep", "30"])
+        try:
+            self.assertTrue(runner.started_near(p.pid, time.time()))
+            self.assertFalse(runner.started_near(p.pid, time.time() - 3600))
+            self.assertFalse(runner.started_near(999999999, time.time()))
+        finally:
+            p.kill()
+            p.wait()
 
 
 class Security(Base):
