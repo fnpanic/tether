@@ -184,6 +184,9 @@ let skList: { serial: number; keys: { key: string; expires?: number }[] } = { se
 // hbbs signs with the new key on R1 once its list was announced; R2 stays on the old key.
 const skLive = () => servers.map((s) => ({ server: s, reachable: true, verified: true, signing: s === R1 && skList.keys.length > 1 ? skList.keys[1].key : SK_OLD, ...(s === R2 && skList.serial > 1 ? { serial: skList.serial - 1, keys: [{ key: SK_OLD }] } : skList) }));
 
+/** Page templates saved in this preview session (page_template_*). */
+const templates: Record<string, string> = {};
+
 export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
   await new Promise((r) => setTimeout(r, 120));
   const out: Record<string, () => unknown> = {
@@ -279,6 +282,17 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
     cdn_configure: () => null,
     page_render: async () => (await import("./mock-page.html?raw")).default,
     page_publish: () => servers.map((s) => ok(s)),
+    page_template_save: () => {
+      const file = `${Date.now()}-${String(a.name).replace(/\.html?$/, "").replace(/[^A-Za-z0-9_-]/g, "_")}.html`;
+      templates[file] = a.html;
+      return file;
+    },
+    page_template_list: () => Object.keys(templates).sort().reverse().map((file) => ({ file, size: templates[file].length })),
+    page_template_read: () => templates[a.file] ?? (() => { throw new Error("missing"); })(),
+    page_data: () => {
+      const r = (file: string, cdn = false) => ({ version: "0.5.24", file, size: 24_100_000, sha256: "9f".repeat(32), notes: "Faster reconnects.", minimum_version: "", mandatory: false, date: now - 7200, cdn_url: cdn ? `https://tether-dl.thomas-schend.workers.dev/stable/technician/windows-x86_64/${file}` : null });
+      return { "technician/windows-x86_64": r("Tether_0.5.24_x64-setup.exe", true), "customer/windows-x86_64": r("TetherQS-0.5.24.exe"), "technician/darwin-universal": r("Tether_0.5.24_universal.dmg") };
+    },
     custom_list: () => custom.map((c) => ({ ...c, link: `${R1}/q/${c.token}`, status: c.expires > now ? "active" : "expired" })),
     custom_save: () => {
       const id = a.args.id ?? Math.random().toString(36).slice(2, 18);

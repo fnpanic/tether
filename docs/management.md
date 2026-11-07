@@ -409,7 +409,11 @@ How clients handle these flags: [updates.md](updates.md).
 
 ## Download page
 
-Generates a self-contained page (no external resources, light and dark) and publishes it as
+**Design: Standard (built-in) | Custom HTML.** Standard (the default) is the generated page described
+here. Custom HTML publishes your own template with `{{tether.…}}` placeholders for links, versions,
+sizes, checksums and notes: see [download-page.md](download-page.md).
+
+Standard generates a self-contained page (no external resources, light and dark) and publishes it as
 `https://<relay>/`. Settings: title, introduction (empty line = new paragraph), and which apps to
 offer. The page has a Windows and a macOS section, each with one card per offered app: one
 **Download** button for the file a person needs (Windows installer, macOS disk image, TetherQS),

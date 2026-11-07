@@ -1,0 +1,144 @@
+<!doctype html>
+<!-- Example Tether download page template (docs/download-page.md). Uses every placeholder.
+     Tether Manage fills the double-brace placeholders at publish time; values are HTML-escaped. -->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{tether.title}}</title>
+<style>
+:root{--canvas:#fff;--parchment:#f5f5f7;--tile:#fff;--ink:#1d1d1f;--muted:#6e6e73;--hairline:rgba(0,0,0,.08);--accent:#0066cc;--focus:#0071e3}
+@media (prefers-color-scheme:dark){:root{--canvas:#000;--parchment:#1c1c1e;--tile:#272729;--ink:#f5f5f7;--muted:#98989d;--hairline:rgba(255,255,255,.1);--accent:#2997ff;--focus:#2997ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--ink);font-family:-apple-system,"Segoe UI Variable","Segoe UI",system-ui,sans-serif}
+main{max-width:980px;margin:0 auto;padding:80px 32px}
+h1{font-size:40px;line-height:1.1;font-weight:600;margin:0 0 16px}
+p.intro{font-size:17px;line-height:1.47;color:var(--muted);margin:0 0 12px;max-width:640px;white-space:pre-line}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:24px;margin-top:24px}
+.card{display:flex;flex-direction:column;gap:8px;padding:24px;border:1px solid var(--hairline);border-radius:18px;background:var(--tile)}
+.card.off{opacity:.6}
+.label{font-size:21px;font-weight:600}
+.detail{font-size:14px;color:var(--muted);margin-bottom:8px}
+.cta{align-self:flex-start;background:var(--accent);color:#fff;border-radius:9999px;padding:10px 22px;font-size:15px;text-decoration:none}
+a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+details{font-size:13px;color:var(--muted)}
+dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px} dd{margin:0;overflow-wrap:anywhere}
+.notes{white-space:pre-line}
+.switch{display:inline-flex;gap:4px;margin-top:32px;padding:4px;border-radius:9999px;background:var(--parchment)}
+.switch a{padding:8px 18px;border-radius:9999px;color:var(--ink);text-decoration:none;font-size:15px}
+.os{margin-top:48px}
+html[data-os] .os{display:none}
+html[data-os=windows] #windows,html[data-os=macos] #macos{display:block}
+html[data-os=windows] .switch a[data-os=windows],html[data-os=macos] .switch a[data-os=macos]{background:var(--ink);color:var(--canvas)}
+h2{font-size:28px;font-weight:600;margin:0;display:flex;align-items:center;gap:12px}
+.mine{display:none;font-size:12px;color:var(--accent);border:1px solid currentColor;border-radius:9999px;padding:2px 10px}
+html[data-mine=windows] #windows .mine,html[data-mine=macos] #macos .mine{display:inline-block}
+footer{margin-top:80px;font-size:12px;color:var(--muted)}
+</style></head>
+<body><main>
+  <h1>{{tether.title}}</h1>
+  <p class="intro">{{tether.intro}}</p>
+  <nav class="switch" aria-label="Operating system"><a href="#windows" data-os="windows">Windows</a><a href="#macos" data-os="macos">macOS</a></nav>
+    <section class="os" id="windows">
+      <h2>Windows<span class="mine">Your computer</span></h2>
+      <div class="grid">
+      {{#tether.technician.windows}}
+      <div class="card">
+        <span class="label">Tether for technicians</span>
+        <span class="detail">Windows installer · version {{tether.technician.windows.version}} · {{tether.technician.windows.size}} · {{tether.technician.windows.date}}</span>
+        <a class="cta" href="{{tether.technician.windows.url}}" data-version="{{tether.technician.windows.version}}">Download</a>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.technician.windows.file}}</code> ({{tether.technician.windows.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.technician.windows.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.technician.windows.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.technician.windows.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.technician.windows.notes}}</dd>
+          </dl>
+        </details>
+      </div>
+      {{/tether.technician.windows}}
+      {{^tether.technician.windows}}
+      <div class="card off"><span class="label">Tether for technicians</span><span class="detail">Not available yet</span></div>
+      {{/tether.technician.windows}}
+      {{#tether.customer.windows}}
+      <div class="card">
+        <span class="label">Tether Quick Support</span>
+        <span class="detail">Windows · no installation needed · version {{tether.customer.windows.version}} · {{tether.customer.windows.size}} · {{tether.customer.windows.date}}</span>
+        <a class="cta" href="{{tether.customer.windows.url}}" data-version="{{tether.customer.windows.version}}">Download</a>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.customer.windows.file}}</code> ({{tether.customer.windows.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.customer.windows.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.customer.windows.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.customer.windows.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.customer.windows.notes}}</dd>
+          </dl>
+        </details>
+      </div>
+      {{/tether.customer.windows}}
+      {{^tether.customer.windows}}
+      <div class="card off"><span class="label">Tether Quick Support</span><span class="detail">Not available yet</span></div>
+      {{/tether.customer.windows}}
+      </div>
+    </section>
+    <section class="os" id="macos">
+      <h2>macOS<span class="mine">Your computer</span></h2>
+      <div class="grid">
+      {{#tether.technician.macos}}
+      <div class="card">
+        <span class="label">Tether for technicians</span>
+        <span class="detail">Disk image for Apple silicon and Intel · version {{tether.technician.macos.version}} · {{tether.technician.macos.size}} · {{tether.technician.macos.date}}</span>
+        <a class="cta" href="{{tether.technician.macos.url}}" data-version="{{tether.technician.macos.version}}">Download</a>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.technician.macos.file}}</code> ({{tether.technician.macos.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.technician.macos.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.technician.macos.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.technician.macos.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.technician.macos.notes}}</dd>
+          </dl>
+        </details>
+      </div>
+      {{/tether.technician.macos}}
+      {{^tether.technician.macos}}
+      <div class="card off"><span class="label">Tether for technicians</span><span class="detail">Not available yet</span></div>
+      {{/tether.technician.macos}}
+      {{#tether.customer.macos}}
+      <div class="card">
+        <span class="label">Tether Quick Support</span>
+        <span class="detail">Mac · unzip and open it · version {{tether.customer.macos.version}} · {{tether.customer.macos.size}} · {{tether.customer.macos.date}}</span>
+        <a class="cta" href="{{tether.customer.macos.url}}" data-version="{{tether.customer.macos.version}}">Download</a>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.customer.macos.file}}</code> ({{tether.customer.macos.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.customer.macos.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.customer.macos.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.customer.macos.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.customer.macos.notes}}</dd>
+          </dl>
+        </details>
+      </div>
+      {{/tether.customer.macos}}
+      {{^tether.customer.macos}}
+      <div class="card off"><span class="label">Tether Quick Support</span><span class="detail">Not available yet</span></div>
+      {{/tether.customer.macos}}
+      </div>
+    </section>
+
+  {{#tether.custom.acme}}
+  <section class="os-all">
+    <h2>For {{tether.custom.acme.name}}</h2>
+    <p><a class="cta" href="{{tether.custom.acme.url}}">Download {{tether.custom.acme.name}} support</a> (link valid until {{tether.custom.acme.expires}})</p>
+  </section>
+  {{/tether.custom.acme}}
+  <footer>Served by {{tether.relay}} · page published {{tether.published}} · downloads are signed and served over HTTPS.</footer>
+</main>
+<script>(function(){var d=document.documentElement,u=navigator.userAgentData,p=(u&&u.platform)||navigator.platform||navigator.userAgent||"";
+var mine=/mac/i.test(p)?"macos":/win/i.test(p)?"windows":"";
+var tabs=document.querySelectorAll(".switch a");
+function pick(os){d.setAttribute("data-os",os);for(var i=0;i<tabs.length;i++){tabs[i].setAttribute("aria-current",tabs[i].getAttribute("data-os")===os?"true":"false")}}
+for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){e.preventDefault();pick(this.getAttribute("data-os"))})}
+if(mine){d.setAttribute("data-mine",mine);pick(mine)}})();</script>
+</body></html>

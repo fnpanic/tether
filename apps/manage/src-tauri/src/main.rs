@@ -1374,6 +1374,87 @@ async fn page_publish(app: State<'_, App>, html: String) -> R<Vec<RelayResult>> 
     }
 }
 
+/// What a custom page template can show (docs/download-page.md): every release in the highest
+/// verified (signed) stable index, keyed `kind/platform`. For the macOS technician app the page
+/// offers the disk image, which is not in the index: its size and SHA-256 come from the first
+/// relay's copy (a missing one leaves the release out).
+#[tauri::command]
+async fn page_data(app: State<'_, App>) -> R<Value> {
+    let live = relay_indexes(&app, "stable", &app.servers()).await?;
+    let mut out = serde_json::Map::new();
+    let Some(ix) = live.into_iter().filter_map(|(_, i)| i.map(|i| i.0)).max_by_key(|i| i.serial) else { return Ok(Value::Object(out)) };
+    for (key, e) in &ix.releases {
+        let (mut file, mut size, mut sha256, mut cdn_url) = (e.file.clone(), e.size, e.sha256.clone(), (e.urls.len() > 1).then(|| e.urls[0].clone()));
+        if key == &release::index_key("technician", release::MAC) {
+            file = release::dmg_name(&e.version);
+            let Some((n, h)) = dmg_facts(&app.server(), &file).await? else { continue };
+            (size, sha256, cdn_url) = (n, h, None);
+        }
+        out.insert(key.clone(), json!({ "version": e.version, "file": file, "size": size, "sha256": sha256, "notes": e.notes,
+            "minimum_version": e.minimum_version, "mandatory": e.mandatory, "date": e.rollout.start, "cdn_url": cdn_url }));
+    }
+    Ok(Value::Object(out))
+}
+
+/// Size and SHA-256 of a disk image on the relay; file names carry the version, so one download
+/// per version and session.
+async fn dmg_facts(server: &str, file: &str) -> R<Option<(u64, String)>> {
+    static SEEN: Mutex<BTreeMap<String, (u64, String)>> = Mutex::new(BTreeMap::new());
+    let key = format!("{server}/{file}");
+    if let Some(f) = SEEN.lock().unwrap().get(&key) {
+        return Ok(Some(f.clone()));
+    }
+    let Some(b) = api::public(server, &format!("/download/stable/technician/{}/{file}", release::MAC)).await? else { return Ok(None) };
+    let f = (b.len() as u64, tether_trust::release::sha256_hex(&b));
+    SEEN.lock().unwrap().insert(key, f.clone());
+    Ok(Some(f))
+}
+
+/// Uploaded page templates: every version is kept as `page-templates/<millis>-<name>.html`.
+const PAGE_TEMPLATES: &str = "page-templates";
+const PAGE_TEMPLATE_MAX: usize = 512 << 10;
+
+fn template_file_ok(f: &str) -> bool {
+    (6..=100).contains(&f.len()) && f.ends_with(".html") && !f.starts_with('.') && f.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn template_file_name(millis: u128, name: &str) -> String {
+    let stem: String = name.trim_end_matches(".html").trim_end_matches(".htm").chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(60).collect();
+    format!("{millis}-{}.html", if stem.is_empty() { "template".into() } else { stem })
+}
+
+#[tauri::command]
+fn page_template_save(app: State<App>, name: String, html: String) -> R<String> {
+    if html.len() > PAGE_TEMPLATE_MAX {
+        return Err("The template is larger than 512 KiB (the relay's page limit).".into());
+    }
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let file = template_file_name(millis, &name);
+    app.write(&format!("{PAGE_TEMPLATES}/{file}"), html.as_bytes())?;
+    Ok(file)
+}
+
+/// Stored templates, newest first: `{file, size}` (the file name starts with the save time).
+#[tauri::command]
+fn page_template_list(app: State<App>) -> Vec<Value> {
+    let mut v: Vec<(String, u64)> = fs::read_dir(app.path(PAGE_TEMPLATES))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((e.file_name().into_string().ok().filter(|f| template_file_ok(f))?, e.metadata().ok()?.len())))
+        .collect();
+    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.into_iter().map(|(file, size)| json!({ "file": file, "size": size })).collect()
+}
+
+#[tauri::command]
+fn page_template_read(app: State<App>, file: String) -> R<String> {
+    if !template_file_ok(&file) {
+        return Err("invalid template name".into());
+    }
+    fs::read_to_string(app.path(&format!("{PAGE_TEMPLATES}/{file}"))).map_err(|_| format!("The stored template {file} is missing or not UTF-8."))
+}
+
 // ---- custom apps ----
 
 /// Local copy of a custom app (the relay list has no logo or settings): `custom/<id>.json`.
@@ -1642,6 +1723,10 @@ fn main() {
             release_scan,
             page_render,
             page_publish,
+            page_data,
+            page_template_save,
+            page_template_list,
+            page_template_read,
             custom_save,
             custom_list,
             custom_delete,
@@ -1683,6 +1768,15 @@ mod server_list_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_template_names_stay_in_their_folder() {
+        assert_eq!(template_file_name(1, "My Page (v2).html"), "1-My_Page__v2_.html");
+        assert_eq!(template_file_name(1, "../../x.htm"), "1-______x.html");
+        assert_eq!(template_file_name(1, ".html"), "1-template.html");
+        assert!(template_file_ok(&template_file_name(1, "a b")) && template_file_ok("1-a.html"));
+        assert!(!template_file_ok("../a.html") && !template_file_ok("a/b.html") && !template_file_ok("a.txt") && !template_file_ok(".x.html"));
+    }
 
     #[test]
     fn build_folder_scan_two_levels_deep() {

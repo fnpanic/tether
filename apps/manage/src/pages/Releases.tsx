@@ -5,6 +5,7 @@ import { Check, ChevronRight, RefreshCw, Trash2, X } from "lucide-react";
 import { useApp } from "../App";
 import { api, bytes, host, inTauri, invoke, target, when, type RelayResult } from "../lib/ipc";
 import { idle, percent, track, type Progress } from "../lib/progress";
+import { pageHtml } from "../lib/page-template";
 import { PublishSheet } from "../components/publish";
 import { describeRamp, groupReleases, rampPresets, rolloutState, type IndexView, type ReleaseGroup } from "../lib/releases";
 import { Badge, Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Table, TextArea, TextField, Toggle } from "../components/ui";
@@ -250,12 +251,8 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
     }
     if (page && stable) {
       try {
-        const html = await invoke<string>("page_render", {
-          title: s.page_title ?? "Remote support",
-          intro: s.page_intro ?? "Download Tether to get help from our support team.",
-          technician: s.page_technician ?? true,
-          customer: s.page_customer ?? true,
-        });
+        // The saved design: Standard (built-in) or the custom template (docs/download-page.md).
+        const html = await pageHtml(s, state.servers, invoke);
         const r = await invoke<RelayResult[]>("page_publish", { html });
         r.forEach((x) => add(x.server, "Download page", x.ok ? undefined : x.error));
       } catch (e: any) {
