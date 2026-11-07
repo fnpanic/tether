@@ -9422,6 +9422,7 @@ dependencies = [
 name = "tether-quick"
 version = "0.5.23"
 dependencies = [
+ "flate2",
  "hbb_common",
  "minisign",
  "reqwest 0.12.28",

@@ -1,7 +1,8 @@
 // Update notice. Optional: a card at the bottom right ("Later" hides it). Mandatory (below the
 // minimum version, or the release says so): a blocking dialog, no "Later". Forced: a countdown of
-// `update.restart-seconds`, then download, install and restart. The backend refuses sessions while
-// an update is required; this only explains why.
+// `update.restart-seconds`, then download, install and restart; the countdown runs only while no
+// session is open (D7: "Will update after this session"). The backend refuses sessions while an
+// update is required; this only explains why.
 import { useEffect, useState } from "react";
 import { AlertCircle, Download, X } from "lucide-react";
 import { inTauri, invoke } from "../lib/ipc";
@@ -17,12 +18,23 @@ export interface UpdateStatus {
   blocked: string | null;
   enabled: boolean;
   restartSeconds: number;
+  /** A session runs: a forced update waits for it. */
+  busy?: boolean;
+  /** idle, waiting-rollout, downloading, staged, waiting-idle, failed, stale, halted */
+  phase?: string;
+  /** The signed release index has expired (warn only). */
+  stale?: boolean;
+  serial?: number;
+  /** A newer release whose rollout has not reached this device yet. */
+  rollout?: { version: string; percent: number } | null;
 }
+
+export { updateLine } from "../lib/updates";
 
 export const updateApi = {
   status: () => invoke<UpdateStatus | undefined>("update_status"),
   check: () => invoke<UpdateStatus>("update_check"),
-  install: () => invoke("update_install"),
+  install: (auto = false) => invoke("update_install", { auto }),
 };
 
 const clock = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -44,12 +56,12 @@ export function UpdateCard() {
     return () => void subs.then((fs) => fs.forEach((f) => f()));
   }, []);
 
-  const install = async () => {
+  const install = async (auto = false) => {
     setError("");
     setInstalling(true);
     setProgress(null);
     try {
-      await updateApi.install(); // restarts the app when done
+      await updateApi.install(auto); // restarts the app when done
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -57,18 +69,26 @@ export function UpdateCard() {
     }
   };
 
-  // Forced: count down, then install; after an error try again in a minute.
+  // Forced: count down while no session runs (a session restarts the countdown afterwards), then
+  // install; after an error try again in a minute.
   const forced = !!up?.forced && !!up.version;
+  const waiting = forced && !!up?.busy;
   useEffect(() => {
-    if (!forced || !up) return;
+    if (!forced || !up || waiting) return setLeft(null);
     setLeft(Math.max(1, up.restartSeconds || 60));
     const t = setInterval(() => setLeft((l) => (l === null || l <= 0 ? l : l - 1)), 1000);
     return () => clearInterval(t);
-  }, [forced, up?.version]);
+  }, [forced, waiting, up?.version]);
   useEffect(() => {
     if (left !== 0 || installing) return;
-    install().then(() => setLeft(60));
+    install(true).then(() => setLeft(60));
   }, [left]);
+  // The backend's `busy` changes without an event: ask again while waiting.
+  useEffect(() => {
+    if (!waiting) return;
+    const t = setInterval(() => updateApi.status().then((s) => s && setUp(s)).catch(() => {}), 5000);
+    return () => clearInterval(t);
+  }, [waiting]);
 
   if (!up || (!up.version && !up.blocked) || (!up.mandatory && dismissed)) return null;
 
@@ -94,6 +114,7 @@ export function UpdateCard() {
               Restarting in {clock(left)}
             </p>
           )}
+          {waiting && !installing && <p className="mt-2 text-callout font-semibold">Will update after this session.</p>}
         </div>
         {!up.mandatory && (
           <IconButton label="Later" onClick={() => setDismissed(true)}>
@@ -122,7 +143,7 @@ export function UpdateCard() {
           </Button>
         )}
         {up.version && up.enabled ? (
-          <Button size="sm" variant="primary" onClick={install} disabled={installing}>
+          <Button size="sm" variant="primary" onClick={() => install()} disabled={installing}>
             {error ? "Try again" : up.forced ? "Restart now" : "Install and restart"}
           </Button>
         ) : (

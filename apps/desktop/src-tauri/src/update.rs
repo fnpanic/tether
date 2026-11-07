@@ -1,17 +1,25 @@
-//! Updates (docs/api.md "Download layout and update manifests", docs/updates.md).
+//! Updates (docs/updates.md, docs/update-design.md, wire format in docs/api.md).
 //!
-//! The manifest `https://<relay>/download/<channel>/technician/<target>/latest.json` is read here
-//! (custom fields `mandatory`, `minimumVersion`, `forced`) and cached in the config dir, so every
-//! process role can enforce it without network: below the policy or manifest minimum version, or
-//! with a pending mandatory update, sessions are refused (`blocked`). Every relay is asked (with
-//! `If-None-Match`), the highest version wins. The download is verified here (minisign,
-//! `TETHER_UPDATER_PUB_KEY`, and the signed trusted comment must name the offered file and
-//! version, `tether_trust::release`), and exactly those bytes go to `tauri-plugin-updater`'s
-//! installer: the version checked is the version installed.
+//! Source of truth is the signed release index `https://<relay>/download/<channel>/releases.json`
+//! (admin-key envelope): every relay is asked (`If-None-Match`), the highest valid serial wins and
+//! raises the floor (`releases-<channel>.serial`). Once a device accepted one, the unsigned
+//! `latest.json` is never used again; before that (relays without an index) the highest
+//! `latest.json` is. The result is cached in the config dir (`update-state.json`), so every
+//! process role enforces it without network: below the policy or release minimum version, or with
+//! a pending mandatory update that reached this device, sessions are refused (`blocked`).
+//!
+//! The rollout ramp (stable bucket per install and release, policy `update.rollout`), halt and
+//! security flags come from the signed entry. An eligible update is downloaded in the background
+//! and verified (size, sha256, minisign, signed trusted comment: file and version), staged in the
+//! config dir, and those exact bytes go to `tauri-plugin-updater`'s installer. A forced update
+//! installs only while no session runs (D7). Checks: at start (random 5-60 s), every
+//! `update.check-hours` (+0-20 %), after a policy change, and after a release hint (hbbs push via
+//! the mirrored option `tether-release-hint`, or the heartbeat answer).
 
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap},
+    path::PathBuf,
     sync::{Condvar, LazyLock, Mutex},
     time::Duration,
 };
@@ -32,6 +40,7 @@ use crate::policy;
 const UPDATER_KEY: Option<&str> = option_env!("TETHER_UPDATER_PUB_KEY");
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Legacy `latest.json` (clients up to 0.5.23 read only this).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
@@ -63,14 +72,28 @@ impl Manifest {
     }
 }
 
-/// Per relay: ETag and manifest of its last 200 (the relays' ETags differ).
-static ETAGS: LazyLock<Mutex<HashMap<String, (String, Option<Manifest>)>>> = LazyLock::new(Default::default);
+/// What the last check found, cached for every process role (`update-state.json`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Found {
+    pub release: Option<Candidate>,
+    /// The rollout reached this device (computed at check time; legacy releases always).
+    pub eligible: bool,
+    /// The signed index is past its expiry (D3: warn only).
+    pub stale: bool,
+}
 
-static LAST: LazyLock<Mutex<Option<Manifest>>> = LazyLock::new(|| {
+/// Per relay: ETag and body of its last 200 answer, for `latest.json` and `releases.json`.
+static ETAGS: LazyLock<Mutex<HashMap<String, (String, Vec<u8>)>>> = LazyLock::new(Default::default);
+
+static LAST: LazyLock<Mutex<Found>> = LazyLock::new(|| {
     let cached = std::fs::read(Config::path("update-state.json")).ok();
-    Mutex::new(cached.and_then(|raw| serde_json::from_slice(&raw).ok()))
+    Mutex::new(cached.and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default())
 });
 static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+/// Background download: `idle`, `downloading`, `staged`, `failed`.
+static PHASE: Mutex<&'static str> = Mutex::new("idle");
+static HINTS: Mutex<Option<release::Hints>> = Mutex::new(None);
 
 /// Updater `{{target}}` and manifest platform key: `windows-x86_64`, `darwin-universal`, …
 pub fn target() -> String {
@@ -87,8 +110,7 @@ pub fn target() -> String {
 
 fn channel() -> String {
     let c = policy::get("update.channel");
-    let ok = (1..=32).contains(&c.len()) && c.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-');
-    if ok {
+    if release::valid_channel(&c) {
         c
     } else {
         "stable".into()
@@ -99,24 +121,30 @@ fn manifest_path(target: &str) -> String {
     format!("/download/{}/technician/{target}/latest.json", channel())
 }
 
-// ----------------------------------------------------------------------------- enforcement
-
-fn newer(m: &Manifest) -> bool {
-    compare(&m.version, VERSION) == Some(Ordering::Greater)
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// Why sessions are blocked, if they are.
-fn reason_for(m: Option<&Manifest>, policy_minimum: &str, updates_enabled: bool) -> Option<&'static str> {
-    if below_minimum(VERSION, policy_minimum) || m.is_some_and(|m| below_minimum(VERSION, &m.minimum_version)) {
+// ----------------------------------------------------------------------------- enforcement
+
+fn newer(c: &Candidate) -> bool {
+    !c.halted && compare(&c.version, VERSION) == Some(Ordering::Greater)
+}
+
+/// Why sessions are blocked, if they are. A mandatory release blocks only devices its rollout
+/// reached (the others cannot install it yet); minimum versions always block.
+fn reason_for(f: &Found, policy_minimum: &str, updates_enabled: bool) -> Option<&'static str> {
+    let c = f.release.as_ref();
+    if below_minimum(VERSION, policy_minimum) || c.is_some_and(|c| below_minimum(VERSION, &c.minimum_version)) {
         return Some("below-minimum");
     }
     // A mandatory update can only be required when updates may be installed.
-    (updates_enabled && m.is_some_and(|m| m.mandatory && newer(m))).then_some("mandatory")
+    (updates_enabled && f.eligible && c.is_some_and(|c| c.mandatory && newer(c))).then_some("mandatory")
 }
 
 fn reason() -> Option<&'static str> {
-    let m = LAST.lock().unwrap().clone();
-    reason_for(m.as_ref(), &policy::get("update.minimum-version"), policy::on("update.enabled"))
+    let f = LAST.lock().unwrap().clone();
+    reason_for(&f, &policy::get("update.minimum-version"), policy::on("update.enabled"))
 }
 
 /// True while this version may not be used for sessions (outgoing or incoming).
@@ -133,11 +161,42 @@ pub fn guard() -> Result<(), String> {
     }
 }
 
+/// The release this device may install now.
+fn offer() -> Option<Candidate> {
+    let f = LAST.lock().unwrap().clone();
+    f.release.filter(|c| f.eligible && newer(c))
+}
+
+/// Heartbeat `update_state` (docs/api.md): idle, waiting-rollout, downloading, staged,
+/// waiting-idle, failed, stale, halted.
+pub fn phase() -> String {
+    let f = LAST.lock().unwrap().clone();
+    let p = *PHASE.lock().unwrap();
+    match f.release.as_ref() {
+        Some(c) if c.halted && compare(&c.version, VERSION) == Some(Ordering::Greater) => "halted",
+        Some(c) if newer(c) && !f.eligible => "waiting-rollout",
+        Some(c) if newer(c) && p == "staged" && c.forced && crate::app::busy() => "waiting-idle",
+        Some(c) if newer(c) && p != "idle" => p,
+        _ if f.stale => "stale",
+        _ => "idle",
+    }
+    .into()
+}
+
+/// Heartbeat fields: `(update_state, release serial, version in flight)`.
+pub fn heartbeat_fields() -> (String, u64, String) {
+    let f = LAST.lock().unwrap().clone();
+    let v = f.release.as_ref().filter(|c| newer(c)).map(|c| c.version.clone()).unwrap_or_default();
+    (phase(), f.release.as_ref().map_or(0, |c| c.serial), v)
+}
+
 /// State for the UI (`update` event, `update_status`).
 pub fn status() -> Value {
-    let m = LAST.lock().unwrap().clone().filter(newer);
+    let f = LAST.lock().unwrap().clone();
+    let m = offer();
     let reason = reason();
     let enabled = policy::on("update.enabled");
+    let pending = f.release.as_ref().filter(|c| newer(c) && !f.eligible);
     json!({
         "current": VERSION,
         "version": m.as_ref().map(|m| m.version.clone()),
@@ -147,14 +206,21 @@ pub fn status() -> Value {
         "blocked": reason,
         "enabled": enabled,
         "restartSeconds": policy::get("update.restart-seconds").parse::<u64>().unwrap_or(60),
+        // A session runs: a forced update waits for it (D7).
+        "busy": crate::app::busy(),
+        "phase": phase(),
+        "stale": f.stale,
+        "serial": f.release.as_ref().map_or(0, |c| c.serial),
+        "rollout": pending.map(|c| json!({ "version": c.version, "percent": c.rollout.percent(now()) })),
     })
 }
 
-// ----------------------------------------------------------------------------- check / install
+// ----------------------------------------------------------------------------- check
 
-/// The manifest of one relay; 304 answers come from the remembered copy.
-fn manifest_from(host: &str, path: &str) -> Result<Option<Manifest>, String> {
-    let etag = ETAGS.lock().unwrap().get(host).map(|e| e.0.clone());
+/// One relay's document at `path`; 304 answers come from the remembered copy. `Ok(None)`: 404.
+fn fetch_doc(host: &str, path: &str, limit: usize) -> Result<Option<Vec<u8>>, String> {
+    let key = format!("{host}{path}");
+    let etag = ETAGS.lock().unwrap().get(&key).map(|e| e.0.clone());
     let r = policy::api_via(&[host.to_owned()], |c, base| {
         let rq = c.get(format!("{base}{path}"));
         match &etag {
@@ -163,16 +229,15 @@ fn manifest_from(host: &str, path: &str) -> Result<Option<Manifest>, String> {
         }
     })?;
     match r.status().as_u16() {
-        304 => Ok(ETAGS.lock().unwrap().get(host).and_then(|e| e.1.clone())),
+        304 => Ok(ETAGS.lock().unwrap().get(&key).map(|e| e.1.clone())),
         404 => Ok(None),
         200 => {
             let tag = r.headers().get("ETag").and_then(|v| v.to_str().ok()).map(str::to_owned);
-            let raw = tether_trust::read_limited(r, 64 * 1024).map_err(|e| format!("update manifest: {e}"))?;
-            let m: Manifest = serde_json::from_slice(&raw).map_err(|e| format!("invalid update manifest: {e}"))?;
+            let raw = tether_trust::read_limited(r, limit).map_err(|e| format!("{path}: {e}"))?;
             if let Some(t) = tag {
-                ETAGS.lock().unwrap().insert(host.to_owned(), (t, Some(m.clone())));
+                ETAGS.lock().unwrap().insert(key, (t, raw.clone()));
             }
-            Ok(Some(m))
+            Ok(Some(raw))
         }
         s => Err(format!("update server answered {s}")),
     }
@@ -201,26 +266,87 @@ fn highest(answers: Vec<Result<Option<Manifest>, String>>) -> Result<Option<Mani
     }
 }
 
-/// Ask every relay for the manifest (blocking). `Err("offline: …")` when none can be reached.
+fn index_cache(channel: &str) -> PathBuf {
+    Config::path(format!("releases-{channel}.json"))
+}
+
+/// The release to consider: signed index first (highest serial over the relays, never below the
+/// floor), else (no floor yet, D2) the highest legacy manifest.
+fn find_release(relays: &[(String, String)], channel: &str, keys: &[tether_trust::VerifyingKey]) -> Result<Option<Candidate>, String> {
+    let cache = index_cache(channel);
+    let ipath = format!("/download/{channel}/releases.json");
+    let mut docs = Vec::new();
+    let mut errors = Vec::new();
+    for (host, base) in relays {
+        match fetch_doc(host, &ipath, release::MAX_INDEX) {
+            Ok(Some(raw)) => docs.push((base.clone(), raw)),
+            Ok(None) => {}
+            Err(e) => errors.push(e),
+        }
+    }
+    let key = format!("technician/{}", target());
+    let pick = |base: &str, ix: &release::Index| ix.releases.get(&key).map(|e| Candidate::from_entry(e, base, ix));
+    if !keys.is_empty() {
+        match release::choose(&cache, &docs, keys, channel) {
+            Ok(Some((base, ix))) => return Ok(pick(&base, &ix)),
+            Ok(None) => {}
+            Err(e) => log::warn!("release index: {e}"),
+        }
+        if release::floor(&cache, keys) > 0 || release::REQUIRE_SIGNED_INDEX {
+            return match (release::load(&cache, keys, channel), relays.first()) {
+                (Some(ix), Some((_, base))) => Ok(pick(base, &ix)),
+                _ if errors.len() == relays.len() && !relays.is_empty() => Err(errors.join("; ")),
+                _ => Ok(None),
+            };
+        }
+    }
+    let mpath = manifest_path(&target());
+    let answers = relays
+        .iter()
+        .map(|(host, _)| fetch_doc(host, &mpath, 64 * 1024).and_then(|r| r.map(|b| serde_json::from_slice::<Manifest>(&b).map_err(|e| format!("invalid update manifest: {e}"))).transpose()))
+        .collect();
+    Ok(highest(answers)?.and_then(|m| m.candidate()))
+}
+
+/// Ask every relay (blocking). `Err("offline: …")` when none can be reached.
 pub fn check() -> Result<Value, String> {
-    let path = manifest_path(&target());
-    let answers = policy::relay_bases().iter().map(|(host, _)| manifest_from(host, &path)).collect();
-    let m = highest(answers)?;
-    let raw = serde_json::to_vec(&m).unwrap_or_default();
+    let found = match find_release(&policy::relay_bases(), &channel(), &policy::admin_keys())? {
+        Some(c) => {
+            let t = now();
+            let bucket = release::bucket(&policy::install_uuid(), "technician", &c.version);
+            Found { eligible: c.eligible(bucket, t, &policy::get("update.rollout")), stale: c.stale(t), release: Some(c) }
+        }
+        None => Found::default(),
+    };
+    let raw = serde_json::to_vec(&found).unwrap_or_default();
     if let Err(e) = policy::write_atomic(&Config::path("update-state.json"), &raw) {
         log::warn!("cannot cache update state: {e}");
     }
-    *LAST.lock().unwrap() = m;
+    *LAST.lock().unwrap() = found;
+    if let Some(c) = offer() {
+        stage_in_background(c);
+    }
     let s = status();
     crate::app::emit("update", s.clone());
     Ok(s)
 }
 
-/// Download the candidate (each URL in turn) and return the verified bytes.
+// ----------------------------------------------------------------------------- download / install
+
+fn gunzip(data: &[u8], max: u64) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(flate2::read::GzDecoder::new(data), max + 1), &mut out).map_err(|e| format!("bad gzip copy: {e}"))?;
+    if out.len() as u64 > max {
+        return Err("the gzip copy unpacks larger than announced".into());
+    }
+    Ok(out)
+}
+
+/// Every source in turn (the gzip copy first), then the verified bytes.
 fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
     let mut last = String::from("no download URL");
-    for url in &c.urls {
-        match download_one(url, c).and_then(|b| c.verify(&b, key).map(|_| b)) {
+    for (url, packed) in c.sources() {
+        match download_one(&url, c, packed).and_then(|b| c.accept(b, packed, key, gunzip)) {
             Ok(b) => return Ok(b),
             Err(e) => {
                 log::warn!("update download {url}: {e}");
@@ -231,9 +357,10 @@ fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
     Err(last)
 }
 
-fn download_one(url: &str, c: &Candidate) -> Result<Vec<u8>, String> {
+fn download_one(url: &str, c: &Candidate, packed: bool) -> Result<Vec<u8>, String> {
     let mut r = policy::fetch(url, Duration::from_secs(1800))?;
-    let total = if c.size > 0 { c.size } else { r.content_length().unwrap_or(0) };
+    let limit = c.limit(packed);
+    let total = if c.signed() { limit } else { r.content_length().unwrap_or(0) };
     let mut bytes = Vec::with_capacity(total.min(release::MAX_ARTIFACT) as usize);
     let mut buf = vec![0u8; 256 * 1024];
     loop {
@@ -242,7 +369,7 @@ fn download_one(url: &str, c: &Candidate) -> Result<Vec<u8>, String> {
             break;
         }
         bytes.extend_from_slice(&buf[..n]);
-        if bytes.len() as u64 > release::MAX_ARTIFACT || (c.size > 0 && bytes.len() as u64 > c.size) {
+        if bytes.len() as u64 > limit {
             return Err("the download is larger than announced".into());
         }
         crate::app::emit("update-progress", json!({ "done": bytes.len(), "total": total }));
@@ -250,20 +377,77 @@ fn download_one(url: &str, c: &Candidate) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// Download, verify and install the update, then restart. Progress: `update-progress` events.
-pub async fn install(app: AppHandle) -> Result<(), String> {
+/// The verified download of `c`, waiting for its install (config dir).
+fn staged_path(c: &Candidate) -> Option<PathBuf> {
+    release::valid_version(&c.version).then(|| Config::path(format!("update-{}.staged", c.version)))
+}
+
+fn staged(c: &Candidate, key: &str) -> Option<Vec<u8>> {
+    // Read back and verified again: the config dir is not trusted more than the network.
+    std::fs::read(staged_path(c)?).ok().filter(|b| c.verify(b, key).is_ok())
+}
+
+/// Download and verify in the background as soon as the device may install it; one at a time.
+fn stage_in_background(c: Candidate) {
+    static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let (Some(key), Some(path)) = (UPDATER_KEY.filter(|k| !k.is_empty()), staged_path(&c)) else { return };
+    if !policy::on("update.enabled") || BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        if staged(&c, key).is_some() {
+            *PHASE.lock().unwrap() = "staged";
+        } else {
+            *PHASE.lock().unwrap() = "downloading";
+            let r = download(&c, key).and_then(|b| policy::write_atomic(&path, &b).map_err(|e| e.to_string()));
+            *PHASE.lock().unwrap() = match r {
+                Ok(()) => {
+                    log::info!("update {} downloaded and verified", c.version);
+                    "staged"
+                }
+                Err(e) => {
+                    log::warn!("update download: {e}");
+                    "failed"
+                }
+            };
+        }
+        BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+        crate::app::emit("update", status());
+    });
+}
+
+/// Install the update and restart. `auto` (the forced countdown) is refused while a session runs
+/// (D7); a click by the user is not. Right before installing the relays are asked again, so a
+/// halted rollout stops here. Progress: `update-progress` events.
+pub async fn install(app: AppHandle, auto: bool) -> Result<(), String> {
     if !policy::on("update.enabled") {
         return Err("locked:update.enabled: Your organisation installs updates for you.".into());
     }
+    if auto && crate::app::busy() {
+        return Err("busy: The update installs when the session ends.".into());
+    }
     let key = UPDATER_KEY.filter(|k| !k.is_empty()).ok_or("Updates are not configured in this build.")?;
-    let c = LAST.lock().unwrap().clone().filter(newer).and_then(|m| m.candidate()).ok_or("No update is available.")?;
-    let bytes = tauri::async_runtime::spawn_blocking({
-        let c = c.clone();
-        move || download(&c, key)
+    let c = tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = check() {
+            log::warn!("update re-check: {e}");
+        }
+        offer().ok_or_else(|| "No update is available (the release may have been halted).".to_owned())
     })
     .await
     .map_err(|e| e.to_string())??;
+    let bytes = tauri::async_runtime::spawn_blocking({
+        let c = c.clone();
+        move || staged(&c, key).map_or_else(|| download(&c, key), Ok)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if auto && crate::app::busy() {
+        return Err("busy: The update installs when the session ends.".into());
+    }
     install_bytes(&app, key, &c, &bytes)?;
+    if let Some(p) = staged_path(&c) {
+        let _ = std::fs::remove_file(p);
+    }
     app.restart();
 }
 
@@ -274,20 +458,45 @@ fn install_bytes(app: &AppHandle, key: &str, c: &Candidate, bytes: &[u8]) -> Res
     if let Some(p) = policy::proxy_url().and_then(|p| p.parse().ok()) {
         b = b.proxy(p);
     }
-    let raw = json!({ "version": c.version, "notes": c.notes, "platforms": { target(): { "url": c.urls.first(), "signature": c.signature } } });
+    let url = c.urls.first().or(c.packed.as_ref().and_then(|p| p.urls.first())).ok_or("no download URL")?;
+    let raw = json!({ "version": c.version, "notes": c.notes, "platforms": { target(): { "url": url, "signature": c.signature } } });
     let update = b.build().map_err(|e| e.to_string())?.restore_update(raw).map_err(|e| e.to_string())?.ok_or("No update is available.")?;
     update.install(bytes).map_err(|e| e.to_string())
 }
 
-/// Ask the checker to run now (policy changed).
+// ----------------------------------------------------------------------------- triggers
+
+/// Ask the checker to run now (policy changed, release hint).
 pub fn on_policy_change() {
     *WAKE.0.lock().unwrap() = true;
     WAKE.1.notify_all();
 }
 
+/// A relay's release generation changed (hbbs push, heartbeat answer): check after a random
+/// 0..spread s, at most once a minute per relay. The value is unsigned: it only triggers a fetch.
+pub fn hint(host: &str, generation: u64, spread: u32) {
+    let fire = HINTS.lock().unwrap().get_or_insert_with(Default::default).update(host, generation, now());
+    if fire {
+        log::info!("release hint from {host}: generation {generation}");
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(release::uniform_secs(spread.min(release::MAX_SPREAD_SECS) as u64)));
+            on_policy_change();
+        });
+    }
+}
+
 /// Main UI: check on start (after a random 5-60 s), every `update.check-hours` (+0-20 % jitter,
-/// so devices never poll in step), and after each policy change.
+/// so devices never poll in step), after each policy change and each release hint.
 pub fn start() {
+    // hbbs hints arrive in the `--server` process (rendezvous_mediator.rs) and reach this one
+    // through the option mirror (`start_status_sync`).
+    std::thread::spawn(|| loop {
+        let raw = librustdesk::ui::api::get_option(release::HINT_OPTION.to_owned());
+        for (host, (g, spread)) in release::parse_hints(&raw) {
+            hint(&host, g, spread);
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    });
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(5 + release::uniform_secs(55)));
         loop {
@@ -311,18 +520,28 @@ mod tests {
         Manifest { version: version.into(), mandatory, minimum_version: minimum.into(), ..Default::default() }
     }
 
+    fn found(version: &str, mandatory: bool, minimum: &str, eligible: bool) -> Found {
+        Found { release: Some(Candidate { version: version.into(), mandatory, minimum_version: minimum.into(), ..Default::default() }), eligible, stale: false }
+    }
+
     #[test]
     fn blocking_rules() {
-        assert_eq!(reason_for(None, "", true), None);
-        assert_eq!(reason_for(None, "999.0.0", true), Some("below-minimum"));
+        let none = Found::default();
+        assert_eq!(reason_for(&none, "", true), None);
+        assert_eq!(reason_for(&none, "999.0.0", true), Some("below-minimum"));
         // Policy minimum still blocks with updates disabled.
-        assert_eq!(reason_for(None, "999.0.0", false), Some("below-minimum"));
-        assert_eq!(reason_for(Some(&m("999.0.0", false, "999.0.0")), "", true), Some("below-minimum"));
-        assert_eq!(reason_for(Some(&m("999.0.0", true, "")), "", true), Some("mandatory"));
-        assert_eq!(reason_for(Some(&m("999.0.0", true, "")), "", false), None);
-        assert_eq!(reason_for(Some(&m("999.0.0", false, "")), "", true), None);
+        assert_eq!(reason_for(&none, "999.0.0", false), Some("below-minimum"));
+        assert_eq!(reason_for(&found("999.0.0", false, "999.0.0", true), "", true), Some("below-minimum"));
+        assert_eq!(reason_for(&found("999.0.0", true, "", true), "", true), Some("mandatory"));
+        assert_eq!(reason_for(&found("999.0.0", true, "", true), "", false), None);
+        assert_eq!(reason_for(&found("999.0.0", false, "", true), "", true), None);
         // A mandatory release that is not newer does not block.
-        assert_eq!(reason_for(Some(&m("0.0.1", true, "")), "", true), None);
+        assert_eq!(reason_for(&found("0.0.1", true, "", true), "", true), None);
+        // Not reached by the rollout yet, or halted: a mandatory release does not block.
+        assert_eq!(reason_for(&found("999.0.0", true, "", false), "", true), None);
+        let mut halted = found("999.0.0", true, "", true);
+        halted.release.as_mut().unwrap().halted = true;
+        assert_eq!(reason_for(&halted, "", true), None);
     }
 
     #[test]
@@ -351,6 +570,16 @@ mod tests {
         let c = serde_json::from_str::<Manifest>(&raw).unwrap().candidate().unwrap();
         assert_eq!((c.file.as_str(), c.version.as_str(), c.serial), ("Tether_0.5.24_x64-setup.exe", "0.5.24", 0));
         assert!(serde_json::from_str::<Manifest>(r#"{"version":"1"}"#).unwrap().candidate().is_none());
+    }
+
+    /// The cache written by 0.5.23 (a bare Manifest) does not parse as `Found`: start empty.
+    #[test]
+    fn old_cache_is_ignored() {
+        let old = br#"{"version":"0.5.24","notes":"","mandatory":true,"minimumVersion":"","forced":false}"#;
+        let f: Found = serde_json::from_slice(old).unwrap_or_default();
+        assert!(f.release.is_none() && !f.eligible);
+        let back: Found = serde_json::from_slice(&serde_json::to_vec(&found("1.0.0", true, "", true)).unwrap()).unwrap();
+        assert_eq!(back, found("1.0.0", true, "", true));
     }
 
     #[test]

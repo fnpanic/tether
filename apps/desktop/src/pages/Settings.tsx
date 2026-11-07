@@ -4,7 +4,7 @@ import { Activity, Info, KeyRound, Lock, Monitor, Moon, Network, Palette, Shield
 import { api, type Status } from "../lib/ipc";
 import { errorText, isHidden, isLocked, isOn, usePolicy } from "../lib/policy";
 import { Diagnostics } from "./Diagnostics";
-import { updateApi, type UpdateStatus } from "../components/UpdateCard";
+import { updateApi, updateLine, type UpdateStatus } from "../components/UpdateCard";
 import { getThemePref, setThemePref, type ThemePref } from "../lib/theme";
 import { Button, IconButton, Segmented, TextField, Toggle } from "../components/ui";
 import { useMode } from "../lib/mode";
@@ -459,7 +459,7 @@ function About({ status }: { status: Status | null }) {
         >
           Check for updates
         </Button>
-        {up && <span>{typeof up === "string" ? up : up.version ? `Version ${up.version} is available.` : "Tether is up to date."}</span>}
+        {up && <span className={typeof up !== "string" && up.stale ? "text-warn" : ""}>{typeof up === "string" ? up : updateLine(up)}</span>}
       </div>
       <p>Fast, private remote desktop. Built on the RustDesk open-source core.</p>
       <p>

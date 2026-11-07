@@ -9622,6 +9622,7 @@ name = "tether"
 version = "0.5.23"
 dependencies = [
  "base",
+ "flate2",
  "hbb_common",
  "rdev",
  "reqwest 0.12.28",

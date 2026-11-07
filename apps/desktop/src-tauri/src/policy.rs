@@ -163,6 +163,11 @@ pub fn install_uuid() -> String {
 
 // ----------------------------------------------------------------------------- load / apply
 
+/// The compiled-in admin keys (policy, server key list, release index).
+pub(crate) fn admin_keys() -> Vec<VerifyingKey> {
+    trusted_keys()
+}
+
 fn trusted_keys() -> Vec<VerifyingKey> {
     ADMIN_KEYS
         .unwrap_or("")
@@ -515,12 +520,41 @@ pub fn heartbeat() {
     if keys_serial > 0 {
         body["server_keys_serial"] = json!(keys_serial);
     }
-    match api(|c, base| c.post(format!("{base}/api/heartbeat")).json(&body)) {
+    let plain = body.clone();
+    // Update state only to relays that answered with a release generation: older ones reject
+    // unknown fields (400), and then the plain heartbeat goes again.
+    let new_relay = RELAY_HAS_RELEASES.load(Ordering::Relaxed);
+    if new_relay {
+        let (state, serial, version) = crate::update::heartbeat_fields();
+        body["release_serial"] = json!(serial);
+        body["update_state"] = json!(state);
+        if tether_trust::release::valid_version(&version) {
+            body["update_version"] = json!(version);
+        }
+    }
+    let mut r = api(|c, base| c.post(format!("{base}/api/heartbeat")).json(&body));
+    if new_relay && r.as_ref().is_ok_and(|r| r.status().as_u16() == 400) {
+        RELAY_HAS_RELEASES.store(false, Ordering::Relaxed);
+        r = api(|c, base| c.post(format!("{base}/api/heartbeat")).json(&plain));
+    }
+    match r {
+        // `{"releases": G}`: the relay's release generation; a change means "check for updates".
+        Ok(r) if r.status().as_u16() == 200 => {
+            // The relay that answered is first (api_hosts puts the last good one first).
+            let host = relay_bases().into_iter().next().map(|h| h.0).unwrap_or_default();
+            if let Some(g) = tether_trust::read_limited(r, 1024).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["releases"].as_u64()) {
+                RELAY_HAS_RELEASES.store(true, Ordering::Relaxed);
+                crate::update::hint(&host, g, 60);
+            }
+        }
         Ok(r) if r.status().is_success() || r.status().as_u16() == 429 => {}
         Ok(r) => log::debug!("heartbeat: {}", r.status()),
         Err(e) => log::debug!("heartbeat: {e}"),
     }
 }
+
+/// The heartbeat relay answered with a release generation (it knows the update fields).
+static RELAY_HAS_RELEASES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn interval() -> Duration {
     if on("policy.fast-apply") {

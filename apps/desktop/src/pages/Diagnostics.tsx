@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "../lib/ipc";
 import { errorText, isOn, usePolicy } from "../lib/policy";
 import { Button, StatusDot, TextField, Toggle } from "../components/ui";
+import { updateApi, updateLine, type UpdateStatus } from "../components/UpdateCard";
 
 interface Route {
   url: string;
@@ -69,6 +70,8 @@ function Routes({ routes }: { routes: Route[] }) {
 export function Diagnostics() {
   const eff = usePolicy();
   const [info, setInfo] = useState<Info | null>(null);
+  const [up, setUp] = useState<UpdateStatus | null>(null);
+  useEffect(() => void updateApi.status().then((s) => s && setUp(s)).catch(() => {}), []);
   const [test, setTest] = useState<{ routes: Route[] } | null>(null);
   const [testing, setTesting] = useState(false);
   const [ticket, setTicket] = useState("");
@@ -96,6 +99,9 @@ export function Diagnostics() {
     <div className="space-y-6">
       <section>
         <Line k="Version">{info?.version ?? "…"}</Line>
+        <Line k="Updates">
+          <span className={up?.stale ? "text-warn" : ""}>{up ? `${updateLine(up)}${up.serial ? ` Release index ${up.serial}.` : ""}${up.phase && up.phase !== "idle" ? ` (${up.phase})` : ""}` : "…"}</span>
+        </Line>
         <Line k="ID">{info?.id}</Line>
         <Line k="System">{info?.os}</Line>
         <Line k="Policy">
