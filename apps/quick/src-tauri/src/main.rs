@@ -34,6 +34,9 @@ fn main() -> ExitCode {
         *hbb_common::config::ORG.write().unwrap() = ORG.to_owned();
     }
     custom::load();
+    if std::env::args().nth(1).as_deref() == Some("--print-custom-profile") {
+        return if custom::print_status() { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    }
     security::apply_policy();
     netpolicy::apply();
     policy::load_cached();

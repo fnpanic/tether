@@ -10,6 +10,7 @@
 //! docs/update-design.md), `tmp/`.
 
 mod audit;
+mod maczip;
 mod metrics;
 mod team;
 
@@ -497,11 +498,29 @@ fn valid_custom_id(s: &str) -> bool {
     (1..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// `<Name>-Support.exe`, name reduced to `[A-Za-z0-9 _.-]` (safe inside the quoted header value).
-fn download_name(name: &str) -> String {
+/// `<Name>-Support` (+ `.exe`/`.zip`, and the macOS bundle name), name reduced to
+/// `[A-Za-z0-9 _.-]` (safe inside the quoted header value; no `[` for `custom::mac_id_from_bundle`).
+fn download_base(name: &str) -> String {
     let n: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '.' | '-')).collect();
     let n = n.trim_matches(|c| c == ' ' || c == '.');
-    format!("{}-Support.exe", if n.is_empty() { "TetherQS" } else { n })
+    format!("{}-Support", if n.is_empty() { "TetherQS" } else { n })
+}
+
+/// A `/q/` download streamed by tether-api itself (no proxy in front that follows X-Accel-Redirect).
+fn download(body: impl Read + Send + 'static, len: u64, ctype: &str, disposition: &str) -> Resp {
+    Response::new(
+        tiny_http::StatusCode(200),
+        vec![
+            hdr("Content-Type", ctype),
+            hdr("Content-Disposition", disposition),
+            hdr("Cache-Control", "no-store"),
+            hdr("X-Content-Type-Options", "nosniff"),
+        ],
+        Box::new(body) as Box<dyn Read + Send>,
+        Some(len as usize),
+        None,
+    )
+    .with_chunked_threshold(usize::MAX) // tiny_http would switch to chunked above 32 KiB
 }
 
 /// Log-safe token prefix (full tokens are never logged).
@@ -669,7 +688,7 @@ impl App {
             ("POST", "/api/audit/file") => self.audit_post(rq, body, "file"),
             ("POST", "/api/audit/alarm") => self.audit_post(rq, body, "alarm"),
             ("POST", p) if p.starts_with("/api/diag/") => self.diag_upload(body, &p["/api/diag/".len()..]),
-            ("GET", p) if p.starts_with("/q/") => self.custom_download(rq, &p["/q/".len()..]),
+            ("GET", p) if p.starts_with("/q/") => self.q(rq, &p["/q/".len()..]),
             (m, p) if p.starts_with("/api/team/") => self.team_route(rq, body, m, &url, &p["/api/team/".len()..]),
             (m, p) if p.starts_with("/api/admin/") => self.admin(rq, body, m, &url, &p["/api/admin/".len()..]),
             _ => Err(not_found()),
@@ -991,7 +1010,7 @@ impl App {
         let entry = CustomApp { id: id.to_owned(), name: p.name, token: req.token, expires: req.expires, channel: req.channel, created, downloads, last_download, profile: req.profile };
         self.check_space(body.len() as u64)?;
         self.save(&format!("custom/{id}.json"), &entry).map_err(internal)?;
-        self.qcache_drop(id);
+        self.qcache_drop(id, "");
         match old {
             Some(i) => self.custom[i] = entry,
             None => self.custom.push(entry),
@@ -1002,59 +1021,105 @@ impl App {
     fn delete_custom(&mut self, id: &str) -> Result<Resp, Resp> {
         let i = self.custom.iter().position(|c| c.id == id && valid_custom_id(id)).ok_or_else(not_found)?;
         fs::remove_file(self.data.join("custom").join(format!("{id}.json"))).map_err(internal)?;
-        self.qcache_drop(id);
+        self.qcache_drop(id, "");
         self.custom.remove(i);
         Ok(empty(204))
     }
 
-    /// `GET /q/<token>`: the channel's current TetherQS.exe plus the signed profile trailer.
-    /// Unknown, revoked and expired tokens get the same 404.
-    fn custom_download(&mut self, rq: &Request, token: &str) -> Result<Resp, Resp> {
-        let t = now();
-        if !rate_ok(&mut self.q_hits, client_ip(rq), t, Q_IP_PER_MIN) {
+    /// `GET /q/<token>` (Windows exe, or the macOS zip for a Mac browser), `/q/<token>/windows`,
+    /// `/q/<token>/mac`, and `/q/m/<mac id>` (the signed profile of a macOS custom app). One rate
+    /// limit for all of them.
+    fn q(&mut self, rq: &Request, rest: &str) -> Result<Resp, Resp> {
+        if !rate_ok(&mut self.q_hits, client_ip(rq), now(), Q_IP_PER_MIN) {
             return Err(text(429, "too many requests"));
         }
+        if let Some(id) = rest.strip_prefix("m/") {
+            return self.custom_profile(id);
+        }
+        let (token, mac) = match rest.split_once('/') {
+            // Mac browsers (Safari, Chrome, Firefox, Edge) all say "Macintosh"; iPhones say "like Mac OS X".
+            None => (rest, header(rq, "User-Agent").is_some_and(|ua| ua.contains("Macintosh"))),
+            Some((t, "windows")) => (t, false),
+            Some((t, "mac")) => (t, true),
+            _ => return Err(not_found()),
+        };
+        self.custom_download(rq, token, mac)
+    }
+
+    /// The signed profile of the custom app whose token gives this mac id (`custom::mac_id`).
+    /// Also after the link expired: copies downloaded before keep working, as on Windows; a
+    /// deleted app answers 404.
+    fn custom_profile(&self, id: &str) -> Result<Resp, Resp> {
+        if !custom::valid_mac_id(id) {
+            return Err(not_found());
+        }
+        let c = self.custom.iter().find(|c| custom::mac_id(&c.token) == id).ok_or_else(not_found)?;
+        Ok(json(&c.profile).with_header(hdr("Cache-Control", "no-store")))
+    }
+
+    /// The channel's current TetherQS.exe plus the signed profile trailer, or for macOS its
+    /// TetherQS zip with the `.app` named `<Name>-Support [<mac id>].app`. Unknown, revoked and
+    /// expired tokens get the same 404.
+    fn custom_download(&mut self, rq: &Request, token: &str, mac: bool) -> Result<Resp, Resp> {
+        let t = now();
         if !custom::valid_token(token) {
             return Err(not_found());
         }
         let i = self.custom.iter().position(|c| c.token == token && t < c.expires).ok_or_else(not_found)?;
         let c = &self.custom[i];
-        let dir = self.data.join("download").join(&c.channel).join("customer/windows-x86_64");
+        let (platform, ctype, ext) = if mac {
+            ("darwin-universal", "application/zip", "zip")
+        } else {
+            ("windows-x86_64", "application/vnd.microsoft.portable-executable", "exe")
+        };
+        let dir = self.data.join("download").join(&c.channel).join("customer").join(platform);
         let exe = (|| {
             let m: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("latest.json")).ok()?).ok()?;
-            let file = m["platforms"]["windows-x86_64"]["url"].as_str()?.rsplit('/').next().filter(|f| valid_segment(f))?.to_owned();
+            let file = m["platforms"][platform]["url"].as_str()?.rsplit('/').next().filter(|f| valid_segment(f))?.to_owned();
             let f = File::open(dir.join(&file)).ok()?;
             let meta = f.metadata().ok().filter(|m| m.is_file())?;
             Some((f, meta, file))
         })();
-        let Some((f, meta, file)) = exe else {
-            eprintln!("custom app {} (token {}…): no Windows TetherQS release in channel {}", c.id, token_hint(token), c.channel);
+        let Some((mut f, meta, file)) = exe else {
+            eprintln!("custom app {} (token {}…): no {platform} TetherQS release in channel {}", c.id, token_hint(token), c.channel);
             return Err(not_found());
         };
-        let len = meta.len();
-        let trailer = custom::trailer(&serde_json::to_vec(&c.profile).map_err(internal)?);
-        let size = len as usize + trailer.len();
-        let disposition = format!("attachment; filename=\"{}\"", download_name(&c.name));
-        // Behind the Caddyfile's handle_response (it sets X-Tether-Accel): answer with the path of
-        // a prepared copy and let Caddy send it, so a slow download does not hold a worker.
-        let resp = if header(rq, "X-Tether-Accel").as_deref() == Some("1") {
-            let rel = self.qcache(&c.id.clone(), &file, f, &meta, &trailer).map_err(internal)?;
-            empty(204).with_header(hdr("X-Accel-Redirect", &rel)).with_header(hdr("Content-Disposition", &disposition))
+        let base = download_base(&c.name);
+        let disposition = format!("attachment; filename=\"{base}.{ext}\"");
+        let id = c.id.clone();
+        let accel = header(rq, "X-Tether-Accel").as_deref() == Some("1");
+        // Behind the Caddyfile's handle_response (it sets X-Tether-Accel): answer with the path of a
+        // prepared copy and let Caddy send it, so a slow download does not hold a worker.
+        let accel_resp = |rel: &str| empty(204).with_header(hdr("X-Accel-Redirect", rel)).with_header(hdr("Content-Type", ctype)).with_header(hdr("Content-Disposition", &disposition));
+        let resp = if mac {
+            // Always prepared on disk: the rename streams file to file, never through memory.
+            let bundle = custom::mac_bundle_name(&base, &custom::mac_id(token));
+            let rel = self.qcache(&id, &file, &meta, None, |out| maczip::rename_app(&mut f, out, &bundle).map(drop)).map_err(|e| {
+                eprintln!("custom app {id}: could not prepare the macOS zip from {file}: {e}");
+                not_found()
+            })?;
+            if accel {
+                accel_resp(&rel)
+            } else {
+                let f = File::open(self.data.join(rel.trim_start_matches('/'))).map_err(internal)?;
+                let len = f.metadata().map_err(internal)?.len();
+                download(f, len, ctype, &disposition)
+            }
         } else {
-            let body: Box<dyn Read + Send> = Box::new(f.take(len).chain(io::Cursor::new(trailer)));
-            Response::new(
-                tiny_http::StatusCode(200),
-                vec![
-                    hdr("Content-Type", "application/vnd.microsoft.portable-executable"),
-                    hdr("Content-Disposition", &disposition),
-                    hdr("Cache-Control", "no-store"),
-                    hdr("X-Content-Type-Options", "nosniff"),
-                ],
-                body,
-                Some(size),
-                None,
-            )
-            .with_chunked_threshold(usize::MAX) // tiny_http would switch to chunked above 32 KiB
+            let len = meta.len();
+            let trailer = custom::trailer(&serde_json::to_vec(&c.profile).map_err(internal)?);
+            let size = len + trailer.len() as u64;
+            if accel {
+                let rel = self
+                    .qcache(&id, &file, &meta, Some(size), |out| {
+                        io::copy(&mut f, out)?;
+                        out.write_all(&trailer)
+                    })
+                    .map_err(internal)?;
+                accel_resp(&rel)
+            } else {
+                download(f.take(len).chain(io::Cursor::new(trailer)), size, ctype, &disposition)
+            }
         };
         let c = &mut self.custom[i];
         c.downloads += 1;
@@ -1066,25 +1131,23 @@ impl App {
         Ok(resp)
     }
 
-    /// `qcache/<id>--<exe>`: the exe with this app's trailer, as Caddy serves it for `/q/`
-    /// (path relative to the data dir). Rebuilt when the release or the profile changed; other
-    /// copies of the app are removed. The directory is not under `download/`, so it is reachable
-    /// only through the X-Accel-Redirect of a valid token.
-    fn qcache(&self, id: &str, file: &str, mut exe: File, meta: &fs::Metadata, trailer: &[u8]) -> io::Result<String> {
+    /// `qcache/<id>--<release file>`: the release with this app's trailer (exe) or renamed bundle
+    /// (zip), as Caddy serves it for `/q/` (path relative to the data dir). Rebuilt when the
+    /// release is newer or the copy is not `len` long; other copies of the app are removed, and
+    /// every profile or token change drops them. The directory is not under `download/`, so it is
+    /// reachable only through the X-Accel-Redirect of a valid token.
+    fn qcache(&self, id: &str, file: &str, meta: &fs::Metadata, len: Option<u64>, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<String> {
         let dir = self.data.join("qcache");
         mkdirs(&dir, 0o750)?;
         let name = format!("{id}--{file}");
         let dest = dir.join(&name);
-        let fresh = fs::metadata(&dest).is_ok_and(|m| {
-            m.len() == meta.len() + trailer.len() as u64 && m.modified().ok() >= meta.modified().ok()
-        });
+        let fresh = fs::metadata(&dest).is_ok_and(|m| len.map_or(true, |l| m.len() == l) && m.modified().ok() >= meta.modified().ok());
         if !fresh {
-            self.qcache_drop(id);
+            self.qcache_drop(id, Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or(""));
             let tmp = tmp_path(&self.data);
             let r = (|| {
                 let mut f = OpenOptions::new().write(true).create_new(true).mode(0o640).open(&tmp)?;
-                io::copy(&mut exe, &mut f)?;
-                f.write_all(trailer)?;
+                write(&mut f)?;
                 f.sync_all()?;
                 fs::rename(&tmp, &dest)
             })();
@@ -1096,11 +1159,12 @@ impl App {
         Ok(format!("/qcache/{name}"))
     }
 
-    /// Removes the prepared `/q/` copies of an app (its profile or token changed, or it was revoked).
-    fn qcache_drop(&self, id: &str) {
+    /// Removes the prepared `/q/` copies of an app (its profile or token changed, or it was
+    /// revoked), or with `ext` only those of one platform (`exe`, `zip`).
+    fn qcache_drop(&self, id: &str, ext: &str) {
         let prefix = format!("{id}--");
         for e in fs::read_dir(self.data.join("qcache")).into_iter().flatten().flatten() {
-            if e.file_name().to_str().is_some_and(|n| n.starts_with(&prefix)) {
+            if e.file_name().to_str().is_some_and(|n| n.starts_with(&prefix) && n.ends_with(ext)) {
                 let _ = fs::remove_file(e.path());
             }
         }

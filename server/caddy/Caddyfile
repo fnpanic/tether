@@ -63,7 +63,8 @@ http://:21125 {
 	# the Prometheus on the other node, /grafana/* on the monitoring node. None by default.
 	import /etc/tether/caddy.d/*.caddy
 
-	# Private custom-app download links (GET /q/<token>, docs/api.md "Custom apps"). No access log
+	# Private custom-app download links (GET /q/<token>[/mac|/windows], the macOS profile
+	# /q/m/<mac id>; docs/api.md "Custom apps"). No access log
 	# is configured: the tokens are secrets.
 	# tether-api checks the token and names a prepared file (X-Accel-Redirect); Caddy sends it,
 	# so a slow download does not hold one of tether-api's 32 workers. qcache/ is not under
@@ -75,7 +76,7 @@ http://:21125 {
 			handle_response @accel {
 				root * /var/lib/tether-api
 				rewrite * {rp.header.X-Accel-Redirect}
-				header Content-Type application/vnd.microsoft.portable-executable
+				header Content-Type {rp.header.Content-Type}
 				header Content-Disposition {rp.header.Content-Disposition}
 				header Cache-Control no-store
 				header X-Content-Type-Options nosniff
