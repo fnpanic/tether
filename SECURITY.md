@@ -309,13 +309,13 @@ Update the status here and there together.
 
 | ID | Weakness | Status |
 | --- | --- | --- |
-| W1 | Key exchange version 0 (one key, same nonces both ways) is accepted from and used with non-Tether peers; the shield still shows | open — tracked |
-| W2 | Legacy (non-multiplexed) TCP tunnels switch to raw mode: no inner encryption (needs `permission.tunnel`, default N) | open — tracked |
-| W3 | The trusted server key and custom server are local options (UI only with `settings.server`; a machine admin always) | open — tracked |
-| W4 | Rendezvous/relay endpoints given as IP addresses use plain `ws://` | open — tracked |
-| W5 | hbbs/hbbr WebSocket ports 21118/21119 bind all interfaces; reached directly (no host firewall) they take client-sent IP headers and have no TLS | open — tracked |
+| W1 | Key exchange version 0 (one key, same nonces both ways) is accepted from and used with non-Tether peers; the shield still shows | fixed in the next release |
+| W2 | Legacy (non-multiplexed) TCP tunnels switch to raw mode: no inner encryption (needs `permission.tunnel`, default N) | fixed in the next release |
+| W3 | The trusted server key and custom server are local options (UI only with `settings.server`; a machine admin always) | fixed in the next release |
+| W4 | Rendezvous/relay endpoints given as IP addresses use plain `ws://` | fixed in the next release |
+| W5 | hbbs/hbbr WebSocket ports 21118/21119 bind all interfaces; reached directly (no host firewall) they take client-sent IP headers and have no TLS | fixed in the next relay release |
 | W6 | Host authenticity rests on hbbs and the server key (no pinning, no own-fingerprint display, no viewer key) | open — by design today |
-| W7 | Connecting by IP address skips the handshake and the refusal (plaintext against a stock host) | open |
+| W7 | Connecting by IP address skips the handshake and the refusal (plaintext against a stock host) | fixed in the next release |
 | W8 | `RegisterPk` with an ID's uuid from the same IP replaces its key (upstream rule; impact untested) | open |
 | W9 | Update manifest unsigned (rollback to an older signed build, blocking via `minimum_version`) | open |
 | W10 | macOS direct listener is not limited to the local subnet | open |

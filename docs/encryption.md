@@ -447,7 +447,7 @@ both directions (`stream.rs:104-108`, `tcp.rs:248-252, 382-402`): keystream and 
 reuse, reflection of frames. Only reachable with a non-Tether peer; the shield still shows.
 Section 3, step 5.
 
-Status: open — tracked.
+Status: fixed in the next release (CHANGELOG [Unreleased]): both sides refuse version 0 outside WebRTC (`kx_version_refused`, `check_kx_pick` in server.rs, `secure_connection` in client.rs); stock RustDesk peers older than 1.5.1 are refused. Effective once both ends run it.
 
 ### W2. Legacy TCP tunnels are not end-to-end encrypted
 
@@ -457,7 +457,7 @@ by the TLS to Caddy: hbbr and a TLS-inspecting proxy see them. The host allows i
 `enable-tunnel` is on (policy `permission.tunnel`, default N, `crates/tether-trust/src/policy.rs:122`).
 The Tether viewer does not start port forwards; other RustDesk viewers can. Section 3, step 7.
 
-Status: open — tracked.
+Status: fixed in the next release: the host refuses non-multiplexed tunnels (`legacy_tunnel_refused` in connection.rs) and the viewer only opens the multiplexed, encrypted tunnel (port_forward.rs).
 
 ### W3. The trust anchor can be changed locally
 
@@ -468,7 +468,7 @@ refuses to write them unless policy allows `settings.server` (default N,
 them with `--option` (`src/core_main.rs:515-534`). Whoever sets them decides which key vouches for
 hosts.
 
-Status: open — tracked.
+Status: fixed in the next release: while `settings.server` is off, policy blanks `key`, `custom-rendezvous-server` and `relay-server` on every apply (policy.rs `apply_core`), so values written earlier or by `--option` are not used; `id@server` targets other than `@public` are refused (`peer_target_refused` in client.rs).
 
 ### W4. Plain `ws://` for IP endpoints
 
@@ -476,7 +476,7 @@ A rendezvous or relay endpoint that is an IP address (an `id@1.2.3.4` peer, an I
 server, or a relay name hbbs hands out) gets `ws://` without TLS (`hbb_common/src/websocket.rs:628-649`).
 End-to-end encryption is unaffected; the signalling (IDs, uuids, keys, SDP) is then in clear.
 
-Status: open — tracked.
+Status: fixed in the next release: `websocket::check_tls` allows only `wss://` (or `ws://` to loopback) once the apps call `require_tls()` in `apply_policy`.
 
 ### W5. hbbs/hbbr WebSocket ports reachable directly
 
@@ -488,7 +488,7 @@ sends: hbbs the last `X-Forwarded-For` hop (`rendezvous_server.rs:1750-1754`), h
 or `X-Forwarded-For` (`relay_server.rs:415-426`). That defeats per-IP limits and the IP check of
 the `RegisterPk` rule (W8), and the connection has no TLS.
 
-Status: open — tracked.
+Status: fixed in the next relay release: hbbs/hbbr bind 21118/21119 to `WS_BIND`, default `127.0.0.1` (`listen_ws` in rustdesk-server common.rs); the Helm chart sets `WS_BIND=0.0.0.0` for its separate proxy pod. Effective once the relays are updated.
 
 ### W6. Host authenticity rests on hbbs and the server key
 
@@ -502,7 +502,7 @@ Status: open — by design today.
 No rendezvous, no handshake, no refusal (`client.rs:609-636`, `io_loop.rs:247`). Fails against a
 Tether host; runs unencrypted against a stock RustDesk host with direct IP access. Section 4.
 
-Status: open.
+Status: fixed in the next release: the viewer refuses address peers (IP or host:port) before any connection (`peer_target_refused` in client.rs).
 
 ### W8. Key replacement at hbbs via RegisterPk
 
