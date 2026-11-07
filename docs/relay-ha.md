@@ -434,3 +434,12 @@ tether-api `4ac5b001a796f53f`. Verified on both: services active, WebSocket 101,
 `latest.json` 200, unknown `/q/<token>`, `/q/<token>/mac` and `/q/m/<id>` 404, 27/27 targets up.
 On the Mac (runner), the signed TetherQS 0.5.25 kept a valid signature after the rename and looked up
 `/q/m/<id>` on the live relays (404 for an unknown id, then plain TetherQS).
+
+## First release clean-up (2026-11-07, 22:05 CET)
+
+Run from Tether Manage 0.5.8 (Releases › Clean up old releases…, keep 3). Both relays identical: one prune
+run, 1.82 GB freed (`tether_api_release_prune_freed_bytes_total` 1819645947), releases now 549 MB in 62 files
+(was 2.37 GB in 228), versions left 0.5.20-0.5.25. 0.5.20-0.5.22 were still inside the 24 h rule on Hetzner
+because the relay move copied every release there on 2026-11-06 (file times = copy time); a later run
+with keep 3 removes 0.5.20 and 0.5.21. `releases.json`, `latest.json`, the 0.5.25 installer and `/` answer
+200. Disk: Hetzner 14 % used, Oracle 2 32 %. Log: `/var/lib/tether-api/release-prune.jsonl`.
