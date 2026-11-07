@@ -163,7 +163,6 @@ fi
 if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
   # Oracle Linux / RHEL family.
   firewall-cmd --permanent --add-port=21115-21117/tcp --add-port=21116/udp --add-port=443/tcp --add-port=80/tcp
-  firewall-cmd --permanent --add-forward-port=port=80:proto=tcp:toport=443
   firewall-cmd --reload
 elif command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow 21115:21117/tcp
