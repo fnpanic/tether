@@ -141,6 +141,7 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
       <li><a href="#tech-install">Install Tether</a></li>
       <li><a href="#tech-home">Your ID and password</a></li>
       <li><a href="#tech-connect">Connect to a device</a></li>
+      <li><a href="#tech-hosts">Hundreds of hosts: Advanced mode</a></li>
       <li><a href="#tech-cli">Command line and links</a></li>
       <li><a href="#tech-toolbar">The session toolbar</a></li>
       <li><a href="#tech-files">File transfer</a></li>
@@ -248,6 +249,17 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
 </ol>
 <p>A recent device can be opened again with one click on its card. Tether remembers the password for a device only if you leave “Remember” switched on in the password prompt.</p>
 <div class="note"><strong>Always encrypted.</strong> Tether refuses any connection that cannot be end-to-end encrypted. There is no “continue insecurely” button.</div>
+
+<h2 id="tech-hosts">Hundreds of hosts: Advanced mode</h2>
+<p>Click <strong>Hosts</strong> in the main window's title bar (or Settings → Appearance → Home view) to switch the home view to <strong>Advanced</strong>; <strong>Simple view</strong> switches back. Your organisation can turn this mode off or make it the only one. It lists every device you connected to, the ones you added or imported, and, with <strong>Team</strong> turned on, your organisation's devices. It stays fast with thousands of entries.</p>
+<ul>
+  <li><strong>Search</strong> as you type: any part of a name, ID, user, OS or note. Narrow it with tags and filters, for example <code>#customer:acme is:online -#env:test</code> or <code>os:mac seen:&lt;7d</code>. Press <kbd>?</kbd> for the full syntax.</li>
+  <li><strong>Keyboard first</strong>: <kbd>↑</kbd> <kbd>↓</kbd> to move, <kbd>Enter</kbd> to connect, <kbd>Shift</kbd>+<kbd>Enter</kbd> for file transfer, <kbd>Alt</kbd>+<kbd>Enter</kbd> to watch without control. <kbd>Ctrl</kbd>+<kbd>K</kbd> opens a box that finds any host or command.</li>
+  <li><strong>Tags</strong> such as <code>site:berlin</code> or <code>customer:acme</code>, with colours. Select many hosts (<kbd>Shift</kbd>+click, <kbd>Ctrl</kbd>+<kbd>A</kbd>) and press <kbd>T</kbd> to tag them all at once. <strong>Tag rules</strong> tag hosts automatically, for example every Mac or every name starting with <code>BER-</code>.</li>
+  <li><strong>Saved searches</strong>, pinned hosts, names and private notes per host, and import/export as JSON or CSV. Notes stay on your PC and are left out of exports unless you include them.</li>
+  <li><strong>Open sessions</strong> lists your session windows and sends Ctrl+Alt+Del, locks or restarts a remote computer without switching to it.</li>
+</ul>
+<p>Details for administrators and the full search syntax: <code>docs/advanced.md</code>.</p>
 
 <h2 id="tech-cli">Command line and <code>tether://</code> links</h2>
 <p>The technician app (<code>C:\Program Files\Tether\tether.exe</code>) can be started from scripts, ticket systems and intranet pages.</p>

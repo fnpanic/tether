@@ -106,12 +106,14 @@ function friendly(text: string): string {
   return text;
 }
 
-export function Session({ sessionKey, peer, conn }: { sessionKey: string; peer: string; conn: string }) {
+export function Session({ sessionKey, peer, conn, viewOnly = false }: { sessionKey: string; peer: string; conn: string; viewOnly?: boolean }) {
   if (conn === "file-transfer") return <FileTransfer sessionKey={sessionKey} peer={peer} />;
-  return <RemoteView sessionKey={sessionKey} peer={peer} />;
+  return <RemoteView sessionKey={sessionKey} peer={peer} viewOnly={viewOnly} />;
 }
 
-function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: string }) {
+/** `viewOnly`: opened as "View only" (Advanced mode, `--view-only`): the core's per-peer view-only
+ *  option is switched on for this session (the host then refuses input) and back off when it ends. */
+function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; peer: string; viewOnly: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const pipeRef = useRef<VideoPipeline | null>(null);
@@ -161,6 +163,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
   // Reconnect: the running series, its timer and the policy limit (event handlers read refs).
   const series = useRef<Series | null>(null);
   const retryTimer = useRef(0);
+  const restoreView = useRef(false);
   const limitMin = useRef(10);
   // Survives a reload of this window (F5), which continues the same session.
   const everConnected = useRef(stored(`connected-${key}`));
@@ -287,6 +290,10 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       if (!alive) return;
       const ch = videoChannel((buf) => pipe.push(buf));
       await invoke("session_start", { key, peer, webcodecs: formats, video: ch });
+      if (viewOnly && !(await invoke<boolean>("session_get_toggle", { key, name: "view-only" }).catch(() => true))) {
+        await invoke("session_toggle", { key, name: "view-only" });
+        restoreView.current = true;
+      }
       setImageQuality((await invoke<string>("get_option", { key: "image-quality" }).catch(() => "")) || "balanced");
     })().catch((e) => alive && setPhase({ kind: "error", title: "Could not start the session", text: String(e), retry: false }));
     const t = setInterval(() => pipeRef.current && setVstats({ ...pipeRef.current.sample() }), 1000);
@@ -298,9 +305,12 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       clearTimeout(pwTimer.current);
       if (recRef.current.state === "on") invoke("recording_finished").catch(() => {});
       pipe.close();
+      // Same IPC order: the option is back to the user's choice before the session goes.
+      if (restoreView.current) invoke("session_toggle", { key, name: "view-only" }).catch(() => {});
+      restoreView.current = false;
       invoke("session_close", { key });
     };
-  }, [key, peer]);
+  }, [key, peer]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sharpening: Off draws with the 2D canvas, Auto/Strong with WebGL; a switch remounts the canvas
   // (key below), whose new element the pipeline takes over with the current picture.
@@ -394,7 +404,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
     let raf = 0;
     let wheelAcc = { x: 0, y: 0 };
     const mods = (e: MouseEvent | KeyboardEvent) => ({ alt: e.altKey, ctrl: e.ctrlKey, shift: e.shiftKey, command: e.metaKey });
-    const send = (mask: number, e: MouseEvent, xy = toRemote(e)) => invoke("session_mouse", { key, mask, ...xy, ...mods(e) });
+    const send = (mask: number, e: MouseEvent, xy = toRemote(e)) => !viewOnly && invoke("session_mouse", { key, mask, ...xy, ...mods(e) });
 
     // Coalesce moves to one per frame; button events go out immediately.
     const flush = () => {
@@ -427,13 +437,13 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       e.preventDefault();
       const s = wheelSteps(e, wheelAcc);
       wheelAcc = s.acc;
-      if (s.x || s.y) invoke("session_mouse", { key, mask: MOUSE.WHEEL, x: s.x, y: s.y, ...mods(e) });
+      if ((s.x || s.y) && !viewOnly) invoke("session_mouse", { key, mask: MOUSE.WHEEL, x: s.x, y: s.y, ...mods(e) });
     };
     const ctx = (e: MouseEvent) => e.preventDefault();
     const key_ = (down: boolean) => (e: KeyboardEvent) => {
       if (chat.open && (e.target as HTMLElement)?.tagName === "INPUT") return;
       e.preventDefault();
-      invoke("session_key", { key, code: e.code, down, lockModes: lockModes(e), character: e.key.length === 1 ? e.key : "" });
+      if (!viewOnly) invoke("session_key", { key, code: e.code, down, lockModes: lockModes(e), character: e.key.length === 1 ? e.key : "" });
     };
     const kd = key_(true);
     const ku = key_(false);
@@ -466,7 +476,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
       document.removeEventListener("focusin", fin);
       document.removeEventListener("focusout", fout);
     };
-  }, [phase.kind, key, toRemote, chat.open, useGl]);
+  }, [phase.kind, key, toRemote, chat.open, useGl, viewOnly]);
 
   // Keyboard settings; asked again once the peer's platform is known (PC/Mac mapping).
   useEffect(() => {
@@ -645,6 +655,7 @@ function RemoteView({ sessionKey: key, peer }: { sessionKey: string; peer: strin
               </span>
             )}
             {route && <span className="rounded-[5px] bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white/70">{route}</span>}
+            {viewOnly && <span className="rounded-[5px] bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white/70">View only</span>}
           </div>
           <Sep />
           {info && info.displays.length > 1 && (

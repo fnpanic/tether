@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { Activity, FileCode2, History, KeyRound, Lock, Monitor, Package, Palette, ShieldCheck, Stethoscope } from "lucide-react";
+import { Activity, FileCode2, History, KeyRound, Lock, Monitor, Package, Palette, ShieldCheck, Stethoscope, Users } from "lucide-react";
 import { api, emptyBundle, invoke, type AppState, type Bundle, type Change, type Live } from "./lib/ipc";
 import { SELECTED, useToast } from "./components/ui";
 import { PolicyBar, PolicyPublish } from "./components/policy-publish";
@@ -8,6 +8,7 @@ import { Home } from "./pages/Home";
 import { Policy } from "./pages/Policy";
 import { Devices } from "./pages/Devices";
 import { Sessions } from "./pages/Sessions";
+import { Team } from "./pages/Team";
 import { Releases } from "./pages/Releases";
 import { DownloadPage } from "./pages/DownloadPage";
 import { CustomApps } from "./pages/CustomApps";
@@ -40,6 +41,7 @@ const PAGES = [
   { id: "policy", label: "Policy", icon: ShieldCheck, el: Policy },
   { id: "devices", label: "Devices", icon: Monitor, el: Devices },
   { id: "sessions", label: "Sessions", icon: History, el: Sessions },
+  { id: "team", label: "Team", icon: Users, el: Team },
   { id: "releases", label: "Releases", icon: Package, el: Releases },
   { id: "page", label: "Download page", icon: FileCode2, el: DownloadPage },
   { id: "custom", label: "Custom apps", icon: Palette, el: CustomApps },

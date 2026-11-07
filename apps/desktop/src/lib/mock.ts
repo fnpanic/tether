@@ -15,6 +15,11 @@ const state = {
   ],
 };
 
+// Advanced mode's mock fleet is its own chunk, like the page it feeds.
+let fleetCache: Promise<import("./mock-fleet").Fleet> | null = null;
+const fleet = () => (fleetCache ??= import("./mock-fleet").then((m) => m.fleet()));
+const team = { rev: 0, doc: null as unknown, by: "", at: 0 };
+
 function emit(event: string, name: string, payload: unknown) {
   for (const cb of listeners[event] ?? []) cb({ name, payload });
 }
@@ -87,6 +92,66 @@ export const mock = {
       case "cm_clients":
         return [{ id: 1, peer_id: "184392571", name: "maria@Design-Studio", authorized: false, keyboard: true, clipboard: true, audio: true, file: true, restart: true, recording: false, block_input: false, is_file_transfer: false },
           { id: 2, peer_id: "902114538", name: "j.berg@FINANCE-PC-07", authorized: true, keyboard: true, clipboard: true, audio: true, file: true, restart: true, recording: false, block_input: false, is_file_transfer: false }] as T;
+      case "policy_state": {
+        // `?ui=forced|off` in the page URL: policy ui.advanced for the mode tests.
+        const ui = new URLSearchParams(location.search).get("ui");
+        return (ui ? { profile: "technician", serial: 1, group: null, values: { "ui.advanced": ui }, locked: ["ui.advanced"], hidden: [], sources: ["profile"] } : undefined) as T;
+      }
+      case "main_window_fit":
+        return undefined as T;
+      case "hosts_peers":
+        return [...state.peers.map((p, i) => ({ ...p, last: Math.floor(Date.now() / 1000) - i * 3600 })), ...(await fleet()).peers] as T;
+      case "hosts_store_load":
+        try {
+          const f = await fleet();
+          return (localStorage.getItem("tether.mock.hostsStore") ?? (f.peers.length ? f.store : "")) as T;
+        } catch {
+          return "" as T;
+        }
+      case "hosts_store_save":
+        if (String(a.doc).length > 16 * 1024 * 1024) throw "The host list is too large to save (16 MB).";
+        try {
+          localStorage.setItem("tether.mock.hostsStore", String(a.doc));
+        } catch {
+          /* quota: keep in memory only */
+        }
+        return undefined as T;
+      case "hosts_online": {
+        await new Promise((r) => setTimeout(r, 120));
+        const f = await fleet();
+        return (a.ids as string[]).filter((id) => f.online.has(id) || id === "184392571" || id === "551870034") as T;
+      }
+      case "sessions_open":
+        return [
+          { key: "k1", peer: "184392571", conn: "default" },
+          { key: "k2", peer: "551870034", conn: "file-transfer" },
+        ] as T;
+      case "session_focus_window":
+        return true as T;
+      case "team_identity":
+        return { key: "q2o5n0d6m7m3l1k8p4g2b7r9x0c5v8z1a3s6d9f2g4h=", fingerprint: "9F3A-12B0-C4D1-77E2" } as T;
+      case "team_me":
+        if (new URLSearchParams(location.search).get("team") === "none") throw "not-member: This app is not in your organisation's team. Send its key to your administrator.";
+        return { name: "Anna (Helpdesk)", write: true, audit: true } as T;
+      case "team_devices":
+        return (await fleet()).org as T;
+      case "team_tags_get":
+        return { rev: team.rev, doc: team.doc, updated_by: team.by, updated_at: team.at } as T;
+      case "team_tags_put":
+        if (a.rev !== team.rev) return { ok: false, conflict: { rev: team.rev, doc: team.doc } } as T;
+        team.rev++;
+        team.doc = JSON.parse(String(a.doc));
+        team.by = "Anna (Helpdesk)";
+        team.at = Math.floor(Date.now() / 1000);
+        return { ok: true, rev: team.rev } as T;
+      case "team_audit": {
+        const t = Math.floor(Date.now() / 1000);
+        return [
+          { ts: t - 3600, action: "login", id: a.device, peer_id: "731204986", peer_name: "anna", conn_type: "remote", ip: "198.51.100.7" },
+          { ts: t - 2400, action: "disconnect", id: a.device },
+          { ts: t - 86400 * 3, action: "login", id: a.device, peer_id: "402118736", peer_name: "ben", conn_type: "file_transfer", ip: "203.0.113.20" },
+        ] as T;
+      }
       case "fs_home_dir":
         return "C:\\Users\\demo" as T;
       case "fs_local_dir":

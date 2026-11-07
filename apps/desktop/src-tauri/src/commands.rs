@@ -142,7 +142,7 @@ fn mac_fix(app: tauri::AppHandle, which: String) -> R<()> {
 /// Async: creating a window from a synchronous command deadlocks on Windows (WebView2).
 /// `from`: a live session to the same peer whose login the new one reuses (no second password).
 #[tauri::command]
-async fn open_session(app: AppHandle, peer: String, conn: Option<String>, from: Option<String>) -> R<String> {
+async fn open_session(app: AppHandle, peer: String, conn: Option<String>, from: Option<String>, view_only: Option<bool>) -> R<String> {
     let peer = peer.trim().replace(' ', "");
     security::check_peer_id(&peer)?;
     crate::policy::check_outgoing()?;
@@ -156,7 +156,8 @@ async fn open_session(app: AppHandle, peer: String, conn: Option<String>, from: 
             return Err("The session has ended; connect again.".to_owned());
         }
     }
-    let key = app::open_session(&app, &peer, conn).map_err(|e| e.to_string())?;
+    let c = crate::cli::Connect { peer: peer.clone(), conn: conn.to_owned(), view_only: view_only.unwrap_or(false), ..Default::default() };
+    let key = app::open_session_with(&app, &c).map_err(|e| e.to_string())?;
     if let (Some(f), Some(s)) = (from, sink::get()) {
         s.set_pending_login(&key, f);
     }
@@ -600,8 +601,114 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         cm_record_consent_init,
         cm_record_consent,
         // --- end reconnect/recording ---
+        hosts_peers,
+        hosts_store_load,
+        hosts_store_save,
+        hosts_online,
+        main_window_fit,
+        sessions_open,
+        session_focus_window,
+        hosts_export,
+        hosts_import,
+        team_identity,
+        team_me,
+        team_devices,
+        team_tags_get,
+        team_tags_put,
+        team_audit,
     ]
 }
+
+// --- advanced mode (docs/advanced.md) ---
+use crate::{hosts, team};
+
+#[tauri::command]
+fn hosts_peers() -> Vec<Value> {
+    hosts::peers()
+}
+
+#[tauri::command]
+async fn hosts_store_load() -> R<String> {
+    blocking(hosts::load_store).await?
+}
+
+#[tauri::command]
+async fn hosts_store_save(doc: String) -> R<()> {
+    blocking(move || hosts::save_store(&doc)).await?
+}
+
+#[tauri::command]
+async fn hosts_online(ids: Vec<String>) -> R<Vec<String>> {
+    hosts::online(ids).await
+}
+
+#[tauri::command]
+fn main_window_fit(app: AppHandle, advanced: bool) -> R<()> {
+    app::fit_main(&app, advanced).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn sessions_open() -> Vec<Value> {
+    app::open_sessions().into_iter().map(|(key, peer, conn)| serde_json::json!({ "key": key, "peer": peer, "conn": conn })).collect()
+}
+
+#[tauri::command]
+fn session_focus_window(app: AppHandle, key: String) -> bool {
+    app::focus_session(&app, &key)
+}
+
+/// Save an export where the user picks (native dialog); false when cancelled.
+#[tauri::command]
+async fn hosts_export(app: AppHandle, name: String, content: String) -> R<bool> {
+    use tauri_plugin_dialog::DialogExt;
+    let ext = hosts::export_ext(&name)?;
+    if content.len() > hosts::STORE_MAX * 2 {
+        return Err("The export is too large.".into());
+    }
+    let picked = blocking(move || app.dialog().file().set_title("Export hosts").set_file_name(&name).add_filter(ext.to_uppercase(), &[ext]).blocking_save_file()).await?;
+    let Some(p) = picked.and_then(|p| p.into_path().ok()) else { return Ok(false) };
+    blocking(move || std::fs::write(p, content).map(|_| true).map_err(|e| format!("The file could not be written: {e}"))).await?
+}
+
+/// Read a file the user picks (native dialog) for import; None when cancelled.
+#[tauri::command]
+async fn hosts_import(app: AppHandle) -> R<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = blocking(move || app.dialog().file().set_title("Import hosts").add_filter("Hosts (JSON, CSV)", &["json", "csv", "txt"]).blocking_pick_file()).await?;
+    let Some(p) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
+    blocking(move || hosts::read_import(&p).map(Some)).await?
+}
+
+#[tauri::command]
+async fn team_identity() -> R<Value> {
+    blocking(team::identity).await?
+}
+
+#[tauri::command]
+async fn team_me() -> R<Value> {
+    blocking(team::me).await?
+}
+
+#[tauri::command]
+async fn team_devices() -> R<Value> {
+    blocking(team::devices).await?
+}
+
+#[tauri::command]
+async fn team_tags_get() -> R<Value> {
+    blocking(team::tags_get).await?
+}
+
+#[tauri::command]
+async fn team_tags_put(rev: u64, doc: String) -> R<Value> {
+    blocking(move || team::tags_put(rev, &doc)).await?
+}
+
+#[tauri::command]
+async fn team_audit(device: String, since: u64) -> R<Value> {
+    blocking(move || team::audit(&device, since)).await?
+}
+// --- end advanced mode ---
 
 // --- reconnect/recording ---
 use crate::{recording, session_policy};

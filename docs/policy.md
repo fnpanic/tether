@@ -24,7 +24,7 @@ States per layer: `on` (user may change, `value` is the default), `off` (locked 
 | `connect.reconnect-minutes` | connections | Keep reconnecting after a connection loss (minutes) | `10` | technician, customer | – |
 | `settings.server` | connections | Allow changing the relay server | `N` | technician | – |
 | `servers.list` | connections | Additional relay servers (host names or wss:// URLs, comma-separated) | – | technician, customer | – |
-| `network.direct` | connections | Direct connections (LAN, IPv6, NAT hole punching) beside the relay (auto, off) | `auto` | technician, customer | – |
+| `network.direct` | connections | Direct connections (same network) beside the relay (auto, off) | `auto` | technician, customer | – |
 | `video.quality` | video | Default image quality (best, balanced, low) | `balanced` | technician | `image-quality` |
 | `video.codec` | video | Preferred codec (auto, h264, h265, av1, vp9, vp8) | `auto` | technician | `codec-preference` |
 | `recording.mode` | recording | Session recording (off, on-request, always) | `on-request` | technician | – |
@@ -43,6 +43,7 @@ States per layer: `on` (user may change, `value` is the default), `off` (locked 
 | `update.restart-seconds` | updates | Countdown before a forced update restarts the app (s) | `60` | technician, customer | – |
 | `policy.refresh-minutes` | policy | Check for policy changes every (minutes) | `15` | technician, customer | – |
 | `policy.fast-apply` | policy | Fast apply (check every minute) | `N` | technician, customer | – |
+| `ui.advanced` | interface | Advanced mode: host inventory with search and tags as the home view (off, available, forced) | `available` | technician | – |
 | `diagnostics.page` | diagnostics | Diagnostics page | `Y` | technician, customer | – |
 | `diagnostics.upload` | diagnostics | Send diagnostics to support | `Y` | technician, customer | – |
 | `diagnostics.verbose-logging` | diagnostics | Allow verbose logging | `Y` | technician, customer | – |

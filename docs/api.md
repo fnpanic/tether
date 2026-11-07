@@ -131,8 +131,42 @@ Failure: `401` with a short reason. Bodies over the limits: `413`.
 | `PUT /api/admin/download-page` | HTML (≤ 512 KiB) | `204`, stored as `download/index.html` |
 | `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>` | – | Session audit records (above), newest first. All optional: `since` (default 0), `limit` 1–5000 (default 1000), `device` matches `id` or `uuid` exactly (URL-encoded). Unknown parameter or bad value: `400`. |
 | `GET /api/admin/status` | – | `{version, disk_free, devices, policy_serial, server_keys_serial, uptime}` |
+| `PUT /api/admin/team` | team roster (≤ 64 KiB, below) | `204`. Validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600). `{"members":[]}` turns team access off. |
+| `GET /api/admin/team` | – | the roster (`{"members":[]}` when none) |
 
 The server refuses uploads that would leave less than 2 GiB free on the disk (`507`).
+
+## Team (technician) endpoints
+
+Technicians do not hold the admin key. Each technician app generates its own Ed25519 key; the
+admin adds the public key to the **team roster** in Tether Manage and publishes it to every relay
+(`PUT /api/admin/team`). The roster (`tether_trust::team`, unknown fields rejected):
+
+```json
+{"members":[{"name":"Anna Berger","key":"<std base64 of the 32-byte public key>","write":true,"audit":false}]}
+```
+At most 500 members; `name` 1–64 characters, no control characters, no leading or trailing
+spaces; `key` a valid Ed25519 public key; keys unique; all four fields required. Both apps show a
+key as its **fingerprint**: `hex(sha256(raw 32-byte key))`, first 16 hex digits, uppercase, in
+groups of 4 (`630D-CD29-66C4-3366` for the key bytes `00 01 … 1f`;
+`tether_trust::team::fingerprint`).
+
+Member requests carry the same `Tether-Sig` header as admin requests (same message, ±300 s skew),
+signed with the member's key. The relay tries every roster key; the nonce cache is the one admin
+requests use. Unknown key, bad signature, no roster or an empty roster: `401` with a short reason.
+Limits: 120 requests/min per member key and 60 failed signatures/min per IP (`429`). Unknown path:
+`404`.
+
+| Method & path | Body | Result |
+| --- | --- | --- |
+| `GET /api/team/me` | – | `{"name":…, "write":bool, "audit":bool}` |
+| `GET /api/team/devices` | – | `[{uuid,id,profile,version,os,last_seen}]` newest first, from the heartbeats (no IP, no serials) |
+| `GET /api/team/tags` | – | `{"rev":<u64>,"doc":<JSON or null>,"updated_by":"<name>","updated_at":<unix>}`; `rev` 0, `doc` null, `updated_by` "" and `updated_at` 0 when none was stored |
+| `PUT /api/team/tags` | a JSON object (≤ 512 KiB), header `If-Match: <rev>` (decimal, quotes tolerated) | `200 {"rev":<new>}`. Member without `write`: `403`. Missing or bad `If-Match`, body not a JSON object: `400`. `rev` is not the current one: `409` with the current `{"rev","doc","updated_by","updated_at"}`. Too large: `413`. Stored atomically as `team/tags.json` (0600) with `rev + 1`, `updated_by` = the member's roster name. The relay does not look inside the document. |
+| `GET /api/team/audit?device=<id or uuid>&since=<unix>&limit=<n>` | – | Session audit records of one device, same format as `GET /api/admin/audit`, newest first. Members with `audit` only (else `403`). `device` required (`400` without); `since` default 0; `limit` 1–500, default 200; unknown parameter `400`. |
+
+The roster is per relay: publish it to every relay (Tether Manage does). Tags are stored per relay
+too: a client should read and write them on one relay (the first that answers).
 
 ## Download layout and update manifests
 

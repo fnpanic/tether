@@ -85,6 +85,16 @@
   --ok: #1f9d55;
   --warn: #b25000;
   --danger: #d70015;
+  /* Tag dots (DESIGN.md › Tags): identification only, never fills. */
+  --tag-gray: #8e8e93;
+  --tag-red: #d70015;
+  --tag-orange: #c93400;
+  --tag-yellow: #a05a00;
+  --tag-green: #248a3d;
+  --tag-teal: #0e7d8a;
+  --tag-blue: #0040dd;
+  --tag-purple: #8944ab;
+  --tag-pink: #d30f45;
   color-scheme: light;
 }
 
@@ -103,6 +113,15 @@
   --ok: #30d158;
   --warn: #ffb340;
   --danger: #ff453a;
+  --tag-gray: #98989d;
+  --tag-red: #ff6961;
+  --tag-orange: #ffb340;
+  --tag-yellow: #ffd426;
+  --tag-green: #30db5b;
+  --tag-teal: #5de6ff;
+  --tag-blue: #409cff;
+  --tag-purple: #da8fff;
+  --tag-pink: #ff6482;
   color-scheme: dark;
 }
 

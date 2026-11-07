@@ -158,6 +158,7 @@ pub const FEATURES: &[Feature] = &[
     t!("policy.refresh-minutes", "policy", "Check for policy changes every (minutes)", "Richtlinie prüfen alle (Minuten)", Kind::Number, "15", BOTH),
     b!("policy.fast-apply", "policy", "Fast apply (check every minute)", "Schnell anwenden (jede Minute prüfen)", "N", None, BOTH),
     // Diagnostics.
+    c!("ui.advanced", "interface", "Advanced mode: host inventory with search and tags as the home view", "Erweiterter Modus: Host-Liste mit Suche und Tags als Startansicht", "available", &["off", "available", "forced"], "off", None, TECH),
     b!("diagnostics.page", "diagnostics", "Diagnostics page", "Diagnoseseite", "Y", None, BOTH),
     b!("diagnostics.upload", "diagnostics", "Send diagnostics to support", "Diagnose an Support senden", "Y", None, BOTH),
     b!("diagnostics.verbose-logging", "diagnostics", "Allow verbose logging", "Ausführliche Protokollierung erlauben", "Y", None, BOTH),

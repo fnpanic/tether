@@ -9,6 +9,7 @@ signed requests. Nothing in it is needed by technicians or customers.
 | Status and relays | The relay list (every publish goes to all of them) with per-relay health; live policy vs draft |
 | Policy | Edit the draft, compare it with the live policy on every relay, history |
 | Devices | Every app that sent a heartbeat to any relay in the last 180 days; filters; group assignment |
+| Team | Technicians who may read the device list and shared tags with their own key |
 | Releases | What each relay publishes vs the latest upload; sign and publish installers and `TetherQS.exe` |
 | Download page | Generate and publish the page at `https://<relay>/` |
 | Custom apps | Branded TetherQS downloads (name, logo, colour, settings) behind private, expiring links |
@@ -318,6 +319,32 @@ shown (UTC times; cells a spreadsheet would run as a formula are prefixed with `
 The records are posted without a device key: anyone who can reach a relay can add rows. Read
 them as a log of what hosts reported, not as proof (SECURITY.md). Retention on the relays: 90 days
 or 50 MB (`AUDIT_RETENTION_DAYS`, `AUDIT_MAX_MB` in `/etc/tether/api.env`).
+
+## Team
+
+Technicians who do not hold the admin key can still see the organisation's devices and share
+device tags: each technician app has its own key, and the **team roster** on the relays lists the
+keys allowed in ([api.md](api.md), "Team (technician) endpoints"; security: SECURITY.md, "Team
+access").
+
+The page loads the roster from every relay (`GET /api/admin/team`), shows the first relay's and
+names any relay whose roster differs or that does not answer.
+
+| Column | Meaning |
+| --- | --- |
+| Name | Shown to the team as the author of tag changes |
+| Fingerprint | First 16 hex digits of the SHA-256 of the key, e.g. `630D-CD29-66C4-3366` |
+| Can edit shared tags | May replace the shared tag document (`write`) |
+| Can read session history | May read the session audit log of one device at a time (`audit`) |
+
+**Add technician**: the technician copies the public key from their app and sends it; paste it
+with a name. The page checks that it is a 32-byte base64 key and shows its fingerprint: compare it
+with the fingerprint the technician reads out from their app (on the phone, not through the channel
+the key came by). Adding, removing and changing flags only change the local draft; **Publish…**
+sends the roster to every relay (review sheet, result per relay, as for everything else). A
+technician removed from the roster is locked out at once on every relay that got the new roster; a
+relay that missed the publish still lets them in, so publish again until every relay has it. An
+empty roster turns team access off.
 
 ## Releases
 
