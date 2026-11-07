@@ -4,7 +4,10 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
-## [Unreleased]
+## [0.5.21] — 2026-11-07
+
+Clients: picture quality (colours, still-picture sharpening for AV1). Relays: the security fixes below,
+deployed on both relays on 2026-11-06 (no client update needed for them).
 
 ### Security
 Relay fixes from the code audit. They take effect when the relay's `hbbs`, `tether-api` and
