@@ -66,6 +66,9 @@ IP, key or token; label values come from fixed sets, except `relay`, which comes
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `hbbs_peers_online` | gauge | | hosts registered within the last 30 s |
+| `hbbs_release_generation` | gauge | | release generation G hbbs pushes (read from tether-api's `release-generation` every 5 s; 0 = none) |
+| `hbbs_release_hints_sent_total` | counter | `reason` = `change` / `register` | `ReleaseHint` frames sent to registered WebSocket hosts: after G changed, or once after a registration |
+| `hbbs_release_hint_peers_notified` | gauge | | registered WebSocket hosts that got the current G (reset when G changes) |
 | `hbbs_peers_signalling` | gauge | `transport` = `tcp_ws` / `udp` | online hosts by signalling path (TCP or WebSocket connection, or UDP) |
 | `hbbs_peers_in_memory` | gauge | | peers held in memory, online or not |
 | `hbbs_connections` | gauge | `transport` = `tcp` / `ws` | open connections to the rendezvous ports (21116, 21118 behind Caddy) |
@@ -113,6 +116,11 @@ Answered to loopback peers only; Caddy forwards only `/api/*` and `/q/*`, so it 
 | `tether_api_busy_rejected_total` | counter | | 503 busy at the cap |
 | `tether_api_body_timeouts_total` | counter | | request bodies that did not arrive in time |
 | `tether_api_devices`, `tether_api_devices_active_24h` | gauge | | devices in the list, and with a heartbeat within 24 h |
+| `tether_api_release_generation` | gauge | | release generation G (bumped by every `releases.json` or `latest.json` change; heartbeat answer and hbbs push) |
+| `tether_api_release_index_serial`, `tether_api_release_index_expires_timestamp` | gauge | `channel` | serial and expiry of the stored signed release index |
+| `tether_api_devices_by_version` | gauge | `profile`, `version` | devices with a heartbeat within 24 h by installed version (30 largest groups, the rest `version="other"`) |
+| `tether_api_devices_update_state` | gauge | `state` | devices (24 h) by reported update state (`idle`, `waiting-rollout`, `downloading`, `staged`, `waiting-idle`, `failed`, `stale`, `halted`, `unknown` = older clients) |
+| `tether_api_release_downloads_total` | counter | `profile`, `version` | devices that reported a newly downloaded and verified update since start (downloads by version, wherever they came from: relay or CDN; at most 64 series) |
 | `tether_api_data_bytes` | gauge | | size of `/var/lib/tether-api` (releases, audit, diagnostics, state) |
 | `tether_api_data_fs_free_bytes`, `tether_api_data_fs_size_bytes` | gauge | | its filesystem |
 
@@ -175,7 +183,7 @@ Every dashboard has a `Node` selector and marks process restarts.
 | Overview | node up, relay ready from outside, relay choice (primary / FAILOVER), firing alerts, certificate expiry; sessions, online hosts, active devices, bandwidth, TURN now; trends; relay health timeline; alert list |
 | Relay (hbbr) | sessions by transport, pairs, waiting, draining, traffic and hourly volume, timeouts / refusals / downgrades / blocks, hbbr CPU, memory, fds |
 | Signalling (hbbs) | online hosts by path, connections, registrations, RegisterPk results, punch holes by result, brute-force refusals, relay health timeline, relay hand-outs and load, failover state and transitions, TURN allocations, traffic, requests and drops, hbbs process |
-| API | request rate, 5xx share, p95, workers gauge, devices, data dir; by endpoint and status, latency p50/p95, errors and limits; heartbeats, devices, fetches and posts; workers, data size, free space; Caddy requests, latency, memory, in-flight |
+| API | request rate, 5xx share, p95, workers gauge, devices, data dir; by endpoint and status, latency p50/p95, errors and limits; heartbeats, devices, fetches and posts; **Releases**: release generation (tether-api and hbbs), index serial and days left per channel, hosts notified, hints sent, index fetches, update states, devices by version, downloads by version; workers, data size, free space; Caddy requests, latency, memory, in-flight |
 | Hosts | CPU, memory, root disk gauges, uptime; CPU by mode, load, memory, swap; filesystems, disk I/O; network, conntrack, TCP, drops and retransmits; open files; systemd unit states |
 | Probes | every endpoint up/down, history, durations, TLS and processing time, status codes, certificate days left |
 
@@ -214,6 +222,11 @@ Overview and in Grafana › Alerting (Alertmanager data source).
 | TurnAllocationsNearCap | TURN over 80 % of `TURN_MAX_ALLOCATIONS` | warning |
 | ApiErrors | over 5 % of tether-api requests 5xx (and > 0.01/s) for 5 min | warning |
 | ApiWorkersExhausted | tether-api answered 503 busy in the last 10 min | warning |
+| ReleaseGenerationMismatch | tether-api and hbbs on a node disagree on G for 2 min (push hint broken) | warning |
+| ReleaseIndexMismatch | the relays hold different release index serials of a channel for 10 min | warning |
+| ReleaseIndexExpiringSoon | a release index expires within 7 days (for 1 h) | warning |
+| UpdateFailuresHigh | more than 2 % of active devices report `failed` for 30 min | warning |
+| UpdateStale | devices report an expired release index for 1 h | info |
 | Watchdog | always (proves the pipeline; never notified) | none |
 
 The 150-session threshold of HbbrSaturated is a guess for a CX23's shared ~1 Gbit/s: tune it in
@@ -320,6 +333,9 @@ to the pod name). tether-api's `/metrics` is loopback-only and not scraped in th
 | RelayUnhealthy / RelayFailover | Signalling dashboard › Relay health: which relay, seen by whom. `printf rs \| nc -q1 127.0.0.1 21115` on the node lists what hbbs hands out. Sessions move to the backup by themselves; fix the primary's hbbr / network. |
 | CertificateExpiringSoon | `journalctl -u tether-https \| grep -i -E 'acme\|certificate'`; TLS-ALPN-01 needs 443 reachable and DNS pointing at the node |
 | DiskAlmostFull | `du -sh /var/lib/* \| sort -h`; Prometheus caps itself at 4 GB; tether-api releases in `/var/lib/tether-api/download` |
+| ReleaseGenerationMismatch | `ls -l /var/lib/tether-api/release-generation` (group `tether-api`, mode 0640+), `id tether` (member of `tether-api`), restart hbbs after `usermod`. Devices still get the heartbeat hint. |
+| ReleaseIndexMismatch / ReleaseIndexExpiringSoon / UpdateStale | Tether Manage › Releases › Rollouts (serial per relay; unlocking re-signs indexes that expire within 15 days); Publish to missing relays |
+| UpdateFailuresHigh | API dashboard › Releases (states, downloads); a client log shows `update download …: <reason>`. Halt the rollout in Tether Manage if a release is bad. |
 | ApiErrors / ApiWorkersExhausted | `journalctl -u tether-api -n 100`; API dashboard › Errors and limits (503 busy vs 500 internal vs 507 storage) |
 | HbbrSaturated | Relay dashboard: sessions, traffic; Hosts › network; consider raising the threshold or adding a relay |
 | TargetDown for hbbs/hbbr/api | old binary without metrics, or the service is down: `systemctl status tether-hbbs` |

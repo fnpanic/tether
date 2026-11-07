@@ -6,6 +6,51 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Security
+- **Update binaries bound to their signed version (W9 rollback)**: both apps now check the minisign
+  trusted comment (`file:` and `version:` must be the offered ones). Before, neither did, so a relay
+  could offer an older signed build under a higher version. The technician app installs exactly the
+  bytes it verified (no second manifest fetch: the version checked is the version installed).
+- **Signed release index (W9)**: `download/<channel>/releases.json`, signed with the admin key like
+  the policy, names version, file, size, sha256, signature, URLs, flags and rollout. Clients verify
+  every download against it (so relays and the CDN are untrusted), keep a serial floor per channel,
+  and once they accepted an index never use the unsigned `latest.json` again (the next release
+  requires it: `REQUIRE_SIGNED_INDEX`). Expiry after 30 days only warns.
+
+### Added
+- **Updates in about a minute**: tether-api counts a release generation (every index or manifest
+  change) and answers heartbeats with `200 {"releases": G}`; hbbs pushes `ReleaseHint` (new
+  rendezvous message, tag 1001, ignored by old clients) to every host on the WebSocket and once
+  after registration; clients check after a random 0-60 s. Fallback polls are jittered.
+- **Staged rollouts**: signed ramp per release (default 1 % → 10 % → 50 % → 100 % over 24 h,
+  Fast, Immediately), stable bucket per device and release, policy `update.rollout`
+  (early/default/late), security releases skip the ramp, **Halt / Resume** in Tether Manage ›
+  Releases › Rollouts (devices re-check right before installing).
+- **Forced updates never interrupt a session** (both apps): download in the background, install
+  when no session or file transfer runs ("Will update after this session").
+- **Download CDN** (optional): Tether Manage deploys the update files as Cloudflare Workers Static
+  Assets (`tether-dl.thomas-schend.workers.dev`, free plan) on every publish; clients fall back to
+  the relays. TetherQS.exe ships as a gzip copy (35 → 15 MB) on the CDN and from the relays
+  (Caddy `precompressed`, nginx `gzip_static`).
+- Settings › About and Diagnostics (technician app), Help (TetherQS): update state, rollout
+  progress, "Update information is out of date".
+- Metrics: `tether_api_release_generation`, `…_release_index_serial`/`…_expires_timestamp`,
+  `…_devices_by_version`, `…_devices_update_state`, `…_release_downloads_total`, endpoint
+  `release_index`; `hbbs_release_generation`, `hbbs_release_hints_sent_total`,
+  `hbbs_release_hint_peers_notified`. Grafana API dashboard row "Releases"; alerts
+  `ReleaseGenerationMismatch`, `ReleaseIndexMismatch`, `ReleaseIndexExpiringSoon`,
+  `UpdateFailuresHigh`, `UpdateStale`.
+
+### Changed
+- TetherQS takes the highest version over all relays (was: the first relay with a release) and
+  checks after policy changes. Both apps send `If-None-Match` per relay.
+- Heartbeat: optional `release_serial`, `update_state`, `update_version` (sent only to relays that
+  answer with a release generation).
+- Relays: hbbs needs read access to `/var/lib/tether-api/release-generation` (group `tether-api`,
+  `server/install.sh`).
+- `scripts/make-patches.sh` includes `vendor/rustdesk-server/src/metrics.rs` (it was missing from
+  `patches/rustdesk-server.patch`).
+
 ## [0.5.23] — 2026-11-07
 Tether / TetherQS 0.5.23 (Windows and macOS); hbbs and hbbr for the WebSocket bind (W5).
 

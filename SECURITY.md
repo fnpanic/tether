@@ -317,7 +317,7 @@ Update the status here and there together.
 | W6 | Host authenticity rests on hbbs and the server key (no pinning, no own-fingerprint display, no viewer key) | open — by design today |
 | W7 | Connecting by IP address skips the handshake and the refusal (plaintext against a stock host) | fixed in the next release |
 | W8 | `RegisterPk` with an ID's uuid from the same IP replaces its key (upstream rule; impact untested) | open |
-| W9 | Update manifest unsigned (rollback to an older signed build, blocking via `minimum_version`) | open |
+| W9 | Update manifest unsigned (rollback to an older signed build, blocking via `minimum_version`); neither app checked the signed trusted comment, so an older signed build could be offered under a higher version | fixed in the next release (trusted-comment check, signed release index with serial floor) |
 | W10 | macOS direct listener is not limited to the local subnet | open |
 | W11 | Traffic analysis: frame sizes and keystroke timing visible to relay and proxy | open |
 | W12 | A captured challenge response allows offline password guessing | open |

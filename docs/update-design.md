@@ -1,7 +1,10 @@
 # Update process: design for faster, safer updates
 
-Status: **proposal** (2026-11-07). Nothing here is implemented yet. Places that need a decision by
-the owner are marked **Decision Dn** and collected in [Decisions needed](#decisions-needed).
+Status: **implemented** on branch `updimpl` (2026-11-07), not yet released or deployed. The owner's
+decisions are in [Decisions](#decisions-needed) ("Decided 2026-11-07"); the status of each step is
+in [§8](#8-plan-and-effort). D1 changed after the decision: no R2 (it needs billing details);
+downloads go to **Cloudflare Workers Static Assets** instead (§5.6). Section 1 describes 0.5.23,
+before this work.
 
 Short version: a new release reaches online devices in **under 2 minutes** instead of up to
 6 hours. Three things make that work:
@@ -160,7 +163,7 @@ manifest that changes a few times a week. It also still gives minutes of latency
 | C. **Push hint over the existing hbbs WebSocket** | **< 1 min** (jitter W = 30-60 s) | 0 (one 78 B frame per device per release ≈ 0.8 MB per node) | 10 k index fetches spread over W: **167 req/s for 60 s**, 82 MB (51 MB if most are 304) | hbbs + client patch | hint unsigned, content signed | **adopt as primary** |
 | D. Separate SSE / long-poll / WebSocket channel | seconds | **+10 000 held connections per node**: Caddy ≈ 145 KB each (measured) = **+1.45 GB RAM** (nginx 41 KB = 0.4 GB) | as C | new endpoint | as C | reject: duplicates C, costs RAM the 1 GB Oracle node does not have |
 | E. Manifest via CDN (Cloudflare caching `latest.json`) | as the poll interval | relay ≈ 0; CDN free | as A | **own domain** (~$10/yr) | unchanged; CDN is one more party that can serve stale data | only useful together with a signed index; does not fix latency |
-| F. Binaries via CDN (R2 + custom domain) | – | – | relay egress for releases → 0 | domain + Cloudflare account | binaries signed; URL can be anywhere | optional, **D1** |
+| F. Binaries via CDN (decided: Workers Static Assets on `*.workers.dev`) | – | – | relay egress for releases → 0 | Cloudflare account (free plan, no domain, no billing) | binaries bound to the signed index; URL can be anywhere | **D1: adopted** |
 | G. Web push / OS push (APNs, WNS) | seconds | – | – | vendor accounts, not reachable behind many corporate proxies | – | reject |
 
 ### 4.4 Download burst (the real bottleneck)
@@ -391,6 +394,23 @@ B and C it is only the last resort.
 
 The index can list several URLs, so the binaries can live anywhere without trusting the host.
 
+**Decided and built (2026-11-07): Cloudflare Workers Static Assets** on
+`https://tether-dl.thomas-schend.workers.dev/<channel>/<app>/<platform>/<file>`. Free plan, no
+domain and no billing details (R2 needs them; the owner declined). Requests answered by a static
+asset are free and unlimited and do not count against the 100 000 Worker requests per day, as long
+as the script is not run first (no `run_worker_first`; the script only answers misses with 404).
+Limits: **25 MiB per file**, 20 000 files per version
+([limits](https://developers.cloudflare.com/workers/platform/limits/),
+[billing and limitations](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/)).
+Tether Manage deploys a new Worker version on every publish through the assets upload API
+(upload session with the manifest, buckets, script upload with the completion token), holding the
+current and the previous release of each channel/app/platform; `server/cloudflare/worker/deploy.sh`
+is the `wrangler deploy` fallback. Every update file fits under 25 MiB except the plain
+TetherQS.exe (33.3 MiB): its index entry gets a `packed` gzip copy (`TetherQS-<v>.exe.gz`,
+~14 MiB) whose own size and sha256 are checked before it is unpacked, then the unpacked exe like
+any other; the plain exe (first downloads, old clients) stays on the relays. Manage refuses to
+publish a CDN file over 25 MiB. The R2 row below is the original comparison.
+
 | Option | Cost | Pros | Cons |
 | --- | --- | --- | --- |
 | **Cloudflare R2 + custom domain** (`dl.<domain>`) | domain ≈ $10/yr (Cloudflare Registrar at cost; check the live price). R2 free tier: 10 GB-month, 10 M reads, 1 M writes/month, **egress free** | No egress cost. Edge cache (max 512 MB per object on the free plan). A release is about 100 MB per version, so the last 5 versions fit in 1 GB. The signed index can be mirrored there too (`Cache-Control: max-age=60`) for freeze detection and relay-down. | Needs a domain and a Cloudflare account. `r2.dev` is rate-limited and "for development only", so it is not an option. Corporate proxies may block a new domain (clients fall back to the relay URL). |
@@ -400,7 +420,7 @@ The index can list several URLs, so the binaries can live anywhere without trust
 | Workers | free 100 000 requests/day | – | Below the 10 k × 96 polls per day of a 15-min poll. Not needed: the files are static. |
 | Stay on relays | 0 | Nothing new | Rollout pace is limited by 130 Mbit/s per node. Use **nginx** fronts (they have a cap), or add one to Caddy. |
 
-Cheap win in any case: serve TetherQS.exe compressed. Caddy `file_server { precompressed gzip }`
+Cheap win in any case (built): serve TetherQS.exe compressed. Caddy `file_server { precompressed gzip }`
 with a `.exe.gz` that Manage uploads, and nginx `gzip_static on`. The TetherQS client sends
 `Accept-Encoding: gzip`; `reqwest` with the `gzip` feature decompresses it transparently. The
 signature still covers the plain exe. Result: 35 → 14.6 MB (measured). xz would be 9.3 MB, but
@@ -546,22 +566,53 @@ broadcasts and download egress.
 
 ## 8. Plan and effort
 
-| Step | Content | Effort (dev days) | Depends on |
-| --- | --- | --- | --- |
-| 0 | Trusted-comment binding both apps; technician `download()` + `install(bytes)` instead of `download_and_install`; `If-None-Match` per host; jittered fallback interval; TetherQS woken by policy changes | 1 | – |
-| 1 | tether-api release generation + heartbeat `200 {"releases":G}`; client wakes on change (≤ 15 min latency for everyone on the new client) | 1 | – |
-| 2 | Signed release index: `tether-trust::release`, Manage signing + upload order, client verify/floor/multi-source, unsigned flags ignored; docs (api.md, updates.md, encryption.md W9 → fixed, SECURITY.md) | 3-4 | 0 |
-| 3 | Rollout steps, `update.rollout` policy, halt, security flag, install when idle (both apps), heartbeat `update_state`; Manage rollout/halt UI and adoption view | 3 | 2 |
-| 4 | hbbs `ReleaseHint` (proto in both `hbb_common` copies, file watch, broadcast, send after registration), client hook + option mirror, `spread_secs`; load test | 2-3 | 1 |
-| 5 | Compressed TetherQS download (`precompressed gzip`, `gzip_static`, reqwest `gzip`) | 0.5 | – |
-| 6 | Metrics, alerts, Grafana row | 1 | 1-4 |
-| 7 (D1) | CDN: R2 bucket + domain, Manage upload, index URL list, index mirror | 1.5-2 | 2, decision |
-| | **Total** | **≈ 13-16** (without step 7: 11.5-14) | |
+| Step | Content | Effort (dev days) | Depends on | Status (2026-11-07, branch `updimpl`) |
+| --- | --- | --- | --- | --- |
+| 0 | Trusted-comment binding both apps; technician `download()` + `install(bytes)` instead of `download_and_install`; `If-None-Match` per host; jittered fallback interval; TetherQS woken by policy changes | 1 | – | **done** (own commit, ships alone); the technician app installs via `restore_update` + `install(bytes)`; TetherQS also takes the highest version over all relays |
+| 1 | tether-api release generation + heartbeat `200 {"releases":G}`; client wakes on change (≤ 15 min latency for everyone on the new client) | 1 | – | **done** |
+| 2 | Signed release index: `tether-trust::release`, Manage signing + upload order, client verify/floor/multi-source, unsigned flags ignored; docs (api.md, updates.md, encryption.md W9 → fixed, SECURITY.md) | 3-4 | 0 | **done**; tether-api verifies the index on upload and serves it with `ETag: "<serial>"` (index fetches are counted); D2 is the constant `REQUIRE_SIGNED_INDEX` |
+| 3 | Rollout steps, `update.rollout` policy, halt, security flag, install when idle (both apps), heartbeat `update_state`; Manage rollout/halt UI and adoption view | 3 | 2 | **done**; adoption is in Grafana ("Devices by version", "Update states"); the Manage Devices page is unchanged |
+| 4 | hbbs `ReleaseHint` (proto in both `hbb_common` copies, file watch, broadcast, send after registration), client hook + option mirror, `spread_secs`; load test | 2-3 | 1 | **done**, without the 10 000-host load test |
+| 5 | Compressed TetherQS download (`precompressed gzip`, `gzip_static`, reqwest `gzip`) | 0.5 | – | **done**, plus the `packed` entry for the CDN |
+| 6 | Metrics, alerts, Grafana row | 1 | 1-4 | **done** (not deployed) |
+| 7 (D1) | CDN: Workers Static Assets on workers.dev (was: R2 + domain), Manage upload, index URL list | 1.5-2 | 2, decision | **done** in code; Worker not deployed, no Cloudflare resources created |
+| | **Total** | **≈ 13-16** (without step 7: 11.5-14) | | |
+
+Not built: an index mirror on the CDN (the relays stay the only source of the index, as decided),
+the clock-skew warning from the relay's `Date` header, the `RolloutStalled` and
+`DownloadSaturation` alerts, and an adoption view inside Tether Manage.
 
 Suggested order: 0 → 1 → 5 (quick wins, about 2.5 days, latency already 6 h → 15 min, rollback
 closed), then 2 → 3 (W9 fixed, safe rollouts), then 4 (seconds), 6, and 7 if decided.
 
 ## Decisions needed
+
+**Decided 2026-11-07** (owner):
+
+- **D1**: downloads offloaded to Cloudflare, served by a Worker on `<name>.workers.dev` (no
+  domain on Cloudflare; `r2.dev` is not for production). The relays stay the source of truth for
+  the signed release index and the push; the Worker only serves binaries; clients fall back to the
+  relay URL. Every binary is verified against sha256 + size + minisign signature + signed
+  trusted-comment version from the signed index, so the CDN is untrusted. **Revised the same day:**
+  no R2 (enabling it needs billing details, which the owner refuses): Workers Static Assets on
+  `tether-dl.thomas-schend.workers.dev`, free plan, 25 MiB per file, TetherQS.exe as a gzip copy
+  (§5.6).
+- **D2**: clients from this release verify the signed index whenever present; once a device has
+  accepted one it never accepts an unsigned manifest again (the highest serial is persisted); from
+  the next release the signed index is required (`tether_trust::release::REQUIRE_SIGNED_INDEX`).
+- **D3**: expiry 30 days, warn only ("Update information is out of date" in Diagnostics/Settings),
+  never refuse.
+- **D4**: staged rollout default 1 % → 10 % → 50 % → 100 % over 24 h (signed ramp), stable
+  per-device bucket per release, `security` skips the ramp, halt = re-signed index.
+- **D5**: yes, build the hbbs push (`ReleaseHint` over the existing rendezvous connection: hbbs
+  watches the file tether-api writes, broadcasts to registered hosts, sends the current value after
+  registration, clients wait 0-60 s and then fetch the index), plus the heartbeat hint and the
+  jittered fallback poll.
+- **D6**: keep Caddy (nginx optional, as today); the staged rollout bounds download bandwidth.
+- **D7**: yes: forced and mandatory updates never interrupt a running session (TetherQS and the
+  technician app): download in the background, install when idle (no session, no file transfer).
+
+The original questions:
 
 | # | Question | Options | Recommendation |
 | --- | --- | --- | --- |

@@ -560,7 +560,8 @@ pub fn parse_hints(s: &str) -> BTreeMap<String, (u64, u32)> {
 }
 
 /// Per-relay release generation hints (hbbs push or heartbeat answer) → whether to fetch the
-/// index now. A host's first value is the baseline; a changed one triggers, at most once per
+/// index now: a changed value, or a host's first one above 0 (hbbs sends the current G after a
+/// registration, so a device that was offline during a push catches up), at most once per
 /// [`HINT_THROTTLE_SECS`] per host. `G` is unsigned on purpose: a relay can only cause a fetch.
 #[derive(Default)]
 pub struct Hints {
@@ -571,7 +572,7 @@ pub struct Hints {
 impl Hints {
     pub fn update(&mut self, host: &str, generation: u64, now: u64) -> bool {
         let prev = self.seen.insert(host.to_owned(), generation);
-        if prev.is_none_or(|p| p == generation) {
+        if prev == Some(generation) || (prev.is_none() && generation == 0) {
             return false;
         }
         if self.last_fire.get(host).is_some_and(|t| now < t + HINT_THROTTLE_SECS) {
@@ -859,11 +860,13 @@ mod tests {
         assert_eq!(h.len(), 2);
         assert_eq!(parse_hints("a=5")["a"], (5, 60));
         let mut s = Hints::default();
-        assert!(!s.update("a", 5, 0), "first value is the baseline");
-        assert!(!s.update("a", 5, 1));
+        assert!(!s.update("a", 0, 0), "first value 0: nothing published yet");
+        assert!(!s.update("a", 0, 1));
         assert!(s.update("a", 6, 2));
+        assert!(!s.update("a", 6, 3), "unchanged");
         assert!(!s.update("a", 7, 30), "throttled: one fetch per host per minute");
         assert!(s.update("a", 7, 62), "fires after the throttle");
-        assert!(!s.update("b", 1, 62) && s.update("b", 2, 63), "per host");
+        assert!(s.update("b", 4, 62), "first value above 0 (after a registration): catch up");
+        assert!(!s.update("b", 4, 63) && s.update("b", 5, 200), "per host");
     }
 }

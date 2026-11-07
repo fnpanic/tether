@@ -454,7 +454,9 @@ pub async fn install(app: AppHandle, auto: bool) -> Result<(), String> {
 /// Hand verified bytes to the plugin's installer (NSIS on Windows, the .app on macOS). The plugin
 /// checks the signature and the signed version once more.
 fn install_bytes(app: &AppHandle, key: &str, c: &Candidate, bytes: &[u8]) -> Result<(), String> {
-    let mut b = app.updater_builder().pubkey(key).target(target());
+    // `build` insists on endpoints; `restore_update` never fetches them.
+    let endpoints = policy::relay_bases().iter().filter_map(|(_, base)| format!("{base}{}", manifest_path("{{target}}")).parse().ok()).collect();
+    let mut b = app.updater_builder().pubkey(key).target(target()).endpoints(endpoints).map_err(|e| e.to_string())?;
     if let Some(p) = policy::proxy_url().and_then(|p| p.parse().ok()) {
         b = b.proxy(p);
     }
