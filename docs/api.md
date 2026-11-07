@@ -133,11 +133,12 @@ Failure: `401` with a short reason. Bodies over the limits: `413`.
 | `GET /api/admin/diag` | – | `[{ticket,note,created,uploaded,size}]` |
 | `GET /api/admin/diag/<ticket>` | – | the zip (`application/zip`) or `404` |
 | `PUT /api/admin/release/<channel>/<path>` | file bytes (≤ 200 MiB) | `204`. Writes `download/<channel>/<path>` atomically. `<channel>` `[a-z0-9-]{1,32}`; `<path>` segments `[A-Za-z0-9._-]`, no `..`. Upload artifacts first, `latest.json` last. |
-| `DELETE /api/admin/release/<channel>/<path>` | – | `204` |
+| `DELETE /api/admin/release/<channel>/<path>[?force=1]` | – | `204`; `404` if missing. `409 "published release: …"` for `releases.json`, any `latest.json`, and every file of the version the channel's release index or the folder's `latest.json` publishes, unless `?force=1` (part of the signed URL). Forced deletes are logged (`release-prune.jsonl`, journal). |
+| `POST /api/admin/releases/prune` | JSON (≤ 64 KiB, below) | Release clean-up: the plan (`dry_run: true`) or the deletion of the listed versions (below). |
 | `GET /api/admin/releases` | – | `[{channel,path,size,modified}]` |
 | `PUT /api/admin/download-page` | HTML (≤ 512 KiB) | `204`, stored as `download/index.html` |
 | `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>` | – | Session audit records (above), newest first. All optional: `since` (default 0), `limit` 1–5000 (default 1000), `device` matches `id` or `uuid` exactly (URL-encoded). Unknown parameter or bad value: `400`. |
-| `GET /api/admin/status` | – | `{version, disk_free, devices, policy_serial, server_keys_serial, release_generation, release_indexes: {<channel>: {serial, expires}}, uptime}` |
+| `GET /api/admin/status` | – | `{version, disk_free, devices, policy_serial, server_keys_serial, release_generation, release_indexes: {<channel>: {serial, expires}}, uptime, last_prune: {time, files, bytes} \| null}` |
 | `PUT /api/admin/team` | team roster (≤ 64 KiB, below) | `204`. Validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600). `{"members":[]}` turns team access off. |
 | `GET /api/admin/team` | – | the roster (`{"members":[]}` when none) |
 
@@ -207,6 +208,47 @@ format plus three optional fields:
 - `forced`: install without asking after `update.restart-seconds`.
 Clients enforce the stricter of manifest and policy. Blocking is done in the backend (session
 start, accepting incoming sessions), not only in the UI.
+
+### Release clean-up (`POST /api/admin/releases/prune`)
+
+Design and rationale: [release-cleanup.md](release-cleanup.md). Per relay, per folder
+`download/<channel>/<app>/<platform>/`, a **version** is the set of files
+`tether_trust::release::file_version` assigns to it (artifact, `.sig`, TetherQS `.exe.gz`, mac
+`.dmg` + `.dmg.sig`). A version is kept when any of these holds (reason in `why`):
+
+| `why` | Rule |
+| --- | --- |
+| `index` | the version of `<app>/<platform>` in the channel's `releases.json` (halted or not, any rollout percent; verified with the key it names) |
+| `latest.json` | the version in the folder's `latest.json` |
+| `newer` | above the published one (the higher of the two above), or nothing is published in the folder |
+| `previous` | one of the `keep` newest versions below the published one (`keep` 0-20, default 2) |
+| `download page` | a file of it is linked from `download/index.html` |
+| `pinned` | named in `pin` (Tether Manage pins every version in its `cdn-assets.json`) |
+| `recent` | a file of it was modified in the last 24 h |
+| `unreadable release index or latest.json` | the folder's `releases.json` / `latest.json` cannot be read: nothing in it goes |
+
+Everything else is dropped as whole versions. Files no release name matches (`latest.json`,
+`releases.json`, `index.html`, anything unknown) are never touched.
+
+Dry run: `{"dry_run": true, "keep": 2, "pin": [{"channel":"stable","dir":"customer/windows-x86_64","version":"0.5.23"}]}` →
+
+```json
+{"keep_older":2,"drop_bytes":2054613901,"drop_files":190,"kept_bytes":204116694,
+ "groups":[{"channel":"stable","dir":"customer/windows-x86_64","published":"0.5.24","index_serial":8,
+   "keep":[{"version":"0.5.24","files":["TetherQS-0.5.24.exe","…"],"bytes":69797888,"why":["index","latest.json","download page"]}],
+   "drop":[{"version":"0.5.21","files":["TetherQS-0.5.21.exe","TetherQS-0.5.21.exe.sig"],"bytes":34898944}]}]}
+```
+
+Execute: `{"dry_run": false, "keep": 2, "pin": […], "delete": [{"channel":…,"dir":…,"version":…}]}`. The
+relay recomputes the plan (under its state lock, so no upload runs in between) and deletes only
+versions that are both in `delete` and in its own drop list; empty folders are removed. Answer:
+`{"deleted":[{channel,dir,version,files,bytes}], "kept":[{channel,dir,version,"result":"kept",why}],
+"gone":[{channel,dir,version,"result":"gone"}], "failed":[{channel,dir,version,error}], "freed_bytes":n}`:
+`kept` = protected now (e.g. published since the dry run), `gone` = no such version (already
+deleted: repeating an execute is safe). `400` for `keep` > 20, an execute without `delete`, or
+unknown fields. Each execute writes a journal line (`release prune: …`) and a record to
+`release-prune.jsonl` in the data dir (last 100 records, with the deleted versions; forced
+`DELETE`s are recorded there too).
 
 ### Release index (`download/<channel>/releases.json`)
 
