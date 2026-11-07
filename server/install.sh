@@ -159,7 +159,8 @@ if command -v restorecon >/dev/null; then
   [ -f /etc/sysctl.d/90-tether.conf ] && restorecon /etc/sysctl.d/90-tether.conf
 fi
 
-# Host firewall first, so Caddy can get its certificate on the first try: relay ports, 443, and 80 forwarded to 443 (fallback route for clients).
+# Host firewall first, so the front end can get its certificate on the first try: relay ports, 443
+# and 80 (the front end listens on 80 itself and redirects to https; never forward 80 to the TLS port).
 if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
   # Oracle Linux / RHEL family.
   firewall-cmd --permanent --add-port=21115-21117/tcp --add-port=21116/udp --add-port=443/tcp --add-port=80/tcp
@@ -169,19 +170,13 @@ elif command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow 21116/udp
   ufw allow 443/tcp
   ufw allow 80/tcp
-  if ! grep -q "tether: 80->443" /etc/ufw/before.rules; then
-    rules="$(cat /etc/ufw/before.rules)"
-    printf '# tether: 80->443\n*nat\n:PREROUTING ACCEPT [0:0]\n-A PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 443\nCOMMIT\n\n%s\n' "$rules" > /etc/ufw/before.rules
-  fi
   ufw reload
 elif command -v iptables >/dev/null && iptables -S INPUT | grep -q -- "-j REJECT"; then
   # Raw iptables, as on Oracle Cloud's Ubuntu images (INPUT rejects everything except SSH).
-  for rule in "-p tcp -m multiport --dports 21115:21117" "-p udp --dport 21116" "-p tcp --dport 443"; do
+  for rule in "-p tcp -m multiport --dports 21115:21117" "-p udp --dport 21116" "-p tcp --dport 443" "-p tcp --dport 80"; do
     # shellcheck disable=SC2086
     iptables -C INPUT $rule -m state --state NEW -j ACCEPT 2>/dev/null || iptables -I INPUT 5 $rule -m state --state NEW -j ACCEPT
   done
-  iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 443 2>/dev/null \
-    || iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 443
   if command -v netfilter-persistent >/dev/null; then
     netfilter-persistent save
   else
