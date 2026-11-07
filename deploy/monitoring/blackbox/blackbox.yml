@@ -1,0 +1,36 @@
+# blackbox_exporter modules for the probes in prometheus.yml (docs/monitoring.md).
+# @PEER_HOST@: the public name of the node this node probes (install.sh PEER_HOST / REMOTE_HOST).
+modules:
+  http_2xx:
+    prober: http
+    timeout: 8s
+    http:
+      method: GET
+      valid_status_codes: [200]
+      fail_if_not_ssl: true
+      preferred_ip_protocol: ip4
+  # WebSocket endpoints: the upgrade must be answered 101. A raw request over TLS, because the
+  # http prober would wait for the upgraded connection to end.
+  ws_id:
+    prober: tcp
+    timeout: 8s
+    tcp:
+      tls: true
+      preferred_ip_protocol: ip4
+      query_response:
+        - send: "GET /ws/id HTTP/1.1\r\nHost: @PEER_HOST@\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGV0aGVyLW1vbml0b3Jpbmc=\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        - expect: "^HTTP/1.1 101"
+  ws_relay:
+    prober: tcp
+    timeout: 8s
+    tcp:
+      tls: true
+      preferred_ip_protocol: ip4
+      query_response:
+        - send: "GET /ws/relay HTTP/1.1\r\nHost: @PEER_HOST@\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGV0aGVyLW1vbml0b3Jpbmc=\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        - expect: "^HTTP/1.1 101"
+  tcp_connect:
+    prober: tcp
+    timeout: 5s
+    tcp:
+      preferred_ip_protocol: ip4

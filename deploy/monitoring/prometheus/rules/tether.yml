@@ -1,0 +1,137 @@
+# Tether alert rules (docs/monitoring.md › Alerts). Tested by rules.test.yml (promtool test rules).
+groups:
+  - name: tether-availability
+    rules:
+      - alert: NodeDown
+        expr: up{job="node"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.node }} is not reachable"
+          description: "node_exporter on {{ $labels.node }} has not answered for 2 minutes (host down, or for the other node its Caddy /_metrics path)."
+      - alert: TargetDown
+        expr: up{job=~"hbbs|hbbr|api|caddy|blackbox_exporter|alertmanager"} == 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.job }} metrics on {{ $labels.node }} unreachable"
+          description: "Prometheus cannot scrape {{ $labels.job }} on {{ $labels.node }} for 5 minutes: the service is down or does not expose metrics (old binary?)."
+      - alert: ProbeFailed
+        expr: probe_success == 0
+        for: 3m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.probe }} on {{ $labels.node }} fails from {{ $labels.probe_from }}"
+          description: "{{ $labels.instance }} has failed for 3 minutes, probed from {{ $labels.probe_from }}."
+      - alert: RelayUnhealthy
+        expr: hbbs_relay_healthy == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "relay {{ $labels.relay }} unhealthy (seen by hbbs on {{ $labels.node }})"
+          description: "The {{ $labels.role }} relay {{ $labels.relay }} has failed hbbs's 3 s health check for a minute; hbbs does not hand it out."
+      - alert: RelayFailover
+        expr: hbbs_relay_failover == 1
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "hbbs on {{ $labels.node }} hands out backup relays"
+          description: "No primary relay is healthy: new sessions go over the backup relay."
+      - alert: ServiceUnitFailed
+        expr: node_systemd_unit_state{state="failed"} == 1
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.name }} failed on {{ $labels.node }}"
+          description: "systemd reports {{ $labels.name }} as failed."
+      - alert: ServiceRestarting
+        expr: changes(process_start_time_seconds{job=~"hbbs|hbbr|api"}[15m]) > 2
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.job }} on {{ $labels.node }} restarted {{ $value }} times in 15 minutes"
+          description: "A crash loop or repeated restarts."
+
+  - name: tether-capacity
+    rules:
+      - alert: CertificateExpiringSoon
+        expr: probe_ssl_earliest_cert_expiry - time() < 14 * 86400
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "TLS certificate of {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+          description: "Caddy renews 30 days ahead: renewal has failed for over two weeks. Check tether-https logs (TLS-ALPN-01 on 443)."
+      - alert: DiskAlmostFull
+        expr: |
+          1 - node_filesystem_avail_bytes{fstype!~"tmpfs|devtmpfs|overlay|squashfs|ramfs|efivarfs|vfat",mountpoint!~"/boot.*"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|devtmpfs|overlay|squashfs|ramfs|efivarfs|vfat",mountpoint!~"/boot.*"} > 0.85
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.mountpoint }} on {{ $labels.node }} is {{ $value | humanizePercentage }} full"
+          description: "Over 85 % used. tether-api refuses uploads below 2 GiB free; Prometheus keeps 30 days."
+      - alert: HighCpu
+        expr: 1 - avg by (node) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.9
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "CPU on {{ $labels.node }} is {{ $value | humanizePercentage }} busy"
+          description: "Over 90 % for 15 minutes."
+      - alert: MemoryLow
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.node }} has {{ $value | humanizePercentage }} memory available"
+          description: "Under 10 % available for 10 minutes."
+      - alert: ConntrackAlmostFull
+        expr: node_nf_conntrack_entries / node_nf_conntrack_entries_limit > 0.8
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "conntrack table on {{ $labels.node }} {{ $value | humanizePercentage }} full"
+          description: "New connections are dropped when it is full."
+      - alert: HbbrSaturated
+        expr: |
+          sum by (node) (hbbr_sessions) > 150
+            or max by (node) (process_open_fds{job="hbbr"} / process_max_fds{job="hbbr"}) > 0.8
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "hbbr on {{ $labels.node }} near its limit ({{ $value }})"
+          description: "Over 150 relayed sessions (tune to the node's bandwidth: a CX23 has ~1 Gbit/s shared) or over 80 % of its file descriptors."
+      - alert: TurnAllocationsNearCap
+        expr: hbbs_turn_allocations / hbbs_turn_allocations_max > 0.8 and hbbs_turn_allocations_max > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "TURN on {{ $labels.node }} at {{ $value | humanizePercentage }} of TURN_MAX_ALLOCATIONS"
+          description: "New WebRTC sessions fall back to the relay once the cap is reached."
+
+  - name: tether-api
+    rules:
+      - alert: ApiErrors
+        expr: |
+          sum by (node) (rate(tether_api_requests_total{code=~"5.."}[5m]))
+            / sum by (node) (rate(tether_api_requests_total[5m])) > 0.05
+          and sum by (node) (rate(tether_api_requests_total{code=~"5.."}[5m])) > 0.01
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "tether-api on {{ $labels.node }}: {{ $value | humanizePercentage }} of requests fail with 5xx"
+          description: "Check journalctl -u tether-api (500 internal, 503 busy or admin disabled, 507 storage)."
+      - alert: ApiWorkersExhausted
+        expr: increase(tether_api_busy_rejected_total[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "tether-api on {{ $labels.node }} answered 503 busy"
+          description: "All 32 workers were busy: slow clients or a flood."
+
+  - name: tether-meta
+    rules:
+      # Always firing: the end-to-end check of Prometheus -> Alertmanager (and of an optional
+      # dead man's switch outside, docs/monitoring.md).
+      - alert: Watchdog
+        expr: vector(1)
+        labels: { severity: none }
+        annotations:
+          summary: "Alerting pipeline works"

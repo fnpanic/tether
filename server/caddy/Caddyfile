@@ -2,6 +2,15 @@
 # {$RELAY_HOST} comes from /etc/tether/server.env.
 {
 	admin off
+	# Prometheus metrics of the HTTP server (requests, latency), read at 127.0.0.1:21125 below.
+	metrics
+}
+
+# Metrics for Prometheus, localhost only (docs/monitoring.md). The admin API (which would serve
+# them otherwise) stays off.
+http://:21125 {
+	bind 127.0.0.1
+	metrics /metrics
 }
 
 {$RELAY_HOST} {
@@ -49,6 +58,10 @@
 			request_buffers 512k
 		}
 	}
+
+	# Optional extras from the monitoring installer (deploy/monitoring/install.sh): /_metrics/* for
+	# the Prometheus on the other node, /grafana/* on the monitoring node. None by default.
+	import /etc/tether/caddy.d/*.caddy
 
 	# Private custom-app download links (GET /q/<token>, docs/api.md "Custom apps"). No access log
 	# is configured: the tokens are secrets.

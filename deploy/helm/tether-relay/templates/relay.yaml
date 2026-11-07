@@ -19,12 +19,18 @@ kind: Service
 metadata:
   name: {{ $fn }}-{{ $c }}
   labels: {{- include "tr.labels" $ | nindent 4 }}
+    {{- if $.Values.metrics.enabled }}
+    tether.metrics: "true"
+    {{- end }}
 spec:
   clusterIP: None
   publishNotReadyAddresses: true
   selector: {{- include "tr.selector" $ctx | nindent 4 }}
   ports:
     - { name: ws, port: {{ if eq $c "hbbs" }}21118{{ else }}21119{{ end }} }
+    {{- if $.Values.metrics.enabled }}
+    - { name: metrics, port: {{ if eq $c "hbbs" }}21123{{ else }}21124{{ end }} }
+    {{- end }}
 {{- range $i := until (int $v.replicas) }}
 ---
 # One Service per pod: /ws/{{ if eq $c "hbbs" }}id{{ else }}relay{{ end }}/{{ $i }} must reach exactly this pod. Not-ready (draining)
@@ -95,6 +101,10 @@ spec:
             - { name: DRAIN_TIMEOUT, value: {{ $v.drainSeconds | quote }} }
             # hbb_common writes a config dir under HOME; the root filesystem is read-only.
             - { name: HOME, value: /tmp }
+            {{- if $.Values.metrics.enabled }}
+            # /metrics on the pod IP (cluster network only; no Service of type LoadBalancer exposes it).
+            - { name: METRICS_ADDR, value: "0.0.0.0" }
+            {{- end }}
             {{- with $.Values.key.accept }}
             - { name: KEYS_ACCEPT, value: {{ . | quote }} }
             {{- end }}
@@ -107,6 +117,9 @@ spec:
           ports:
             - { name: ws, containerPort: {{ if eq $c "hbbs" }}21118{{ else }}21119{{ end }} }
             - { name: health, containerPort: {{ if eq $c "hbbs" }}21122{{ else }}21121{{ end }} }
+            {{- if $.Values.metrics.enabled }}
+            - { name: metrics, containerPort: {{ if eq $c "hbbs" }}21123{{ else }}21124{{ end }} }
+            {{- end }}
           readinessProbe:
             httpGet: { path: /readyz, port: health }
             periodSeconds: 2

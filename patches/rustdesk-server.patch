@@ -902,20 +902,581 @@ index 9c76f41..fa33db3 100644
 +        assert!(stun_binding_response(&req, "1.2.3.4:5".parse().unwrap()).is_none());
 +    }
 +}
+diff --git a/src/hbbr.rs b/src/hbbr.rs
+index 4c8a784..2f14278 100644
+--- a/src/hbbr.rs
++++ b/src/hbbr.rs
+@@ -1,6 +1,7 @@
+ use clap::App;
+ mod common;
+ mod relay_server;
++mod metrics;
+ use flexi_logger::*;
+ use hbb_common::{config::RELAY_PORT, ResultType};
+ use relay_server::*;
 diff --git a/src/lib.rs b/src/lib.rs
-index 8da29a2..7f2735b 100644
+index 8da29a2..5c72db5 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,8 @@
  mod rendezvous_server;
  pub use rendezvous_server::*;
  pub mod common;
 +pub mod turn;
++pub mod metrics;
  mod database;
  mod peer;
  mod version;
+diff --git a/src/metrics.rs b/src/metrics.rs
+new file mode 100644
+index 0000000..a8e77b5
+--- /dev/null
++++ b/src/metrics.rs
+@@ -0,0 +1,519 @@
++//! Tether: Prometheus metrics of hbbs and hbbr (text exposition format 0.0.4), served on
++//! `METRICS_ADDR`:`METRICS_PORT` (default 127.0.0.1, hbbs 21123, hbbr 21124; port 0 = off).
++//! Labels come from fixed sets only (no peer IDs, IPs or keys); the one exception is the relay
++//! name, which comes from hbbs's own `-r` list (bounded by MAX_RELAYS). docs/monitoring.md.
++#![allow(dead_code)] // one module for both binaries; each uses its half
++
++use std::fmt::Write as _;
++use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
++use std::sync::Mutex;
++
++pub struct Counter(AtomicU64);
++
++impl Counter {
++    pub const fn new() -> Self {
++        Self(AtomicU64::new(0))
++    }
++    pub fn inc(&self) {
++        self.0.fetch_add(1, Relaxed);
++    }
++    pub fn add(&self, n: u64) {
++        self.0.fetch_add(n, Relaxed);
++    }
++    pub fn get(&self) -> u64 {
++        self.0.load(Relaxed)
++    }
++}
++
++pub struct Gauge(AtomicI64);
++
++impl Gauge {
++    pub const fn new() -> Self {
++        Self(AtomicI64::new(0))
++    }
++    pub fn inc(&self) {
++        self.0.fetch_add(1, Relaxed);
++    }
++    pub fn dec(&self) {
++        self.0.fetch_sub(1, Relaxed);
++    }
++    pub fn set(&self, v: i64) {
++        self.0.store(v, Relaxed);
++    }
++    pub fn get(&self) -> i64 {
++        self.0.load(Relaxed)
++    }
++}
++
++/// Decrements a gauge when dropped (open connections, sessions).
++pub struct Open(&'static Gauge);
++
++impl Open {
++    pub fn new(g: &'static Gauge) -> Self {
++        g.inc();
++        Self(g)
++    }
++}
++
++impl Drop for Open {
++    fn drop(&mut self) {
++        self.0.dec();
++    }
++}
++
++// ---- hbbs ----
++
++pub const TRANSPORTS: [&str; 3] = ["udp", "tcp", "ws"];
++pub fn transport(ws: bool) -> usize {
++    if ws { 2 } else { 1 }
++}
++/// RegisterPeer messages by transport (TRANSPORTS).
++pub static REGISTER_PEER: [Counter; 3] = [Counter::new(), Counter::new(), Counter::new()];
++/// Open TCP / WebSocket connections to hbbs's rendezvous ports (index transport()).
++pub static CONNECTIONS: [Gauge; 3] = [Gauge::new(), Gauge::new(), Gauge::new()];
++/// RegisterPk answers by register_pk_response::Result value (0..=8; 1 is unused).
++pub static REGISTER_PK: [Counter; 9] = [
++    Counter::new(), Counter::new(), Counter::new(), Counter::new(), Counter::new(),
++    Counter::new(), Counter::new(), Counter::new(), Counter::new(),
++];
++const REGISTER_PK_RESULTS: [&str; 9] = [
++    "ok", "1", "uuid_mismatch", "id_exists", "too_frequent", "invalid_id_format", "not_support", "server_error", "not_deployed",
++];
++pub fn register_pk(result: i32) {
++    if let Some(c) = REGISTER_PK.get(result as usize) {
++        c.inc();
++    }
++}
++
++pub const PUNCH_OK: usize = 0;
++pub const PUNCH_LAN: usize = 1;
++pub const PUNCH_OFFLINE: usize = 2;
++pub const PUNCH_NOT_EXIST: usize = 3;
++pub const PUNCH_KEY_MISMATCH: usize = 4;
++const PUNCH_RESULTS: [&str; 5] = ["ok", "lan", "offline", "id_not_exist", "key_mismatch"];
++/// PunchHoleRequest outcomes.
++pub static PUNCH: [Counter; 5] = [Counter::new(), Counter::new(), Counter::new(), Counter::new(), Counter::new()];
++/// RegisterPk refused by the per-IP brute-force guard: [too many requests, too many IDs].
++pub static IP_BLOCKED: [Counter; 2] = [Counter::new(), Counter::new()];
++
++/// 1 while hbbs hands out backup relays because no primary is healthy.
++pub static FAILOVER: Gauge = Gauge::new();
++/// Failover transitions: [to backup, back to primary].
++pub static FAILOVER_TRANSITIONS: [Counter; 2] = [Counter::new(), Counter::new()];
++pub static RELAY_CHECKS: Counter = Counter::new();
++
++pub const MAX_RELAYS: usize = 16;
++
++#[derive(Default, Clone)]
++struct Relay {
++    name: String,
++    backup: bool,
++    healthy: bool,
++    sessions: usize,
++    assigned: u64,
++}
++
++static RELAYS: Mutex<Vec<Relay>> = Mutex::new(Vec::new());
++
++fn relay_slot<'a>(v: &'a mut Vec<Relay>, name: &str) -> Option<&'a mut Relay> {
++    if let Some(i) = v.iter().position(|r| r.name == name) {
++        return v.get_mut(i);
++    }
++    if v.len() >= MAX_RELAYS {
++        return None;
++    }
++    v.push(Relay { name: name.to_owned(), ..Default::default() });
++    v.last_mut()
++}
++
++/// Result of one health round: every configured relay (address, backup) and the healthy ones
++/// (address, open sessions, backup).
++pub fn relay_check(all: &[(String, bool)], healthy: &[(String, usize, bool)]) {
++    RELAY_CHECKS.inc();
++    let mut v = RELAYS.lock().unwrap_or_else(|e| e.into_inner());
++    for (name, backup) in all {
++        if let Some(r) = relay_slot(&mut v, name) {
++            let h = healthy.iter().find(|h| &h.0 == name);
++            r.backup = *backup;
++            r.healthy = h.is_some();
++            r.sessions = h.map_or(0, |h| h.1);
++        }
++    }
++}
++
++/// A relay handed out to a pair of peers ("" = none available).
++pub fn relay_assigned(name: &str) {
++    let mut v = RELAYS.lock().unwrap_or_else(|e| e.into_inner());
++    if let Some(r) = relay_slot(&mut v, if name.is_empty() { "none" } else { name }) {
++        r.assigned += 1;
++    }
++}
++
++pub fn failover(using_backup: bool) {
++    if (FAILOVER.get() == 1) != using_backup {
++        FAILOVER_TRANSITIONS[if using_backup { 0 } else { 1 }].inc();
++    }
++    FAILOVER.set(using_backup as i64);
++}
++
++pub static TURN_ALLOCATIONS: Counter = Counter::new();
++pub static TURN_ALLOCATIONS_REFUSED: Counter = Counter::new();
++/// TURN control requests (Allocate, Refresh, CreatePermission, ChannelBind, Send, ChannelData).
++pub static TURN_REQUESTS: Counter = Counter::new();
++/// Unauthenticated TURN requests dropped by the rate limit.
++pub static TURN_UNAUTH_DROPPED: Counter = Counter::new();
++pub static TURN_QUEUE_DROPPED: Counter = Counter::new();
++/// Datagrams dropped by an allocation's bandwidth cap: [to peer, from peer].
++pub static TURN_BANDWIDTH_DROPPED: [Counter; 2] = [Counter::new(), Counter::new()];
++/// Relayed bytes: [to peer, from peer].
++pub static TURN_BYTES: [Counter; 2] = [Counter::new(), Counter::new()];
++
++/// Values hbbs reads at scrape time.
++pub struct HbbsNow {
++    pub peers_online: usize,
++    pub peers_in_memory: usize,
++    pub tcp_signalling: usize,
++    pub turn_enabled: bool,
++    pub turn_open: usize,
++    pub turn_max: usize,
++}
++
++pub fn render_hbbs(now: &HbbsNow) -> String {
++    let mut o = String::new();
++    header(&mut o, "hbbs_peers_online", "gauge", "Hosts registered within the last 30 s (REG_TIMEOUT).");
++    sample(&mut o, "hbbs_peers_online", "", now.peers_online as f64);
++    header(&mut o, "hbbs_peers_signalling", "gauge", "Online hosts by signalling path: tcp = over a TCP or WebSocket connection, udp = the rest.");
++    sample(&mut o, "hbbs_peers_signalling", "transport=\"tcp_ws\"", now.tcp_signalling as f64);
++    sample(&mut o, "hbbs_peers_signalling", "transport=\"udp\"", now.peers_online.saturating_sub(now.tcp_signalling) as f64);
++    header(&mut o, "hbbs_peers_in_memory", "gauge", "Peers held in memory (online or not).");
++    sample(&mut o, "hbbs_peers_in_memory", "", now.peers_in_memory as f64);
++    header(&mut o, "hbbs_connections", "gauge", "Open connections to the rendezvous ports.");
++    for i in 1..3 {
++        sample(&mut o, "hbbs_connections", &format!("transport=\"{}\"", TRANSPORTS[i]), CONNECTIONS[i].get() as f64);
++    }
++    header(&mut o, "hbbs_register_peer_total", "counter", "RegisterPeer messages received.");
++    for (i, t) in TRANSPORTS.iter().enumerate() {
++        sample(&mut o, "hbbs_register_peer_total", &format!("transport=\"{t}\""), REGISTER_PEER[i].get() as f64);
++    }
++    header(&mut o, "hbbs_register_pk_total", "counter", "RegisterPk answers by result.");
++    for (i, r) in REGISTER_PK_RESULTS.iter().enumerate() {
++        if i != 1 {
++            sample(&mut o, "hbbs_register_pk_total", &format!("result=\"{r}\""), REGISTER_PK[i].get() as f64);
++        }
++    }
++    header(&mut o, "hbbs_punch_hole_total", "counter", "PunchHoleRequest outcomes (ok = punch hole sent, lan = local address fetch).");
++    for (i, r) in PUNCH_RESULTS.iter().enumerate() {
++        sample(&mut o, "hbbs_punch_hole_total", &format!("result=\"{r}\""), PUNCH[i].get() as f64);
++    }
++    header(&mut o, "hbbs_ip_blocked_total", "counter", "RegisterPk refused by the per-IP brute-force guard.");
++    sample(&mut o, "hbbs_ip_blocked_total", "reason=\"rate\"", IP_BLOCKED[0].get() as f64);
++    sample(&mut o, "hbbs_ip_blocked_total", "reason=\"ids\"", IP_BLOCKED[1].get() as f64);
++
++    header(&mut o, "hbbs_relay_failover", "gauge", "1 while no primary relay is healthy and backups are handed out.");
++    sample(&mut o, "hbbs_relay_failover", "", FAILOVER.get() as f64);
++    header(&mut o, "hbbs_relay_failover_transitions_total", "counter", "Switches between primary and backup relays.");
++    sample(&mut o, "hbbs_relay_failover_transitions_total", "to=\"backup\"", FAILOVER_TRANSITIONS[0].get() as f64);
++    sample(&mut o, "hbbs_relay_failover_transitions_total", "to=\"primary\"", FAILOVER_TRANSITIONS[1].get() as f64);
++    header(&mut o, "hbbs_relay_checks_total", "counter", "Relay health rounds (every 3 s with more than one relay).");
++    sample(&mut o, "hbbs_relay_checks_total", "", RELAY_CHECKS.get() as f64);
++    let relays = RELAYS.lock().unwrap_or_else(|e| e.into_inner()).clone();
++    header(&mut o, "hbbs_relay_healthy", "gauge", "1 if the relay passed the last health check.");
++    for r in relays.iter().filter(|r| r.name != "none") {
++        let l = relay_labels(r);
++        sample(&mut o, "hbbs_relay_healthy", &l, r.healthy as u8 as f64);
++    }
++    header(&mut o, "hbbs_relay_sessions", "gauge", "Open sessions the relay reported in the last health check.");
++    for r in relays.iter().filter(|r| r.name != "none") {
++        sample(&mut o, "hbbs_relay_sessions", &relay_labels(r), r.sessions as f64);
++    }
++    header(&mut o, "hbbs_relay_assigned_total", "counter", "Relay handed out to a pair of peers (relay=\"none\": none available).");
++    for r in relays.iter() {
++        sample(&mut o, "hbbs_relay_assigned_total", &relay_labels(r), r.assigned as f64);
++    }
++
++    header(&mut o, "hbbs_turn_enabled", "gauge", "1 if hbbs runs the TURN server.");
++    sample(&mut o, "hbbs_turn_enabled", "", now.turn_enabled as u8 as f64);
++    header(&mut o, "hbbs_turn_allocations", "gauge", "Open TURN allocations.");
++    sample(&mut o, "hbbs_turn_allocations", "", now.turn_open as f64);
++    header(&mut o, "hbbs_turn_allocations_max", "gauge", "TURN_MAX_ALLOCATIONS.");
++    sample(&mut o, "hbbs_turn_allocations_max", "", now.turn_max as f64);
++    header(&mut o, "hbbs_turn_allocations_total", "counter", "TURN allocations made.");
++    sample(&mut o, "hbbs_turn_allocations_total", "", TURN_ALLOCATIONS.get() as f64);
++    header(&mut o, "hbbs_turn_allocations_refused_total", "counter", "TURN allocations refused at TURN_MAX_ALLOCATIONS.");
++    sample(&mut o, "hbbs_turn_allocations_refused_total", "", TURN_ALLOCATIONS_REFUSED.get() as f64);
++    header(&mut o, "hbbs_turn_requests_total", "counter", "TURN control datagrams (requests and channel data) taken.");
++    sample(&mut o, "hbbs_turn_requests_total", "", TURN_REQUESTS.get() as f64);
++    header(&mut o, "hbbs_turn_dropped_total", "counter", "TURN datagrams dropped: unauthenticated over the rate limit, control queue full, bandwidth cap.");
++    sample(&mut o, "hbbs_turn_dropped_total", "reason=\"unauth_rate\"", TURN_UNAUTH_DROPPED.get() as f64);
++    sample(&mut o, "hbbs_turn_dropped_total", "reason=\"queue_full\"", TURN_QUEUE_DROPPED.get() as f64);
++    sample(&mut o, "hbbs_turn_dropped_total", "reason=\"bandwidth_to_peer\"", TURN_BANDWIDTH_DROPPED[0].get() as f64);
++    sample(&mut o, "hbbs_turn_dropped_total", "reason=\"bandwidth_from_peer\"", TURN_BANDWIDTH_DROPPED[1].get() as f64);
++    header(&mut o, "hbbs_turn_bytes_total", "counter", "Bytes relayed by TURN allocations.");
++    sample(&mut o, "hbbs_turn_bytes_total", "direction=\"to_peer\"", TURN_BYTES[0].get() as f64);
++    sample(&mut o, "hbbs_turn_bytes_total", "direction=\"from_peer\"", TURN_BYTES[1].get() as f64);
++    common(&mut o);
++    o
++}
++
++fn relay_labels(r: &Relay) -> String {
++    let name: String = r.name.chars().filter(|c| !matches!(c, '"' | '\\' | '\n')).take(128).collect();
++    format!("relay=\"{name}\",role=\"{}\"", if r.backup { "backup" } else { "primary" })
++}
++
++// ---- hbbr ----
++
++/// Relay requests waiting for their peer.
++pub static PAIR_WAITING: Gauge = Gauge::new();
++/// Waiting relay requests whose peer never came (30 s).
++pub static PAIR_TIMEOUTS: Counter = Counter::new();
++/// New relay requests refused while draining.
++pub static PAIR_REFUSED_DRAINING: Counter = Counter::new();
++/// Pairs made by transport: [tcp (both raw), ws (either side WebSocket)].
++pub static PAIRED: [Counter; 2] = [Counter::new(), Counter::new()];
++/// Open sessions by transport, as PAIRED.
++pub static RELAY_SESSIONS: [Gauge; 2] = [Gauge::new(), Gauge::new()];
++/// Bytes relayed (each byte is received from one side and sent to the other once).
++pub static RELAY_BYTES: Counter = Counter::new();
++/// Sessions slowed to LIMIT_SPEED after exceeding the downgrade threshold.
++pub static DOWNGRADES: Counter = Counter::new();
++/// Connections or sessions closed because the IP is on the blocklist.
++pub static BLOCKED: Counter = Counter::new();
++
++pub fn render_hbbr(draining: bool) -> String {
++    let mut o = String::new();
++    header(&mut o, "hbbr_sessions", "gauge", "Paired sessions being relayed.");
++    sample(&mut o, "hbbr_sessions", "transport=\"tcp\"", RELAY_SESSIONS[0].get() as f64);
++    sample(&mut o, "hbbr_sessions", "transport=\"ws\"", RELAY_SESSIONS[1].get() as f64);
++    header(&mut o, "hbbr_pairs_total", "counter", "Relay requests paired with their peer.");
++    sample(&mut o, "hbbr_pairs_total", "transport=\"tcp\"", PAIRED[0].get() as f64);
++    sample(&mut o, "hbbr_pairs_total", "transport=\"ws\"", PAIRED[1].get() as f64);
++    header(&mut o, "hbbr_pair_waiting", "gauge", "Relay requests waiting for their peer.");
++    sample(&mut o, "hbbr_pair_waiting", "", PAIR_WAITING.get() as f64);
++    header(&mut o, "hbbr_pair_timeouts_total", "counter", "Relay requests whose peer did not come within 30 s.");
++    sample(&mut o, "hbbr_pair_timeouts_total", "", PAIR_TIMEOUTS.get() as f64);
++    header(&mut o, "hbbr_pair_refused_draining_total", "counter", "New relay requests refused while draining.");
++    sample(&mut o, "hbbr_pair_refused_draining_total", "", PAIR_REFUSED_DRAINING.get() as f64);
++    header(&mut o, "hbbr_relayed_bytes_total", "counter", "Bytes relayed between the two sides of all sessions.");
++    sample(&mut o, "hbbr_relayed_bytes_total", "", RELAY_BYTES.get() as f64);
++    header(&mut o, "hbbr_downgrades_total", "counter", "Sessions slowed to LIMIT_SPEED by the bandwidth limiter.");
++    sample(&mut o, "hbbr_downgrades_total", "", DOWNGRADES.get() as f64);
++    header(&mut o, "hbbr_blocked_total", "counter", "Connections or sessions closed for a blocklisted IP.");
++    sample(&mut o, "hbbr_blocked_total", "", BLOCKED.get() as f64);
++    header(&mut o, "hbbr_draining", "gauge", "1 while hbbr drains (stopping, takes no new sessions).");
++    sample(&mut o, "hbbr_draining", "", draining as u8 as f64);
++    common(&mut o);
++    o
++}
++
++// ---- shared ----
++
++fn header(o: &mut String, name: &str, typ: &str, help: &str) {
++    let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} {typ}");
++}
++
++fn sample(o: &mut String, name: &str, labels: &str, v: f64) {
++    if labels.is_empty() {
++        let _ = writeln!(o, "{name} {v}");
++    } else {
++        let _ = writeln!(o, "{name}{{{labels}}} {v}");
++    }
++}
++
++fn common(o: &mut String) {
++    header(o, "tether_build_info", "gauge", "Build version.");
++    sample(o, "tether_build_info", &format!("version=\"{}\"", crate::version::VERSION), 1.);
++    process(o);
++}
++
++/// process_* metrics from /proc/self, named like the Prometheus client libraries do.
++pub fn process(o: &mut String) {
++    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
++    let field = |k: &str| {
++        status.lines().find_map(|l| l.strip_prefix(k)?.split_whitespace().next()?.parse::<f64>().ok())
++    };
++    // shortcut: assumes USER_HZ = 100 (true on Linux x86_64 and arm64); use sysconf if that changes.
++    const HZ: f64 = 100.;
++    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
++    // Fields after "(comm) ": index 0 is field 3 (state); utime = 14, stime = 15, starttime = 22.
++    let f: Vec<f64> = stat.rsplit_once(") ").map_or(vec![], |(_, r)| r.split(' ').map(|x| x.parse().unwrap_or(0.)).collect());
++    let at = |n: usize| f.get(n - 3).copied().unwrap_or(0.);
++    let btime = std::fs::read_to_string("/proc/stat")
++        .unwrap_or_default()
++        .lines()
++        .find_map(|l| l.strip_prefix("btime ")?.trim().parse::<f64>().ok())
++        .unwrap_or(0.);
++    let fds = std::fs::read_dir("/proc/self/fd").map_or(0, |d| d.count());
++    let max_fds = std::fs::read_to_string("/proc/self/limits")
++        .unwrap_or_default()
++        .lines()
++        .find_map(|l| l.strip_prefix("Max open files")?.split_whitespace().next()?.parse::<f64>().ok())
++        .unwrap_or(0.);
++    for (name, typ, help, v) in [
++        ("process_cpu_seconds_total", "counter", "User and system CPU time spent in seconds.", (at(14) + at(15)) / HZ),
++        ("process_resident_memory_bytes", "gauge", "Resident memory size in bytes.", field("VmRSS:").unwrap_or(0.) * 1024.),
++        ("process_virtual_memory_bytes", "gauge", "Virtual memory size in bytes.", field("VmSize:").unwrap_or(0.) * 1024.),
++        ("process_threads", "gauge", "Number of OS threads.", field("Threads:").unwrap_or(0.)),
++        ("process_open_fds", "gauge", "Number of open file descriptors.", fds as f64),
++        ("process_max_fds", "gauge", "Maximum number of open file descriptors.", max_fds),
++        ("process_start_time_seconds", "gauge", "Start time of the process since unix epoch in seconds.", btime + at(22) / HZ),
++    ] {
++        header(o, name, typ, help);
++        sample(o, name, "", v);
++    }
++}
++
++/// Serves `GET /metrics` with `render()` on METRICS_ADDR:METRICS_PORT (default 127.0.0.1 and
++/// `default_port`; port 0 = off). Never bind it to a public address: docs/monitoring.md.
++pub async fn serve<F, Fut>(default_port: u16, render: F)
++where
++    F: Fn() -> Fut + Send + Sync + Clone + 'static,
++    Fut: std::future::Future<Output = String> + Send,
++{
++    use hbb_common::tokio::io::{AsyncReadExt, AsyncWriteExt};
++    let port: u16 = std::env::var("METRICS_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(default_port);
++    if port == 0 {
++        return;
++    }
++    let addr = std::env::var("METRICS_ADDR").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "127.0.0.1".into());
++    let listener = match hbb_common::tokio::net::TcpListener::bind((addr.trim(), port)).await {
++        Ok(l) => l,
++        Err(err) => {
++            hbb_common::log::error!("metrics endpoint on {addr}:{port} failed: {err}");
++            return;
++        }
++    };
++    hbb_common::log::info!("Metrics endpoint on http://{addr}:{port}/metrics");
++    while let Ok((mut stream, _)) = listener.accept().await {
++        let render = render.clone();
++        hbb_common::tokio::spawn(async move {
++            let mut buf = [0u8; 1024];
++            let n = match hbb_common::timeout(2_000, stream.read(&mut buf)).await {
++                Ok(Ok(n)) => n,
++                _ => return,
++            };
++            let req = String::from_utf8_lossy(&buf[..n]);
++            let path = req.split_whitespace().nth(1).unwrap_or("");
++            let (code, body) = if path.split('?').next() == Some("/metrics") {
++                ("200 OK", render().await)
++            } else {
++                ("404 Not Found", "not found\n".to_owned())
++            };
++            let res = format!(
++                "HTTP/1.1 {code}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
++                body.len()
++            );
++            stream.write_all(res.as_bytes()).await.ok();
++        });
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn value(text: &str, series: &str) -> f64 {
++        text.lines()
++            .find_map(|l| l.strip_prefix(series)?.strip_prefix(' ')?.parse().ok())
++            .unwrap_or_else(|| panic!("{series} missing in\n{text}"))
++    }
++
++    fn now() -> HbbsNow {
++        HbbsNow { peers_online: 5, peers_in_memory: 9, tcp_signalling: 2, turn_enabled: true, turn_open: 1, turn_max: 64 }
++    }
++
++    // Statics are shared by the tests of this module: each test uses its own series.
++    #[test]
++    fn hbbs_counters_move_and_render() {
++        let before = render_hbbs(&now());
++        PUNCH[PUNCH_OFFLINE].inc();
++        register_pk(4);
++        register_pk(99); // out of range: ignored
++        REGISTER_PEER[transport(true)].inc();
++        TURN_BYTES[1].add(1500);
++        let after = render_hbbs(&now());
++        for s in [
++            "hbbs_punch_hole_total{result=\"offline\"}",
++            "hbbs_register_pk_total{result=\"too_frequent\"}",
++            "hbbs_register_peer_total{transport=\"ws\"}",
++        ] {
++            assert_eq!(value(&after, s), value(&before, s) + 1., "{s}");
++        }
++        assert_eq!(value(&after, "hbbs_turn_bytes_total{direction=\"from_peer\"}"), value(&before, "hbbs_turn_bytes_total{direction=\"from_peer\"}") + 1500.);
++        assert_eq!(value(&after, "hbbs_peers_signalling{transport=\"udp\"}"), 3.);
++        assert_eq!(value(&after, "hbbs_turn_allocations_max"), 64.);
++        assert!(value(&after, "process_resident_memory_bytes") > 0.);
++        assert!(value(&after, "process_open_fds") > 0.);
++        assert!(value(&after, "process_start_time_seconds") > 1.6e9);
++        // Every sample line belongs to a declared metric.
++        for l in after.lines().filter(|l| !l.starts_with('#')) {
++            let name = l.split(['{', ' ']).next().unwrap();
++            assert!(after.contains(&format!("# TYPE {name} ")), "undeclared {name}");
++        }
++    }
++
++    #[test]
++    fn relays_health_assignment_and_failover() {
++        let all = vec![("a.example".to_owned(), false), ("b.example".to_owned(), true)];
++        relay_check(&all, &[("a.example".into(), 3, false), ("b.example".into(), 0, true)]);
++        relay_assigned("a.example");
++        relay_assigned("a.example");
++        relay_assigned("");
++        let t = render_hbbs(&now());
++        assert_eq!(value(&t, "hbbs_relay_healthy{relay=\"a.example\",role=\"primary\"}"), 1.);
++        assert_eq!(value(&t, "hbbs_relay_sessions{relay=\"a.example\",role=\"primary\"}"), 3.);
++        assert_eq!(value(&t, "hbbs_relay_assigned_total{relay=\"a.example\",role=\"primary\"}"), 2.);
++        assert_eq!(value(&t, "hbbs_relay_assigned_total{relay=\"none\",role=\"primary\"}"), 1.);
++        relay_check(&all, &[("b.example".into(), 0, true)]);
++        failover(true);
++        failover(true); // no new transition
++        let t = render_hbbs(&now());
++        assert_eq!(value(&t, "hbbs_relay_healthy{relay=\"a.example\",role=\"primary\"}"), 0.);
++        assert_eq!(value(&t, "hbbs_relay_failover"), 1.);
++        assert_eq!(value(&t, "hbbs_relay_failover_transitions_total{to=\"backup\"}"), 1.);
++        failover(false);
++        let t = render_hbbs(&now());
++        assert_eq!(value(&t, "hbbs_relay_failover_transitions_total{to=\"primary\"}"), 1.);
++        // The label set stays bounded whatever names come in.
++        for i in 0..100 {
++            relay_assigned(&format!("r{i}"));
++        }
++        assert!(RELAYS.lock().unwrap().len() <= MAX_RELAYS);
++    }
++
++    #[test]
++    fn hbbr_render() {
++        {
++            let _s = Open::new(&RELAY_SESSIONS[1]);
++            PAIRED[1].inc();
++            RELAY_BYTES.add(10);
++            let t = render_hbbr(true);
++            assert_eq!(value(&t, "hbbr_sessions{transport=\"ws\"}"), 1.);
++            assert_eq!(value(&t, "hbbr_pairs_total{transport=\"ws\"}"), 1.);
++            assert_eq!(value(&t, "hbbr_relayed_bytes_total"), 10.);
++            assert_eq!(value(&t, "hbbr_draining"), 1.);
++        }
++        assert_eq!(value(&render_hbbr(false), "hbbr_sessions{transport=\"ws\"}"), 0.);
++    }
++
++    #[test]
++    fn serves_metrics_on_localhost_only() {
++        hbb_common::tokio::runtime::Runtime::new().unwrap().block_on(async {
++            use hbb_common::tokio::io::{AsyncReadExt, AsyncWriteExt};
++            // Free port, then serve on it (METRICS_PORT is read by serve; this test owns it).
++            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
++            std::env::set_var("METRICS_PORT", port.to_string());
++            hbb_common::tokio::spawn(serve(1, || async { render_hbbr(false) }));
++            let mut got = String::new();
++            for _ in 0..50 {
++                hbb_common::tokio::time::sleep(std::time::Duration::from_millis(20)).await;
++                if let Ok(mut s) = hbb_common::tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
++                    s.write_all(b"GET /metrics HTTP/1.1\r\n\r\n").await.unwrap();
++                    s.read_to_string(&mut got).await.ok();
++                    break;
++                }
++            }
++            assert!(got.starts_with("HTTP/1.1 200 OK"), "{got}");
++            assert!(got.contains("# TYPE hbbr_sessions gauge"));
++        });
++    }
++}
+diff --git a/src/peer.rs b/src/peer.rs
+index 4ca87cf..7efd9c5 100644
+--- a/src/peer.rs
++++ b/src/peer.rs
+@@ -173,6 +173,18 @@ impl PeerMap {
+         self.map.read().await.get(id).cloned()
+     }
+ 
++    /// Tether metrics: (peers registered within `timeout_ms`, peers in memory).
++    pub(crate) async fn count_online(&self, timeout_ms: u128) -> (usize, usize) {
++        let peers: Vec<LockPeer> = self.map.read().await.values().cloned().collect();
++        let mut online = 0;
++        for p in &peers {
++            if p.read().await.last_reg_time.elapsed().as_millis() < timeout_ms {
++                online += 1;
++            }
++        }
++        (online, peers.len())
++    }
++
+     #[inline]
+     pub(crate) async fn is_in_memory(&self, id: &str) -> bool {
+         self.map.read().await.contains_key(id)
 diff --git a/src/relay_server.rs b/src/relay_server.rs
-index 0ec190a..69ae13b 100644
+index 0ec190a..f1dd2ce 100644
 --- a/src/relay_server.rs
 +++ b/src/relay_server.rs
 @@ -42,12 +42,19 @@ static DOWNGRADE_START_CHECK: AtomicUsize = AtomicUsize::new(1_800_000); // in m
@@ -938,19 +1499,28 @@ index 0ec190a..69ae13b 100644
      if let Ok(mut file) = std::fs::File::open(BLACKLIST_FILE) {
          let mut contents = String::new();
          if file.read_to_string(&mut contents).is_ok() {
-@@ -88,7 +95,10 @@ pub async fn start(port: &str, key: &str) -> ResultType<()> {
+@@ -88,7 +95,11 @@ pub async fn start(port: &str, key: &str) -> ResultType<()> {
              io_loop(listen_any(port).await?, listen_any(port2).await?, &key).await;
          }
      };
 -    let listen_signal = crate::common::listen_signal();
 +    tokio::spawn(crate::common::serve_health(HEALTH_PORT, || SESSIONS.load(Ordering::SeqCst)));
++    tokio::spawn(crate::metrics::serve(21124, || async { crate::metrics::render_hbbr(crate::common::is_draining()) }));
 +    let listen_signal = crate::common::listen_signal_and_drain(|| {
 +        SESSIONS.load(Ordering::SeqCst) == 0 && PEERS.try_lock().map_or(false, |p| p.is_empty())
 +    });
      tokio::select!(
          res = main_task => res,
          res = listen_signal => res,
-@@ -427,7 +437,7 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
+@@ -381,6 +392,7 @@ async fn handle_connection(
+     let ip = ip.to_string();
+     if BLOCKLIST.read().await.get(&ip).is_some() {
+         log::info!("{} blocked", ip);
++        crate::metrics::BLOCKED.inc();
+         return;
+     }
+     let key = key.to_owned();
+@@ -427,7 +439,7 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
      if let Ok(Some(Ok(bytes))) = timeout(30_000, stream.recv()).await {
          if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
              if let Some(rendezvous_message::Union::RequestRelay(rf)) = msg_in.union {
@@ -959,10 +1529,13 @@ index 0ec190a..69ae13b 100644
                      log::warn!("Relay authentication failed from {} - invalid key", addr);
                      return;
                  }
-@@ -442,13 +452,18 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
+@@ -442,18 +454,32 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                              stream.set_raw();
                              log::info!("Both are raw");
                          }
++                        let t = (stream.is_ws() || peer.is_ws()) as usize;
++                        crate::metrics::PAIRED[t].inc();
++                        let _open = crate::metrics::Open::new(&crate::metrics::RELAY_SESSIONS[t]);
 +                        SESSIONS.fetch_add(1, Ordering::SeqCst);
                          if let Err(err) = relay(addr, &mut stream, peer, limiter, id.clone()).await
                          {
@@ -975,10 +1548,55 @@ index 0ec190a..69ae13b 100644
 +                    } else if refuse_new_pairs() {
 +                        // Draining: the client asks hbbs again and gets another relay.
 +                        log::info!("Draining, refused new relay request {} from {}", rf.uuid, addr);
++                        crate::metrics::PAIR_REFUSED_DRAINING.inc();
                      } else {
                          log::info!("New relay request {} from {}", rf.uuid, addr);
                          PEERS.lock().await.insert(rf.uuid.clone(), Box::new(stream));
-@@ -565,6 +580,11 @@ async fn relay(
+-                        sleep(30.).await;
+-                        PEERS.lock().await.remove(&rf.uuid);
++                        {
++                            let _waiting = crate::metrics::Open::new(&crate::metrics::PAIR_WAITING);
++                            sleep(30.).await;
++                        }
++                        if PEERS.lock().await.remove(&rf.uuid).is_some() {
++                            crate::metrics::PAIR_TIMEOUTS.inc();
++                        }
+                     }
+                 }
+             }
+@@ -497,6 +523,7 @@ async fn relay(
+                     total_limiter.consume(nb).await;
+                     total += nb;
+                     total_s += nb;
++                    crate::metrics::RELAY_BYTES.add(bytes.len() as u64);
+                     if !bytes.is_empty() {
+                         stream.send_raw(bytes.into()).await?;
+                     }
+@@ -516,6 +543,7 @@ async fn relay(
+                     total_limiter.consume(nb).await;
+                     total += nb;
+                     total_s += nb;
++                    crate::metrics::RELAY_BYTES.add(bytes.len() as u64);
+                     if !bytes.is_empty() {
+                         peer.send_raw(bytes.into()).await?;
+                     }
+@@ -534,6 +562,7 @@ async fn relay(
+         if n >= 1_000 {
+             if BLOCKLIST.read().await.get(&ip).is_some() {
+                 log::info!("{} blocked", ip);
++                crate::metrics::BLOCKED.inc();
+                 break;
+             }
+             blacked = BLACKLIST.read().await.get(&ip).is_some();
+@@ -553,6 +582,7 @@ async fn relay(
+                 && total > elapsed * downgrade_threshold
+             {
+                 downgrade = true;
++                crate::metrics::DOWNGRADES.inc();
+                 log::info!(
+                     "Downgrade {}, exceed downgrade threshold {}bit/ms in {}ms",
+                     id,
+@@ -565,6 +595,11 @@ async fn relay(
      Ok(())
  }
  
@@ -991,7 +1609,7 @@ index 0ec190a..69ae13b 100644
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..cd61d7d 100644
+index dff45eb..abcc2b4 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,12 @@ use std::{
@@ -1072,19 +1690,31 @@ index dff45eb..cd61d7d 100644
          let (tx, mut rx) = mpsc::unbounded_channel::<Data>();
          let software_url = get_arg("software-url");
          let version = hbb_common::get_version_from_url(&software_url);
-@@ -221,7 +245,10 @@ impl RendezvousServer {
+@@ -147,6 +171,7 @@ impl RendezvousServer {
+         log::info!("local-ip: {:?}", rs.inner.local_ip);
+         std::env::set_var("PORT_FOR_API", port.to_string());
+         rs.parse_relay_servers(&get_arg("relay-servers"));
++        let pm_metrics = rs.pm.clone();
+         let mut listener = create_tcp_listener(port).await?;
+         let mut listener2 = create_tcp_listener(nat_port).await?;
+         let mut listener3 = create_tcp_listener(ws_port).await?;
+@@ -221,7 +246,14 @@ impl RendezvousServer {
                  }
              }
          };
 -        let listen_signal = listen_signal();
 +        tokio::spawn(serve_health(HEALTH_PORT, || TCP_PEERS.try_lock().map_or(0, |p| p.len())));
++        tokio::spawn(crate::metrics::serve(21123, move || {
++            let pm = pm_metrics.clone();
++            async move { render_metrics(&pm).await }
++        }));
 +        // Nothing to wait for: hosts registered here are registered with the other servers too
 +        // and reconnect; DRAIN_TIMEOUT only gives proxies time to stop sending new requests.
 +        let listen_signal = listen_signal_and_drain(|| false);
          tokio::select!(
              res = main_task => res,
              res = listen_signal => res,
-@@ -237,6 +264,9 @@ impl RendezvousServer {
+@@ -237,6 +269,9 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> LoopFailure {
@@ -1094,7 +1724,7 @@ index dff45eb..cd61d7d 100644
          let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
          loop {
              tokio::select! {
-@@ -251,9 +281,24 @@ impl RendezvousServer {
+@@ -251,9 +286,25 @@ impl RendezvousServer {
                  }
                  Some(data) = rx.recv() => {
                      match data {
@@ -1116,12 +1746,13 @@ index dff45eb..cd61d7d 100644
 +                            } else if !had && has && self.relay_servers.iter().any(|r| r.2) {
 +                                log::info!("relay failover: primary relay healthy again");
 +                            }
++                            crate::metrics::failover(!has && rs.iter().any(|r| r.2));
 +                            self.relay_servers = Arc::new(rs);
 +                        }
                      }
                  }
                  res = socket.next() => {
-@@ -321,6 +366,16 @@ impl RendezvousServer {
+@@ -321,10 +372,21 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> ResultType<()> {
@@ -1138,7 +1769,12 @@ index dff45eb..cd61d7d 100644
          if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
              match msg_in.union {
                  Some(rendezvous_message::Union::RegisterPeer(rp)) => {
-@@ -340,89 +395,9 @@ impl RendezvousServer {
+                     // B registered
++                    crate::metrics::REGISTER_PEER[0].inc();
+                     if !rp.id.is_empty() {
+                         log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
+                         self.update_addr(rp.id, addr, socket).await?;
+@@ -340,89 +402,9 @@ impl RendezvousServer {
                      }
                  }
                  Some(rendezvous_message::Union::RegisterPk(rk)) => {
@@ -1193,7 +1829,9 @@ index dff45eb..cd61d7d 100644
 -                        req_pk.0 = 0;
 -                    } else if req_pk.0 > 2 {
 -                        return send_rk_res(socket, addr, TOO_FREQUENT).await;
--                    }
++                    if let Some(msg_out) = self.register_pk(rk, addr).await {
++                        socket.send(&msg_out, addr).await?
+                     }
 -                    req_pk.0 += 1;
 -                    req_pk.1 = Instant::now();
 -                    peer.write().await.reg_pk = req_pk;
@@ -1218,9 +1856,7 @@ index dff45eb..cd61d7d 100644
 -                    }
 -                    if changed {
 -                        self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
-+                    if let Some(msg_out) = self.register_pk(rk, addr).await {
-+                        socket.send(&msg_out, addr).await?
-                     }
+-                    }
 -                    let mut msg_out = RendezvousMessage::new();
 -                    msg_out.set_register_pk_response(RegisterPkResponse {
 -                        result: register_pk_response::Result::OK.into(),
@@ -1230,7 +1866,7 @@ index dff45eb..cd61d7d 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // UDP PunchHoleRequest is intentionally unsupported.
-@@ -479,9 +454,33 @@ impl RendezvousServer {
+@@ -479,9 +461,34 @@ impl RendezvousServer {
          addr: SocketAddr,
          key: &str,
          ws: bool,
@@ -1242,6 +1878,7 @@ index dff45eb..cd61d7d 100644
 +                    // Host registered over TCP/WebSocket: keep this connection as its signalling path,
 +                    // but only once register_peer accepted it (known key, same IP). Otherwise the
 +                    // answer is request_pk and the RegisterPk that follows decides.
++                    crate::metrics::REGISTER_PEER[crate::metrics::transport(ws)].inc();
 +                    if !rp.id.is_empty() {
 +                        let mut msg_out = self.register_peer(rp.id.clone(), addr).await;
 +                        if !msg_out.register_peer_response().request_pk {
@@ -1264,7 +1901,7 @@ index dff45eb..cd61d7d 100644
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // there maybe several attempt, so sink can be none
                      if let Some(sink) = sink.take() {
-@@ -521,8 +520,18 @@ impl RendezvousServer {
+@@ -521,8 +528,18 @@ impl RendezvousServer {
                              rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
                          }
                      }
@@ -1284,7 +1921,7 @@ index dff45eb..cd61d7d 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
                      allow_err!(self.handle_hole_sent(phs, addr, None).await);
-@@ -545,14 +554,23 @@ impl RendezvousServer {
+@@ -545,14 +562,23 @@ impl RendezvousServer {
                      msg_out.set_test_nat_response(res);
                      Self::send_to_sink(sink, msg_out).await;
                  }
@@ -1316,7 +1953,7 @@ index dff45eb..cd61d7d 100644
                  }
                  _ => {}
              }
-@@ -567,6 +585,12 @@ impl RendezvousServer {
+@@ -567,6 +593,12 @@ impl RendezvousServer {
          socket_addr: SocketAddr,
          socket: &mut FramedSocket,
      ) -> ResultType<()> {
@@ -1329,7 +1966,7 @@ index dff45eb..cd61d7d 100644
          let (request_pk, ip_change) = if let Some(old) = self.pm.get_in_memory(&id).await {
              let mut old = old.write().await;
              let ip = socket_addr.ip();
-@@ -601,7 +625,109 @@ impl RendezvousServer {
+@@ -601,7 +633,110 @@ impl RendezvousServer {
              request_pk,
              ..Default::default()
          });
@@ -1431,6 +2068,7 @@ index dff45eb..cd61d7d 100644
 +        if changed {
 +            self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
 +        }
++        crate::metrics::register_pk(0);
 +        let mut msg_out = RendezvousMessage::new();
 +        msg_out.set_register_pk_response(RegisterPkResponse {
 +            result: register_pk_response::Result::OK.into(),
@@ -1440,7 +2078,7 @@ index dff45eb..cd61d7d 100644
      }
  
      #[inline]
-@@ -620,17 +746,25 @@ impl RendezvousServer {
+@@ -620,17 +755,25 @@ impl RendezvousServer {
              &addr
          );
          let mut msg_out = RendezvousMessage::new();
@@ -1467,7 +2105,7 @@ index dff45eb..cd61d7d 100644
              socket.send(&msg_out, addr_a).await?;
          } else {
              self.send_to_tcp(msg_out, addr_a).await;
-@@ -658,6 +792,7 @@ impl RendezvousServer {
+@@ -658,6 +801,7 @@ impl RendezvousServer {
              socket_addr: la.local_addr.clone(),
              pk: self.get_pk(&la.version, la.id).await,
              relay_server: la.relay_server,
@@ -1475,16 +2113,34 @@ index dff45eb..cd61d7d 100644
              ..Default::default()
          };
          p.set_is_local(true);
-@@ -679,7 +814,7 @@ impl RendezvousServer {
+@@ -679,8 +823,9 @@ impl RendezvousServer {
          ws: bool,
      ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
          let mut ph = ph;
 -        if !key.is_empty() && ph.licence_key != key {
 +        if !crate::common::key_accepted(key, &ph.licence_key) {
              log::warn!("Authentication failed from {} for peer {} - invalid key", addr, ph.id);
++            crate::metrics::PUNCH[crate::metrics::PUNCH_KEY_MISMATCH].inc();
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
-@@ -754,6 +889,7 @@ impl RendezvousServer {
+                 failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
+@@ -700,6 +845,7 @@ impl RendezvousServer {
+                 (r.last_reg_time.elapsed().as_millis() as i64, r.socket_addr)
+             };
+             if elapsed >= REG_TIMEOUT {
++                crate::metrics::PUNCH[crate::metrics::PUNCH_OFFLINE].inc();
+                 let mut msg_out = RendezvousMessage::new();
+                 msg_out.set_punch_hole_response(PunchHoleResponse {
+                     failure: punch_hole_response::Failure::OFFLINE.into(),
+@@ -744,6 +890,7 @@ impl RendezvousServer {
+                     }
+                 });
+             let socket_addr = AddrMangle::encode(addr).into();
++            crate::metrics::PUNCH[if same_intranet { crate::metrics::PUNCH_LAN } else { crate::metrics::PUNCH_OK }].inc();
+             if same_intranet {
+                 log::debug!(
+                     "Fetch local addr {:?} {:?} request from {:?}",
+@@ -754,6 +901,7 @@ impl RendezvousServer {
                  msg_out.set_fetch_local_addr(FetchLocalAddr {
                      socket_addr,
                      relay_server,
@@ -1492,7 +2148,7 @@ index dff45eb..cd61d7d 100644
                      ..Default::default()
                  });
              } else {
-@@ -763,10 +899,23 @@ impl RendezvousServer {
+@@ -763,15 +911,29 @@ impl RendezvousServer {
                      peer_addr,
                      addr
                  );
@@ -1516,7 +2172,13 @@ index dff45eb..cd61d7d 100644
                      ..Default::default()
                  });
              }
-@@ -821,19 +970,57 @@ impl RendezvousServer {
+             Ok((msg_out, Some(peer_addr)))
+         } else {
++            crate::metrics::PUNCH[crate::metrics::PUNCH_NOT_EXIST].inc();
+             let mut msg_out = RendezvousMessage::new();
+             msg_out.set_punch_hole_response(PunchHoleResponse {
+                 failure: punch_hole_response::Failure::ID_NOT_EXIST.into(),
+@@ -821,19 +983,57 @@ impl RendezvousServer {
      #[inline]
      async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) {
          if let Some(sink) = sink.as_mut() {
@@ -1582,7 +2244,25 @@ index dff45eb..cd61d7d 100644
      #[inline]
      async fn send_to_tcp_sync(
          &mut self,
-@@ -911,19 +1098,26 @@ impl RendezvousServer {
+@@ -888,6 +1088,7 @@ impl RendezvousServer {
+             if counter.1.elapsed().as_secs() > IP_BLOCK_DUR {
+                 counter.0 = 0;
+             } else if counter.0 > 30 {
++                crate::metrics::IP_BLOCKED[0].inc();
+                 return false;
+             }
+             counter.0 += 1;
+@@ -898,6 +1099,9 @@ impl RendezvousServer {
+             if counter.1.elapsed().as_secs() > DAY_SECONDS {
+                 counter.0.clear();
+             } else if counter.0.len() > 300 {
++                if is_new {
++                    crate::metrics::IP_BLOCKED[1].inc();
++                }
+                 return !is_new;
+             }
+             if is_new {
+@@ -911,19 +1115,28 @@ impl RendezvousServer {
      }
  
      fn parse_relay_servers(&mut self, relay_servers: &str) {
@@ -1614,11 +2294,13 @@ index dff45eb..cd61d7d 100644
 -        }
 -        let i = ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst) % self.relay_servers.len();
 -        self.relay_servers[i].clone()
-+        pick_relay(&self.relay_servers, ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst))
++        let r = pick_relay(&self.relay_servers, ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst));
++        crate::metrics::relay_assigned(&r);
++        r
      }
  
      async fn check_cmd(&self, cmd: &str) -> String {
-@@ -948,8 +1142,9 @@ impl RendezvousServer {
+@@ -948,8 +1161,9 @@ impl RendezvousServer {
                  if let Some(rs) = fds.next() {
                      self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                  } else {
@@ -1630,10 +2312,11 @@ index dff45eb..cd61d7d 100644
                      }
                  }
              }
-@@ -1148,20 +1343,21 @@ impl RendezvousServer {
+@@ -1148,20 +1362,22 @@ impl RendezvousServer {
          key: &str,
          ws: bool,
      ) -> ResultType<()> {
++        let _conn = crate::metrics::Open::new(&crate::metrics::CONNECTIONS[crate::metrics::transport(ws)]);
 +        // Messages queued for this connection (signalling for a host registered over it).
 +        let (peer_tx, mut peer_rx) = mpsc::unbounded_channel::<RendezvousMessage>();
          let mut sink;
@@ -1660,7 +2343,7 @@ index dff45eb..cd61d7d 100644
                      }
                  }
                  Ok(response)
-@@ -1169,22 +1365,71 @@ impl RendezvousServer {
+@@ -1169,22 +1385,71 @@ impl RendezvousServer {
              let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
              let (a, mut b) = ws_stream.split();
              sink = Some(Sink::Ws(a));
@@ -1739,7 +2422,7 @@ index dff45eb..cd61d7d 100644
          if sink.is_none() {
              self.tcp_punch.lock().await.remove(&try_into_v4(addr));
          }
-@@ -1268,18 +1513,43 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
+@@ -1268,24 +1533,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
      let mut futs = Vec::new();
      let rs = Arc::new(Mutex::new(Vec::new()));
      for x in rs0.iter() {
@@ -1789,7 +2472,15 @@ index dff45eb..cd61d7d 100644
              }
          }));
      }
-@@ -1330,17 +1600,13 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+     join_all(futs).await;
+     log::debug!("check_relay_servers");
+     let rs = std::mem::take(&mut *rs.lock().await);
++    let all: Vec<(String, bool)> = rs0.iter().map(|x| relay_entry(x)).map(|(a, _, b)| (a.to_owned(), b)).collect();
++    crate::metrics::relay_check(&all, &rs);
+     if !rs.is_empty() {
+         tx.send(Data::RelayServers(rs)).ok();
+     }
+@@ -1330,17 +1622,14 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
  }
  
  #[inline]
@@ -1799,6 +2490,7 @@ index dff45eb..cd61d7d 100644
 -    res: register_pk_response::Result,
 -) -> ResultType<()> {
 +fn rk_res(res: register_pk_response::Result) -> RendezvousMessage {
++    crate::metrics::register_pk(res as i32);
      let mut msg_out = RendezvousMessage::new();
      msg_out.set_register_pk_response(RegisterPkResponse {
          result: res.into(),
@@ -1809,7 +2501,7 @@ index dff45eb..cd61d7d 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1627,236 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1650,251 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
@@ -2046,12 +2738,27 @@ index dff45eb..cd61d7d 100644
 +        assert_eq!(h(&[]), None);
 +    }
 +}
++
++/// Tether: the `/metrics` page (crate::metrics) with the values read at scrape time.
++async fn render_metrics(pm: &PeerMap) -> String {
++    let (peers_online, peers_in_memory) = pm.count_online(REG_TIMEOUT as u128).await;
++    let tcp_signalling = TCP_PEERS.lock().await.len();
++    let turn = crate::turn::get();
++    crate::metrics::render_hbbs(&crate::metrics::HbbsNow {
++        peers_online,
++        peers_in_memory,
++        tcp_signalling,
++        turn_enabled: turn.is_some(),
++        turn_open: turn.map_or(0, |t| t.open_allocations()),
++        turn_max: turn.map_or(0, |t| t.max_allocations()),
++    })
++}
 diff --git a/src/turn.rs b/src/turn.rs
 new file mode 100644
-index 0000000..60d95ea
+index 0000000..778654b
 --- /dev/null
 +++ b/src/turn.rs
-@@ -0,0 +1,911 @@
+@@ -0,0 +1,934 @@
 +//! Tether: a TURN server (RFC 5766, UDP) inside hbbs, on hbbs's own UDP port (21116), so a
 +//! WebRTC session that cannot form a direct pair is relayed over UDP instead of hbbr's
 +//! TCP/WebSocket leg. The core's WebRTC data channel (KCP-style SCTP, see
@@ -2458,6 +3165,14 @@ index 0000000..60d95ea
 +        }
 +    }
 +
++    /// Tether metrics: open allocations and the cap.
++    pub fn open_allocations(&self) -> usize {
++        self.live.load(Ordering::SeqCst)
++    }
++    pub fn max_allocations(&self) -> usize {
++        self.cfg.max_allocations
++    }
++
 +    fn public_ip(&self) -> Option<Ipv4Addr> {
 +        Some(Ipv4Addr::from(self.public_ip.load(Ordering::SeqCst))).filter(|ip| !ip.is_unspecified())
 +    }
@@ -2487,7 +3202,10 @@ index 0000000..60d95ea
 +            Some(3) | Some(4) | Some(8) | Some(9) => {
 +                match self.auth.verified_user(b) {
 +                    Some(user) => self.auth.record_first_use(&user, from, now_secs()),
-+                    None if !self.unauth.lock().unwrap().take(1) => return true,
++                    None if !self.unauth.lock().unwrap().take(1) => {
++                        crate::metrics::TURN_UNAUTH_DROPPED.inc();
++                        return true;
++                    }
 +                    None => {}
 +                }
 +                self.client(from);
@@ -2500,7 +3218,9 @@ index 0000000..60d95ea
 +            _ => is_channel_data(b) && self.clients.lock().unwrap().contains_key(&from),
 +        };
 +        if to_control {
++            crate::metrics::TURN_REQUESTS.inc();
 +            if self.control.try_send((b.to_vec(), from)).is_err() {
++                crate::metrics::TURN_QUEUE_DROPPED.inc();
 +                log::debug!("TURN control queue full, dropped");
 +            }
 +            return true;
@@ -2634,11 +3354,17 @@ index 0000000..60d95ea
 +            let Some((b, from)) = self.rx.lock().await.recv().await else {
 +                return Err(webrtc_util::Error::Other("closed".into()));
 +            };
-+            if self.turn.allowed(from) && self.recv.lock().unwrap().take(b.len()) {
-+                let n = b.len().min(buf.len());
-+                buf[..n].copy_from_slice(&b[..n]);
-+                return Ok((n, from));
++            if !self.turn.allowed(from) {
++                continue;
 +            }
++            if !self.recv.lock().unwrap().take(b.len()) {
++                crate::metrics::TURN_BANDWIDTH_DROPPED[1].inc();
++                continue;
++            }
++            crate::metrics::TURN_BYTES[1].add(b.len() as u64);
++            let n = b.len().min(buf.len());
++            buf[..n].copy_from_slice(&b[..n]);
++            return Ok((n, from));
 +        }
 +    }
 +    async fn send(&self, _: &[u8]) -> webrtc_util::Result<usize> {
@@ -2664,8 +3390,10 @@ index 0000000..60d95ea
 +            }
 +        }
 +        if !self.send.lock().unwrap().take(b.len()) {
++            crate::metrics::TURN_BANDWIDTH_DROPPED[0].inc();
 +            return Ok(b.len());
 +        }
++        crate::metrics::TURN_BYTES[0].add(b.len() as u64);
 +        Ok(self.turn.send_to(b, to).await?)
 +    }
 +    fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
@@ -2701,10 +3429,12 @@ index 0000000..60d95ea
 +            return Err(turn::Error::Other("IPv4 relays only".into()));
 +        };
 +        if t.live.fetch_add(1, Ordering::SeqCst) >= t.cfg.max_allocations {
++            crate::metrics::TURN_ALLOCATIONS_REFUSED.inc();
 +            t.live.fetch_sub(1, Ordering::SeqCst);
 +            log::warn!("TURN allocation refused: {} allocations open", t.cfg.max_allocations);
 +            return Err(turn::Error::Other("allocation limit".into()));
 +        }
++        crate::metrics::TURN_ALLOCATIONS.inc();
 +        let (tx, rx) = mpsc::channel(QUEUE);
 +        let conn = RelayConn {
 +            id: t.next_id.fetch_add(1, Ordering::SeqCst),

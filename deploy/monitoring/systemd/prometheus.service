@@ -1,0 +1,31 @@
+[Unit]
+Description=Prometheus (Tether monitoring, docs/monitoring.md)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prometheus
+Group=prometheus
+# 30 days, and never more than 4 GB on disk (the oldest blocks go first).
+ExecStart=/usr/local/bin/prometheus \
+  --config.file=/etc/tether-monitoring/prometheus.yml \
+  --storage.tsdb.path=/var/lib/prometheus \
+  --storage.tsdb.retention.time=30d \
+  --storage.tsdb.retention.size=4GB \
+  --web.listen-address=127.0.0.1:9090 \
+  --web.external-url=http://127.0.0.1:9090/
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+MemoryMax=600M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/prometheus
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

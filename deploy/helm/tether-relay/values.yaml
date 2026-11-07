@@ -86,6 +86,16 @@ api:
     requests: { cpu: 10m, memory: 16Mi }
     limits: { cpu: 500m, memory: 64Mi }
 
+# Prometheus metrics of hbbs (port 21123) and hbbr (21124) on the pod network (docs/monitoring.md).
+# tether-api answers /metrics only on loopback, so it is not scraped here.
+metrics:
+  enabled: false
+  serviceMonitor:
+    # Needs the Prometheus Operator CRDs (kube-prometheus-stack).
+    enabled: false
+    interval: 30s
+    labels: {}   # e.g. { release: kube-prometheus-stack }
+
 podDisruptionBudget:
   maxUnavailable: 1
 

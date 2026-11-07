@@ -30,6 +30,8 @@ install -d -o tether -g tether -m 0750 /var/lib/tether
 install -d -o tether-api -g tether-api -m 0750 /var/lib/tether-api
 install -d -o tether-https -g tether-https -m 0750 /var/lib/tether-https
 install -d -m 0755 /etc/tether
+# Optional Caddy snippets (the monitoring installer puts /_metrics/* and /grafana/* there).
+install -d -m 0755 /etc/tether/caddy.d
 install -m 0755 "$BIN/hbbs" "$BIN/hbbr" "$BIN/tether-api" /usr/local/bin/
 
 # Caddy: official static release binary, checked against the release's checksum file.

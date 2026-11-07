@@ -1,0 +1,30 @@
+[Unit]
+Description=Prometheus node_exporter (Tether monitoring, docs/monitoring.md)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=node_exporter
+Group=node_exporter
+# systemd collector: state of the Tether, monitoring and hardening units (over D-Bus).
+ExecStart=/usr/local/bin/node_exporter \
+  --web.listen-address=127.0.0.1:9100 \
+  --collector.systemd \
+  --collector.systemd.unit-include=(tether-.*|prometheus|alertmanager|grafana-server|node_exporter|blackbox_exporter|fail2ban|firewalld|sshd|dnf-automatic.*|nightly-reboot)\.(service|timer) \
+  --no-collector.wifi \
+  --no-collector.infiniband \
+  --no-collector.nfs \
+  --no-collector.nfsd \
+  --no-collector.zfs
+Restart=always
+RestartSec=5
+MemoryMax=96M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

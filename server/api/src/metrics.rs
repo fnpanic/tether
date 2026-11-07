@@ -1,0 +1,234 @@
+//! Prometheus metrics of tether-api (`GET /metrics`, text format 0.0.4), answered only to
+//! loopback peers. Caddy forwards only `/api/*` and `/q/*`, so the page is never public.
+//! Labels are fixed sets: endpoint names below and the HTTP status codes this server sends.
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::Mutex;
+use std::time::Duration;
+
+pub const ENDPOINTS: [&str; 11] = [
+    "policy", "server_keys", "heartbeat", "audit_conn", "audit_file", "audit_alarm", "diag_upload", "custom_download", "admin",
+    "metrics", "other",
+];
+pub const METRICS: usize = 9;
+const OTHER: usize = 10;
+const BUCKETS: [f64; 13] = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1., 2.5, 5., 10., 30., 120.];
+
+/// Requests being served (worker threads).
+pub static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// Requests answered 503 "busy" because MAX_WORKERS were running.
+pub static BUSY_REJECTED: AtomicU64 = AtomicU64::new(0);
+/// Request bodies that failed to arrive in time.
+pub static BODY_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Default)]
+struct Hist {
+    counts: [u64; BUCKETS.len()],
+    sum: f64,
+    n: u64,
+}
+
+#[derive(Default)]
+struct State {
+    /// (endpoint, status) -> requests
+    requests: BTreeMap<(usize, u16), u64>,
+    latency: BTreeMap<usize, Hist>,
+}
+
+static STATE: Mutex<State> = Mutex::new(State { requests: BTreeMap::new(), latency: BTreeMap::new() });
+
+/// The endpoint label of a request.
+pub fn endpoint(method: &str, url: &str) -> usize {
+    let p = url.split('?').next().unwrap_or("");
+    match (method, p) {
+        ("GET", "/api/policy") => 0,
+        ("GET", "/api/server-keys") => 1,
+        ("POST", "/api/heartbeat") => 2,
+        ("POST", "/api/audit/conn") => 3,
+        ("POST", "/api/audit/file") => 4,
+        ("POST", "/api/audit/alarm") => 5,
+        ("POST", p) if p.starts_with("/api/diag/") => 6,
+        ("GET", p) if p.starts_with("/q/") => 7,
+        (_, p) if p.starts_with("/api/admin/") => 8,
+        ("GET", "/metrics") => METRICS,
+        _ => OTHER,
+    }
+}
+
+pub fn observe(endpoint: usize, status: u16, took: Duration) {
+    let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    *s.requests.entry((endpoint, status)).or_default() += 1;
+    let h = s.latency.entry(endpoint).or_default();
+    let secs = took.as_secs_f64();
+    for (i, b) in BUCKETS.iter().enumerate() {
+        if secs <= *b {
+            h.counts[i] += 1;
+        }
+    }
+    h.sum += secs;
+    h.n += 1;
+}
+
+/// Counts a body read error that was a timeout.
+pub fn body_error(e: &std::io::Error) {
+    if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) {
+        BODY_TIMEOUTS.fetch_add(1, Relaxed);
+    }
+}
+
+/// Values the app reads at scrape time.
+pub struct Now {
+    pub max_workers: usize,
+    pub devices: usize,
+    pub devices_24h: usize,
+}
+
+fn header(o: &mut String, name: &str, typ: &str, help: &str) {
+    let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} {typ}");
+}
+
+pub fn render(now: &Now, data_dir: &Path) -> String {
+    let mut o = String::new();
+    {
+        let s = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        header(&mut o, "tether_api_requests_total", "counter", "Requests by endpoint and HTTP status.");
+        for ((ep, code), n) in &s.requests {
+            let _ = writeln!(o, "tether_api_requests_total{{endpoint=\"{}\",code=\"{code}\"}} {n}", ENDPOINTS[*ep]);
+        }
+        header(&mut o, "tether_api_request_duration_seconds", "histogram", "Time from request to response written, by endpoint.");
+        for (ep, h) in &s.latency {
+            let ep = ENDPOINTS[*ep];
+            for (i, b) in BUCKETS.iter().enumerate() {
+                let _ = writeln!(o, "tether_api_request_duration_seconds_bucket{{endpoint=\"{ep}\",le=\"{b}\"}} {}", h.counts[i]);
+            }
+            let _ = writeln!(o, "tether_api_request_duration_seconds_bucket{{endpoint=\"{ep}\",le=\"+Inf\"}} {}", h.n);
+            let _ = writeln!(o, "tether_api_request_duration_seconds_sum{{endpoint=\"{ep}\"}} {}", h.sum);
+            let _ = writeln!(o, "tether_api_request_duration_seconds_count{{endpoint=\"{ep}\"}} {}", h.n);
+        }
+    }
+    let du = dir_bytes(data_dir);
+    let (free, size) = fs_space(data_dir);
+    for (name, typ, help, v) in [
+        ("tether_api_workers_active", "gauge", "Requests being served now.", ACTIVE.load(Relaxed) as f64),
+        ("tether_api_workers_max", "gauge", "Requests served at once (MAX_WORKERS); more get 503.", now.max_workers as f64),
+        ("tether_api_busy_rejected_total", "counter", "Requests answered 503 busy at MAX_WORKERS.", BUSY_REJECTED.load(Relaxed) as f64),
+        ("tether_api_body_timeouts_total", "counter", "Request bodies that did not arrive in time.", BODY_TIMEOUTS.load(Relaxed) as f64),
+        ("tether_api_devices", "gauge", "Devices in the device list (heartbeat within 180 days).", now.devices as f64),
+        ("tether_api_devices_active_24h", "gauge", "Devices with a heartbeat within 24 h.", now.devices_24h as f64),
+        ("tether_api_data_bytes", "gauge", "Size of the data directory (releases, audit, diagnostics, state).", du as f64),
+        ("tether_api_data_fs_free_bytes", "gauge", "Free space on the data directory's filesystem (for unprivileged users).", free as f64),
+        ("tether_api_data_fs_size_bytes", "gauge", "Size of the data directory's filesystem.", size as f64),
+    ] {
+        header(&mut o, name, typ, help);
+        let _ = writeln!(o, "{name} {v}");
+    }
+    header(&mut o, "tether_build_info", "gauge", "Build version.");
+    let _ = writeln!(o, "tether_build_info{{version=\"{}\"}} 1", env!("CARGO_PKG_VERSION"));
+    process(&mut o);
+    o
+}
+
+fn dir_bytes(p: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(p) else { return 0 };
+    rd.flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_bytes(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
+}
+
+fn fs_space(p: &Path) -> (u64, u64) {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else { return (0, 0) };
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
+        return (0, 0);
+    }
+    (s.f_bavail as u64 * s.f_frsize as u64, s.f_blocks as u64 * s.f_frsize as u64)
+}
+
+/// process_* metrics from /proc/self, named like the Prometheus client libraries do.
+fn process(o: &mut String) {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |k: &str| status.lines().find_map(|l| l.strip_prefix(k)?.split_whitespace().next()?.parse::<f64>().ok());
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    // Fields after "(comm) ": index 0 is field 3 (state); utime = 14, stime = 15, starttime = 22.
+    let f: Vec<f64> = stat.rsplit_once(") ").map_or(vec![], |(_, r)| r.split(' ').map(|x| x.parse().unwrap_or(0.)).collect());
+    let at = |n: usize| f.get(n - 3).copied().unwrap_or(0.);
+    let btime = std::fs::read_to_string("/proc/stat")
+        .unwrap_or_default()
+        .lines()
+        .find_map(|l| l.strip_prefix("btime ")?.trim().parse::<f64>().ok())
+        .unwrap_or(0.);
+    let fds = std::fs::read_dir("/proc/self/fd").map_or(0, |d| d.count());
+    let max_fds = std::fs::read_to_string("/proc/self/limits")
+        .unwrap_or_default()
+        .lines()
+        .find_map(|l| l.strip_prefix("Max open files")?.split_whitespace().next()?.parse::<f64>().ok())
+        .unwrap_or(0.);
+    for (name, typ, help, v) in [
+        ("process_cpu_seconds_total", "counter", "User and system CPU time spent in seconds.", (at(14) + at(15)) / hz),
+        ("process_resident_memory_bytes", "gauge", "Resident memory size in bytes.", field("VmRSS:").unwrap_or(0.) * 1024.),
+        ("process_virtual_memory_bytes", "gauge", "Virtual memory size in bytes.", field("VmSize:").unwrap_or(0.) * 1024.),
+        ("process_threads", "gauge", "Number of OS threads.", field("Threads:").unwrap_or(0.)),
+        ("process_open_fds", "gauge", "Number of open file descriptors.", fds as f64),
+        ("process_max_fds", "gauge", "Maximum number of open file descriptors.", max_fds),
+        ("process_start_time_seconds", "gauge", "Start time of the process since unix epoch in seconds.", btime + at(22) / hz),
+    ] {
+        header(o, name, typ, help);
+        let _ = writeln!(o, "{name} {v}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn value(text: &str, series: &str) -> f64 {
+        text.lines().find_map(|l| l.strip_prefix(series)?.strip_prefix(' ')?.parse().ok()).unwrap_or(0.)
+    }
+
+    #[test]
+    fn endpoints_are_a_fixed_set() {
+        assert_eq!(ENDPOINTS[endpoint("GET", "/api/policy?x=1")], "policy");
+        assert_eq!(ENDPOINTS[endpoint("POST", "/api/diag/ABCD")], "diag_upload");
+        assert_eq!(ENDPOINTS[endpoint("GET", "/q/secret-token")], "custom_download");
+        assert_eq!(ENDPOINTS[endpoint("PUT", "/api/admin/policy")], "admin");
+        assert_eq!(ENDPOINTS[endpoint("GET", "/metrics")], "metrics");
+        assert_eq!(ENDPOINTS[endpoint("GET", "/anything/else")], "other");
+    }
+
+    #[test]
+    fn counters_and_histogram_move() {
+        let dir = std::env::temp_dir().join(format!("tether-api-metrics-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f"), [0u8; 100]).unwrap();
+        let now = Now { max_workers: 32, devices: 3, devices_24h: 2 };
+        let before = render(&now, &dir);
+        observe(2, 204, Duration::from_millis(3));
+        observe(2, 204, Duration::from_millis(300));
+        BUSY_REJECTED.fetch_add(1, Relaxed);
+        body_error(&std::io::ErrorKind::TimedOut.into());
+        body_error(&std::io::ErrorKind::InvalidData.into());
+        let t = render(&now, &dir);
+        let d = |s: &str| value(&t, s) - value(&before, s);
+        assert_eq!(d("tether_api_requests_total{endpoint=\"heartbeat\",code=\"204\"}"), 2.);
+        assert_eq!(d("tether_api_request_duration_seconds_bucket{endpoint=\"heartbeat\",le=\"0.005\"}"), 1.);
+        assert_eq!(d("tether_api_request_duration_seconds_bucket{endpoint=\"heartbeat\",le=\"0.5\"}"), 2.);
+        assert_eq!(d("tether_api_request_duration_seconds_count{endpoint=\"heartbeat\"}"), 2.);
+        assert_eq!(d("tether_api_busy_rejected_total"), 1.);
+        assert_eq!(d("tether_api_body_timeouts_total"), 1.);
+        assert_eq!(value(&t, "tether_api_workers_max"), 32.);
+        assert_eq!(value(&t, "tether_api_devices_active_24h"), 2.);
+        assert_eq!(value(&t, "tether_api_data_bytes"), 100.);
+        assert!(value(&t, "tether_api_data_fs_size_bytes") > 0.);
+        assert!(value(&t, "process_resident_memory_bytes") > 0.);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

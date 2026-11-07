@@ -1,0 +1,29 @@
+# Alertmanager on the monitoring node (docs/monitoring.md › Notifications).
+# Notifications are off by default (receiver "none"). To get them on Telegram (free):
+#   1. talk to @BotFather, /newbot -> bot token; send your bot a message, then read your chat id
+#      from https://api.telegram.org/bot<token>/getUpdates ("chat":{"id":...}).
+#   2. sudo TELEGRAM_CHAT_ID=<id> TELEGRAM_BOT_TOKEN=<token> deploy/monitoring/install.sh monitor
+#      (writes /etc/tether-monitoring/telegram.token, mode 0640, and switches the receiver).
+route:
+  receiver: none
+  group_by: [alertname, node]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  routes:
+    # Watchdog always fires: it proves the pipeline works; never notify about it.
+    - matchers: ['alertname="Watchdog"']
+      receiver: none
+inhibit_rules:
+  # A node that is down also fails its probes and targets: report the node only.
+  - source_matchers: ['alertname="NodeDown"']
+    target_matchers: ['alertname=~"TargetDown|ProbeFailed|RelayUnhealthy"']
+    equal: [node]
+receivers:
+  - name: none
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: @ETC@/telegram.token
+        chat_id: @TELEGRAM_CHAT_ID@
+        parse_mode: HTML
+        send_resolved: true
