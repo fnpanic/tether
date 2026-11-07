@@ -2140,7 +2140,7 @@ index 0ec190a..f1dd2ce 100644
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..eb8a48e 100644
+index dff45eb..cef312f 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,14 @@ use std::{
@@ -3117,7 +3117,7 @@ index dff45eb..eb8a48e 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1695,326 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1695,328 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
@@ -3353,6 +3353,8 @@ index dff45eb..eb8a48e 100644
 +
 +    #[test]
 +    fn online_query_answers_one_bit_per_id() {
++        // DB_URL is process-wide: tests that set it run one at a time.
++        let _g = DB_ENV.lock().unwrap_or_else(|e| e.into_inner());
 +        tokio::runtime::Runtime::new().unwrap().block_on(async {
 +            let db = std::env::temp_dir().join(format!("hbbs-online-{}.sqlite3", std::process::id()));
 +            let _ = std::fs::remove_file(&db);
