@@ -422,3 +422,15 @@ the service or `/metrics` does not come up), Oracle 2 first, then Hetzner. Binar
 both. Verified: service active, unsigned prune 401, `tether_api_release_bytes{channel="stable"}` 2.26 GB
 per relay, `releases.json`, `latest.json` and `/` 200 on both. Monitoring re-installed on Hetzner for
 the new Grafana panels: 27/27 targets up. The first clean-up run is done from Tether Manage 0.5.8.
+
+## Relay update 0.5.25: macOS custom apps (2026-11-07)
+
+tether-api (`/q/<token>` picks the platform by User-Agent, `/q/<token>/mac|windows`, the renamed
+TetherQS zip, `GET /q/m/<mac id>` for the signed profile) and the Caddy/nginx config (Content-Type from
+tether-api), deployed together with `C:ms
+ightelay-0525\deploy.sh` (backup `/root/bak-0525`),
+Oracle 2 first, then Hetzner. Binaries: hbbs `b09f06d0d2a2f3a4` (unchanged), hbbr `1dd0b5e5a30bbc75`,
+tether-api `4ac5b001a796f53f`. Verified on both: services active, WebSocket 101, `/`, `releases.json`,
+`latest.json` 200, unknown `/q/<token>`, `/q/<token>/mac` and `/q/m/<id>` 404, 27/27 targets up.
+On the Mac (runner), the signed TetherQS 0.5.25 kept a valid signature after the rename and looked up
+`/q/m/<id>` on the live relays (404 for an unknown id, then plain TetherQS).
