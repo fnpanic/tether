@@ -182,7 +182,7 @@ fn member_auth_me_and_devices() {
 
     // Device list without IPs or policy serials.
     let ip = [("X-Forwarded-For", "203.0.113.9")];
-    assert_eq!(s.req("POST", "/api/heartbeat", &ip, hb("dev-0001", "111222333").as_bytes()).status, 204);
+    assert_eq!(s.req("POST", "/api/heartbeat", &ip, hb("dev-0001", "111222333").as_bytes()).status, 200);
     let d = s.get(&anna, "/api/team/devices").json();
     assert_eq!(d.as_array().unwrap().len(), 1);
     let keys: Vec<&str> = d[0].as_object().unwrap().keys().map(String::as_str).collect();

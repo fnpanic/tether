@@ -2012,6 +2012,545 @@ index 8da29a2..5c72db5 100644
  mod database;
  mod peer;
  mod version;
+diff --git a/src/metrics.rs b/src/metrics.rs
+new file mode 100644
+index 0000000..042946a
+--- /dev/null
++++ b/src/metrics.rs
+@@ -0,0 +1,533 @@
++//! Tether: Prometheus metrics of hbbs and hbbr (text exposition format 0.0.4), served on
++//! `METRICS_ADDR`:`METRICS_PORT` (default 127.0.0.1, hbbs 21123, hbbr 21124; port 0 = off).
++//! Labels come from fixed sets only (no peer IDs, IPs or keys); the one exception is the relay
++//! name, which comes from hbbs's own `-r` list (bounded by MAX_RELAYS). docs/monitoring.md.
++#![allow(dead_code)] // one module for both binaries; each uses its half
++
++use std::fmt::Write as _;
++use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
++use std::sync::Mutex;
++
++pub struct Counter(AtomicU64);
++
++impl Counter {
++    pub const fn new() -> Self {
++        Self(AtomicU64::new(0))
++    }
++    pub fn inc(&self) {
++        self.0.fetch_add(1, Relaxed);
++    }
++    pub fn add(&self, n: u64) {
++        self.0.fetch_add(n, Relaxed);
++    }
++    pub fn get(&self) -> u64 {
++        self.0.load(Relaxed)
++    }
++}
++
++pub struct Gauge(AtomicI64);
++
++impl Gauge {
++    pub const fn new() -> Self {
++        Self(AtomicI64::new(0))
++    }
++    pub fn inc(&self) {
++        self.0.fetch_add(1, Relaxed);
++    }
++    pub fn dec(&self) {
++        self.0.fetch_sub(1, Relaxed);
++    }
++    pub fn set(&self, v: i64) {
++        self.0.store(v, Relaxed);
++    }
++    pub fn get(&self) -> i64 {
++        self.0.load(Relaxed)
++    }
++}
++
++/// Decrements a gauge when dropped (open connections, sessions).
++pub struct Open(&'static Gauge);
++
++impl Open {
++    pub fn new(g: &'static Gauge) -> Self {
++        g.inc();
++        Self(g)
++    }
++}
++
++impl Drop for Open {
++    fn drop(&mut self) {
++        self.0.dec();
++    }
++}
++
++// ---- hbbs ----
++
++pub const TRANSPORTS: [&str; 3] = ["udp", "tcp", "ws"];
++pub fn transport(ws: bool) -> usize {
++    if ws { 2 } else { 1 }
++}
++/// RegisterPeer messages by transport (TRANSPORTS).
++pub static REGISTER_PEER: [Counter; 3] = [Counter::new(), Counter::new(), Counter::new()];
++/// Open TCP / WebSocket connections to hbbs's rendezvous ports (index transport()).
++pub static CONNECTIONS: [Gauge; 3] = [Gauge::new(), Gauge::new(), Gauge::new()];
++/// RegisterPk answers by register_pk_response::Result value (0..=8; 1 is unused).
++pub static REGISTER_PK: [Counter; 9] = [
++    Counter::new(), Counter::new(), Counter::new(), Counter::new(), Counter::new(),
++    Counter::new(), Counter::new(), Counter::new(), Counter::new(),
++];
++const REGISTER_PK_RESULTS: [&str; 9] = [
++    "ok", "1", "uuid_mismatch", "id_exists", "too_frequent", "invalid_id_format", "not_support", "server_error", "not_deployed",
++];
++pub fn register_pk(result: i32) {
++    if let Some(c) = REGISTER_PK.get(result as usize) {
++        c.inc();
++    }
++}
++
++pub const PUNCH_OK: usize = 0;
++pub const PUNCH_LAN: usize = 1;
++pub const PUNCH_OFFLINE: usize = 2;
++pub const PUNCH_NOT_EXIST: usize = 3;
++pub const PUNCH_KEY_MISMATCH: usize = 4;
++const PUNCH_RESULTS: [&str; 5] = ["ok", "lan", "offline", "id_not_exist", "key_mismatch"];
++/// PunchHoleRequest outcomes.
++pub static PUNCH: [Counter; 5] = [Counter::new(), Counter::new(), Counter::new(), Counter::new(), Counter::new()];
++/// RegisterPk refused by the per-IP brute-force guard: [too many requests, too many IDs].
++pub static IP_BLOCKED: [Counter; 2] = [Counter::new(), Counter::new()];
++
++/// 1 while hbbs hands out backup relays because no primary is healthy.
++pub static FAILOVER: Gauge = Gauge::new();
++/// Failover transitions: [to backup, back to primary].
++pub static FAILOVER_TRANSITIONS: [Counter; 2] = [Counter::new(), Counter::new()];
++pub static RELAY_CHECKS: Counter = Counter::new();
++
++pub const MAX_RELAYS: usize = 16;
++
++#[derive(Default, Clone)]
++struct Relay {
++    name: String,
++    backup: bool,
++    healthy: bool,
++    sessions: usize,
++    assigned: u64,
++}
++
++static RELAYS: Mutex<Vec<Relay>> = Mutex::new(Vec::new());
++
++fn relay_slot<'a>(v: &'a mut Vec<Relay>, name: &str) -> Option<&'a mut Relay> {
++    if let Some(i) = v.iter().position(|r| r.name == name) {
++        return v.get_mut(i);
++    }
++    if v.len() >= MAX_RELAYS {
++        return None;
++    }
++    v.push(Relay { name: name.to_owned(), ..Default::default() });
++    v.last_mut()
++}
++
++/// Result of one health round: every configured relay (address, backup) and the healthy ones
++/// (address, open sessions, backup).
++pub fn relay_check(all: &[(String, bool)], healthy: &[(String, usize, bool)]) {
++    RELAY_CHECKS.inc();
++    let mut v = RELAYS.lock().unwrap_or_else(|e| e.into_inner());
++    for (name, backup) in all {
++        if let Some(r) = relay_slot(&mut v, name) {
++            let h = healthy.iter().find(|h| &h.0 == name);
++            r.backup = *backup;
++            r.healthy = h.is_some();
++            r.sessions = h.map_or(0, |h| h.1);
++        }
++    }
++}
++
++/// A relay handed out to a pair of peers ("" = none available).
++pub fn relay_assigned(name: &str) {
++    let mut v = RELAYS.lock().unwrap_or_else(|e| e.into_inner());
++    if let Some(r) = relay_slot(&mut v, if name.is_empty() { "none" } else { name }) {
++        r.assigned += 1;
++    }
++}
++
++pub fn failover(using_backup: bool) {
++    if (FAILOVER.get() == 1) != using_backup {
++        FAILOVER_TRANSITIONS[if using_backup { 0 } else { 1 }].inc();
++    }
++    FAILOVER.set(using_backup as i64);
++}
++
++pub static TURN_ALLOCATIONS: Counter = Counter::new();
++pub static TURN_ALLOCATIONS_REFUSED: Counter = Counter::new();
++/// TURN control requests (Allocate, Refresh, CreatePermission, ChannelBind, Send, ChannelData).
++pub static TURN_REQUESTS: Counter = Counter::new();
++/// Unauthenticated TURN requests dropped by the rate limit.
++pub static TURN_UNAUTH_DROPPED: Counter = Counter::new();
++pub static TURN_QUEUE_DROPPED: Counter = Counter::new();
++/// Datagrams dropped by an allocation's bandwidth cap: [to peer, from peer].
++pub static TURN_BANDWIDTH_DROPPED: [Counter; 2] = [Counter::new(), Counter::new()];
++/// Relayed bytes: [to peer, from peer].
++pub static TURN_BYTES: [Counter; 2] = [Counter::new(), Counter::new()];
++
++/// Values hbbs reads at scrape time.
++pub struct HbbsNow {
++    pub peers_online: usize,
++    pub peers_in_memory: usize,
++    pub tcp_signalling: usize,
++    pub turn_enabled: bool,
++    pub turn_open: usize,
++    pub turn_max: usize,
++}
++
++/// Tether release push (docs/update-design.md): G read from tether-api's `release-generation`.
++pub static RELEASE_GENERATION: Gauge = Gauge::new();
++/// ReleaseHint frames sent: [0] after a change of G, [1] right after a host registered.
++pub static RELEASE_HINTS: [Counter; 2] = [Counter::new(), Counter::new()];
++/// Registered WebSocket hosts that got the current G (reset when G changes).
++pub static RELEASE_HINT_PEERS: Gauge = Gauge::new();
++
++pub fn render_hbbs(now: &HbbsNow) -> String {
++    let mut o = String::new();
++    header(&mut o, "hbbs_release_generation", "gauge", "Release generation G pushed to hosts (tether-api release-generation; 0 = none).");
++    sample(&mut o, "hbbs_release_generation", "", RELEASE_GENERATION.get() as f64);
++    header(&mut o, "hbbs_release_hints_sent_total", "counter", "ReleaseHint frames sent to registered WebSocket hosts (reason change: G changed; register: after a registration).");
++    sample(&mut o, "hbbs_release_hints_sent_total", "reason=\"change\"", RELEASE_HINTS[0].get() as f64);
++    sample(&mut o, "hbbs_release_hints_sent_total", "reason=\"register\"", RELEASE_HINTS[1].get() as f64);
++    header(&mut o, "hbbs_release_hint_peers_notified", "gauge", "Registered WebSocket hosts that got the current release generation.");
++    sample(&mut o, "hbbs_release_hint_peers_notified", "", RELEASE_HINT_PEERS.get() as f64);
++    header(&mut o, "hbbs_peers_online", "gauge", "Hosts registered within the last 30 s (REG_TIMEOUT).");
++    sample(&mut o, "hbbs_peers_online", "", now.peers_online as f64);
++    header(&mut o, "hbbs_peers_signalling", "gauge", "Online hosts by signalling path: tcp = over a TCP or WebSocket connection, udp = the rest.");
++    sample(&mut o, "hbbs_peers_signalling", "transport=\"tcp_ws\"", now.tcp_signalling as f64);
++    sample(&mut o, "hbbs_peers_signalling", "transport=\"udp\"", now.peers_online.saturating_sub(now.tcp_signalling) as f64);
++    header(&mut o, "hbbs_peers_in_memory", "gauge", "Peers held in memory (online or not).");
++    sample(&mut o, "hbbs_peers_in_memory", "", now.peers_in_memory as f64);
++    header(&mut o, "hbbs_connections", "gauge", "Open connections to the rendezvous ports.");
++    for i in 1..3 {
++        sample(&mut o, "hbbs_connections", &format!("transport=\"{}\"", TRANSPORTS[i]), CONNECTIONS[i].get() as f64);
++    }
++    header(&mut o, "hbbs_register_peer_total", "counter", "RegisterPeer messages received.");
++    for (i, t) in TRANSPORTS.iter().enumerate() {
++        sample(&mut o, "hbbs_register_peer_total", &format!("transport=\"{t}\""), REGISTER_PEER[i].get() as f64);
++    }
++    header(&mut o, "hbbs_register_pk_total", "counter", "RegisterPk answers by result.");
++    for (i, r) in REGISTER_PK_RESULTS.iter().enumerate() {
++        if i != 1 {
++            sample(&mut o, "hbbs_register_pk_total", &format!("result=\"{r}\""), REGISTER_PK[i].get() as f64);
++        }
++    }
++    header(&mut o, "hbbs_punch_hole_total", "counter", "PunchHoleRequest outcomes (ok = punch hole sent, lan = local address fetch).");
++    for (i, r) in PUNCH_RESULTS.iter().enumerate() {
++        sample(&mut o, "hbbs_punch_hole_total", &format!("result=\"{r}\""), PUNCH[i].get() as f64);
++    }
++    header(&mut o, "hbbs_ip_blocked_total", "counter", "RegisterPk refused by the per-IP brute-force guard.");
++    sample(&mut o, "hbbs_ip_blocked_total", "reason=\"rate\"", IP_BLOCKED[0].get() as f64);
++    sample(&mut o, "hbbs_ip_blocked_total", "reason=\"ids\"", IP_BLOCKED[1].get() as f64);
++
++    header(&mut o, "hbbs_relay_failover", "gauge", "1 while no primary relay is healthy and backups are handed out.");
++    sample(&mut o, "hbbs_relay_failover", "", FAILOVER.get() as f64);
++    header(&mut o, "hbbs_relay_failover_transitions_total", "counter", "Switches between primary and backup relays.");
++    sample(&mut o, "hbbs_relay_failover_transitions_total", "to=\"backup\"", FAILOVER_TRANSITIONS[0].get() as f64);
++    sample(&mut o, "hbbs_relay_failover_transitions_total", "to=\"primary\"", FAILOVER_TRANSITIONS[1].get() as f64);
++    header(&mut o, "hbbs_relay_checks_total", "counter", "Relay health rounds (every 3 s with more than one relay).");
++    sample(&mut o, "hbbs_relay_checks_total", "", RELAY_CHECKS.get() as f64);
++    let relays = RELAYS.lock().unwrap_or_else(|e| e.into_inner()).clone();
++    header(&mut o, "hbbs_relay_healthy", "gauge", "1 if the relay passed the last health check.");
++    for r in relays.iter().filter(|r| r.name != "none") {
++        let l = relay_labels(r);
++        sample(&mut o, "hbbs_relay_healthy", &l, r.healthy as u8 as f64);
++    }
++    header(&mut o, "hbbs_relay_sessions", "gauge", "Open sessions the relay reported in the last health check.");
++    for r in relays.iter().filter(|r| r.name != "none") {
++        sample(&mut o, "hbbs_relay_sessions", &relay_labels(r), r.sessions as f64);
++    }
++    header(&mut o, "hbbs_relay_assigned_total", "counter", "Relay handed out to a pair of peers (relay=\"none\": none available).");
++    for r in relays.iter() {
++        sample(&mut o, "hbbs_relay_assigned_total", &relay_labels(r), r.assigned as f64);
++    }
++
++    header(&mut o, "hbbs_turn_enabled", "gauge", "1 if hbbs runs the TURN server.");
++    sample(&mut o, "hbbs_turn_enabled", "", now.turn_enabled as u8 as f64);
++    header(&mut o, "hbbs_turn_allocations", "gauge", "Open TURN allocations.");
++    sample(&mut o, "hbbs_turn_allocations", "", now.turn_open as f64);
++    header(&mut o, "hbbs_turn_allocations_max", "gauge", "TURN_MAX_ALLOCATIONS.");
++    sample(&mut o, "hbbs_turn_allocations_max", "", now.turn_max as f64);
++    header(&mut o, "hbbs_turn_allocations_total", "counter", "TURN allocations made.");
++    sample(&mut o, "hbbs_turn_allocations_total", "", TURN_ALLOCATIONS.get() as f64);
++    header(&mut o, "hbbs_turn_allocations_refused_total", "counter", "TURN allocations refused at TURN_MAX_ALLOCATIONS.");
++    sample(&mut o, "hbbs_turn_allocations_refused_total", "", TURN_ALLOCATIONS_REFUSED.get() as f64);
++    header(&mut o, "hbbs_turn_requests_total", "counter", "TURN control datagrams (requests and channel data) taken.");
++    sample(&mut o, "hbbs_turn_requests_total", "", TURN_REQUESTS.get() as f64);
++    header(&mut o, "hbbs_turn_dropped_total", "counter", "TURN datagrams dropped: unauthenticated over the rate limit, control queue full, bandwidth cap.");
++    sample(&mut o, "hbbs_turn_dropped_total", "reason=\"unauth_rate\"", TURN_UNAUTH_DROPPED.get() as f64);
++    sample(&mut o, "hbbs_turn_dropped_total", "reason=\"queue_full\"", TURN_QUEUE_DROPPED.get() as f64);
++    sample(&mut o, "hbbs_turn_dropped_total", "reason=\"bandwidth_to_peer\"", TURN_BANDWIDTH_DROPPED[0].get() as f64);
++    sample(&mut o, "hbbs_turn_dropped_total", "reason=\"bandwidth_from_peer\"", TURN_BANDWIDTH_DROPPED[1].get() as f64);
++    header(&mut o, "hbbs_turn_bytes_total", "counter", "Bytes relayed by TURN allocations.");
++    sample(&mut o, "hbbs_turn_bytes_total", "direction=\"to_peer\"", TURN_BYTES[0].get() as f64);
++    sample(&mut o, "hbbs_turn_bytes_total", "direction=\"from_peer\"", TURN_BYTES[1].get() as f64);
++    common(&mut o);
++    o
++}
++
++fn relay_labels(r: &Relay) -> String {
++    let name: String = r.name.chars().filter(|c| !matches!(c, '"' | '\\' | '\n')).take(128).collect();
++    format!("relay=\"{name}\",role=\"{}\"", if r.backup { "backup" } else { "primary" })
++}
++
++// ---- hbbr ----
++
++/// Relay requests waiting for their peer.
++pub static PAIR_WAITING: Gauge = Gauge::new();
++/// Waiting relay requests whose peer never came (30 s).
++pub static PAIR_TIMEOUTS: Counter = Counter::new();
++/// New relay requests refused while draining.
++pub static PAIR_REFUSED_DRAINING: Counter = Counter::new();
++/// Pairs made by transport: [tcp (both raw), ws (either side WebSocket)].
++pub static PAIRED: [Counter; 2] = [Counter::new(), Counter::new()];
++/// Open sessions by transport, as PAIRED.
++pub static RELAY_SESSIONS: [Gauge; 2] = [Gauge::new(), Gauge::new()];
++/// Bytes relayed (each byte is received from one side and sent to the other once).
++pub static RELAY_BYTES: Counter = Counter::new();
++/// Sessions slowed to LIMIT_SPEED after exceeding the downgrade threshold.
++pub static DOWNGRADES: Counter = Counter::new();
++/// Connections or sessions closed because the IP is on the blocklist.
++pub static BLOCKED: Counter = Counter::new();
++
++pub fn render_hbbr(draining: bool) -> String {
++    let mut o = String::new();
++    header(&mut o, "hbbr_sessions", "gauge", "Paired sessions being relayed.");
++    sample(&mut o, "hbbr_sessions", "transport=\"tcp\"", RELAY_SESSIONS[0].get() as f64);
++    sample(&mut o, "hbbr_sessions", "transport=\"ws\"", RELAY_SESSIONS[1].get() as f64);
++    header(&mut o, "hbbr_pairs_total", "counter", "Relay requests paired with their peer.");
++    sample(&mut o, "hbbr_pairs_total", "transport=\"tcp\"", PAIRED[0].get() as f64);
++    sample(&mut o, "hbbr_pairs_total", "transport=\"ws\"", PAIRED[1].get() as f64);
++    header(&mut o, "hbbr_pair_waiting", "gauge", "Relay requests waiting for their peer.");
++    sample(&mut o, "hbbr_pair_waiting", "", PAIR_WAITING.get() as f64);
++    header(&mut o, "hbbr_pair_timeouts_total", "counter", "Relay requests whose peer did not come within 30 s.");
++    sample(&mut o, "hbbr_pair_timeouts_total", "", PAIR_TIMEOUTS.get() as f64);
++    header(&mut o, "hbbr_pair_refused_draining_total", "counter", "New relay requests refused while draining.");
++    sample(&mut o, "hbbr_pair_refused_draining_total", "", PAIR_REFUSED_DRAINING.get() as f64);
++    header(&mut o, "hbbr_relayed_bytes_total", "counter", "Bytes relayed between the two sides of all sessions.");
++    sample(&mut o, "hbbr_relayed_bytes_total", "", RELAY_BYTES.get() as f64);
++    header(&mut o, "hbbr_downgrades_total", "counter", "Sessions slowed to LIMIT_SPEED by the bandwidth limiter.");
++    sample(&mut o, "hbbr_downgrades_total", "", DOWNGRADES.get() as f64);
++    header(&mut o, "hbbr_blocked_total", "counter", "Connections or sessions closed for a blocklisted IP.");
++    sample(&mut o, "hbbr_blocked_total", "", BLOCKED.get() as f64);
++    header(&mut o, "hbbr_draining", "gauge", "1 while hbbr drains (stopping, takes no new sessions).");
++    sample(&mut o, "hbbr_draining", "", draining as u8 as f64);
++    common(&mut o);
++    o
++}
++
++// ---- shared ----
++
++fn header(o: &mut String, name: &str, typ: &str, help: &str) {
++    let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} {typ}");
++}
++
++fn sample(o: &mut String, name: &str, labels: &str, v: f64) {
++    if labels.is_empty() {
++        let _ = writeln!(o, "{name} {v}");
++    } else {
++        let _ = writeln!(o, "{name}{{{labels}}} {v}");
++    }
++}
++
++fn common(o: &mut String) {
++    header(o, "tether_build_info", "gauge", "Build version.");
++    sample(o, "tether_build_info", &format!("version=\"{}\"", crate::version::VERSION), 1.);
++    process(o);
++}
++
++/// process_* metrics from /proc/self, named like the Prometheus client libraries do.
++pub fn process(o: &mut String) {
++    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
++    let field = |k: &str| {
++        status.lines().find_map(|l| l.strip_prefix(k)?.split_whitespace().next()?.parse::<f64>().ok())
++    };
++    // shortcut: assumes USER_HZ = 100 (true on Linux x86_64 and arm64); use sysconf if that changes.
++    const HZ: f64 = 100.;
++    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
++    // Fields after "(comm) ": index 0 is field 3 (state); utime = 14, stime = 15, starttime = 22.
++    let f: Vec<f64> = stat.rsplit_once(") ").map_or(vec![], |(_, r)| r.split(' ').map(|x| x.parse().unwrap_or(0.)).collect());
++    let at = |n: usize| f.get(n - 3).copied().unwrap_or(0.);
++    let btime = std::fs::read_to_string("/proc/stat")
++        .unwrap_or_default()
++        .lines()
++        .find_map(|l| l.strip_prefix("btime ")?.trim().parse::<f64>().ok())
++        .unwrap_or(0.);
++    let fds = std::fs::read_dir("/proc/self/fd").map_or(0, |d| d.count());
++    let max_fds = std::fs::read_to_string("/proc/self/limits")
++        .unwrap_or_default()
++        .lines()
++        .find_map(|l| l.strip_prefix("Max open files")?.split_whitespace().next()?.parse::<f64>().ok())
++        .unwrap_or(0.);
++    for (name, typ, help, v) in [
++        ("process_cpu_seconds_total", "counter", "User and system CPU time spent in seconds.", (at(14) + at(15)) / HZ),
++        ("process_resident_memory_bytes", "gauge", "Resident memory size in bytes.", field("VmRSS:").unwrap_or(0.) * 1024.),
++        ("process_virtual_memory_bytes", "gauge", "Virtual memory size in bytes.", field("VmSize:").unwrap_or(0.) * 1024.),
++        ("process_threads", "gauge", "Number of OS threads.", field("Threads:").unwrap_or(0.)),
++        ("process_open_fds", "gauge", "Number of open file descriptors.", fds as f64),
++        ("process_max_fds", "gauge", "Maximum number of open file descriptors.", max_fds),
++        ("process_start_time_seconds", "gauge", "Start time of the process since unix epoch in seconds.", btime + at(22) / HZ),
++    ] {
++        header(o, name, typ, help);
++        sample(o, name, "", v);
++    }
++}
++
++/// Serves `GET /metrics` with `render()` on METRICS_ADDR:METRICS_PORT (default 127.0.0.1 and
++/// `default_port`; port 0 = off). Never bind it to a public address: docs/monitoring.md.
++pub async fn serve<F, Fut>(default_port: u16, render: F)
++where
++    F: Fn() -> Fut + Send + Sync + Clone + 'static,
++    Fut: std::future::Future<Output = String> + Send,
++{
++    use hbb_common::tokio::io::{AsyncReadExt, AsyncWriteExt};
++    let port: u16 = std::env::var("METRICS_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(default_port);
++    if port == 0 {
++        return;
++    }
++    let addr = std::env::var("METRICS_ADDR").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "127.0.0.1".into());
++    let listener = match hbb_common::tokio::net::TcpListener::bind((addr.trim(), port)).await {
++        Ok(l) => l,
++        Err(err) => {
++            hbb_common::log::error!("metrics endpoint on {addr}:{port} failed: {err}");
++            return;
++        }
++    };
++    hbb_common::log::info!("Metrics endpoint on http://{addr}:{port}/metrics");
++    while let Ok((mut stream, _)) = listener.accept().await {
++        let render = render.clone();
++        hbb_common::tokio::spawn(async move {
++            let mut buf = [0u8; 1024];
++            let n = match hbb_common::timeout(2_000, stream.read(&mut buf)).await {
++                Ok(Ok(n)) => n,
++                _ => return,
++            };
++            let req = String::from_utf8_lossy(&buf[..n]);
++            let path = req.split_whitespace().nth(1).unwrap_or("");
++            let (code, body) = if path.split('?').next() == Some("/metrics") {
++                ("200 OK", render().await)
++            } else {
++                ("404 Not Found", "not found\n".to_owned())
++            };
++            let res = format!(
++                "HTTP/1.1 {code}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
++                body.len()
++            );
++            stream.write_all(res.as_bytes()).await.ok();
++        });
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn value(text: &str, series: &str) -> f64 {
++        text.lines()
++            .find_map(|l| l.strip_prefix(series)?.strip_prefix(' ')?.parse().ok())
++            .unwrap_or_else(|| panic!("{series} missing in\n{text}"))
++    }
++
++    fn now() -> HbbsNow {
++        HbbsNow { peers_online: 5, peers_in_memory: 9, tcp_signalling: 2, turn_enabled: true, turn_open: 1, turn_max: 64 }
++    }
++
++    // Statics are shared by the tests of this module: each test uses its own series.
++    #[test]
++    fn hbbs_counters_move_and_render() {
++        let before = render_hbbs(&now());
++        PUNCH[PUNCH_OFFLINE].inc();
++        register_pk(4);
++        register_pk(99); // out of range: ignored
++        REGISTER_PEER[transport(true)].inc();
++        TURN_BYTES[1].add(1500);
++        let after = render_hbbs(&now());
++        for s in [
++            "hbbs_punch_hole_total{result=\"offline\"}",
++            "hbbs_register_pk_total{result=\"too_frequent\"}",
++            "hbbs_register_peer_total{transport=\"ws\"}",
++        ] {
++            assert_eq!(value(&after, s), value(&before, s) + 1., "{s}");
++        }
++        assert_eq!(value(&after, "hbbs_turn_bytes_total{direction=\"from_peer\"}"), value(&before, "hbbs_turn_bytes_total{direction=\"from_peer\"}") + 1500.);
++        assert_eq!(value(&after, "hbbs_peers_signalling{transport=\"udp\"}"), 3.);
++        assert_eq!(value(&after, "hbbs_turn_allocations_max"), 64.);
++        assert!(value(&after, "process_resident_memory_bytes") > 0.);
++        assert!(value(&after, "process_open_fds") > 0.);
++        assert!(value(&after, "process_start_time_seconds") > 1.6e9);
++        // Every sample line belongs to a declared metric.
++        for l in after.lines().filter(|l| !l.starts_with('#')) {
++            let name = l.split(['{', ' ']).next().unwrap();
++            assert!(after.contains(&format!("# TYPE {name} ")), "undeclared {name}");
++        }
++    }
++
++    #[test]
++    fn relays_health_assignment_and_failover() {
++        let all = vec![("a.example".to_owned(), false), ("b.example".to_owned(), true)];
++        relay_check(&all, &[("a.example".into(), 3, false), ("b.example".into(), 0, true)]);
++        relay_assigned("a.example");
++        relay_assigned("a.example");
++        relay_assigned("");
++        let t = render_hbbs(&now());
++        assert_eq!(value(&t, "hbbs_relay_healthy{relay=\"a.example\",role=\"primary\"}"), 1.);
++        assert_eq!(value(&t, "hbbs_relay_sessions{relay=\"a.example\",role=\"primary\"}"), 3.);
++        assert_eq!(value(&t, "hbbs_relay_assigned_total{relay=\"a.example\",role=\"primary\"}"), 2.);
++        assert_eq!(value(&t, "hbbs_relay_assigned_total{relay=\"none\",role=\"primary\"}"), 1.);
++        relay_check(&all, &[("b.example".into(), 0, true)]);
++        failover(true);
++        failover(true); // no new transition
++        let t = render_hbbs(&now());
++        assert_eq!(value(&t, "hbbs_relay_healthy{relay=\"a.example\",role=\"primary\"}"), 0.);
++        assert_eq!(value(&t, "hbbs_relay_failover"), 1.);
++        assert_eq!(value(&t, "hbbs_relay_failover_transitions_total{to=\"backup\"}"), 1.);
++        failover(false);
++        let t = render_hbbs(&now());
++        assert_eq!(value(&t, "hbbs_relay_failover_transitions_total{to=\"primary\"}"), 1.);
++        // The label set stays bounded whatever names come in.
++        for i in 0..100 {
++            relay_assigned(&format!("r{i}"));
++        }
++        assert!(RELAYS.lock().unwrap().len() <= MAX_RELAYS);
++    }
++
++    #[test]
++    fn hbbr_render() {
++        {
++            let _s = Open::new(&RELAY_SESSIONS[1]);
++            PAIRED[1].inc();
++            RELAY_BYTES.add(10);
++            let t = render_hbbr(true);
++            assert_eq!(value(&t, "hbbr_sessions{transport=\"ws\"}"), 1.);
++            assert_eq!(value(&t, "hbbr_pairs_total{transport=\"ws\"}"), 1.);
++            assert_eq!(value(&t, "hbbr_relayed_bytes_total"), 10.);
++            assert_eq!(value(&t, "hbbr_draining"), 1.);
++        }
++        assert_eq!(value(&render_hbbr(false), "hbbr_sessions{transport=\"ws\"}"), 0.);
++    }
++
++    #[test]
++    fn serves_metrics_on_localhost_only() {
++        hbb_common::tokio::runtime::Runtime::new().unwrap().block_on(async {
++            use hbb_common::tokio::io::{AsyncReadExt, AsyncWriteExt};
++            // Free port, then serve on it (METRICS_PORT is read by serve; this test owns it).
++            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
++            std::env::set_var("METRICS_PORT", port.to_string());
++            hbb_common::tokio::spawn(serve(1, || async { render_hbbr(false) }));
++            let mut got = String::new();
++            for _ in 0..50 {
++                hbb_common::tokio::time::sleep(std::time::Duration::from_millis(20)).await;
++                if let Ok(mut s) = hbb_common::tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
++                    s.write_all(b"GET /metrics HTTP/1.1\r\n\r\n").await.unwrap();
++                    s.read_to_string(&mut got).await.ok();
++                    break;
++                }
++            }
++            assert!(got.starts_with("HTTP/1.1 200 OK"), "{got}");
++            assert!(got.contains("# TYPE hbbr_sessions gauge"));
++        });
++    }
++}
 diff --git a/src/peer.rs b/src/peer.rs
 index 4ca87cf..7efd9c5 100644
 --- a/src/peer.rs
@@ -2178,7 +2717,7 @@ index 0ec190a..ad44169 100644
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..bdbdee5 100644
+index dff45eb..9a5cd65 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,14 @@ use std::{
@@ -2197,7 +2736,7 @@ index dff45eb..bdbdee5 100644
  type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
  type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
  enum Sink {
-@@ -57,17 +61,39 @@ enum Sink {
+@@ -57,17 +61,81 @@ enum Sink {
  type Sender = mpsc::UnboundedSender<Data>;
  type Receiver = mpsc::UnboundedReceiver<Data>;
  static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
@@ -2235,10 +2774,52 @@ index dff45eb..bdbdee5 100644
 +type TcpPeerTx = mpsc::UnboundedSender<RendezvousMessage>;
 +static TCP_PEERS: Lazy<TokioMutex<HashMap<SocketAddr, (TcpPeerTx, String)>>> =
 +    Lazy::new(|| TokioMutex::new(HashMap::new()));
++
++/// Tether: the relay's release generation G (tether-api writes it to RELEASE_GENERATION_FILE,
++/// default /var/lib/tether-api/release-generation, read every 5 s). Every registered WebSocket host
++/// gets a `ReleaseHint` when it changes and once right after it registers (docs/update-design.md).
++static RELEASE: Lazy<tokio::sync::watch::Sender<u64>> = Lazy::new(|| tokio::sync::watch::channel(0).0);
++/// `spread_secs` in the hint: clients wait uniform(0, spread) before fetching (RELEASE_HINT_SPREAD,
++/// default 60, at most 900).
++static RELEASE_SPREAD: Lazy<u32> =
++    Lazy::new(|| std::env::var("RELEASE_HINT_SPREAD").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(60).min(900));
++
++fn read_release_generation(path: &str) -> Option<u64> {
++    std::fs::read_to_string(path).ok()?.trim().parse().ok()
++}
++
++/// Publish a new G (only when it changed): wakes every connection loop.
++fn set_release_generation(g: u64) -> bool {
++    let changed = RELEASE.send_if_modified(|cur| std::mem::replace(cur, g) != g);
++    if changed {
++        crate::metrics::RELEASE_GENERATION.set(g as i64);
++        crate::metrics::RELEASE_HINT_PEERS.set(0);
++    }
++    changed
++}
++
++async fn watch_release_generation() {
++    let path = std::env::var("RELEASE_GENERATION_FILE").unwrap_or_else(|_| "/var/lib/tether-api/release-generation".to_owned());
++    let mut t = interval(Duration::from_secs(5));
++    loop {
++        t.tick().await;
++        if let Some(g) = read_release_generation(&path) {
++            if set_release_generation(g) {
++                log::info!("release generation {g}: hinting registered hosts");
++            }
++        }
++    }
++}
++
++fn release_hint(g: u64) -> RendezvousMessage {
++    let mut m = RendezvousMessage::new();
++    m.set_release_hint(ReleaseHint { generation: g, spread_secs: *RELEASE_SPREAD, ..Default::default() });
++    m
++}
  
  #[derive(Clone)]
  struct Inner {
-@@ -84,7 +110,7 @@ pub struct RendezvousServer {
+@@ -84,7 +152,7 @@ pub struct RendezvousServer {
      tcp_punch: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
      pm: PeerMap,
      tx: Sender,
@@ -2247,7 +2828,7 @@ index dff45eb..bdbdee5 100644
      relay_servers0: Arc<RelayServers>,
      rendezvous_servers: Arc<Vec<String>>,
      inner: Arc<Inner>,
-@@ -101,6 +127,10 @@ impl RendezvousServer {
+@@ -101,6 +169,10 @@ impl RendezvousServer {
      #[tokio::main(flavor = "multi_thread")]
      pub async fn start(port: i32, serial: i32, key: &str, rmem: usize) -> ResultType<()> {
          let (key, sk) = Self::get_server_sk(key);
@@ -2258,7 +2839,7 @@ index dff45eb..bdbdee5 100644
          let nat_port = port - 1;
          let ws_port = port + 2;
          let pm = PeerMap::new().await?;
-@@ -108,8 +138,15 @@ impl RendezvousServer {
+@@ -108,8 +180,15 @@ impl RendezvousServer {
          let rendezvous_servers = get_servers(&get_arg("rendezvous-servers"), "rendezvous-servers");
          log::info!("Listening on tcp/udp :{}", port);
          log::info!("Listening on tcp :{}, extra port for NAT test", nat_port);
@@ -2275,7 +2856,7 @@ index dff45eb..bdbdee5 100644
          let (tx, mut rx) = mpsc::unbounded_channel::<Data>();
          let software_url = get_arg("software-url");
          let version = hbb_common::get_version_from_url(&software_url);
-@@ -147,9 +184,10 @@ impl RendezvousServer {
+@@ -147,9 +226,10 @@ impl RendezvousServer {
          log::info!("local-ip: {:?}", rs.inner.local_ip);
          std::env::set_var("PORT_FOR_API", port.to_string());
          rs.parse_relay_servers(&get_arg("relay-servers"));
@@ -2287,7 +2868,7 @@ index dff45eb..bdbdee5 100644
          let test_addr = std::env::var("TEST_HBBS").unwrap_or_default();
          if std::env::var("ALWAYS_USE_RELAY")
              .unwrap_or_default()
-@@ -216,12 +254,19 @@ impl RendezvousServer {
+@@ -216,12 +296,20 @@ impl RendezvousServer {
                      }
                      LoopFailure::Listener3 => {
                          drop(listener3);
@@ -2299,6 +2880,7 @@ index dff45eb..bdbdee5 100644
          };
 -        let listen_signal = listen_signal();
 +        tokio::spawn(serve_health(HEALTH_PORT, || TCP_PEERS.try_lock().map_or(0, |p| p.len())));
++        tokio::spawn(watch_release_generation());
 +        tokio::spawn(crate::metrics::serve(21123, move || {
 +            let pm = pm_metrics.clone();
 +            async move { render_metrics(&pm).await }
@@ -2309,7 +2891,7 @@ index dff45eb..bdbdee5 100644
          tokio::select!(
              res = main_task => res,
              res = listen_signal => res,
-@@ -237,6 +282,9 @@ impl RendezvousServer {
+@@ -237,6 +325,9 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> LoopFailure {
@@ -2319,7 +2901,7 @@ index dff45eb..bdbdee5 100644
          let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
          loop {
              tokio::select! {
-@@ -251,9 +299,25 @@ impl RendezvousServer {
+@@ -251,9 +342,25 @@ impl RendezvousServer {
                  }
                  Some(data) = rx.recv() => {
                      match data {
@@ -2347,7 +2929,7 @@ index dff45eb..bdbdee5 100644
                      }
                  }
                  res = socket.next() => {
-@@ -321,10 +385,21 @@ impl RendezvousServer {
+@@ -321,10 +428,21 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> ResultType<()> {
@@ -2369,7 +2951,7 @@ index dff45eb..bdbdee5 100644
                      if !rp.id.is_empty() {
                          log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
                          self.update_addr(rp.id, addr, socket).await?;
-@@ -340,89 +415,9 @@ impl RendezvousServer {
+@@ -340,89 +458,9 @@ impl RendezvousServer {
                      }
                  }
                  Some(rendezvous_message::Union::RegisterPk(rk)) => {
@@ -2382,7 +2964,9 @@ index dff45eb..bdbdee5 100644
 -                        return send_rk_res(socket, addr, UUID_MISMATCH).await;
 -                    } else if !self.check_ip_blocker(&ip, &id).await {
 -                        return send_rk_res(socket, addr, TOO_FREQUENT).await;
--                    }
++                    if let Some(msg_out) = self.register_pk(rk, addr).await {
++                        socket.send(&msg_out, addr).await?
+                     }
 -                    let peer = self.pm.get_or(&id).await;
 -                    let (changed, ip_changed) = {
 -                        let peer = peer.read().await;
@@ -2446,9 +3030,7 @@ index dff45eb..bdbdee5 100644
 -                                (Instant::now(), HashMap::from([(ip.clone(), 1)])),
 -                            );
 -                        }
-+                    if let Some(msg_out) = self.register_pk(rk, addr).await {
-+                        socket.send(&msg_out, addr).await?
-                     }
+-                    }
 -                    if changed {
 -                        self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
 -                    }
@@ -2461,7 +3043,7 @@ index dff45eb..bdbdee5 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // UDP PunchHoleRequest is intentionally unsupported.
-@@ -479,9 +474,34 @@ impl RendezvousServer {
+@@ -479,9 +517,34 @@ impl RendezvousServer {
          addr: SocketAddr,
          key: &str,
          ws: bool,
@@ -2496,7 +3078,7 @@ index dff45eb..bdbdee5 100644
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // there maybe several attempt, so sink can be none
                      if let Some(sink) = sink.take() {
-@@ -521,8 +541,18 @@ impl RendezvousServer {
+@@ -521,8 +584,18 @@ impl RendezvousServer {
                              rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
                          }
                      }
@@ -2516,7 +3098,7 @@ index dff45eb..bdbdee5 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
                      allow_err!(self.handle_hole_sent(phs, addr, None).await);
-@@ -545,14 +575,31 @@ impl RendezvousServer {
+@@ -545,14 +618,31 @@ impl RendezvousServer {
                      msg_out.set_test_nat_response(res);
                      Self::send_to_sink(sink, msg_out).await;
                  }
@@ -2556,7 +3138,7 @@ index dff45eb..bdbdee5 100644
                  }
                  _ => {}
              }
-@@ -567,6 +614,12 @@ impl RendezvousServer {
+@@ -567,6 +657,12 @@ impl RendezvousServer {
          socket_addr: SocketAddr,
          socket: &mut FramedSocket,
      ) -> ResultType<()> {
@@ -2569,7 +3151,7 @@ index dff45eb..bdbdee5 100644
          let (request_pk, ip_change) = if let Some(old) = self.pm.get_in_memory(&id).await {
              let mut old = old.write().await;
              let ip = socket_addr.ip();
-@@ -601,7 +654,113 @@ impl RendezvousServer {
+@@ -601,7 +697,113 @@ impl RendezvousServer {
              request_pk,
              ..Default::default()
          });
@@ -2684,7 +3266,7 @@ index dff45eb..bdbdee5 100644
      }
  
      #[inline]
-@@ -620,17 +779,25 @@ impl RendezvousServer {
+@@ -620,17 +822,25 @@ impl RendezvousServer {
              &addr
          );
          let mut msg_out = RendezvousMessage::new();
@@ -2711,7 +3293,7 @@ index dff45eb..bdbdee5 100644
              socket.send(&msg_out, addr_a).await?;
          } else {
              self.send_to_tcp(msg_out, addr_a).await;
-@@ -658,6 +825,7 @@ impl RendezvousServer {
+@@ -658,6 +868,7 @@ impl RendezvousServer {
              socket_addr: la.local_addr.clone(),
              pk: self.get_pk(&la.version, la.id).await,
              relay_server: la.relay_server,
@@ -2719,7 +3301,7 @@ index dff45eb..bdbdee5 100644
              ..Default::default()
          };
          p.set_is_local(true);
-@@ -679,8 +847,9 @@ impl RendezvousServer {
+@@ -679,8 +890,9 @@ impl RendezvousServer {
          ws: bool,
      ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
          let mut ph = ph;
@@ -2730,7 +3312,7 @@ index dff45eb..bdbdee5 100644
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
                  failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
-@@ -700,6 +869,7 @@ impl RendezvousServer {
+@@ -700,6 +912,7 @@ impl RendezvousServer {
                  (r.last_reg_time.elapsed().as_millis() as i64, r.socket_addr)
              };
              if elapsed >= REG_TIMEOUT {
@@ -2738,7 +3320,7 @@ index dff45eb..bdbdee5 100644
                  let mut msg_out = RendezvousMessage::new();
                  msg_out.set_punch_hole_response(PunchHoleResponse {
                      failure: punch_hole_response::Failure::OFFLINE.into(),
-@@ -721,7 +891,12 @@ impl RendezvousServer {
+@@ -721,7 +934,12 @@ impl RendezvousServer {
                          break;
                      }
                  }
@@ -2752,7 +3334,7 @@ index dff45eb..bdbdee5 100644
              }
  
              let mut msg_out = RendezvousMessage::new();
-@@ -744,6 +919,7 @@ impl RendezvousServer {
+@@ -744,6 +962,7 @@ impl RendezvousServer {
                      }
                  });
              let socket_addr = AddrMangle::encode(addr).into();
@@ -2760,7 +3342,7 @@ index dff45eb..bdbdee5 100644
              if same_intranet {
                  log::debug!(
                      "Fetch local addr {:?} {:?} request from {:?}",
-@@ -754,6 +930,7 @@ impl RendezvousServer {
+@@ -754,6 +973,7 @@ impl RendezvousServer {
                  msg_out.set_fetch_local_addr(FetchLocalAddr {
                      socket_addr,
                      relay_server,
@@ -2768,7 +3350,7 @@ index dff45eb..bdbdee5 100644
                      ..Default::default()
                  });
              } else {
-@@ -763,15 +940,29 @@ impl RendezvousServer {
+@@ -763,15 +983,29 @@ impl RendezvousServer {
                      peer_addr,
                      addr
                  );
@@ -2798,7 +3380,7 @@ index dff45eb..bdbdee5 100644
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
                  failure: punch_hole_response::Failure::ID_NOT_EXIST.into(),
-@@ -787,6 +978,13 @@ impl RendezvousServer {
+@@ -787,6 +1021,13 @@ impl RendezvousServer {
          stream: &mut FramedStream,
          peers: Vec<String>,
      ) -> ResultType<()> {
@@ -2812,7 +3394,7 @@ index dff45eb..bdbdee5 100644
          let mut states = BytesMut::zeroed((peers.len() + 7) / 8);
          for (i, peer_id) in peers.iter().enumerate() {
              if let Some(peer) = self.pm.get_in_memory(peer_id).await {
-@@ -805,9 +1003,7 @@ impl RendezvousServer {
+@@ -805,9 +1046,7 @@ impl RendezvousServer {
              states: states.into(),
              ..Default::default()
          });
@@ -2823,7 +3405,7 @@ index dff45eb..bdbdee5 100644
      }
  
      #[inline]
-@@ -821,19 +1017,57 @@ impl RendezvousServer {
+@@ -821,19 +1060,57 @@ impl RendezvousServer {
      #[inline]
      async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) {
          if let Some(sink) = sink.as_mut() {
@@ -2889,7 +3471,7 @@ index dff45eb..bdbdee5 100644
      #[inline]
      async fn send_to_tcp_sync(
          &mut self,
-@@ -880,6 +1114,17 @@ impl RendezvousServer {
+@@ -880,6 +1157,17 @@ impl RendezvousServer {
          Ok(())
      }
  
@@ -2907,7 +3489,7 @@ index dff45eb..bdbdee5 100644
      async fn check_ip_blocker(&self, ip: &str, id: &str) -> bool {
          let mut lock = IP_BLOCKER.lock().await;
          let now = Instant::now();
-@@ -887,7 +1132,8 @@ impl RendezvousServer {
+@@ -887,7 +1175,8 @@ impl RendezvousServer {
              let counter = &mut old.0;
              if counter.1.elapsed().as_secs() > IP_BLOCK_DUR {
                  counter.0 = 0;
@@ -2917,7 +3499,7 @@ index dff45eb..bdbdee5 100644
                  return false;
              }
              counter.0 += 1;
-@@ -897,7 +1143,10 @@ impl RendezvousServer {
+@@ -897,7 +1186,10 @@ impl RendezvousServer {
              let is_new = counter.0.get(id).is_none();
              if counter.1.elapsed().as_secs() > DAY_SECONDS {
                  counter.0.clear();
@@ -2929,7 +3511,7 @@ index dff45eb..bdbdee5 100644
                  return !is_new;
              }
              if is_new {
-@@ -911,19 +1160,28 @@ impl RendezvousServer {
+@@ -911,19 +1203,28 @@ impl RendezvousServer {
      }
  
      fn parse_relay_servers(&mut self, relay_servers: &str) {
@@ -2967,7 +3549,7 @@ index dff45eb..bdbdee5 100644
      }
  
      async fn check_cmd(&self, cmd: &str) -> String {
-@@ -948,8 +1206,9 @@ impl RendezvousServer {
+@@ -948,8 +1249,9 @@ impl RendezvousServer {
                  if let Some(rs) = fds.next() {
                      self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                  } else {
@@ -2979,7 +3561,7 @@ index dff45eb..bdbdee5 100644
                      }
                  }
              }
-@@ -1148,20 +1407,22 @@ impl RendezvousServer {
+@@ -1148,20 +1450,22 @@ impl RendezvousServer {
          key: &str,
          ws: bool,
      ) -> ResultType<()> {
@@ -3010,7 +3592,7 @@ index dff45eb..bdbdee5 100644
                      }
                  }
                  Ok(response)
-@@ -1169,22 +1430,71 @@ impl RendezvousServer {
+@@ -1169,22 +1473,87 @@ impl RendezvousServer {
              let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
              let (a, mut b) = ws_stream.split();
              sink = Some(Sink::Ws(a));
@@ -3027,9 +3609,16 @@ index dff45eb..bdbdee5 100644
 +            // every frame: clients ping every second, and the global lock per ping was the
 +            // hottest lock in hbbs (docs/scaling.md).
 +            let mut registered: Option<String> = None;
++            let mut release = RELEASE.subscribe();
 +            loop {
 +                let idle_ms = if registered.is_some() { 120_000 } else { 30_000 };
 +                tokio::select! {
++                    Ok(()) = release.changed(), if registered.is_some() => {
++                        let g = *release.borrow_and_update();
++                        Self::send_to_sink(&mut sink, release_hint(g)).await;
++                        crate::metrics::RELEASE_HINTS[0].inc();
++                        crate::metrics::RELEASE_HINT_PEERS.inc();
++                    }
 +                    _ = heartbeat.tick(), if registered.is_some() => {
 +                        if let Some(Sink::Ws(ws)) = sink.as_mut() {
 +                            if ws.send(tungstenite::Message::Binary(Vec::new())).await.is_err() {
@@ -3047,7 +3636,16 @@ index dff45eb..bdbdee5 100644
 +                            if !self.handle_tcp(&bytes, &mut sink, addr, key, ws, &peer_tx).await {
 +                                break;
 +                            }
++                            let was = registered.is_some();
 +                            registered = registered_id(addr, &peer_tx).await;
++                            // Newly registered: the current G once, so a host that was offline
++                            // during a push learns of the release on reconnect.
++                            let g = *release.borrow_and_update();
++                            if !was && registered.is_some() && g > 0 {
++                                Self::send_to_sink(&mut sink, release_hint(g)).await;
++                                crate::metrics::RELEASE_HINTS[1].inc();
++                                crate::metrics::RELEASE_HINT_PEERS.inc();
++                            }
 +                        }
 +                        Ok(Some(Ok(_))) => {}
 +                        _ => break,
@@ -3089,7 +3687,7 @@ index dff45eb..bdbdee5 100644
          if sink.is_none() {
              self.tcp_punch.lock().await.remove(&try_into_v4(addr));
          }
-@@ -1268,24 +1578,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
+@@ -1268,24 +1637,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
      let mut futs = Vec::new();
      let rs = Arc::new(Mutex::new(Vec::new()));
      for x in rs0.iter() {
@@ -3147,7 +3745,7 @@ index dff45eb..bdbdee5 100644
      if !rs.is_empty() {
          tx.send(Data::RelayServers(rs)).ok();
      }
-@@ -1330,17 +1667,14 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+@@ -1330,17 +1726,14 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
  }
  
  #[inline]
@@ -3168,7 +3766,7 @@ index dff45eb..bdbdee5 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1695,328 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1754,420 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
@@ -3480,6 +4078,98 @@ index dff45eb..bdbdee5 100644
 +        assert_eq!(h(&[("X-Forwarded-For", "2001:db8::1")]).as_deref(), Some("2001:db8::1"));
 +        assert_eq!(h(&[("X-Real-IP", "6.6.6.6")]), None);
 +        assert_eq!(h(&[]), None);
++    }
++
++    /// Tether release push: a registered WebSocket host gets the current G right after it
++    /// registers and every change after that; an unregistered connection gets nothing.
++    #[test]
++    fn release_hint_reaches_registered_websocket_hosts_only() {
++        use tokio_tungstenite::tungstenite::Message as WsMsg;
++        let _g = DB_ENV.lock().unwrap_or_else(|e| e.into_inner());
++        tokio::runtime::Runtime::new().unwrap().block_on(async {
++            let db = std::env::temp_dir().join(format!("hbbs-hint-{}.sqlite3", std::process::id()));
++            let _ = std::fs::remove_file(&db);
++            std::env::set_var("DB_URL", db.to_str().unwrap());
++            let rs = server(PeerMap::new().await.unwrap());
++            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++            let port = listener.local_addr().unwrap().port();
++            tokio::spawn(async move {
++                loop {
++                    let (stream, addr) = listener.accept().await.unwrap();
++                    let mut rs = rs.clone();
++                    tokio::spawn(async move { rs.handle_listener_inner(stream, addr, "", true).await });
++                }
++            });
++            let connect = || async move {
++                let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
++                tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws/id"), tcp).await.unwrap().0
++            };
++            // The next non-heartbeat message, or None within `ms`.
++            async fn next<S: StreamExt<Item = Result<WsMsg, tungstenite::Error>> + Unpin>(ws: &mut S, ms: u64) -> Option<RendezvousMessage> {
++                loop {
++                    match hbb_common::tokio::time::timeout(Duration::from_millis(ms), ws.next()).await {
++                        Ok(Some(Ok(WsMsg::Binary(b)))) if !b.is_empty() => return RendezvousMessage::parse_from_bytes(&b).ok(),
++                        Ok(Some(Ok(_))) => continue,
++                        _ => return None,
++                    }
++                }
++            }
++            let hint = |m: Option<RendezvousMessage>| match m.and_then(|m| m.union) {
++                Some(rendezvous_message::Union::ReleaseHint(h)) => Some((h.generation, h.spread_secs)),
++                _ => None,
++            };
++
++            assert!(set_release_generation(7));
++            assert!(!set_release_generation(7), "unchanged G is not a change");
++            let mut host = connect().await;
++            let mut idle = connect().await;
++            host.send(WsMsg::Binary(register_pk("hinthost1", b"hint-uuid", b"hint-pk"))).await.unwrap();
++            let r = next(&mut host, 3000).await.expect("RegisterPkResponse");
++            assert!(r.has_register_pk_response());
++            assert_eq!(hint(next(&mut host, 3000).await), Some((7, 60)), "current G after registration");
++            // A connection that never registered (a viewer asking once) gets no push.
++            let mut online = RendezvousMessage::new();
++            online.set_online_request(OnlineRequest { id: "x".into(), peers: vec!["hinthost1".into()], ..Default::default() });
++            idle.send(WsMsg::Binary(online.write_to_bytes().unwrap())).await.unwrap();
++            assert!(next(&mut idle, 3000).await.unwrap().has_online_response());
++
++            let before = crate::metrics::RELEASE_HINTS[0].get();
++            assert!(set_release_generation(8));
++            assert_eq!(hint(next(&mut host, 3000).await), Some((8, 60)), "pushed on change");
++            assert_eq!(crate::metrics::RELEASE_HINTS[0].get(), before + 1);
++            assert_eq!(crate::metrics::RELEASE_HINT_PEERS.get(), 1);
++            assert_eq!(crate::metrics::RELEASE_GENERATION.get(), 8);
++            assert!(next(&mut idle, 500).await.is_none(), "unregistered connection got a hint");
++            assert!(next(&mut host, 500).await.is_none(), "one hint per change");
++        });
++    }
++
++    #[test]
++    fn release_generation_file() {
++        let p = std::env::temp_dir().join(format!("hbbs-relgen-{}", std::process::id()));
++        std::fs::write(&p, "42\n").unwrap();
++        assert_eq!(read_release_generation(p.to_str().unwrap()), Some(42));
++        std::fs::write(&p, "garbage").unwrap();
++        assert_eq!(read_release_generation(p.to_str().unwrap()), None);
++        let _ = std::fs::remove_file(&p);
++        assert_eq!(read_release_generation(p.to_str().unwrap()), None);
++    }
++
++    /// What a client without ReleaseHint in its proto does with the frame: it parses, the union is
++    /// empty (unknown field kept aside), so its `handle_resp` falls through `_ => {}`.
++    #[test]
++    fn release_hint_is_an_unknown_field_for_old_clients() {
++        let bytes = release_hint(9).write_to_bytes().unwrap();
++        // Field 1001, wire type 2: tag varint (1001 << 3 | 2) = 0xca 0x3e.
++        assert_eq!(&bytes[..2], &[0xca, 0x3e]);
++        let mut old = RendezvousMessage::new();
++        // An "old" decoder: the same message type with the field stripped from the descriptor is
++        // not available here, so check the wire rule instead: a message type that lacks field
++        // 1001 (RegisterPeer) parses it as an unknown field.
++        let as_old = RegisterPeer::parse_from_bytes(&bytes).unwrap();
++        assert!(as_old.id.is_empty() && as_old.special_fields.unknown_fields().iter().next().is_some());
++        old.merge_from_bytes(&bytes).unwrap();
++        assert!(old.has_release_hint());
 +    }
 +}
 +

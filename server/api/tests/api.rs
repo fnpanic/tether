@@ -227,8 +227,8 @@ fn server_key_list_publish_fetch_and_heartbeat() {
 
     // Heartbeats report the applied list; older clients leave the field out.
     let new = hb("keys-0001").replace("\"serial\":12", "\"serial\":12,\"server_keys_serial\":2");
-    assert_eq!(s.req("POST", "/api/heartbeat", &[], new.as_bytes()).status, 204);
-    assert_eq!(s.req("POST", "/api/heartbeat", &[], hb("keys-0002").as_bytes()).status, 204);
+    assert_eq!(s.req("POST", "/api/heartbeat", &[], new.as_bytes()).status, 200);
+    assert_eq!(s.req("POST", "/api/heartbeat", &[], hb("keys-0002").as_bytes()).status, 200);
     let devs = s.admin(&k, "GET", "/api/admin/devices", b"").json();
     let by = |u: &str| devs.as_array().unwrap().iter().find(|d| d["uuid"] == u).unwrap()["server_keys_serial"].clone();
     assert_eq!((by("keys-0001"), by("keys-0002")), (serde_json::json!(2), serde_json::json!(0)));
@@ -242,7 +242,7 @@ fn hb(uuid: &str) -> String {
 fn heartbeat() {
     let (s, k) = admin_server();
     let ip = [("X-Forwarded-For", "203.0.113.7, 10.0.0.1")];
-    assert_eq!(s.req("POST", "/api/heartbeat", &ip, hb("aaaa-1111").as_bytes()).status, 204);
+    assert_eq!(s.req("POST", "/api/heartbeat", &ip, hb("aaaa-1111").as_bytes()).status, 200);
     assert_eq!(s.req("POST", "/api/heartbeat", &ip, hb("aaaa-1111").as_bytes()).status, 429);
 
     let ip2 = [("X-Forwarded-For", "198.51.100.1")];
@@ -265,7 +265,7 @@ fn heartbeat() {
     // 30 per minute per IP, the 31st is refused.
     let ip3 = [("X-Forwarded-For", "192.0.2.9")];
     for i in 0..30 {
-        assert_eq!(s.req("POST", "/api/heartbeat", &ip3, hb(&format!("dev-{i:04}")).as_bytes()).status, 204, "post {i}");
+        assert_eq!(s.req("POST", "/api/heartbeat", &ip3, hb(&format!("dev-{i:04}")).as_bytes()).status, 200, "post {i}");
     }
     let r = s.req("POST", "/api/heartbeat", &ip3, hb("dev-9999").as_bytes());
     assert_eq!((r.status, r.body.as_slice()), (429, &b"too many requests"[..]));
@@ -530,7 +530,7 @@ fn state_survives_restart() {
     assert_eq!(s.admin(&k, "PUT", "/api/admin/server-keys", &list).status, 204);
     let sig = reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now());
     assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 200);
-    assert_eq!(s.req("POST", "/api/heartbeat", &[], hb("persist-01").as_bytes()).status, 204);
+    assert_eq!(s.req("POST", "/api/heartbeat", &[], hb("persist-01").as_bytes()).status, 200);
 
     // SIGTERM flushes devices; restart on the same data dir.
     unsafe { libc::kill(s.child.id() as i32, libc::SIGTERM) };
@@ -735,4 +735,111 @@ fn stalled_body_read_times_out() {
     let took = t0.elapsed().as_secs();
     assert!(raw.starts_with(b"HTTP/1.1 400"), "no 400 after {took} s: {:?}", String::from_utf8_lossy(&raw));
     assert!((20..50).contains(&took), "{took} s");
+}
+
+fn index_doc(key: &SigningKey, channel: &str, serial: u64) -> Vec<u8> {
+    index_doc_issued(key, channel, serial, 1)
+}
+
+fn index_doc_issued(key: &SigningKey, channel: &str, serial: u64, issued: u64) -> Vec<u8> {
+    let entry = serde_json::json!({
+        "version": "0.5.24", "file": "Tether_0.5.24_x64-setup.exe", "size": 3, "sha256": "a".repeat(64), "signature": "U0lH",
+        "urls": ["https://{relay}/download/stable/technician/windows-x86_64/Tether_0.5.24_x64-setup.exe"],
+        "rollout": {"start": 0, "steps": [[0, 100]]}
+    });
+    let payload = serde_json::json!({"type": "tether-releases/1", "channel": channel, "serial": serial, "issued": issued, "expires": 2_000_000_000u64,
+        "releases": {"technician/windows-x86_64": entry}});
+    serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&payload).unwrap(), key)).unwrap()
+}
+
+fn generation(s: &Srv, uuid: &str) -> u64 {
+    let r = s.req("POST", "/api/heartbeat", &[("X-Real-IP", uuid)], hb(uuid).as_bytes());
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    r.json()["releases"].as_u64().unwrap()
+}
+
+/// Release generation G, the heartbeat hint and the signed release index (docs/update-design.md).
+#[test]
+fn release_generation_heartbeat_hint_and_index() {
+    let (s, k) = admin_server();
+    assert_eq!(generation(&s, "gen-0001"), 0);
+    let rel = "/api/admin/release/stable/technician/windows-x86_64";
+    // An artifact does not change G; a manifest does.
+    assert_eq!(s.admin(&k, "PUT", &format!("{rel}/Tether_0.5.24_x64-setup.exe"), b"exe").status, 204);
+    assert_eq!(generation(&s, "gen-0002"), 0);
+    assert_eq!(s.admin(&k, "PUT", &format!("{rel}/latest.json"), br#"{"version":"0.5.24"}"#).status, 204);
+    assert_eq!(generation(&s, "gen-0003"), 1);
+    assert_eq!(std::fs::read_to_string(s.dir.join("release-generation")).unwrap().trim(), "1");
+
+    // The index: signed by a trusted admin key, for the channel of its path, serials only go up.
+    let p = "/api/admin/release/stable/releases.json";
+    assert_eq!(s.admin(&k, "PUT", p, &index_doc(&generate_key(), "stable", 5)).status, 400, "foreign key");
+    assert_eq!(s.admin(&k, "PUT", p, &index_doc(&k, "test", 5)).status, 400, "other channel");
+    assert_eq!(s.admin(&k, "PUT", p, br#"{"version":"0.5.24"}"#).status, 400, "unsigned");
+    assert!(!s.dir.join("download/stable/releases.json").exists());
+    assert_eq!(generation(&s, "gen-0004"), 1, "refused uploads do not bump G");
+    let doc5 = index_doc(&k, "stable", 5);
+    assert_eq!(s.admin(&k, "PUT", p, &doc5).status, 204);
+    assert_eq!(s.admin(&k, "PUT", p, &doc5).status, 204, "the same document again (publish to missing relays)");
+    assert_eq!(s.admin(&k, "PUT", p, &index_doc(&k, "stable", 4)).status, 409);
+    assert_eq!(s.admin(&k, "PUT", p, &index_doc_issued(&k, "stable", 5, 2)).status, 409, "same serial, other bytes");
+    assert_eq!(generation(&s, "gen-0005"), 3);
+
+    // Served with the serial as ETag (equal on every relay), 304 on If-None-Match, no-cache.
+    let r = s.req("GET", "/download/stable/releases.json", &[], b"");
+    assert_eq!((r.status, r.header("ETag"), r.header("Cache-Control")), (200, Some("\"5\""), Some("no-cache")));
+    assert_eq!(r.body, doc5);
+    assert_eq!(s.req("GET", "/download/stable/releases.json", &[("If-None-Match", "\"5\"")], b"").status, 304);
+    assert_eq!(s.req("GET", "/download/test/releases.json", &[], b"").status, 404);
+    assert_eq!(s.admin(&k, "PUT", p, &index_doc(&k, "stable", 6)).status, 204);
+    assert_eq!(s.req("GET", "/download/stable/releases.json", &[("If-None-Match", "\"5\"")], b"").status, 200);
+    let status = s.admin(&k, "GET", "/api/admin/status", b"").json();
+    assert_eq!((status["release_generation"].as_u64(), status["release_indexes"]["stable"]["serial"].as_u64()), (Some(4), Some(6)));
+
+    // Deleting the index bumps G and stops serving it.
+    assert_eq!(s.admin(&k, "DELETE", p, b"").status, 204);
+    assert_eq!(s.req("GET", "/download/stable/releases.json", &[], b"").status, 404);
+    assert_eq!(generation(&s, "gen-0006"), 5);
+    let m = s.req("GET", "/metrics", &[], b"");
+    let text = String::from_utf8_lossy(&m.body);
+    assert!(text.contains("tether_api_release_generation 5"), "{text}");
+    assert!(text.contains("tether_api_requests_total{endpoint=\"release_index\",code=\"304\"} 1"));
+}
+
+/// New heartbeat fields, validated; old clients take any 2xx (technician: `is_success()`,
+/// TetherQS ignores the body), so the 200 with a JSON body is compatible.
+#[test]
+fn heartbeat_update_fields_and_old_clients() {
+    let (s, _) = admin_server();
+    let with = |uuid: &str, extra: &str| format!(r#"{{"uuid":"{uuid}","id":"1","profile":"customer","version":"0.5.23","os":"w","serial":1{extra}}}"#);
+    for (i, (extra, code)) in [
+        (r#","release_serial":5,"update_state":"staged","update_version":"0.5.24""#, 200),
+        (r#","update_state":"waiting-rollout""#, 200),
+        (r#","update_state":"pwned""#, 400),
+        (r#","update_version":"../1""#, 400),
+        (r#","update_state":"staged","update_version":"0.5.24""#, 200),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let r = s.req("POST", "/api/heartbeat", &[("X-Real-IP", "10.0.0.9")], with(&format!("hbnew-{i:03}"), extra).as_bytes());
+        assert_eq!(r.status, *code, "{extra}");
+        if *code == 200 {
+            // What a 0.5.23 client does with the answer: success, body irrelevant.
+            assert!((200..300).contains(&r.status));
+            assert!(r.json()["releases"].is_u64());
+        }
+    }
+    let m = String::from_utf8_lossy(&s.req("GET", "/metrics", &[], b"").body).into_owned();
+    assert!(m.contains("tether_api_release_downloads_total{profile=\"customer\",version=\"0.5.24\"} 2"), "{m}");
+    assert!(m.contains("tether_api_devices_update_state{state=\"staged\"} 2"));
+    assert!(m.contains("tether_api_devices_by_version{profile=\"customer\",version=\"0.5.23\"} 3"));
+}
+
+/// G survives a restart (read from `release-generation`).
+#[test]
+fn release_generation_persists() {
+    let k = generate_key();
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[], |d| std::fs::write(d.join("release-generation"), "41\n").unwrap());
+    assert_eq!(generation(&s, "persist-g1"), 41);
 }

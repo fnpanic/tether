@@ -1947,7 +1947,7 @@ index 26f8cbc..dbc483f 100644
      fn a_probing_login_asks_for_the_tunnel() {
          let rt = tokio::runtime::Builder::new_current_thread()
 diff --git a/src/rendezvous_mediator.rs b/src/rendezvous_mediator.rs
-index b1e523d..9c5fe9a 100644
+index b1e523d..c1d6c1c 100644
 --- a/src/rendezvous_mediator.rs
 +++ b/src/rendezvous_mediator.rs
 @@ -264,6 +264,18 @@ async fn wait_for_retry(delay: f32, restarted: tokio::sync::futures::Notified<'_
@@ -2034,7 +2034,18 @@ index b1e523d..9c5fe9a 100644
          host.split(".")
              .next()
              .map(|x| {
-@@ -643,6 +696,14 @@ impl RendezvousMediator {
+@@ -592,6 +645,10 @@ impl RendezvousMediator {
+                     _ => {}
+                 }
+             }
++            // Tether: the relay's release generation changed (docs/update-design.md).
++            Some(rendezvous_message::Union::ReleaseHint(h)) => {
++                store_release_hint(&self.host, h.generation, h.spread_secs);
++            }
+             _ => {}
+         }
+         Ok(())
+@@ -643,6 +700,14 @@ impl RendezvousMediator {
                      if last_recv_msg.elapsed().as_millis() as u64 > rz.keep_alive as u64 * 3 / 2 {
                          bail!("Rendezvous connection is timeout");
                      }
@@ -2049,7 +2060,7 @@ index b1e523d..9c5fe9a 100644
                      if (!Config::get_key_confirmed() ||
                          !Config::get_host_key_confirmed(&rz.host_prefix)) &&
                          last_register_sent.map(|x| x.elapsed().as_millis() as i64).unwrap_or(REG_INTERVAL) >= REG_INTERVAL {
-@@ -717,48 +778,63 @@ impl RendezvousMediator {
+@@ -717,48 +782,63 @@ impl RendezvousMediator {
              secure,
          );
  
@@ -2148,7 +2159,7 @@ index b1e523d..9c5fe9a 100644
      }
  
      async fn handle_intranet(&self, fla: FetchLocalAddr, server: ServerPtr) -> ResultType<()> {
-@@ -884,7 +960,8 @@ impl RendezvousMediator {
+@@ -884,7 +964,8 @@ impl RendezvousMediator {
              return Ok(String::new());
          };
          let mut stream =
@@ -2158,7 +2169,7 @@ index b1e523d..9c5fe9a 100644
          let answer = stream.local_endpoint().to_owned();
          let session_key = stream.session_key().to_owned();
          let return_route = ph.socket_addr.clone();
-@@ -1044,7 +1121,9 @@ impl RendezvousMediator {
+@@ -1044,7 +1125,9 @@ impl RendezvousMediator {
              {
                  log::warn!("failed to create WebRTC server connection: {}", err);
              }
@@ -2169,7 +2180,7 @@ index b1e523d..9c5fe9a 100644
          });
  
          Ok(answer)
-@@ -1074,10 +1153,16 @@ impl RendezvousMediator {
+@@ -1074,10 +1157,16 @@ impl RendezvousMediator {
          // No enable-webrtc check here: it is LocalConfig, which the UI process writes and never
          // syncs over IPC, so this (server) process would read the private-server default of "N"
          // and refuse to answer in exactly the self-hosted deployments the transport is for.
@@ -2189,7 +2200,7 @@ index b1e523d..9c5fe9a 100644
          let webrtc_sdp_answer = if webrtc_viable {
              self.spawn_webrtc_answerer(
                  &ph,
-@@ -1341,7 +1426,7 @@ impl RendezvousMediator {
+@@ -1341,7 +1430,7 @@ impl RendezvousMediator {
      }
  }
  
@@ -2198,7 +2209,7 @@ index b1e523d..9c5fe9a 100644
      let mut port = Config::get_option("direct-access-port")
          .parse::<i32>()
          .unwrap_or(0);
-@@ -1404,7 +1489,8 @@ async fn direct_server(server: ServerPtr) {
+@@ -1404,7 +1493,8 @@ async fn direct_server(server: ServerPtr) {
                              server,
                              hbb_common::Stream::from(stream, local_addr),
                              addr,
@@ -2208,7 +2219,7 @@ index b1e523d..9c5fe9a 100644
                              ConnectionMeta::default(), // Direct connections don't have server-side user context.
                          )
                          .await
-@@ -1737,6 +1823,17 @@ mod tests {
+@@ -1737,6 +1827,17 @@ mod tests {
      };
      use hbb_common::protobuf::Message as _;
  
@@ -2226,6 +2237,33 @@ index b1e523d..9c5fe9a 100644
      #[tokio::test]
      async fn manual_restart_interrupts_retry_wait() {
          const WAKE_TIMEOUT: Duration = Duration::from_secs(1);
+@@ -1842,3 +1943,26 @@ mod tests {
+         assert!(AnswererSlot::take().is_some());
+     }
+ }
++
++/// Tether: the latest `ReleaseHint` of every relay as the option `tether-release-hint`
++/// (`host=G/spread;…`, parsed by `tether_trust::release::parse_hints`). The app's update checker
++/// polls it: in-process (TetherQS), or through the option mirror of the UI process (technician app,
++/// where this runs in the `--server` process).
++fn store_release_hint(host: &str, generation: u64, spread_secs: u32) {
++    static HINTS: std::sync::Mutex<std::collections::BTreeMap<String, (u64, u32)>> =
++        std::sync::Mutex::new(std::collections::BTreeMap::new());
++    // Host name only (`wss://h/ws/id`, `h:21116` → `h`), as the app's API host list has it.
++    let h = host.strip_prefix("wss://").or_else(|| host.strip_prefix("ws://")).unwrap_or(host);
++    let h = h.split(['/', ':']).next().unwrap_or(h);
++    let host: String = h.chars().filter(|c| !matches!(c, ';' | '=') && !c.is_whitespace()).collect();
++    let value = {
++        let mut h = HINTS.lock().unwrap_or_else(|e| e.into_inner());
++        if h.get(&host) == Some(&(generation, spread_secs)) {
++            return;
++        }
++        h.insert(host, (generation, spread_secs));
++        h.iter().map(|(k, (g, s))| format!("{k}={g}/{s}")).collect::<Vec<_>>().join(";")
++    };
++    log::info!("release hint: {value}");
++    Config::set_option("tether-release-hint".to_owned(), value);
++}
 diff --git a/src/server.rs b/src/server.rs
 index 8e4c56c..7fa5007 100644
 --- a/src/server.rs

@@ -896,7 +896,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (node) (rate(tether_api_requests_total{job=\"api\",node=~\"$node\",endpoint=\"heartbeat\",code=\"204\"}[$__rate_interval]))",
+          "expr": "sum by (node) (rate(tether_api_requests_total{job=\"api\",node=~\"$node\",endpoint=\"heartbeat\",code=~\"200|204\"}[$__rate_interval]))",
           "legendFormat": "{{node}}",
           "refId": "A"
         }
@@ -1126,7 +1126,7 @@
     },
     {
       "type": "row",
-      "title": "Workers and storage",
+      "title": "Releases",
       "id": 17,
       "collapsed": false,
       "gridPos": {
@@ -1138,10 +1138,10 @@
       "panels": []
     },
     {
-      "type": "timeseries",
-      "title": "Workers",
+      "type": "stat",
+      "title": "Release generation",
       "id": 18,
-      "description": "",
+      "description": "G bumps on every release index or latest.json change; hbbs pushes it to every registered host.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1149,6 +1149,674 @@
       "gridPos": {
         "x": 0,
         "y": 33,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (node) (tether_api_release_generation{job=\"api\",node=~\"$node\"})",
+          "legendFormat": "{{node}} api",
+          "refId": "A",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (node) (hbbs_release_generation{node=~\"$node\"})",
+          "legendFormat": "{{node}} hbbs",
+          "refId": "B",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3274D9",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "noValue": "–"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Index serial",
+      "id": 19,
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 33,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (node, channel) (tether_api_release_index_serial{job=\"api\",node=~\"$node\"})",
+          "legendFormat": "{{node}} {{channel}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#4ECDC4",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "noValue": "–"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Index valid for",
+      "id": 20,
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 33,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "min by (channel) (tether_api_release_index_expires_timestamp{job=\"api\",node=~\"$node\"}) - time()",
+          "legendFormat": "{{channel}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#E02F44",
+                "value": null
+              },
+              {
+                "color": "#FF9830",
+                "value": 0
+              },
+              {
+                "color": "#56A64B",
+                "value": 604800
+              }
+            ]
+          },
+          "mappings": [],
+          "noValue": "–"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Hosts notified (current G)",
+      "id": 21,
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 33,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (node) (hbbs_release_hint_peers_notified{node=~\"$node\"})",
+          "legendFormat": "{{node}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#A352CC",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "noValue": "–"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Release hints sent / min",
+      "id": 22,
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (node, reason) (rate(hbbs_release_hints_sent_total{node=~\"$node\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{node}} {{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 18,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#56A64B",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Release index fetches / s",
+      "id": 23,
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 38,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (node, code) (rate(tether_api_requests_total{job=\"api\",node=~\"$node\",endpoint=\"release_index\"}[$__rate_interval]))",
+          "legendFormat": "{{node}} {{code}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 18,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#56A64B",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Update states (devices, 24 h)",
+      "id": 24,
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 38,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (state) (tether_api_devices_update_state{job=\"api\",node=~\"$node\"})",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 18,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#56A64B",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Devices by version (24 h)",
+      "id": 25,
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 46,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (profile, version) (tether_api_devices_by_version{job=\"api\",node=~\"$node\"})",
+          "legendFormat": "{{profile}} {{version}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 18,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#56A64B",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Downloads by version / h",
+      "id": 26,
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 46,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (profile, version) (increase(tether_api_release_downloads_total{job=\"api\",node=~\"$node\"}[1h]))",
+          "legendFormat": "{{profile}} {{version}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 18,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#56A64B",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Workers and storage",
+      "id": 27,
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 54,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Workers",
+      "id": 28,
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 55,
         "w": 8,
         "h": 8
       },
@@ -1242,7 +1910,7 @@
     {
       "type": "timeseries",
       "title": "Data dir size",
-      "id": 19,
+      "id": 29,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1250,7 +1918,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 33,
+        "y": 55,
         "w": 8,
         "h": 8
       },
@@ -1319,7 +1987,7 @@
     {
       "type": "timeseries",
       "title": "Free space (data filesystem)",
-      "id": 20,
+      "id": 30,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1327,7 +1995,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 33,
+        "y": 55,
         "w": 8,
         "h": 8
       },
@@ -1396,11 +2064,11 @@
     {
       "type": "row",
       "title": "Caddy (HTTPS front end)",
-      "id": 21,
+      "id": 31,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 41,
+        "y": 63,
         "w": 24,
         "h": 1
       },
@@ -1409,7 +2077,7 @@
     {
       "type": "timeseries",
       "title": "Caddy requests / s by status",
-      "id": 22,
+      "id": 32,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1417,7 +2085,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 42,
+        "y": 64,
         "w": 12,
         "h": 8
       },
@@ -1486,7 +2154,7 @@
     {
       "type": "timeseries",
       "title": "Caddy p95 response time",
-      "id": 23,
+      "id": 33,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1494,7 +2162,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 42,
+        "y": 64,
         "w": 12,
         "h": 8
       },
@@ -1563,7 +2231,7 @@
     {
       "type": "timeseries",
       "title": "tether-api memory (RSS)",
-      "id": 24,
+      "id": 34,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1571,7 +2239,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 72,
         "w": 12,
         "h": 8
       },
@@ -1649,7 +2317,7 @@
     {
       "type": "timeseries",
       "title": "Caddy in-flight requests",
-      "id": 25,
+      "id": 35,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1657,7 +2325,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 50,
+        "y": 72,
         "w": 12,
         "h": 8
       },
@@ -1726,11 +2394,11 @@
     {
       "type": "row",
       "title": "nginx (HTTPS front end, PROXY=nginx)",
-      "id": 26,
+      "id": 36,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 58,
+        "y": 80,
         "w": 24,
         "h": 1
       },
@@ -1739,7 +2407,7 @@
     {
       "type": "timeseries",
       "title": "nginx connections",
-      "id": 27,
+      "id": 37,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1747,7 +2415,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 59,
+        "y": 81,
         "w": 8,
         "h": 8
       },
@@ -1825,7 +2493,7 @@
     {
       "type": "timeseries",
       "title": "nginx requests and accepts / s",
-      "id": 28,
+      "id": 38,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1833,7 +2501,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 59,
+        "y": 81,
         "w": 8,
         "h": 8
       },
@@ -1911,7 +2579,7 @@
     {
       "type": "timeseries",
       "title": "nginx dropped connections / min",
-      "id": 29,
+      "id": 39,
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -1919,7 +2587,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 59,
+        "y": 81,
         "w": 8,
         "h": 8
       },

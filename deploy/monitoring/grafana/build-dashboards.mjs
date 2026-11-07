@@ -415,7 +415,7 @@ dashboard("tether-api", "Tether · API", "tether-api requests, latency, errors, 
     { bars: true, fill: 70 }
   );
   row("Clients");
-  ts("Heartbeats / s", [[`sum by (node) (rate(${api("tether_api_requests_total", ',endpoint="heartbeat",code="204"')}[$__rate_interval]))`, "{{node}}"]], { unit: "reqps", w: 8 });
+  ts("Heartbeats / s", [[`sum by (node) (rate(${api("tether_api_requests_total", ',endpoint="heartbeat",code=~"200|204"')}[$__rate_interval]))`, "{{node}}"]], { unit: "reqps", w: 8 });
   ts("Devices", [[`max by (node) (${api("tether_api_devices_active_24h")})`, "{{node}} active 24 h"], [`max by (node) (${api("tether_api_devices")})`, "{{node}} known"]], { w: 8 });
   ts(
     "Fetches and posts / min",
@@ -425,6 +425,22 @@ dashboard("tether-api", "Tether · API", "tether-api requests, latency, errors, 
     ],
     { w: 8 }
   );
+  // Update delivery (docs/update-design.md): G per node in tether-api and hbbs (equal when the
+  // push path works), the signed index per channel, hint pushes, index fetches, adoption.
+  row("Releases");
+  stat("Release generation", [[`max by (node) (${api("tether_api_release_generation")})`, "{{node}} api"], [`max by (node) (hbbs_release_generation{${N}})`, "{{node}} hbbs"]], { color: C.blue, w: 6, desc: "G bumps on every release index or latest.json change; hbbs pushes it to every registered host." });
+  stat("Index serial", [[`max by (node, channel) (${api("tether_api_release_index_serial")})`, "{{node}} {{channel}}"]], { color: C.teal, w: 6 });
+  stat("Index valid for", [[`min by (channel) (${api("tether_api_release_index_expires_timestamp")}) - time()`, "{{channel}}"]], {
+    unit: "s",
+    thresholds: { mode: "absolute", steps: [{ color: C.red, value: null }, { color: C.orange, value: 0 }, { color: C.green, value: 7 * 86400 }] },
+    w: 6,
+  });
+  stat("Hosts notified (current G)", [[`max by (node) (hbbs_release_hint_peers_notified{${N}})`, "{{node}}"]], { color: C.purple, w: 6 });
+  ts("Release hints sent / min", [[`sum by (node, reason) (rate(hbbs_release_hints_sent_total{${N}}[$__rate_interval])) * 60`, "{{node}} {{reason}}"]], { w: 8, bars: true });
+  ts("Release index fetches / s", [[`sum by (node, code) (rate(${api("tether_api_requests_total", ',endpoint="release_index"')}[$__rate_interval]))`, "{{node}} {{code}}"]], { unit: "reqps", w: 8, stack: true });
+  ts("Update states (devices, 24 h)", [[`sum by (state) (${api("tether_api_devices_update_state")})`, "{{state}}"]], { w: 8, stack: true });
+  ts("Devices by version (24 h)", [[`sum by (profile, version) (${api("tether_api_devices_by_version")})`, "{{profile}} {{version}}"]], { w: 12, stack: true });
+  ts("Downloads by version / h", [[`sum by (profile, version) (increase(${api("tether_api_release_downloads_total")}[1h]))`, "{{profile}} {{version}}"]], { w: 12, bars: true });
   row("Workers and storage");
   ts("Workers", [[`max by (node) (${api("tether_api_workers_active")})`, "{{node}} active"], [`max(${api("tether_api_workers_max")})`, "cap"]], { w: 8, colors: [["cap", C.red]] });
   ts("Data dir size", [[`max by (node) (${api("tether_api_data_bytes")})`, "{{node}}"]], { unit: "bytes", w: 8 });
