@@ -20,7 +20,8 @@ stop() {
 # Up = running, the host started its rendezvous connection, and still running 30 s later.
 up() {
   touch "$JOB_DIR/.launch"
-  open "$A"
+  # LaunchServices can refuse the first open right after the bundle was replaced (error -600): retry once.
+  open "$A" || { sleep 3; open "$A"; }
   for _ in $(seq 60); do
     sleep 1
     if running && find ~/Library/Logs/Tether -name '*.log' -newer "$JOB_DIR/.launch" -exec grep -l -E "start rendezvous mediator|start tcp:|keep_alive" {} + 2>/dev/null | grep -q .; then
