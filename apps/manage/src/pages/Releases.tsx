@@ -694,6 +694,7 @@ function CdnSettings() {
       await invoke("cdn_configure", { enabled, base: s.base.trim(), worker: s.worker.trim(), envFile: envFile.trim() || null, passphrase: pass || null });
       setS(await invoke("cdn_state"));
       setPass("");
+      setEnvFile(""); // stored now: the toggle must not re-send the file without the passphrase
       toast(enabled ? "CDN on: the next publish deploys to Cloudflare" : "CDN settings saved");
     } catch (e: any) {
       setError(e.message);
