@@ -531,7 +531,7 @@ index f33f914..d1e167f 100644
      // session's final close (here via `Stream`'s Drop) is issued. Both land on the serialized
      // closer thread, so the first runs to completion and the second is a benign no-op — the pc
 diff --git a/src/websocket.rs b/src/websocket.rs
-index 3a98a84..87bfdd5 100644
+index 3a98a84..7cb05a7 100644
 --- a/src/websocket.rs
 +++ b/src/websocket.rs
 @@ -19,7 +19,10 @@ use std::{
@@ -540,7 +540,7 @@ index 3a98a84..87bfdd5 100644
      pin::Pin,
 -    sync::Arc,
 +    sync::{
-+        atomic::{AtomicU64, Ordering},
++        atomic::{AtomicBool, AtomicU64, Ordering},
 +        Arc,
 +    },
      task::{Context, Poll},
@@ -767,9 +767,11 @@ index 3a98a84..87bfdd5 100644
                  }
              }
              Err(e) => match (tls_type, is_tls_type_cached, danger_accept_invalid_cert) {
-@@ -304,14 +397,16 @@ impl WsFramedStream {
+@@ -303,15 +396,18 @@ impl WsFramedStream {
+         local_addr: Option<SocketAddr>,
          ms_timeout: u64,
      ) -> ResultType<Self> {
++        check_tls(url.as_ref(), REQUIRE_TLS.load(Ordering::Relaxed))?;
          let proxy_conf = Config::get_socks();
 -        let (stream, addr) =
 -            Self::connect(url.as_ref(), local_addr, proxy_conf.as_ref(), ms_timeout).await?;
@@ -786,7 +788,7 @@ index 3a98a84..87bfdd5 100644
          };
  
          Ok(ws)
-@@ -397,9 +492,27 @@ impl WsFramedStream {
+@@ -397,9 +493,27 @@ impl WsFramedStream {
          Ok(())
      }
  
@@ -814,7 +816,45 @@ index 3a98a84..87bfdd5 100644
              let msg = match msg {
                  Ok(msg) => msg,
                  Err(e) => {
-@@ -494,7 +607,9 @@ pub fn check_ws(endpoint: &str) -> String {
+@@ -452,6 +566,37 @@ impl WsFramedStream {
+     }
+ }
+ 
++/// Tether turns this on (`require_tls`): every rendezvous and relay WebSocket is `wss://`.
++static REQUIRE_TLS: AtomicBool = AtomicBool::new(false);
++
++/// Refuse plain `ws://` from now on, except to loopback (local test servers).
++pub fn require_tls() {
++    REQUIRE_TLS.store(true, Ordering::Relaxed);
++}
++
++/// With `required`, `url` must be `wss://`, or `ws://` to a loopback address. An IP endpoint
++/// becomes plain `ws://` in `check_ws`, so this is what keeps signalling off cleartext.
++fn check_tls(url: &str, required: bool) -> ResultType<()> {
++    if !required {
++        return Ok(());
++    }
++    let u = url::Url::parse(url)?;
++    let loopback = match u.host() {
++        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
++        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
++        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
++        None => false,
++    };
++    if u.scheme() == "wss" || (u.scheme() == "ws" && loopback) {
++        Ok(())
++    } else {
++        bail!(
++            "Refused {}: servers must be reached over TLS (wss://, a host name, not an IP address)",
++            url
++        )
++    }
++}
++
+ pub fn is_ws_endpoint(endpoint: &str) -> bool {
+     endpoint.starts_with("ws://") || endpoint.starts_with("wss://")
+ }
+@@ -494,7 +639,9 @@ pub fn check_ws(endpoint: &str) -> String {
          .map(|(_, p)| p)
          .unwrap_or(RELAY_PORT);
  
@@ -825,7 +865,7 @@ index 3a98a84..87bfdd5 100644
          // rendezvous
          (false, endpoint_port + 2)
      } else if endpoint_port == rendezvous_port - 1 {
-@@ -533,6 +648,139 @@ pub fn check_ws(endpoint: &str) -> String {
+@@ -533,6 +680,139 @@ pub fn check_ws(endpoint: &str) -> String {
      format!("{}://{}", protocol, address)
  }
  
@@ -965,7 +1005,7 @@ index 3a98a84..87bfdd5 100644
  /// Port of the reverse proxy serving `/ws/id` and `/ws/relay` on this client's own servers, for
  /// when it cannot listen on the scheme's default port. Any other host, such as a peer's server or
  /// a relay on another machine, keeps the default port. IP endpoints never get here.
-@@ -583,15 +831,21 @@ mod tests {
+@@ -583,15 +863,21 @@ mod tests {
      use tungstenite::protocol::Role;
  
      async fn ws_from_tcp(stream: TcpStream, addr: SocketAddr) -> WsFramedStream {
@@ -990,7 +1030,7 @@ index 3a98a84..87bfdd5 100644
          }
      }
  
-@@ -622,6 +876,25 @@ mod tests {
+@@ -622,6 +908,39 @@ mod tests {
          server.await.unwrap();
      }
  
@@ -1013,10 +1053,24 @@ index 3a98a84..87bfdd5 100644
 +        server.await.unwrap();
 +    }
 +
++    #[test]
++    fn test_check_tls() {
++        assert!(check_tls("ws://1.2.3.4:21118", false).is_ok());
++        assert!(check_tls("ws://1.2.3.4:21118", true).is_err());
++        assert!(check_tls("ws://[2001:db8::1]:21119", true).is_err());
++        assert!(check_tls("ws://relay.example.com/ws/id", true).is_err());
++        assert!(check_tls("wss://relay.example.com/ws/id", true).is_ok());
++        assert!(check_tls("wss://1.2.3.4/ws/relay", true).is_ok());
++        assert!(check_tls("ws://127.0.0.1:22118", true).is_ok());
++        assert!(check_tls("ws://[::1]:22119", true).is_ok());
++        assert!(check_tls("ws://localhost:22118", true).is_ok());
++        assert!(check_tls("http://1.2.3.4", true).is_err());
++    }
++
      #[test]
      fn test_check_ws() {
          let options = Config::get_options();
-@@ -902,3 +1175,45 @@ mod tests {
+@@ -902,3 +1221,45 @@ mod tests {
          }
      }
  }

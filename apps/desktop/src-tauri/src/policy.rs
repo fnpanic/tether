@@ -276,6 +276,16 @@ fn apply_core(eff: &Effective, applied: &mut Vec<String>) {
         map.insert(k.to_owned(), v);
         applied.push(k.to_owned());
     }
+    // A server or key stored while settings.server was allowed (or written into the config file)
+    // must not stay the trust anchor: locked means the built-in servers and signed key list.
+    // These are FLOOR keys, so never in `applied`: policy can only blank them, not set them.
+    for k in SERVER_OPTIONS {
+        if eff.on("settings.server") {
+            o.remove(*k);
+        } else {
+            o.insert((*k).to_owned(), String::new());
+        }
+    }
     drop((o, od));
     let mut d = DEFAULT_SETTINGS.write().unwrap();
     let mut dd = DEFAULT_DISPLAY_SETTINGS.write().unwrap();
@@ -519,10 +529,16 @@ mod tests {
         assert!(applied.contains(&"codec-preference".to_owned()));
         assert!(OVERWRITE_DISPLAY_SETTINGS.read().unwrap().contains_key("codec-preference"));
         assert!(!OVERWRITE_SETTINGS.read().unwrap().contains_key("codec-preference"));
-        // Unlocking removes what policy forced.
+        // Unlocking removes what policy forced; settings.server stays off, so the server options
+        // stay blanked.
         let mut applied2 = applied.clone();
         apply_core(&resolve(None, PROFILE, "dev", None), &mut applied2);
         assert!(applied2.is_empty());
+        assert_eq!(OVERWRITE_SETTINGS.read().unwrap().get("key").map(String::as_str), Some(""));
+        let mut allow = resolve(None, PROFILE, "dev", None);
+        allow.values.insert("settings.server".into(), "Y".into());
+        apply_core(&allow, &mut applied2);
+        assert!(OVERWRITE_SETTINGS.read().unwrap().get("key").is_none());
         assert!(!OVERWRITE_DISPLAY_SETTINGS.read().unwrap().contains_key("codec-preference"));
         assert!(OVERWRITE_SETTINGS.read().unwrap().get("enable-clipboard").is_none());
         crate::security::enforce();

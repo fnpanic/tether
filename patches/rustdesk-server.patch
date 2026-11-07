@@ -1712,10 +1712,10 @@ index 0000000..b660d01
 +    }
 +}
 diff --git a/src/common.rs b/src/common.rs
-index 9c76f41..fa33db3 100644
+index 9c76f41..bd52403 100644
 --- a/src/common.rs
 +++ b/src/common.rs
-@@ -215,4 +215,231 @@ async fn check_software_update_() -> hbb_common::ResultType<()> {
+@@ -215,4 +215,260 @@ async fn check_software_update_() -> hbb_common::ResultType<()> {
         log::info!("new version is available: {}", latest_release_version);
      }
      Ok(())
@@ -1762,6 +1762,21 @@ index 9c76f41..fa33db3 100644
 +/// endpoint), so Tether Manage can check that a relay switched during a key rotation
 +/// (docs/key-rotation.md). Unset in hbbr and in an hbbs without a private key.
 +pub static SIGNING_PUB_KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
++
++/// Address of the WebSocket listeners (hbbs 21118, hbbr 21119): `WS_BIND`, default 127.0.0.1.
++/// They take the client IP from X-Forwarded-For / X-Real-IP, which only the reverse proxy in
++/// front (Caddy/nginx on the same host) may set; where the proxy runs elsewhere (Kubernetes),
++/// set `WS_BIND=0.0.0.0` and keep the port off the public network.
++pub fn ws_bind() -> String {
++    std::env::var("WS_BIND").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "127.0.0.1".into())
++}
++
++/// The WebSocket listener on `ws_bind()`:`port`.
++pub async fn listen_ws(port: u16) -> hbb_common::ResultType<hbb_common::tokio::net::TcpListener> {
++    let addr = ws_bind();
++    let addr = if addr.contains(':') { format!("[{addr}]:{port}") } else { format!("{addr}:{port}") };
++    hbb_common::tcp::new_listener(addr, true).await
++}
 +
 +/// Plain HTTP health endpoint on HEALTH_PORT (default `default_port`, 0 = off), for Kubernetes
 +/// probes and for hbbs checking its relays: `/healthz` is 200 while the process runs, `/readyz`
@@ -1949,6 +1964,20 @@ index 9c76f41..fa33db3 100644
 +        assert!(stun_binding_response(&req, "1.2.3.4:5".parse().unwrap()).is_none());
 +    }
 +}
++
++#[cfg(test)]
++mod ws_bind_tests {
++    #[tokio::test]
++    async fn ws_listener_is_loopback_unless_ws_bind_says_otherwise() {
++        std::env::remove_var("WS_BIND");
++        let l = super::listen_ws(0).await.unwrap();
++        assert!(l.local_addr().unwrap().ip().is_loopback());
++        std::env::set_var("WS_BIND", "0.0.0.0");
++        let l = super::listen_ws(0).await.unwrap();
++        assert!(l.local_addr().unwrap().ip().is_unspecified());
++        std::env::remove_var("WS_BIND");
++    }
++}
 diff --git a/src/hbbr.rs b/src/hbbr.rs
 index 4c8a784..8c9408c 100644
 --- a/src/hbbr.rs
@@ -2007,7 +2036,7 @@ index 4ca87cf..7efd9c5 100644
      pub(crate) async fn is_in_memory(&self, id: &str) -> bool {
          self.map.read().await.contains_key(id)
 diff --git a/src/relay_server.rs b/src/relay_server.rs
-index 0ec190a..f1dd2ce 100644
+index 0ec190a..ad44169 100644
 --- a/src/relay_server.rs
 +++ b/src/relay_server.rs
 @@ -42,12 +42,19 @@ static DOWNGRADE_START_CHECK: AtomicUsize = AtomicUsize::new(1_800_000); // in m
@@ -2030,8 +2059,17 @@ index 0ec190a..f1dd2ce 100644
      if let Ok(mut file) = std::fs::File::open(BLACKLIST_FILE) {
          let mut contents = String::new();
          if file.read_to_string(&mut contents).is_ok() {
-@@ -88,7 +95,11 @@ pub async fn start(port: &str, key: &str) -> ResultType<()> {
-             io_loop(listen_any(port).await?, listen_any(port2).await?, &key).await;
+@@ -81,14 +88,18 @@ pub async fn start(port: &str, key: &str) -> ResultType<()> {
+     let port: u16 = port.parse()?;
+     log::info!("Listening on tcp :{}", port);
+     let port2 = port + 2;
+-    log::info!("Listening on websocket :{}", port2);
++    log::info!("Listening on websocket {}:{}", crate::common::ws_bind(), port2);
+     let main_task = async move {
+         loop {
+             log::info!("Start");
+-            io_loop(listen_any(port).await?, listen_any(port2).await?, &key).await;
++            io_loop(listen_any(port).await?, crate::common::listen_ws(port2).await?, &key).await;
          }
      };
 -    let listen_signal = crate::common::listen_signal();
@@ -2140,7 +2178,7 @@ index 0ec190a..f1dd2ce 100644
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..cef312f 100644
+index dff45eb..bdbdee5 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,14 @@ use std::{
@@ -2220,9 +2258,12 @@ index dff45eb..cef312f 100644
          let nat_port = port - 1;
          let ws_port = port + 2;
          let pm = PeerMap::new().await?;
-@@ -110,6 +140,13 @@ impl RendezvousServer {
+@@ -108,8 +138,15 @@ impl RendezvousServer {
+         let rendezvous_servers = get_servers(&get_arg("rendezvous-servers"), "rendezvous-servers");
+         log::info!("Listening on tcp/udp :{}", port);
          log::info!("Listening on tcp :{}, extra port for NAT test", nat_port);
-         log::info!("Listening on websocket :{}", ws_port);
+-        log::info!("Listening on websocket :{}", ws_port);
++        log::info!("Listening on websocket {}:{}", crate::common::ws_bind(), ws_port);
          let mut socket = create_udp_listener(port, rmem).await?;
 +        // Tether: TURN on the same UDP port (crate::turn), on when RELAY_HOST is set and TURN != 0.
 +        if let Some(cfg) = crate::turn::TurnConfig::from_env(port as u16) {
@@ -2234,15 +2275,25 @@ index dff45eb..cef312f 100644
          let (tx, mut rx) = mpsc::unbounded_channel::<Data>();
          let software_url = get_arg("software-url");
          let version = hbb_common::get_version_from_url(&software_url);
-@@ -147,6 +184,7 @@ impl RendezvousServer {
+@@ -147,9 +184,10 @@ impl RendezvousServer {
          log::info!("local-ip: {:?}", rs.inner.local_ip);
          std::env::set_var("PORT_FOR_API", port.to_string());
          rs.parse_relay_servers(&get_arg("relay-servers"));
 +        let pm_metrics = rs.pm.clone();
          let mut listener = create_tcp_listener(port).await?;
          let mut listener2 = create_tcp_listener(nat_port).await?;
-         let mut listener3 = create_tcp_listener(ws_port).await?;
-@@ -221,7 +259,14 @@ impl RendezvousServer {
+-        let mut listener3 = create_tcp_listener(ws_port).await?;
++        let mut listener3 = crate::common::listen_ws(ws_port as _).await?;
+         let test_addr = std::env::var("TEST_HBBS").unwrap_or_default();
+         if std::env::var("ALWAYS_USE_RELAY")
+             .unwrap_or_default()
+@@ -216,12 +254,19 @@ impl RendezvousServer {
+                     }
+                     LoopFailure::Listener3 => {
+                         drop(listener3);
+-                        listener3 = create_tcp_listener(ws_port).await?;
++                        listener3 = crate::common::listen_ws(ws_port as _).await?;
+                     }
                  }
              }
          };

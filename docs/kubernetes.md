@@ -69,6 +69,11 @@ keeps `NET_BIND_SERVICE`, which its binary needs to start) and RuntimeDefault se
 Probes: `/readyz` (readiness, every 2 s) and `/healthz` (liveness) on the health ports
 21121/21122. Pods prefer to spread over nodes (soft anti-affinity).
 
+The WebSocket ports (hbbs 21118, hbbr 21119) listen on 127.0.0.1 by default (`WS_BIND`), because
+hbbs and hbbr take the client IP from `X-Forwarded-For`/`X-Real-IP`. The proxy runs in its own pod
+here, so the chart sets `WS_BIND=0.0.0.0`: keep these ports on the cluster network (ClusterIP
+Services, a NetworkPolicy if other workloads share the cluster), never on a LoadBalancer.
+
 ## Rollout procedure
 
 - **hbbr** (`helm upgrade` or `kubectl -n tether rollout restart sts/tether-relay-hbbr`): one pod
@@ -139,6 +144,7 @@ kubectl -n tether logs a1        # JSON report once the pod has finished
 2. Relay strings from hbbs can be `wss://…/ws/relay/<n>`; do not rewrite them. The route racer's
    port-80 fallback should treat a URL entry's host as "own".
 3. The `relay-server` option must stay empty, otherwise the client ignores hbbs's relay choice.
+   Every URL must be `wss://`: Tether refuses plain `ws://` to anything but loopback.
 4. Liveness: WebSocket ping about every 1 s on rendezvous and relay connections, dead after
    about 2 s. hbbs and hbbr answer pings.
 5. On relay drop, or when a relay closes right after `RequestRelay` (it is draining), ask again
