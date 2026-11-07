@@ -643,7 +643,7 @@ index 137d648..cf71fab 100644
 +    }
 +}
 diff --git a/src/client.rs b/src/client.rs
-index 597dc86..93ed3cb 100644
+index 597dc86..2c4e555 100644
 --- a/src/client.rs
 +++ b/src/client.rs
 @@ -28,7 +28,7 @@ use uuid::Uuid;
@@ -664,7 +664,22 @@ index 597dc86..93ed3cb 100644
  pub const LOGIN_MSG_2FA_WRONG: &str = "Wrong 2FA Code";
  pub const REQUIRE_2FA: &'static str = "2FA Required";
  pub const LOGIN_MSG_NO_PASSWORD_ACCESS: &str = "No Password Access";
-@@ -212,12 +214,171 @@ impl Drop for OffererGuard {
+@@ -175,6 +177,14 @@ lazy_static::lazy_static! {
+ 
+ const PUBLIC_SERVER: &str = "public";
+ 
++/// Tether: a peer given as an address, or as `id@server` for any server but this build's own
++/// (`public`), would skip the configured servers and their signed server key list.
++#[cfg(feature = "tauri")]
++fn peer_target_refused(peer: &str, other_server: &Option<(String, String, String)>) -> bool {
++    crate::common::is_direct_ip_access(peer)
++        || other_server.as_ref().is_some_and(|(_, server, _)| server != PUBLIC_SERVER)
++}
++
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+ pub fn get_key_state(key: enigo::Key) -> bool {
+     use enigo::KeyboardControllable;
+@@ -212,12 +222,171 @@ impl Drop for OffererGuard {
      }
  }
  
@@ -836,7 +851,7 @@ index 597dc86..93ed3cb 100644
  async fn race_transports_prefer_webrtc<'a, T: 'a>(
      webrtc_fut: BoxFuture<'a, ResultType<T>>,
      others: Vec<BoxFuture<'a, ResultType<T>>>,
-@@ -232,6 +393,7 @@ async fn race_transports_prefer_webrtc<'a, T: 'a>(
+@@ -232,6 +401,7 @@ async fn race_transports_prefer_webrtc<'a, T: 'a>(
      let window = tokio::time::sleep(Duration::from_millis(window_ms));
      tokio::pin!(window);
      let mut window_started = false;
@@ -844,7 +859,7 @@ index 597dc86..93ed3cb 100644
      loop {
          tokio::select! {
              res = async {
-@@ -328,6 +490,15 @@ async fn race_transports_prefer_webrtc<'a, T: 'a>(
+@@ -328,6 +498,15 @@ async fn race_transports_prefer_webrtc<'a, T: 'a>(
                  }
              }
              _ = &mut window, if window_started => {
@@ -860,7 +875,18 @@ index 597dc86..93ed3cb 100644
                  if let Some(conn) = held.take() {
                      return Ok(conn);
                  }
-@@ -487,6 +658,67 @@ impl Client {
+@@ -434,6 +613,10 @@ impl Client {
+         if config::is_incoming_only() && !is_switch_sides_back(conn_type, &interface).await {
+             bail!("Incoming only mode");
+         }
++        #[cfg(feature = "tauri")]
++        if peer_target_refused(peer, &interface.get_lch().read().unwrap().other_server) {
++            bail!(crate::common::PEER_SERVER_REFUSED);
++        }
+         // to-do: remember the port for each peer, so that we can retry easier
+         if hbb_common::is_ip_str(peer) {
+             return Ok((
+@@ -487,6 +670,67 @@ impl Client {
              }
          };
  
@@ -928,7 +954,7 @@ index 597dc86..93ed3cb 100644
          // Same relay gate as the v6 socket below: under any forced relay the v6 punch cannot
          // be used, so probing v6 reachability is wasted work on every such connection.
          if crate::get_ipv6_punch_enabled() && !interface.is_force_relay() {
-@@ -603,17 +835,15 @@ impl Client {
+@@ -603,17 +847,15 @@ impl Client {
  
      /// Whether to build a WebRTC offerer for this connection.
      ///
@@ -951,7 +977,7 @@ index 597dc86..93ed3cb 100644
          if interface.is_policy_relay() && !WebRTCStream::has_turn_server() {
              return false;
          }
-@@ -1012,6 +1242,9 @@ impl Client {
+@@ -1012,6 +1254,9 @@ impl Client {
                                      bail!("Remote desktop is offline");
                                  }
                                  Ok(punch_hole_response::Failure::LICENSE_MISMATCH) => {
@@ -961,7 +987,7 @@ index 597dc86..93ed3cb 100644
                                      bail!("Key mismatch");
                                  }
                                  Ok(punch_hole_response::Failure::LICENSE_OVERUSE) => {
-@@ -1072,6 +1305,7 @@ impl Client {
+@@ -1072,6 +1317,7 @@ impl Client {
                              }
                          }
                          signed_id_pk = rr.pk().into();
@@ -969,7 +995,7 @@ index 597dc86..93ed3cb 100644
                          let mut webrtc_bridge_stop = None;
                          let mut webrtc_for_connect = None;
                          if !rr.webrtc_sdp_answer.is_empty() {
-@@ -1172,20 +1406,69 @@ impl Client {
+@@ -1172,20 +1418,69 @@ impl Client {
                                  connect_futures.push(webrtc_fut);
                                  select_ok(connect_futures).await.map(|r| r.0)
                              } else {
@@ -1042,7 +1068,7 @@ index 597dc86..93ed3cb 100644
                          };
                          if let Some(stop) = webrtc_bridge_stop {
                              let _ = stop.send(());
-@@ -1195,7 +1478,12 @@ impl Client {
+@@ -1195,7 +1490,12 @@ impl Client {
                          let (mut conn, kcp, mut typ, mut direct) = race_result?;
                          feedback = rr.feedback;
                          log::info!("{:?} used to establish {typ} connection", start.elapsed());
@@ -1056,7 +1082,7 @@ index 597dc86..93ed3cb 100644
                              &peer,
                              signed_id_pk.clone(),
                              &key,
-@@ -1249,6 +1537,7 @@ impl Client {
+@@ -1249,6 +1549,7 @@ impl Client {
                                  pk
                              }
                              Err(e) => return Err(e),
@@ -1064,7 +1090,7 @@ index 597dc86..93ed3cb 100644
                          };
                          // `direct` came from the winning future, which resolved it while the pc was
                          // definitely alive — the race needed it to pick a winner at all.
-@@ -1656,11 +1945,8 @@ impl Client {
+@@ -1656,11 +1957,8 @@ impl Client {
          key: &str,
          conn: &mut Stream,
      ) -> ResultType<Option<Vec<u8>>> {
@@ -1078,7 +1104,7 @@ index 597dc86..93ed3cb 100644
          // A WebRTC channel is peer-authenticated only once its DTLS fingerprint is bound to the
          // verified peer identity below. Once a trusted identity IS established, every binding
          // failure fails closed: any peer able to answer WebRTC also signs its fingerprint, so a
-@@ -1673,17 +1959,23 @@ impl Client {
+@@ -1673,17 +1971,23 @@ impl Client {
          let mut sign_pk = None;
          let mut option_pk = None;
          if !signed_id_pk.is_empty() {
@@ -1108,7 +1134,7 @@ index 597dc86..93ed3cb 100644
          }
          let sign_pk = match sign_pk {
              Some(v) => v,
-@@ -1697,7 +1989,14 @@ impl Client {
+@@ -1697,7 +2001,14 @@ impl Client {
                  return Ok(option_pk);
              }
          };
@@ -1124,7 +1150,18 @@ index 597dc86..93ed3cb 100644
              Some(res) => {
                  let bytes = res?;
                  if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
-@@ -2851,6 +3150,8 @@ pub struct LoginConfigHandler {
+@@ -1727,6 +2038,10 @@ impl Client {
+                                 } else {
+                                     hbb_common::tcp::kx_version_for(kx_version)
+                                 };
++                                #[cfg(feature = "tauri")]
++                                if crate::common::kx_version_refused(picked, is_webrtc) {
++                                    bail!(crate::common::PEER_KX_OUTDATED);
++                                }
+                                 let mut msg_out = Message::new();
+                                 msg_out.set_public_key(PublicKey {
+                                     asymmetric_value: asymmetric_value.clone(),
+@@ -2851,6 +3166,8 @@ pub struct LoginConfigHandler {
      pub version: i64,
      features: Option<Features>,
      pub session_id: u64, // used for local <-> server communication
@@ -1133,7 +1170,7 @@ index 597dc86..93ed3cb 100644
      pub supported_encoding: SupportedEncoding,
      restarting_remote_device: bool,
      // Start time of the restart grace window. On Windows the peer may briefly
-@@ -2920,7 +3221,7 @@ impl LoginConfigHandler {
+@@ -2920,7 +3237,7 @@ impl LoginConfigHandler {
              let server = server_key.next().unwrap_or_default();
              let args = server_key.next().unwrap_or_default();
              let key = if server == PUBLIC_SERVER {
@@ -1142,7 +1179,7 @@ index 597dc86..93ed3cb 100644
              } else {
                  let mut args_map: HashMap<String, &str> = HashMap::new();
                  for arg in args.split('&') {
-@@ -2972,6 +3273,7 @@ impl LoginConfigHandler {
+@@ -2972,6 +3289,7 @@ impl LoginConfigHandler {
              }
          }
          self.session_id = sid;
@@ -1150,7 +1187,7 @@ index 597dc86..93ed3cb 100644
          self.supported_encoding = Default::default();
          self.clear_restarting_remote_device();
          // Three scopes: what was decided about this PEER, what this CLIENT is set up as (proxy),
-@@ -2980,8 +3282,10 @@ impl LoginConfigHandler {
+@@ -2980,8 +3298,10 @@ impl LoginConfigHandler {
          self.peer_relay =
              config::option2bool("force-always-relay", &self.get_option("force-always-relay"))
                  || force_relay;
@@ -1163,7 +1200,7 @@ index 597dc86..93ed3cb 100644
          if let Some((real_id, server, key)) = &self.other_server {
              let other_server_key = self.get_option("other-server-key");
              if !other_server_key.is_empty() && key.is_empty() {
-@@ -3002,6 +3306,12 @@ impl LoginConfigHandler {
+@@ -3002,6 +3322,12 @@ impl LoginConfigHandler {
          self.shared_password = shared_password;
          self.record_state = false;
          self.record_permission = true;
@@ -1176,7 +1213,7 @@ index 597dc86..93ed3cb 100644
  
          // `std::env::remove_var("IS_TERMINAL_ADMIN");` is called in `session_add_sync()` - `flutter_ffi.rs`.
          let is_terminal_admin = conn_type == ConnType::TERMINAL
-@@ -3854,6 +4164,7 @@ impl LoginConfigHandler {
+@@ -3854,6 +4180,7 @@ impl LoginConfigHandler {
              my_platform,
              option: self.get_option_message(true).into(),
              session_id: self.session_id,
@@ -1184,7 +1221,7 @@ index 597dc86..93ed3cb 100644
              version: crate::VERSION.to_string(),
              os_login,
              hwid,
-@@ -3951,6 +4262,17 @@ impl LoginConfigHandler {
+@@ -3951,6 +4278,17 @@ impl LoginConfigHandler {
          &self.id
      }
  
@@ -1202,7 +1239,7 @@ index 597dc86..93ed3cb 100644
      pub fn get_key_terminal_service_id(&self) -> &'static str {
          if self.is_terminal_admin {
              "terminal-admin-service-id"
-@@ -4510,8 +4832,22 @@ pub fn handle_login_error(
+@@ -4510,8 +4848,22 @@ pub fn handle_login_error(
          interface.msgbox("input-password", "Password Required", "", "");
          true
      } else if err == LOGIN_MSG_PASSWORD_WRONG {
@@ -1227,7 +1264,7 @@ index 597dc86..93ed3cb 100644
          true
      } else if err == LOGIN_MSG_2FA_WRONG || err == REQUIRE_2FA {
          let enabled = lc.read().unwrap().get_option("trust-this-device") == "Y";
-@@ -5043,6 +5379,19 @@ pub async fn confirm_insecure_connection(
+@@ -5043,6 +5395,19 @@ pub async fn confirm_insecure_connection(
      interface: &impl Interface,
      receiver: &mut UnboundedReceiver<Data>,
  ) -> bool {
@@ -1247,7 +1284,7 @@ index 597dc86..93ed3cb 100644
      interface.msgbox(
          "insecure-connection-nocancel-hasclose",
          "Insecure Connection",
-@@ -5562,6 +5911,69 @@ async fn udp_nat_connect(
+@@ -5562,6 +5927,69 @@ async fn udp_nat_connect(
      Ok((res.1, Some(res.0), typ))
  }
  
@@ -1317,6 +1354,60 @@ index 597dc86..93ed3cb 100644
  #[cfg(test)]
  mod webrtc_race_tests {
      use super::race_transports_prefer_webrtc;
+@@ -5893,6 +6321,7 @@ mod kx_tests {
+         assert!(seen.decrypted && decrypted);
+     }
+ 
++    #[cfg(not(feature = "tauri"))]
+     #[tokio::test]
+     async fn test_a_peer_without_versions_gets_version_0() {
+         let (seen, decrypted) = handshake(0, Some(0)).await;
+@@ -5900,6 +6329,23 @@ mod kx_tests {
+         assert!(seen.decrypted && decrypted);
+     }
+ 
++    #[cfg(feature = "tauri")]
++    #[tokio::test]
++    async fn test_a_peer_without_versions_is_refused() {
++        let (rs_pk, rs_sk) = sign::gen_keypair();
++        let (host, signed_id_pk, seen) = controlled_stub(0, Some(0), rs_sk).await;
++        let mut conn = connect_tcp(host, 3000).await.unwrap();
++        let err =
++            Client::secure_connection(PEER_ID, signed_id_pk, &crate::encode64(rs_pk.0), &mut conn)
++                .await
++                .unwrap_err();
++        assert_eq!(err.to_string(), crate::common::PEER_KX_OUTDATED);
++        assert!(!conn.is_secured());
++        drop(conn);
++        // The stub never got a key to decrypt with.
++        assert!(seen.await.is_err());
++    }
++
+     #[tokio::test]
+     async fn test_a_pick_lowered_in_transit_decrypts_nothing() {
+         // The controlled side takes 0 from a controller without versions, so a lowered pick is
+@@ -5909,3 +6355,21 @@ mod kx_tests {
+         assert!(!seen.decrypted && !decrypted);
+     }
+ }
++
++#[cfg(all(test, feature = "tauri"))]
++mod peer_target_tests {
++    use super::peer_target_refused;
++
++    #[test]
++    fn only_device_ids_on_the_configured_servers() {
++        let other = |s: &str| Some(("123456789".to_owned(), s.to_owned(), "k".to_owned()));
++        assert!(!peer_target_refused("123456789", &None));
++        assert!(!peer_target_refused("123456789", &other("public")));
++        assert!(peer_target_refused("123456789", &other("1.2.3.4")));
++        assert!(peer_target_refused("123456789", &other("evil.example:21116")));
++        assert!(peer_target_refused("1.2.3.4", &None));
++        assert!(peer_target_refused("1.2.3.4:21118", &None));
++        assert!(peer_target_refused("[2001:db8::1]:21118", &None));
++        assert!(peer_target_refused("host.example:21118", &None));
++    }
++}
 diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
 index 1b197a8..79dc7d5 100644
 --- a/src/client/io_loop.rs
@@ -1414,7 +1505,7 @@ index 1b197a8..79dc7d5 100644
                      if !self.video_threads.contains_key(&display) {
                          self.new_video_thread(display);
 diff --git a/src/common.rs b/src/common.rs
-index 53831cc..8e68155 100644
+index 53831cc..3df641a 100644
 --- a/src/common.rs
 +++ b/src/common.rs
 @@ -693,6 +693,11 @@ impl Drop for CheckTestNatType {
@@ -1441,7 +1532,7 @@ index 53831cc..8e68155 100644
      let url = get_api_server(api, custom);
      if url.is_empty() || is_public(&url) {
          return "".to_owned();
-@@ -2141,6 +2151,13 @@ pub fn decode64<T: AsRef<[u8]>>(input: T) -> Result<Vec<u8>, base64::DecodeError
+@@ -2141,6 +2151,28 @@ pub fn decode64<T: AsRef<[u8]>>(input: T) -> Result<Vec<u8>, base64::DecodeError
      base64::decode(input)
  }
  
@@ -1451,11 +1542,26 @@ index 53831cc..8e68155 100644
 +/// Tether: hbbs refused the key this device presented (`LICENSE_MISMATCH`).
 +#[cfg(feature = "tauri")]
 +pub const SERVER_KEY_REJECTED: &str = "Server key mismatch: the server did not accept this Tether's server key (the server key was changed and this device has not received the new key list yet). Tether fetches it automatically with the policy; try again in a few minutes, or update Tether from your download page.";
++/// Tether: the peer offered only key exchange version 0.
++#[cfg(feature = "tauri")]
++pub const PEER_KX_OUTDATED: &str = "This device uses an outdated, insecure encryption; update it. Tether refused the connection.";
++/// Tether: a peer given as an address or as `id@server` would skip this device's servers and
++/// their signed server key list.
++#[cfg(feature = "tauri")]
++pub const PEER_SERVER_REFUSED: &str = "Tether connects only by device ID through your organisation's servers; an address or id@server is not accepted.";
++
++/// Tether: key exchange version 0 runs one key and one nonce sequence in both directions
++/// (keystream and Poly1305 key reuse, frames reflected back to their sender). Only a WebRTC
++/// stream, encrypted by DTLS and not by the stream key, may run it.
++#[cfg(feature = "tauri")]
++pub fn kx_version_refused(picked: u32, is_webrtc: bool) -> bool {
++    picked == 0 && !is_webrtc
++}
 +
  pub async fn get_key(sync: bool) -> String {
      #[cfg(windows)]
      if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
-@@ -2158,7 +2175,8 @@ pub async fn get_key(sync: bool) -> String {
+@@ -2158,7 +2190,8 @@ pub async fn get_key(sync: bool) -> String {
          options.remove("key").unwrap_or_default()
      };
      if key.is_empty() {
@@ -1465,7 +1571,7 @@ index 53831cc..8e68155 100644
      }
      key
  }
-@@ -2290,10 +2308,13 @@ async fn secure_tcp_impl(conn: &mut Stream, key: &str, log_on_success: bool) ->
+@@ -2290,10 +2323,13 @@ async fn secure_tcp_impl(conn: &mut Stream, key: &str, log_on_success: bool) ->
  /// when the server sent something else first, nothing parseable, or closed: `secure_tcp`
  /// tolerates that for servers from before the exchange, `secure_tcp_required` does not.
  async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> ResultType<bool> {
@@ -1482,7 +1588,7 @@ index 53831cc..8e68155 100644
      match timeout(READ_TIMEOUT, conn.next()).await? {
          Some(Ok(bytes)) => {
              if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
-@@ -2302,16 +2323,15 @@ async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> Res
+@@ -2302,16 +2338,15 @@ async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> Res
                          if ex.keys.len() != 1 {
                              bail!("Handshake failed: invalid key exchange message");
                          }
@@ -1502,7 +1608,7 @@ index 53831cc..8e68155 100644
                                  .and_then(|signed| {
                                      let params =
                                          signed.strip_prefix(hbb_common::tcp::KX_PARAMS_DOMAIN)?;
-@@ -2402,6 +2422,15 @@ pub fn get_rs_pk(str_base64: &str) -> Option<sign::PublicKey> {
+@@ -2402,6 +2437,15 @@ pub fn get_rs_pk(str_base64: &str) -> Option<sign::PublicKey> {
      }
  }
  
@@ -1518,7 +1624,7 @@ index 53831cc..8e68155 100644
  pub fn decode_id_pk(signed: &[u8], key: &sign::PublicKey) -> ResultType<(String, [u8; 32])> {
      let (id, pk, _, _) = decode_id_pk_dtls(signed, key)?;
      Ok((id, pk))
-@@ -2786,6 +2815,10 @@ async fn test_bind_ipv6() -> ResultType<SocketAddr> {
+@@ -2786,6 +2830,10 @@ async fn test_bind_ipv6() -> ResultType<SocketAddr> {
  }
  
  pub async fn test_ipv6() -> Option<tokio::task::JoinHandle<()>> {
@@ -1529,7 +1635,7 @@ index 53831cc..8e68155 100644
      {
          // One look and one claim of the minute, under one lock: two connections arriving
          // together would otherwise both find it over and both probe.
-@@ -3619,4 +3652,36 @@ mod tests {
+@@ -3619,4 +3667,36 @@ mod tests {
          // non-WebRTC handshakes.
          assert_eq!(decode_id_pk(&signed, &pk).unwrap(), (id, their_pk));
      }
@@ -1769,6 +1875,77 @@ index d321d12..0e01ef2 100644
 +        let _: id = msg_send![token, retain];
 +    }
 +}
+diff --git a/src/port_forward.rs b/src/port_forward.rs
+index 26f8cbc..dbc483f 100644
+--- a/src/port_forward.rs
++++ b/src/port_forward.rs
+@@ -69,6 +69,10 @@ fn rdp_display_name(lc: &Arc<RwLock<LoginConfigHandler>>, id: &str) -> String {
+     }
+ }
+ 
++/// Tether: the raw pipe runs `set_raw()` after login, which drops the stream cipher, so the
++/// tunnelled bytes would cross the relay in the clear. Only the multiplexed tunnel is used.
++const LEGACY_TUNNEL_REFUSED: &str = "The remote device does not support the encrypted tunnel; update it.";
++
+ pub async fn listen(
+     id: String,
+     password: String,
+@@ -100,7 +104,8 @@ pub async fn listen(
+                 // tunnel, or probes for one on its first accept. Everything
+                 // else, the setting off or a peer without the feature, is the
+                 // raw pipe below, as it always was.
+-                let claim = if lc.read().unwrap().port_forward_mux { tunnel.claim() } else { Claim::Legacy };
++                // Tether: always the multiplexed tunnel, the raw pipe is refused (LEGACY_TUNNEL_REFUSED).
++                let claim = if cfg!(feature = "tauri") || lc.read().unwrap().port_forward_mux { tunnel.claim() } else { Claim::Legacy };
+                 match claim {
+                     Claim::Muxed(handle) => {
+                         if let Err(e) = handle.open(&remote_host, remote_port, forward, Vec::new()) {
+@@ -169,6 +174,9 @@ async fn connect_and_login(
+     remote_host: &str,
+     remote_port: i32,
+ ) -> ResultType<Option<Stream>> {
++    if cfg!(feature = "tauri") {
++        bail!(LEGACY_TUNNEL_REFUSED);
++    }
+     let conn_type = if is_rdp {
+         ConnType::RDP
+     } else {
+@@ -376,6 +384,10 @@ async fn establish_tunnel(
+                 }
+             }
+         }
++        Ok(Some(_)) if cfg!(feature = "tauri") => {
++            tunnel.set_failed();
++            interface.on_establish_connection_error(LEGACY_TUNNEL_REFUSED.to_owned());
++        }
+         Ok(Some(outcome)) => {
+             tunnel.set_legacy();
+             if outcome.local_eof {
+@@ -745,6 +757,24 @@ mod login_tests {
+         });
+     }
+ 
++    #[cfg(feature = "tauri")]
++    #[test]
++    fn the_raw_pipe_is_refused() {
++        let rt = tokio::runtime::Builder::new_current_thread()
++            .enable_all()
++            .build()
++            .unwrap();
++        rt.block_on(async {
++            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++            let sock = tokio::net::TcpStream::connect(l.local_addr().unwrap()).await.unwrap();
++            let mut forward = Framed::new(sock, BytesCodec::new());
++            let (_tx, mut rx) = mpsc::unbounded_channel();
++            let mut close = false;
++            let r = connect_and_login("123456789", "pw", &mut rx, window(), &mut forward, "", "", false, &mut close, "h", 1).await;
++            assert_eq!(r.err().map(|e| e.to_string()).as_deref(), Some(LEGACY_TUNNEL_REFUSED));
++        });
++    }
++
+     #[test]
+     fn a_probing_login_asks_for_the_tunnel() {
+         let rt = tokio::runtime::Builder::new_current_thread()
 diff --git a/src/rendezvous_mediator.rs b/src/rendezvous_mediator.rs
 index b1e523d..9c5fe9a 100644
 --- a/src/rendezvous_mediator.rs
@@ -2050,7 +2227,7 @@ index b1e523d..9c5fe9a 100644
      async fn manual_restart_interrupts_retry_wait() {
          const WAKE_TIMEOUT: Duration = Duration::from_secs(1);
 diff --git a/src/server.rs b/src/server.rs
-index 8e4c56c..9fb08df 100644
+index 8e4c56c..7fa5007 100644
 --- a/src/server.rs
 +++ b/src/server.rs
 @@ -71,6 +71,8 @@ pub mod input_service {
@@ -2062,7 +2239,28 @@ index 8e4c56c..9fb08df 100644
  mod login_failure_check;
  pub(crate) mod port_forward_mux;
  pub mod display_service;
-@@ -262,7 +264,15 @@ pub async fn create_tcp_connection(
+@@ -259,10 +261,36 @@ pub async fn create_tcp_connection(
+     Ok(())
+ }
+ 
++/// The controller's key exchange version pick: never above our offer, and in Tether never 0
++/// outside WebRTC (`common::kx_version_refused`).
++fn check_kx_pick(picked: u32, advertised: u32, is_webrtc: bool) -> ResultType<()> {
++    if picked > advertised {
++        bail!(
++            "Handshake failed: key exchange version {} not offered, {} was",
++            picked,
++            advertised
++        );
++    }
++    #[cfg(feature = "tauri")]
++    if crate::common::kx_version_refused(picked, is_webrtc) {
++        bail!("Handshake refused: the controller picked the insecure key exchange version 0");
++    }
++    let _ = is_webrtc;
++    Ok(())
++}
++
  /// Our signed identity goes out and, when `secure`, the controller's reply keys `stream`.
  /// Separate so it can be raced against the connection's eviction.
  async fn identity_handshake(stream: &mut Stream, secure: bool) -> ResultType<()> {
@@ -2078,7 +2276,22 @@ index 8e4c56c..9fb08df 100644
      if secure && pk.len() == sign::PUBLICKEYBYTES && sk.len() == sign::SECRETKEYBYTES {
          let mut sk_ = [0u8; sign::SECRETKEYBYTES];
          sk_[..].copy_from_slice(&sk);
-@@ -334,11 +344,15 @@ async fn identity_handshake(stream: &mut Stream, secure: bool) -> ResultType<()>
+@@ -314,13 +342,7 @@ async fn identity_handshake(stream: &mut Stream, secure: bool) -> ResultType<()>
+                                 &pk.asymmetric_value,
+                                 &our_sk_b,
+                             )?;
+-                            if pk.kx_version > advertised {
+-                                bail!(
+-                                    "Handshake failed: key exchange version {} not offered, {} was",
+-                                    pk.kx_version,
+-                                    advertised
+-                                );
+-                            }
++                            check_kx_pick(pk.kx_version, advertised, stream.is_webrtc())?;
+                             stream.set_negotiated_key(
+                                 key,
+                                 false,
+@@ -334,11 +356,15 @@ async fn identity_handshake(stream: &mut Stream, secure: bool) -> ResultType<()>
                          } else if pk.asymmetric_value.is_empty() {
                              Config::set_key_confirmed(false);
                              log::info!("Force to update pk");
@@ -2094,7 +2307,7 @@ index 8e4c56c..9fb08df 100644
                      }
                  } else {
                      bail!("Handshake failed: invalid message format");
-@@ -407,11 +421,26 @@ async fn create_relay_connection_(
+@@ -407,11 +433,26 @@ async fn create_relay_connection_(
      // The proxy's address family does not constrain the relay target.
      let relay_server = crate::check_port(relay_server, RELAY_PORT);
      let use_ws_proxy = Config::is_proxy() && is_ws_endpoint(&check_ws(&relay_server));
@@ -2126,8 +2339,32 @@ index 8e4c56c..9fb08df 100644
      let mut msg_out = RendezvousMessage::new();
      let licence_key = crate::get_key(true).await;
      msg_out.set_request_relay(RequestRelay {
+@@ -974,3 +1015,23 @@ pub async fn stop_main_window_process() {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod kx_pick_tests {
++    use super::check_kx_pick;
++
++    #[test]
++    fn picks_above_the_offer_are_refused() {
++        assert!(check_kx_pick(2, 1, false).is_err());
++        assert!(check_kx_pick(1, 1, false).is_ok());
++    }
++
++    #[test]
++    fn version_0_only_on_webrtc() {
++        assert!(check_kx_pick(0, 0, true).is_ok());
++        #[cfg(feature = "tauri")]
++        assert!(check_kx_pick(0, 1, false).is_err());
++        #[cfg(not(feature = "tauri"))]
++        assert!(check_kx_pick(0, 1, false).is_ok());
++    }
++}
 diff --git a/src/server/connection.rs b/src/server/connection.rs
-index e9ea313..5828f97 100644
+index e9ea313..2956b2f 100644
 --- a/src/server/connection.rs
 +++ b/src/server/connection.rs
 @@ -194,6 +194,10 @@ lazy_static::lazy_static! {
@@ -2141,7 +2378,16 @@ index e9ea313..5828f97 100644
      pub static ref AUTHED_CONNS: Arc::<Mutex<Vec<AuthedConn>>> = Default::default();
      pub static ref CONTROL_PERMISSIONS_ARRAY: Arc::<Mutex<Vec<(i32, ControlPermissions)>>> = Default::default();
      static ref WAKELOCK_SENDER: Arc::<Mutex<std::sync::mpsc::Sender<(usize, usize)>>> = Arc::new(Mutex::new(start_wakelock_thread()));
-@@ -663,6 +667,11 @@ impl Connection {
+@@ -213,6 +217,8 @@ lazy_static::lazy_static! {
+ 
+ #[cfg(target_os = "windows")]
+ const TERMINAL_OS_LOGIN_FAILED_MSG: &str = "Incorrect username or password.";
++/// Tether: see `Connection::legacy_tunnel_refused`.
++const LEGACY_TUNNEL_REFUSED: &str = "This tunnel is not end-to-end encrypted (an outdated client). Update the connecting app.";
+ 
+ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+     if a.len() != b.len() {
+@@ -663,6 +669,11 @@ impl Connection {
              conn_audit_primary_auth: ConnAuditPrimaryAuth::None,
              conn_audit_two_factor: ConnAuditTwoFactor::None,
          };
@@ -2153,7 +2399,7 @@ index e9ea313..5828f97 100644
          let addr = hbb_common::try_into_v4(addr);
          if !conn.on_open(addr).await {
              conn.closed = true;
-@@ -847,6 +856,7 @@ impl Connection {
+@@ -847,6 +858,7 @@ impl Connection {
                                  }
                              } else if &name == "file" {
                                  conn.file = enabled;
@@ -2161,7 +2407,7 @@ index e9ea313..5828f97 100644
                                  conn.send_permission(Permission::File, enabled).await;
                                  #[cfg(feature = "unix-file-copy-paste")]
                                  if !enabled {
-@@ -864,6 +874,7 @@ impl Connection {
+@@ -864,6 +876,7 @@ impl Connection {
                                  conn.restart = enabled;
                                  conn.send_permission(Permission::Restart, enabled).await;
                              } else if &name == "recording" {
@@ -2169,7 +2415,7 @@ index e9ea313..5828f97 100644
                                  conn.recording = enabled;
                                  conn.send_permission(Permission::Recording, enabled).await;
                              } else if &name == "block_input" {
-@@ -1260,10 +1271,31 @@ impl Connection {
+@@ -1260,10 +1273,31 @@ impl Connection {
          }
          #[cfg(target_os = "macos")]
          reset_input_ondisconn();
@@ -2201,7 +2447,7 @@ index e9ea313..5828f97 100644
                          handle_mouse(
                              &mouse_input.msg,
                              mouse_input.conn_id,
-@@ -1274,6 +1306,9 @@ impl Connection {
+@@ -1274,6 +1308,9 @@ impl Connection {
                          );
                      }
                      MessageInput::Key((mut msg, press)) => {
@@ -2211,7 +2457,20 @@ index e9ea313..5828f97 100644
                          // Set the press state to false, use `down` only in `handle_key()`.
                          msg.press = false;
                          if press {
-@@ -1936,6 +1971,9 @@ impl Connection {
+@@ -1787,6 +1824,12 @@ impl Connection {
+         }
+     }
+ 
++    /// Tether: a non-multiplexed tunnel runs `set_raw()` after login, which drops the stream
++    /// cipher, so its bytes would cross the relay in the clear. Only the multiplexed one is kept.
++    fn legacy_tunnel_refused(pf: &PortForward) -> bool {
++        cfg!(feature = "tauri") && !pf.multiplex
++    }
++
+     pub(super) fn normalize_port_forward_target(pf: &mut PortForward) -> (String, bool) {
+         let mut is_rdp = false;
+         if pf.host == "RDP" && pf.port == 0 {
+@@ -1936,6 +1979,9 @@ impl Connection {
              self.tx_from_authed.clone(),
              self.lr.clone(),
          ));
@@ -2221,7 +2480,7 @@ index e9ea313..5828f97 100644
          self.session_last_recv_time = SESSIONS
              .lock()
              .unwrap()
-@@ -2237,9 +2275,49 @@ impl Connection {
+@@ -2237,9 +2283,49 @@ impl Connection {
                  self.try_sub_monitor_services();
              }
          }
@@ -2271,7 +2530,19 @@ index e9ea313..5828f97 100644
      fn try_sub_camera_displays(&mut self) {
          if let Some(s) = self.server.upgrade() {
              let mut s = s.write().unwrap();
-@@ -3044,7 +3122,17 @@ impl Connection {
+@@ -2974,6 +3060,11 @@ impl Connection {
+                         sleep(1.).await;
+                         return false;
+                     }
++                    if Self::legacy_tunnel_refused(&pf) {
++                        self.send_login_error(LEGACY_TUNNEL_REFUSED).await;
++                        sleep(1.).await;
++                        return false;
++                    }
+                     let (addr, _is_rdp) = Self::normalize_port_forward_target(&mut pf);
+                     self.port_forward_address = addr;
+                 }
+@@ -3044,7 +3135,17 @@ impl Connection {
                  crate::get_builtin_option(keys::OPTION_ALLOW_LOGON_SCREEN_PASSWORD) == "Y"
                      && is_logon();
  
@@ -2290,7 +2561,7 @@ index e9ea313..5828f97 100644
                  || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()
              {
                  #[cfg(not(any(target_os = "android", target_os = "ios")))]
-@@ -3202,6 +3290,10 @@ impl Connection {
+@@ -3202,6 +3303,10 @@ impl Connection {
                      if self.is_authed_view_camera_conn() {
                          return true;
                      }
@@ -2301,7 +2572,7 @@ index e9ea313..5828f97 100644
                      #[cfg(any(target_os = "android", target_os = "ios"))]
                      if let Err(e) = call_main_service_pointer_input("mouse", me.mask, me.x, me.y) {
                          log::debug!("call_main_service_pointer_input fail:{}", e);
-@@ -3338,6 +3430,11 @@ impl Connection {
+@@ -3338,6 +3443,11 @@ impl Connection {
                      if self.is_authed_view_camera_conn() {
                          return true;
                      }
@@ -2313,7 +2584,7 @@ index e9ea313..5828f97 100644
                      if self.peer_keyboard_enabled() {
                          if is_enter(&me) {
                              CLICK_TIME.store(get_time(), Ordering::SeqCst);
-@@ -3639,6 +3736,51 @@ impl Connection {
+@@ -3639,6 +3749,51 @@ impl Connection {
                                  }
                              }
                          }
@@ -2365,7 +2636,7 @@ index e9ea313..5828f97 100644
                          match fa.union {
                              Some(file_action::Union::ReadEmptyDirs(rd)) => {
                                  self.read_empty_dirs(&rd.path, rd.include_hidden);
-@@ -4032,10 +4174,19 @@ impl Connection {
+@@ -4032,10 +4187,19 @@ impl Connection {
                          .lock()
                          .unwrap()
                          .user_auto_adjust_fps(self.inner.id(), fps),
@@ -2389,7 +2660,7 @@ index e9ea313..5828f97 100644
                      #[cfg(windows)]
                      Some(misc::Union::SelectedSid(sid)) => {
                          if let Some(current_process_sid) =
-@@ -5310,6 +5461,7 @@ impl Connection {
+@@ -5310,6 +5474,7 @@ impl Connection {
              return;
          }
          self.closed = true;
@@ -2397,7 +2668,7 @@ index e9ea313..5828f97 100644
          // If voice A,B -> C, and A,B has voice call
          // B disconnects, C will reset the voice call input.
          //
-@@ -5356,6 +5508,10 @@ impl Connection {
+@@ -5356,6 +5521,10 @@ impl Connection {
          msg_out.set_misc(misc);
          self.send(msg_out).await;
          raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
@@ -2408,7 +2679,7 @@ index e9ea313..5828f97 100644
      }
  
      async fn handle_read_job_init_result(
-@@ -5813,6 +5969,44 @@ impl Connection {
+@@ -5813,6 +5982,44 @@ impl Connection {
          }
      }
  
@@ -2453,7 +2724,21 @@ index e9ea313..5828f97 100644
      fn is_authed_remote_conn(&self) -> bool {
          if let Some(id) = self.authed_conn_id.as_ref() {
              return id.conn_type() == AuthConnType::Remote;
-@@ -7874,3 +8068,104 @@ mod test {
+@@ -7224,6 +7431,13 @@ mod test {
+     // test that admits connections holds this first; a poisoned lock is still a lock.
+     static UNAUTHORIZED_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+ 
++    #[test]
++    fn test_only_multiplexed_tunnels_in_tether() {
++        let pf = |multiplex| PortForward { multiplex, ..Default::default() };
++        assert!(!Connection::legacy_tunnel_refused(&pf(true)));
++        assert_eq!(Connection::legacy_tunnel_refused(&pf(false)), cfg!(feature = "tauri"));
++    }
++
+     fn unauthorized_count() -> usize {
+         UNAUTHORIZED_CONNS.lock().unwrap().len()
+     }
+@@ -7874,3 +8088,104 @@ mod test {
          assert!(!replaced_by(&conn(3, remote, key(7, "other")), 2, &mine));
      }
  }

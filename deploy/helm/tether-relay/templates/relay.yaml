@@ -101,6 +101,9 @@ spec:
             - { name: DRAIN_TIMEOUT, value: {{ $v.drainSeconds | quote }} }
             # hbb_common writes a config dir under HOME; the root filesystem is read-only.
             - { name: HOME, value: /tmp }
+            # The proxy runs in its own pod, so the WebSocket port listens on the pod IP (default
+            # 127.0.0.1). It trusts the proxy's X-Forwarded-For: keep it on the cluster network only.
+            - { name: WS_BIND, value: "0.0.0.0" }
             {{- if $.Values.metrics.enabled }}
             # /metrics on the pod IP (cluster network only; no Service of type LoadBalancer exposes it).
             - { name: METRICS_ADDR, value: "0.0.0.0" }

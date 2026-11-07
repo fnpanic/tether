@@ -4,6 +4,33 @@ All notable changes to Tether. Versions follow [Semantic Versioning](https://sem
 the desktop app version is kept in sync in `apps/desktop/package.json`,
 `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
 
+## [Unreleased]
+
+### Security
+- **Key exchange version 0 refused outside WebRTC** (Tether and TetherQS): version 0 runs one key
+  and one nonce sequence in both directions (keystream and Poly1305 key reuse, reflected frames).
+  A Tether host now refuses a viewer that picks 0, and the Tether viewer refuses a host that offers
+  nothing else ("This device uses an outdated, insecure encryption; update it"), so no shield is
+  shown for such a session. WebRTC (DTLS, version 0 by design) is unchanged. Tether ↔ Tether is
+  unaffected (both sides offer and pick 1); stock RustDesk viewers and hosts older than 1.5.1
+  (no key exchange versions) are refused.
+- **Legacy (non-multiplexed) port forwarding and RDP tunnels refused**: they call `set_raw()` after
+  login, which removes the end-to-end cipher. A Tether host refuses them at login and the Tether
+  viewer only uses the multiplexed, encrypted tunnel; stock RustDesk viewers' raw tunnels are
+  refused.
+- **Trust anchor locked**: while policy `settings.server` is off (the default), `key`,
+  `custom-rendezvous-server` and `relay-server` are blanked in the core, so a value stored earlier or
+  written into the config file is no longer used. The viewer refuses peers given as an address
+  (`1.2.3.4`, `host:port`) or as `id@server` (except `id@public`), which bypassed the configured
+  servers and their signed server key list, also from `tether://` links and the command line.
+- **No plain `ws://` to a server**: rendezvous and relay WebSockets must be `wss://`; an IP endpoint
+  (which became plain `ws://`) is refused. Loopback (`127.0.0.1`, `::1`, `localhost`) stays allowed
+  for local test servers.
+- **hbbs/hbbr WebSocket ports (21118/21119) listen on 127.0.0.1** (`WS_BIND`, default
+  `127.0.0.1`): they take the client IP from `X-Forwarded-For`/`X-Real-IP`, which only the local
+  Caddy/nginx may set. The Helm chart sets `WS_BIND=0.0.0.0` (its proxy is a separate pod). TCP/UDP
+  21115-21117 are unchanged.
+
 ## [0.5.22] — 2026-11-07
 
 Tether / TetherQS 0.5.22 (Windows and macOS), Tether Manage 0.5.6; relay parts as listed (hbbs, hbbr,

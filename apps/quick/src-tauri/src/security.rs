@@ -36,6 +36,8 @@ pub fn apply_policy() {
     for (k, v) in DEFAULTS {
         d.insert((*k).to_owned(), (*v).to_owned());
     }
+    // No plain ws:// to a server (an IP endpoint would get one); loopback stays for local tests.
+    hbb_common::websocket::require_tls();
 }
 
 #[cfg(test)]

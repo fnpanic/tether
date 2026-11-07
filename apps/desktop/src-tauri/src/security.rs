@@ -36,6 +36,8 @@ pub fn apply_policy() {
     }
     drop(d);
     enforce();
+    // No plain ws:// to a server (an IP endpoint would get one); loopback stays for local tests.
+    hbb_common::websocket::require_tls();
 }
 
 /// Re-applies the forced settings; the admin policy (`policy.rs`) calls this last, so a policy can
