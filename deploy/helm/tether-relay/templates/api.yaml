@@ -41,7 +41,7 @@ data:
           handle_response @accel {
             root * /data
             rewrite * {rp.header.X-Accel-Redirect}
-            header Content-Type application/vnd.microsoft.portable-executable
+            header Content-Type {rp.header.Content-Type}
             header Content-Disposition {rp.header.Content-Disposition}
             header Cache-Control no-store
             header X-Content-Type-Options nosniff

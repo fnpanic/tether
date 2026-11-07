@@ -6,6 +6,11 @@
 //! TetherQS reads its own file, verifies the signature against the compiled-in admin keys and
 //! applies the profile; a missing, damaged or untrusted trailer means "plain TetherQS".
 //! See docs/api.md ("Custom apps").
+//!
+//! macOS: the `.app` is signed, so nothing can be added to it. The relay instead names the bundle
+//! folder `<Name>-Support [<mac id>].app` (the folder name is not sealed) and serves the signed
+//! profile at `/q/m/<mac id>`; TetherQS reads its own folder name, fetches and verifies the profile
+//! and caches it. The mac id is derived from the token, so the link secret never appears in a path.
 
 use crate::{envelope, policy::Layer};
 use serde::{Deserialize, Serialize};
@@ -123,6 +128,30 @@ pub fn valid_token(t: &str) -> bool {
     t.len() == 43 && t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// Lookup id of a link's profile for macOS: 16 hex characters of SHA-256 over the token. Not the
+/// token: bundle paths end up in logs and crash reports, and the id cannot be turned back into a
+/// download link.
+pub fn mac_id(token: &str) -> String {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest([b"tetherqs-mac-id\0".as_slice(), token.as_bytes()].concat());
+    h[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn valid_mac_id(s: &str) -> bool {
+    s.len() == 16 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `.app` folder name the relay gives a custom app for macOS (`name` already reduced to safe characters).
+pub fn mac_bundle_name(name: &str, mac_id: &str) -> String {
+    format!("{name} [{mac_id}].app")
+}
+
+/// The mac id in a bundle folder name, wherever it is (Finder may append " 2" to a second copy).
+pub fn mac_id_from_bundle(folder: &str) -> Option<&str> {
+    let stem = folder.strip_suffix(".app")?;
+    stem.rmatch_indices('[').find_map(|(i, _)| stem.get(i + 1..i + 17).filter(|id| valid_mac_id(id) && stem[i + 17..].starts_with(']')))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +195,20 @@ mod tests {
         let t = new_token();
         assert!(valid_token(&t) && t != new_token());
         assert!(!valid_token("../../etc/passwd"));
+    }
+
+    #[test]
+    fn mac_ids() {
+        let t = "A".repeat(43);
+        let id = mac_id(&t);
+        assert!(valid_mac_id(&id) && id != mac_id(&"B".repeat(43)) && !t.contains(&id));
+        assert_eq!(mac_id(&t), id, "stable: every relay derives the same id");
+        let b = mac_bundle_name("ACME GmbH-Support", &id);
+        assert_eq!(mac_id_from_bundle(&b), Some(id.as_str()));
+        let copy = format!("{} 2.app", b.trim_end_matches(".app"));
+        assert_eq!(mac_id_from_bundle(&copy), Some(id.as_str()));
+        for bad in ["TetherQS.app", "x [0123456789abcdeF].app", "x [0123456789abcde].app", "x [0123456789abcdef0].app", "x [0123456789abcdef]"] {
+            assert_eq!(mac_id_from_bundle(bad), None, "{bad}");
+        }
     }
 }

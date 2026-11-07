@@ -247,7 +247,7 @@ export function CustomApps() {
       <Card className="mb-6 flex items-start gap-3 py-4">
         <Link2 size={18} className="mt-0.5 shrink-0 text-accent" />
         <p className="text-caption text-muted">
-          <span className="font-semibold text-ink">The link is private.</span> Anyone who has it can download this app until it expires, so send it only to the customer it is for. It is 256-bit random, not listed anywhere and cannot be guessed; an unknown, expired or revoked link answers the same "not found". Revoke it or issue a new link at any time. Windows only for now.
+          <span className="font-semibold text-ink">The link is private.</span> Anyone who has it can download this app until it expires, so send it only to the customer it is for. It is 256-bit random, not listed anywhere and cannot be guessed; an unknown, expired or revoked link answers the same "not found". Revoke it or issue a new link at any time. The one link serves Windows and macOS: a Mac browser gets the zipped TetherQS.app, everything else the .exe; add <code>/mac</code> or <code>/windows</code> to the link to choose.
         </p>
       </Card>
       <ErrorText error={error} />

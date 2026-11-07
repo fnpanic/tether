@@ -161,7 +161,8 @@ and stored on every relay together with a private, expiring download link
 `https://<relay>/q/<token>` (256-bit random token, at most 366 days; wire contract in
 [api.md](api.md#custom-apps-branded-tetherqs-downloads)). The relay streams the channel's current
 `TetherQS-<v>.exe` with the signed profile appended (`<signed JSON><u32 LE length>TQSPROF1`) as
-`<Name>-Support.exe`. Unknown, revoked and expired links all answer `404`; 30 requests per minute
+`<Name>-Support.exe`, and to a Mac browser the TetherQS zip as `<Name>-Support.zip` holding
+`<Name>-Support [<mac id>].app` (`/q/<token>/mac` and `/q/<token>/windows` choose explicitly). Unknown, revoked and expired links all answer `404`; 30 requests per minute
 per IP; the admin sees download counts. The exe itself stays the same signed build: no per-customer
 compilation.
 
@@ -177,10 +178,26 @@ In TetherQS (Windows):
 - Self-update downloads and verifies the plain exe as usual, then writes it with this instance's
   trailer appended unchanged, so the customer keeps the branded app.
 
+In TetherQS (macOS) the signed `.app` cannot carry a trailer, so:
+- At start it reads the mac id from its own bundle folder name (`… [<16 hex>].app`; also under App
+  Translocation, which keeps the name). No id: plain TetherQS, no request.
+- With an id it uses `custom-<mac id>.json` from its config folder
+  (`~/Library/Preferences/app.tether.Tether-QS/`), else fetches `https://<relay>/q/m/<mac id>` from
+  each compiled-in relay in turn (10 s each, first start only) and caches it. The profile is
+  verified and applied exactly as on Windows; a failure is logged ("custom app profile ignored")
+  and TetherQS runs as plain TetherQS.
+- Self-update replaces the bundle under the same folder name (also in the fallback folder), and the
+  cache stays: still branded. Renaming the app in Finder removes the id (plain TetherQS).
+- `TetherQS.app/Contents/MacOS/TetherQS --print-custom-profile` prints what was found and exits
+  (0 = custom app).
+
 Revoking or letting the link expire stops new downloads only; copies already downloaded keep
-working (the profile has no expiry). Test helper without Tether Manage:
+working (the profile has no expiry). On macOS a copy that was downloaded but never started before
+a **revoke** or **New link** starts as plain TetherQS (its profile is fetched at the first start);
+expiry alone does not affect it. Test helper without Tether Manage:
 `cargo run --example custom_app -- <keyfile> <TetherQS.exe> <out.exe>` in `crates/tether-trust`
-(prints the public key for `TETHER_ADMIN_PUB_KEY`, writes a signed test profile).
+(prints the public key for `TETHER_ADMIN_PUB_KEY`, writes a signed test profile;
+`--profile <out.json>` instead of the two files writes the profile alone, as `/q/m/` serves it).
 
 ## Building
 

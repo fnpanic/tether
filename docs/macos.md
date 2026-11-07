@@ -195,6 +195,60 @@ the Mac's own resolution does not change. To stream the full pixel size, set the
 `tether-full-retina` to `Y`. On congestion a Mac host may lower its bitrate to ~0.3 Mbit/s
 (other hosts keep the ~1 Mbit/s floor).
 
+## Custom apps
+
+A [custom app](management.md#custom-apps) link `https://<relay>/q/<token>` gives a Mac browser
+`<Name>-Support.zip`, which unpacks to `<Name>-Support [<mac id>].app` (`/q/<token>/mac` forces it).
+The app inside is the unchanged, signed TetherQS release: the relay only renames the bundle folder
+in the zip headers (`server/api/src/maczip.rs`), because anything added inside the bundle (a
+trailer on the Mach-O as on Windows, a file in `Resources/`) would break the code signature, and
+the relay has no signing key. At the first start TetherQS reads the mac id from its folder name,
+fetches the signed profile from `https://<relay>/q/m/<mac id>`, verifies it against the
+compiled-in admin keys and caches it as `custom-<mac id>.json` in
+`~/Library/Preferences/app.tether.Tether-QS/` ([quick-support.md](quick-support.md#custom-apps-branded-downloads)).
+Self-updates keep the folder name (the new bundle is swapped in under the same path, or under the
+same name in `~/Library/Application Support/Tether-QS/`) and the cache, so the app stays branded.
+
+Check an app: `"<Name>-Support [<mac id>].app/Contents/MacOS/TetherQS" --print-custom-profile`
+prints the custom app (or why it runs as plain TetherQS) and exits, 0 = custom app.
+
+Limits: renaming the app in Finder drops the id (plain TetherQS); a copy that was never started
+before the app was revoked or got a new link starts plain; the first start needs a relay.
+
+### Why the folder name (checked on the Mac, 2026-11-07, macOS 15.7.4, arm64)
+
+Through the build runner, with the 0.5.24 release zip and a TetherQS build of this change (signed
+with "Tether Code Signing", a test admin key added for the run only); no install, own `HOME`:
+
+| Check | Result |
+| --- | --- |
+| `codesign --verify --deep --strict` after `mv TetherQS.app "ACME GmbH-Support [0123456789abcdef].app"` | `valid on disk`, `satisfies its Designated Requirement` (DR: identifier `net.tether.quick` + certificate root; no path) |
+| Zip renamed by tether-api's `maczip::rename_app` (byte-identical to an independent Python rewrite), quarantined (`0083;<time>;Safari;<UUID>`), unpacked with `ditto -x -k` and with Info-ZIP `unzip` | Same files as the `mv` copy; codesign valid in both |
+| `spctl -a -vv -t exec`, original vs renamed, quarantined or not | Identical verdict: `rejected, origin=Tether Code Signing` (self-signed, not notarized: users approve once with Open Anyway, docs above). A notarized build would keep its ticket too: the ticket is bound to the code directory hash, not to the path. |
+| `--print-custom-profile`, renamed copy with a cached profile | `custom app example-1 (Example Support), accent "#c8102e", 1 settings …`, exit 0 |
+| Same, no cache | Fetched `https://<relay>/q/m/0123456789abcdef` from the compiled-in relay: `404` (endpoint not deployed yet) → `plain TetherQS: custom app …: could not fetch the profile: … 404`, nothing cached, exit 1 |
+| Plain `TetherQS.app` with the same cache | `plain TetherQS (no custom app)`: no lookup without an id |
+| Quarantined bundle exec'd from a shell | Killed by Gatekeeper (SIGKILL), for the renamed **and** the plain `TetherQS.app` alike: needs the user's Open Anyway, unrelated to the rename |
+| `codesign` after the runs | Still valid (TetherQS writes nothing into its bundle) |
+
+Rejected alternatives:
+- **Extended attribute on the bundle** (`ditto -c -k --sequesterRsrc`): codesign still passes, but
+  the attribute was gone after `ditto -x -k` and after `unzip`. Too fragile.
+- **Signed build per custom app** (profile in `Contents/Resources`): robust, but needs the Mac and
+  the signing key for every app and every release: about 5 minutes per incremental build job plus
+  a re-sign and upload per app and update, and the relays would host one zip per app and version.
+- **Download URL from the quarantine database** (`~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2`):
+  readable without permissions, but the newest entries on the test Mac (Edge) had no URL at all,
+  other unpackers do not record one, and the URL would contain the secret token.
+
+Not verified: the folder name under **App Translocation** (an app started straight from a
+quarantined download runs from a random read-only path). Apple's translocation keeps the bundle's
+name (`/private/var/folders/…/AppTranslocation/<UUID>/d/<Name> [<id>].app`), but the private
+`SecTranslocateCreateSecureDirectoryForURL` is refused inside the runner's sandbox
+(`Operation not permitted`) and a GUI start needs Open Anyway at the unlocked Mac. Check once by
+hand: download a custom link in Safari, start the app from Downloads, then
+`ps -o command= -p $(pgrep -x TetherQS)` shows the translocated path, and the title bar the name.
+
 ## Publish with Tether Manage
 
 1. Copy `dist/macos/` to the PC with Tether Manage (keep the `.dmg` next to the `.app.tar.gz`).

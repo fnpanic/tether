@@ -459,6 +459,54 @@ fn custom_apps() {
     assert!(list[0]["last_download"].as_u64().is_some());
     assert!(list[0].get("profile").is_none());
 
+    // macOS: the same link serves the TetherQS zip with the .app renamed to carry the mac id.
+    let mac_id = custom::mac_id(&tok);
+    let bundle = format!("ACME GmbH-Support [{mac_id}].app");
+    assert_eq!(s.req("GET", &format!("{q}/mac"), &[], b"").status, 404, "no macOS release yet");
+    let zip = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/TetherQS-mini.zip")).unwrap();
+    let mrel = "/api/admin/release/stable/customer/darwin-universal";
+    assert_eq!(s.admin(&k, "PUT", &format!("{mrel}/TetherQS-0.4.1-universal.zip"), &zip).status, 204);
+    let mlatest = br#"{"version":"0.4.1","platforms":{"darwin-universal":{"signature":"x","url":"https://r/download/stable/customer/darwin-universal/TetherQS-0.4.1-universal.zip"}}}"#;
+    assert_eq!(s.admin(&k, "PUT", &format!("{mrel}/latest.json"), mlatest).status, 204);
+    let r = s.req("GET", &format!("{q}/mac"), &[], b"");
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("Content-Type"), Some("application/zip"));
+    assert_eq!(r.header("Content-Disposition"), Some("attachment; filename=\"ACME GmbH-Support.zip\""));
+    assert_eq!(r.header("Content-Length").unwrap().parse::<usize>().unwrap(), r.body.len());
+    // 4 entries, each name in the local and the central header grows by the same amount.
+    assert_eq!(r.body.len(), zip.len() + 8 * (bundle.len() - "TetherQS.app".len()));
+    let count = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).filter(|w| *w == needle).count();
+    assert_eq!(count(&r.body, format!("{bundle}/Contents/MacOS/TetherQS").as_bytes()), 2);
+    assert_eq!(count(&r.body, b"TetherQS.app"), 0);
+    let mac_zip = r.body;
+    // A Mac browser on the plain link gets the zip, everything else (Windows, curl) the exe.
+    let mac_ua = ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15");
+    assert_eq!(s.req("GET", &q, &[mac_ua], b"").body, mac_zip);
+    let iphone = ("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15");
+    assert_eq!(s.req("GET", &q, &[iphone], b"").header("Content-Type"), Some("application/vnd.microsoft.portable-executable"));
+    assert_eq!(s.req("GET", &format!("{q}/windows"), &[mac_ua], b"").header("Content-Type"), Some("application/vnd.microsoft.portable-executable"));
+    assert_eq!(s.req("GET", &format!("{q}/linux"), &[], b"").status, 404);
+    assert_eq!(s.req("GET", &format!("{q}/mac/x"), &[], b"").status, 404);
+    // Behind Caddy: the prepared zip, next to (not instead of) the prepared exe.
+    let r = s.req("GET", &format!("{q}/mac"), &[("X-Tether-Accel", "1")], b"");
+    assert_eq!((r.status, r.header("Content-Type")), (204, Some("application/zip")));
+    let mcached = r.header("X-Accel-Redirect").unwrap().to_owned();
+    assert_eq!(mcached, "/qcache/acme-1--TetherQS-0.4.1-universal.zip");
+    assert_eq!(std::fs::read(s.dir.join(mcached.trim_start_matches('/'))).unwrap(), mac_zip);
+    assert_eq!(s.req("GET", &q, &[("X-Tether-Accel", "1")], b"").header("X-Accel-Redirect"), Some(rel.as_str()));
+    assert!(cached.exists() && s.dir.join(mcached.trim_start_matches('/')).exists());
+    assert_eq!(s.admin(&k, "GET", "/api/admin/custom", b"").json()[0]["downloads"], 9);
+
+    // The profile for TetherQS on macOS, by mac id (not the token).
+    let r = s.req("GET", &format!("/q/m/{mac_id}"), &[], b"");
+    assert_eq!((r.status, r.header("Cache-Control")), (200, Some("no-store")));
+    let p = custom::open(&r.body, &[k.verifying_key()]).unwrap();
+    assert_eq!(p.id, "acme-1");
+    assert_eq!(s.req("GET", &format!("/q/m/{}", custom::mac_id(&custom::new_token())), &[], b"").status, 404);
+    assert_eq!(s.req("GET", "/q/m/..%2f..%2fpolicy.json", &[], b"").status, 404);
+    assert_eq!(s.req("GET", &format!("/q/m/{tok}"), &[], b"").status, 404, "the token is not a mac id");
+    assert_eq!(s.admin(&k, "GET", "/api/admin/custom", b"").json()[0]["downloads"], 9, "profile fetches are not downloads");
+
     // Unknown / malformed tokens: 404.
     assert_eq!(s.req("GET", &format!("/q/{}", custom::new_token()), &[], b"").status, 404);
     assert_eq!(s.req("GET", "/q/..%2f..%2fpolicy.json", &[], b"").status, 404);
@@ -469,6 +517,8 @@ fn custom_apps() {
     assert_eq!(s.admin(&k, "PUT", path, &custom_body(&k, "acme-1", "ACME", &tok2, exp)).status, 204);
     assert!(!cached.exists(), "prepared copy of the old profile kept");
     assert_eq!(s.req("GET", &q, &[], b"").status, 404);
+    assert_eq!(s.req("GET", &format!("/q/m/{mac_id}"), &[], b"").status, 404, "old mac id");
+    assert_eq!(s.req("GET", &format!("/q/m/{}", custom::mac_id(&tok2)), &[], b"").status, 200);
     assert_eq!(s.req("GET", &format!("/q/{tok2}"), &[], b"").status, 200);
     assert_eq!(s.admin(&k, "GET", "/api/admin/custom", b"").json()[0]["downloads"], 1);
 
@@ -511,7 +561,10 @@ fn custom_app_expiry_counters_persist_and_rate_limit() {
     // Expired: same 404 as unknown, entry still listed for the admin.
     std::thread::sleep(std::time::Duration::from_secs(3));
     assert_eq!(s.req("GET", &q, &[], b"").status, 404);
+    assert_eq!(s.req("GET", &format!("{q}/mac"), &[], b"").status, 404);
     assert_eq!(s.admin(&k, "GET", "/api/admin/custom", b"").json().as_array().unwrap().len(), 1);
+    // The profile stays available: a copy downloaded before expiry still gets its branding.
+    assert_eq!(s.req("GET", &format!("/q/m/{}", custom::mac_id(&tok)), &[], b"").status, 200);
 
     // 30 per minute per IP (unknown tokens count too), other IPs unaffected.
     let ip = [("X-Forwarded-For", "192.0.2.50")];

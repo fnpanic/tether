@@ -296,12 +296,24 @@ works on any relay. The relay never modifies the profile; TetherQS verifies the 
 | `PUT /api/admin/custom/<id>` (signed) | `{"profile": <signed CustomProfile document>, "token": "<43 chars base64url>", "expires": <unix>, "channel": "stable"}` (≤ 300 KiB) | `204`. The server verifies the signature against its admin keys, runs `CustomProfile::validate`, requires `profile.id == <id>`, `custom::valid_token(token)` and `expires` in the future (≤ 366 days). Replaces an existing entry with that id (new token = old link stops working). Stored in `custom/<id>.json` (0600). |
 | `GET /api/admin/custom` (signed) | – | `[{id, name, token, expires, channel, created, downloads, last_download}]` |
 | `DELETE /api/admin/custom/<id>` (signed) | – | `204`; the link stops working at once. `404` if unknown. |
-| `GET /q/<token>` (public) | – | The current `TetherQS-<v>.exe` of the entry's channel (from `download/<channel>/customer/windows-x86_64/latest.json`) with `custom::trailer(<signed profile>)` appended, `Content-Disposition: attachment; filename="<Name>-Support.exe"` (name reduced to `[A-Za-z0-9 _.-]`). `404` for unknown, revoked **and** expired tokens (same answer, no oracle). Rate-limited to 30 requests/min per IP. Counts downloads. |
+| `GET /q/<token>` (public) | – | Windows: the current `TetherQS-<v>.exe` of the entry's channel (from `download/<channel>/customer/windows-x86_64/latest.json`) with `custom::trailer(<signed profile>)` appended, `Content-Disposition: attachment; filename="<Name>-Support.exe"` (name reduced to `[A-Za-z0-9 _.-]`). A `User-Agent` containing `Macintosh` (every Mac browser; iPhones say "like Mac OS X" and get the exe) gets the macOS zip instead, as `/mac`. `404` for unknown, revoked **and** expired tokens (same answer, no oracle). Rate-limited to 30 requests/min per IP (all `/q/` requests together). Counts downloads. |
+| `GET /q/<token>/windows`, `GET /q/<token>/mac` (public) | – | The same link for one platform, whatever the browser. `/mac`: the channel's `TetherQS-<v>-universal.zip` (`customer/darwin-universal/latest.json`, key `darwin-universal`) with its one top-level `TetherQS.app` folder renamed to `<Name>-Support [<mac id>].app` (also in `__MACOSX/`), `Content-Type: application/zip`, `filename="<Name>-Support.zip"`. Only the names in the zip headers change (data, CRCs, modes, the signature inside are byte-for-byte the same; zip64 refused). |
+| `GET /q/m/<mac id>` (public) | – | The signed profile document of the custom app whose token gives this mac id (`custom::mac_id`: the first 16 hex characters of SHA-256 over `"tetherqs-mac-id\0" + token`), `Cache-Control: no-store`. Answers also after the link expired (a copy downloaded before keeps its branding, as on Windows); `404` once the app is deleted or got a new link. Not counted as a download. |
 
-Caddy routes `/q/*` to `tether-api`, which checks the token and, when Caddy sends `X-Tether-Accel: 1`, answers with `X-Accel-Redirect: /qcache/<id>--<exe>` (the exe with the trailer, prepared once in the data dir outside `download/`); Caddy then sends that file, so slow downloads hold no worker ([scaling.md](scaling.md)). Without the header the file is streamed as before. Tokens are 256-bit random (`custom::new_token`), compared
+Caddy routes `/q/*` to `tether-api`, which checks the token and, when Caddy sends `X-Tether-Accel: 1`, answers with `X-Accel-Redirect: /qcache/<id>--<file>` and the `Content-Type` (the exe with the trailer or the renamed zip, prepared once in the data dir outside `download/`; the exe and the zip copy of an app exist side by side); Caddy then sends that file, so slow downloads hold no worker ([scaling.md](scaling.md)). Without the header the file is streamed (the zip always from its prepared copy: the rename streams file to file). Tokens are 256-bit random (`custom::new_token`), compared
 exactly; links are not listed anywhere public. TetherQS self-updates keep the profile: after
-verifying a new plain exe it re-appends its own trailer. Custom apps are Windows-only for now
-(the macOS TetherQS is a `.app` bundle).
+verifying a new plain exe it re-appends its own trailer.
+
+**macOS.** The TetherQS `.app` is code-signed: appending to the Mach-O or adding a file breaks the
+signature, and the relay has no signing key. The `.app` folder name is not sealed, so the relay
+renames it, and TetherQS (`apps/quick/src-tauri/src/custom.rs`) reads the mac id from its own
+folder name (`custom::mac_id_from_bundle`: the last `[<16 hex>]`, so Finder's `… 2.app` still
+works), fetches `/q/m/<mac id>` from its relays in turn, verifies the profile against the compiled-in
+admin keys exactly like the trailer and caches it as `custom-<mac id>.json` in its config folder.
+Later starts and self-updates (which keep the folder name) use the cache. The mac id, not the
+token, is in the folder name: paths end up in logs, crash reports and diagnostics, and the id
+cannot be turned back into a download link; it only reveals the (signed, non-secret) profile.
+Evidence and limits: [macos.md](macos.md#custom-apps).
 
 ## Limits (1 GB relay VM)
 

@@ -461,14 +461,17 @@ script (both sections); its links and the switch do nothing there, and **Preview
 
 A custom app is a TetherQS download for one customer: their name, logo, accent colour, welcome text
 and customer-module settings, signed with the admin key and appended to `TetherQS.exe` by the relay
-when the private link is used ([api.md](api.md#custom-apps-branded-tetherqs-downloads)). Windows
-only for now.
+when the private link is used ([api.md](api.md#custom-apps-branded-tetherqs-downloads)). The same
+link serves macOS: a Mac browser gets the TetherQS zip with the app named
+`<Name>-Support [<mac id>].app`, which fetches its signed profile at the first start
+([macos.md](macos.md#custom-apps)). Nothing to do for the admin beyond publishing a macOS TetherQS
+release in the app's channel; `<link>/mac` and `<link>/windows` choose a platform explicitly.
 
 **New custom app**:
 
 | Field | Meaning |
 | --- | --- |
-| Name | Window title / company name, and the download's file name (`<Name>-Support.exe`). 1–64 characters. |
+| Name | Window title / company name, and the download's file name (`<Name>-Support.exe`, `<Name>-Support.zip`). 1–64 characters. |
 | Logo | PNG, JPEG, SVG or WebP; scaled in the app to at most 256 × 256 px and 96 KiB (PNG). Empty: Tether logo. |
 | Accent colour | `#rrggbb`. Empty: the policy's `customer.accent-color`. |
 | Welcome text | Up to 400 characters. Empty: the policy's `customer.welcome`. |
@@ -488,7 +491,8 @@ it only to the customer it is for.
 The list shows logo, name, link (copy), expiry, downloads and status. **Edit** changes the app and
 keeps the link (tick "Issue a new link" to replace it), **+30 days** extends the link, **New link**
 replaces the token (the old link stops working at once), **Revoke** deletes it on every relay.
-Downloaded apps keep working after a revoke. Apps created on another PC can be revoked but not
+Downloaded apps keep working after a revoke (on macOS: once started; a copy never started before
+the revoke or a new link starts as plain TetherQS). Apps created on another PC can be revoked but not
 edited (their settings are only on that PC).
 
 ## Diagnostics tickets
