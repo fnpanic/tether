@@ -376,7 +376,7 @@ dashboard("tether-signalling", "Tether · Signalling (hbbs)", "Registrations, pu
 
 // ---------------------------------------------------------------------------------------------
 const api = (m, extra = "") => `${m}{job="api",${N}${extra}}`;
-dashboard("tether-api", "Tether · API", "tether-api requests, latency, errors, workers and data, and Caddy in front of it.", () => {
+dashboard("tether-api", "Tether · API", "tether-api requests, latency, errors, workers and data, and the front end (Caddy or nginx) in front of it.", () => {
   row("Now");
   stat("Requests / s", [[`sum(rate(${api("tether_api_requests_total")}[5m]))`, ""]], { unit: "reqps", decimals: 2, color: C.blue, spark: true, w: 4 });
   stat("5xx share (5 m)", [[`(sum(rate(${api("tether_api_requests_total", ',code=~"5.."')}[5m])) or vector(0)) / clamp_min(sum(rate(${api("tether_api_requests_total")}[5m])), 1e-9)`, ""]], {
@@ -434,6 +434,11 @@ dashboard("tether-api", "Tether · API", "tether-api requests, latency, errors, 
   ts("Caddy p95 response time", [[`histogram_quantile(0.95, sum by (le, node) (rate(caddy_http_request_duration_seconds_bucket{${N}}[$__rate_interval])))`, "{{node}}"]], { unit: "s" });
   ts("tether-api memory (RSS)", [[`process_resident_memory_bytes{job="api",${N}}`, "{{node}} tether-api"], [`process_resident_memory_bytes{job="caddy",${N}}`, "{{node}} caddy"]], { unit: "bytes" });
   ts("Caddy in-flight requests", [[`sum by (node) (caddy_http_requests_in_flight{${N}})`, "{{node}}"]]);
+  // nginx-prometheus-exporter (stub_status) on nodes installed with PROXY=nginx; empty elsewhere.
+  row("nginx (HTTPS front end, PROXY=nginx)");
+  ts("nginx connections", [[`sum by (node) (nginx_connections_active{${N}})`, "{{node}} active"], [`sum by (node) (nginx_connections_waiting{${N}})`, "{{node}} idle (WebSockets, keep-alive)"]], { w: 8 });
+  ts("nginx requests and accepts / s", [[`sum by (node) (rate(nginx_http_requests_total{${N}}[$__rate_interval]))`, "{{node}} requests"], [`sum by (node) (rate(nginx_connections_accepted{${N}}[$__rate_interval]))`, "{{node}} accepted"]], { unit: "reqps", w: 8 });
+  ts("nginx dropped connections / min", [[`sum by (node) (rate(nginx_connections_accepted{${N}}[$__rate_interval]) - rate(nginx_connections_handled{${N}}[$__rate_interval])) * 60`, "{{node}} (worker_connections full)"]], { w: 8 });
 });
 
 // ---------------------------------------------------------------------------------------------

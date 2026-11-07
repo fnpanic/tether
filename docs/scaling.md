@@ -13,12 +13,12 @@ estimates with the reason given; *computed* ones follow from the two.
 
 | | Today (CX23 + Oracle) | Needed for 10k / 3k |
 |---|---|---|
-| Rendezvous (hbbs + Caddy), per node | breaks around 4 000 devices on Oracle (1 GB RAM), ~5 000 on the CX23 (CPU) | 10 000 WebSockets: Caddy 1.4 GB + 0.8 core, hbbs 0.24 GB + 0.22 core (*measured*) |
-| Relay traffic | one 1 Gbit node | 1.6–1.8 Gbit/s peak expected, 3.5 Gbit/s if every session were relayed (*computed*) |
-| Relay CPU | – | 4.4 cores per relayed Gbit/s, three quarters of it Caddy's TLS (*measured*) |
+| Rendezvous (hbbs + front end), per node | breaks around 4 000 devices on Oracle (1 GB RAM), ~5 000 on the CX23 (CPU) | 10 000 WebSockets: nginx 0.41 GB + 0.43 core (Caddy 1.1 GB + 0.76 core), hbbs 0.24 GB + 0.22 core (*measured*, [proxy-benchmark.md](proxy-benchmark.md)) |
+| Relay traffic | one 1 Gbit node | 1.6–1.8 Gbit/s peak expected, 2.7 pessimistic, 3.5 Gbit/s if every session were relayed (*computed*) |
+| Relay CPU | – | 3.2–3.5 cores per relayed Gbit/s at 0.5–1 Gbit/s per node, front end + hbbr, about the same for nginx and Caddy (*measured*) |
 | tether-api | fine | 33 req/s normal, 500 req/s with `policy.fast-apply`; 1 500 req/s took one core (*measured*) |
-| Recommended | | 4 × Hetzner AX41 (dedicated, 1 Gbit/s guaranteed, unlimited traffic): **€236/month** |
-| Cheaper | | 10 × Hetzner CX33 (shared vCPU, 20 TB each): **€90/month**, best effort bandwidth |
+| Recommended | | **8 × Hetzner AX41 in FSN1 / NBG1 / HEL1 (3 / 3 / 2), nginx fronts: €472/month** + object storage for releases (€6.49): a whole location down still leaves the pessimistic peak at 53 % of port and CPU ([Target architecture](#target-architecture-10-000--3-000-with-failures-and-headroom)) |
+| Cheaper | | 6 × AX41 (€354): N+1, survives a location only at the expected peak; Cloud fleet (€308): best-effort bandwidth |
 
 Fixed on this branch (tests before/after below): hbbs restart took minutes behind busy NATs, hbbs
 listen backlog overflowed in reconnect storms, hbbr spent a third of its CPU in musl's allocator,
@@ -159,7 +159,9 @@ hbbs is linear (≈ 2.2 % of a core per 1 000 WebSocket hosts, 24 KB per host) a
 **Caddy is**: ~145 KB and ~0.08 % of a core per idle TLS WebSocket. Its WebSocket proxy holds
 two 32 KB copy buffers per connection, which no Caddyfile option changes. `GOMEMLIMIT=400MiB`
 (below the working set) made Caddy spend 10 cores on garbage collection: never set GOMEMLIMIT or
-a systemd MemoryMax below ~1.6 × devices × 145 KB.
+a systemd MemoryMax below ~1.6 × devices × 145 KB. (Re-measured with the front-end benchmark, PSS with an
+HAProxy client layer: Caddy 111 KB, nginx 41 KB, HAProxy 20 KB per idle TLS WebSocket;
+[proxy-benchmark.md](proxy-benchmark.md).)
 
 ### Relay
 
@@ -175,6 +177,9 @@ a systemd MemoryMax below ~1.6 × devices × 145 KB.
 
 Per relayed Gbit/s: hbbr ~1.1 cores, Caddy (TLS) ~3.3 cores, together **4.4 PC cores**. Caddy
 RSS during relaying: ~210 KB per relayed WebSocket (two per session). hbbr: ~45 KB per session.
+At 1 Gbit/s per node the same comparison gives 3.3 PC cores per Gbit/s for Caddy + hbbr and 3.2
+for nginx + hbbr ([proxy-benchmark.md](proxy-benchmark.md) (b)): the 4.4 above is the 0.5 Gbit/s
+point, where fixed per-frame costs weigh more. Planning below uses 3.5.
 
 hbbr's `TOTAL_BANDWIDTH` (default 1024 Mb/s for the whole process) is a hard cap: above it every
 session on that relay queues, by seconds. It equals a 1 Gbit/s port, so size nodes so that
@@ -252,99 +257,222 @@ Checked and left as they are:
 - Kernel: `ip_local_port_range` is ample (Caddy's upstream connections are per destination
   port), but the service ports are now reserved so a restarted service can always bind them.
 
-## Architecture for 10 000 / 3 000
+## Target architecture: 10 000 / 3 000 with failures and headroom
+
+Revised after the front-end benchmark ([proxy-benchmark.md](proxy-benchmark.md)). The goal is not
+"fits on paper" but "still fits after a failure, with room to spare".
+
+### Design criteria
+
+1. **Failure tolerance.** Any single node down **and** any whole Hetzner location down (nodes
+   spread over FSN1, NBG1, HEL1): the **pessimistic** peak (2.67 Gbit/s relayed out, p99.9) still
+   fits on the remaining nodes at **≤ 60–65 %** of port, CPU, RAM and file descriptors.
+2. **Reconnect storms.** After a node or location failure (and when it comes back) every affected
+   host re-registers and every affected session re-pairs within seconds, without SYN drops or
+   overload.
+3. **Signalling.** Each remaining front holds all 10 000 devices' WebSockets **plus a 2× burst**
+   (20 000 during a reconnect storm).
+4. **Downloads and API storms** (a release of 35 MB × 10 000, a `fast-apply` policy, all devices
+   after an outage) cannot starve the relayed sessions.
+5. **TURN** capacity is accounted for.
+6. **Alerts fire before the headroom is gone**, so scale-out happens while criterion 1 still holds.
+
+### Planning numbers (*measured* on the PC, per PC core; one AX41 ≈ 6 PC cores, *assumed*)
+
+| Item | nginx front (recommended) | Caddy front (today) | Source |
+|---|---|---|---|
+| Idle TLS WebSocket (1 ping/s) | 41 KB + 0.0043 core | 111 KB + 0.0076 core | proxy-benchmark.md (a) |
+| hbbs per WebSocket host | 24 KB + 0.0022 core | same | Measured › Rendezvous |
+| 10 000 devices on one front | **0.65 GB + 0.65 core** | 1.35 GB + 0.98 core | sum of the two rows |
+| Relay, per relayed Gbit/s at ≥ 1 Gbit/s per node | 2.1 (front) + 1.1 (hbbr) = **3.2 cores**; plan **3.5** | 2.5 + 0.8 = 3.3 | proxy-benchmark.md (b) |
+| Relay at 0.5 Gbit/s per node | 2.6 + 1.4 = 4.0 cores per Gbit/s | 3.5 + 1.0 = 4.5 | same (fixed per-frame cost) |
+| RAM per relayed session | 45 KB hbbr + 2 × 42 KB nginx ≈ 130 KB | ≈ 420 KB | same |
+| TLS handshakes + WebSocket upgrades + registrations | 10 000 within 1 s, no failed connect, 7.8 CPU-s (≈ 1 300 per core-second) | same, 12 CPU-s | proxy-benchmark.md (c) |
+| tether-api, 1 500 req/s (all devices within 20 s) | tether-api 0.9 core + front 0.12 core | tether-api 0.9 + Caddy 0.42 core | (e), Measured › tether-api |
+
+The old figure of 4.4 cores per relayed Gbit/s came from a single 0.5 Gbit/s run with a Caddy
+client layer; per node at the planned 0.5–0.65 Gbit/s the relay costs 3.5–4 PC cores per Gbit/s
+whichever front runs. What nginx changes is the signalling side (2.7× less memory, 45 % less CPU
+per idle device) and small nodes (Oracle, Cloud).
+
+### Options
+
+All prices excl. VAT, monthly, cancellable monthly, from hetzner.com on 2026-11-07. Ports and
+locations as Hetzner states them (dedicated: 1 Gbit/s guaranteed, unlimited traffic; Cloud: no
+bandwidth guarantee, "about 300–500 Mbit/s", 20 TB included, €1/TB more).
+
+| | A: 8 × AX41 (recommended) | B: 6 × AX41 | C: Cloud, 2 × CCX23 + 15 × CX33 |
+|---|---|---|---|
+| Layout (FSN1 / NBG1 / HEL1) | front 1 + 2 relays / front 2 + 2 relays / 2 relays | front 1 + 1 / front 2 + 1 / 2 | front 1 + 5 / front 2 + 5 / 5 (fronts do not relay) |
+| Relay capacity at 65 % | 8 × 0.65 = 5.2 Gbit/s | 3.9 | 15 × 0.30 = 4.5 (best effort) |
+| Cost | **€472** | €354 | 2 × 86.49 + 15 × 8.99 = **€308** |
+| + release downloads on Object Storage | €6.49 (1 TB egress incl.) | same | same |
+
+**Failure math, pessimistic peak 2.67 Gbit/s (out), share per relaying node:**
+
+| Situation | A: per node | port | CPU (front node) | B: per node | port | C: per relay | of 0.46 Gbit/s |
+|---|---|---|---|---|---|---|---|
+| all up | 0.33 Gbit/s | 33 % | 1.2 + 0.7 = 1.9 cores = 32 % | 0.45 | 45 % | 0.18 | 39 % |
+| one node down | 0.38 | 38 % | 34 % | 0.53 | 53 % | 0.19 | 41 % |
+| largest location down | 5 left: **0.53** | **53 %** | 1.9 + 1.3 (20 000 WebSockets) = 3.2 = **53 %** | 4 left: 0.67 | **67 % ✗** | 10 left: 0.27 | 58 % |
+| all relayed (3.51), location down | 0.70 | 70 % (above plan, below the port) | 62 % | 0.88 | 88 % | 0.35 | 76 % |
+| expected (1.83), location down | 0.37 | 37 % | 37 % | 0.46 | 46 % | 0.18 | 40 % |
+
+RAM is never the limit on an AX41 (64 GB): a front with 20 000 WebSockets and 450 relayed
+sessions needs ~1.4 GB; file descriptors ~61 000 of 1 048 576; conntrack ~45 000 of 524 288.
+On a CX33 front (C: CCX23, 16 GB, 4 dedicated vCPU ≈ 2.8 PC cores) 20 000 WebSockets take
+1.3 cores = 46 %, so C's fronts do not relay.
+
+- **A** meets every criterion with the pessimistic peak, has the most failure domains (losing one
+  node is 1/8 of capacity) and no traffic accounting. **Recommended: €472/month (+ €6.49).**
+- **B** meets N+1 and survives a location loss at the *expected* peak, not the pessimistic one
+  (67 %). €118/month cheaper; a fine intermediate step (path below).
+- **C** fits the numbers at €308 but rests on best-effort bandwidth (0.46 Gbit/s per CX33 is an
+  assumption: Hetzner promises none), shared vCPUs (steal time) and a server type that was
+  "currently unavailable" on 2026-11-07. Only if A's cost is unacceptable; measure each node
+  with `tools/load/relay-run.sh` from outside before relying on it.
+
+A 10G uplink (€43/month per dedicated server, not on every model, traffic then billed) would
+need fewer, bigger nodes but puts a third of the capacity in each box: a single node failure then
+costs as much as a location. Not recommended at this size.
 
 ```mermaid
 flowchart LR
-  D[10 000 devices] -- "WSS /ws/id (both)" --> F1
-  D -- "WSS /ws/id (both)" --> F2
-  D -- "/api, /download" --> F1
-  subgraph F1["front 1: tether-desk (AX41)"]
-    C1[Caddy] --> S1[hbbs + TURN]; C1 --> A1[tether-api]; C1 --> R1[hbbr]
+  D[10 000 devices] -- "WSS /ws/id (both fronts)" --> F1
+  D -- "WSS /ws/id (both fronts)" --> F2
+  D -- "/api, latest.json" --> F1
+  D -. "release files (signed)" .-> OS[(Object Storage)]
+  subgraph FSN1
+    F1["front 1 tether-desk: nginx, hbbs+TURN, tether-api, hbbr"]; R1[relay]; R2[relay]
   end
-  subgraph F2["front 2: tether-desk2 (AX41)"]
-    C2[Caddy] --> S2[hbbs + TURN]; C2 --> A2[tether-api]; C2 --> R2[hbbr]
+  subgraph NBG1
+    F2["front 2 tether-desk2: nginx, hbbs+TURN, tether-api, hbbr"]; R3[relay]; R4[relay]
   end
-  subgraph R["relay nodes relay3, relay4 (AX41)"]
-    C3[Caddy] --> R3[hbbr]
+  subgraph HEL1
+    R5[relay]; R6[relay]
   end
-  S1 -. "least loaded healthy relay" .-> R
-  S2 -. "least loaded healthy relay" .-> R
-  O[Oracle: relay only, backup] -.-> S1
+  F1 -. "least loaded healthy relay" .-> R1 & R3 & R5
+  F2 -. "least loaded healthy relay" .-> R2 & R4 & R6
+  O[Oracle: backup relay only] -.-> F1
 ```
 
-- **Two front nodes** (the names clients already know). Each runs the full bundle; devices
-  register with both, viewers race both, each hbbs hands out any relay. Each front holds 10 000
-  WebSockets (Caddy 1.4 GB, ~1 core) and relays too.
-- **Relay-only nodes**: the same bundle installed under their own name (`install.sh relay3.…`);
-  they are in every hbbs's `RELAY_SERVERS`, not in the client list, so adding relays needs no
-  client change. Their hbbs and tether-api stay idle.
-- Relay choice: least loaded healthy primary, Oracle as `|backup` only. The Oracle VM must
-  **not** stay a registration node (`tether-desk2`) beyond ~4 000 devices: 1 GB RAM holds about
-  4 000 TLS WebSockets in Caddy (*computed* from 145 + 24 KB per device and ~350 MB for the rest).
-- `RELAY_SERVERS` on both fronts (same line):
-  `tether-desk.…|http://127.0.0.1:21121/readyz,tether-desk2.…|https://tether-desk2.…/readyz/relay,relay3.…|https://relay3.…/readyz/relay,relay4.…|https://relay4.…/readyz/relay,<oracle>|https://<oracle>/readyz/relay|backup`
-  (on front 2 its own entry may use the local URL).
-- **tether-api consistency**: unchanged model, Tether Manage writes to every node in its relay
-  list. Only the two fronts serve the API (clients use their server list), so Manage's list is
-  the two fronts; relay-only nodes need no policy, releases or audit. Devices heartbeat to front
-  1 while it answers; Manage merges both device lists.
-- **DNS**: one name per node. DuckDNS works; a domain of your own (A records, TTL 300) is better
-  for more than two names.
-- Failure of a front: devices stay registered at the other front; its hbbs hands out the same
-  relays. Failure of a relay: its sessions reconnect within seconds through another (measured in
-  relay-ha.md), N+1 keeps the peak covered.
+- **Fronts** keep the names clients know (`tether-desk`, `tether-desk2`) and run the whole bundle;
+  devices register with both, viewers race both, each hbbs hands out any healthy relay (least
+  loaded). They relay too. **Relay nodes** run the same bundle under their own names, listed in
+  both fronts' `RELAY_SERVERS` only (no client change to add one). Oracle stays a `|backup` relay.
+- Set `TOTAL_BANDWIDTH` on every hbbr above its port (e.g. 2048): its default (1024 Mb/s) would
+  cap a node exactly at the port, with seconds of queueing (Measured › Relay).
+- The two fronts sit in different locations; HEL1 holds relays only, so losing it never costs a
+  front. Relays in HEL1 add ~25 ms RTT for German users: hbbs's least-loaded choice uses them
+  mostly when the German relays are busy or down.
 
-### Node sizes and count
+### Criterion 2: reconnect storms
 
-Planning per relay node, at ≤ 65 % of the port and ≤ 70 % CPU, 4.4 PC cores per Gbit/s:
-
-| Node | € / month (excl. VAT) | CPU (PC-core equivalents, *assumed*) | Network | Plan per node |
+| Event | What reconnects | Load per node | Measured capacity | Time |
 |---|---|---|---|---|
-| AX41 (Ryzen 5 3600 6C/12T, 64 GB, 2×512 GB NVMe) | 59, no setup fee, no minimum term | ~6 | 1 Gbit/s guaranteed, traffic unlimited | **0.65 Gbit/s** (port) |
-| CX33 (4 shared vCPU, 8 GB) | 8.99, hourly | ~2–2.8 | "expect about 300–500 Mbit/s", 20 TB incl., €1/TB more | **0.30 Gbit/s** |
-| CPX32 (4 shared AMD vCPU, 8 GB) | 35.99 | ~2–2.8 | same | 0.30 Gbit/s |
-| CCX23 (4 dedicated AMD vCPU, 16 GB) | 86.49 | ~2.8 | same | 0.35 Gbit/s |
+| a relay node fails | its sessions: ≤ 2 250 / 8 ≈ 280 sessions, 560 WebSockets | ≈ 110 re-pairs per remaining relay | ≈ 1 300 new TLS WebSockets per core-second per node | ~1 s after detection (relay-ha.md: 20–40 ms after a kill, 1.0 s after a freeze; the dead relay leaves every healthy set within 5.5 s) |
+| a location fails (A: FSN1, front 1 + 2 relays) | ~845 relayed sessions (1 690 WebSockets) re-pair on 5 relays; the 10 000 devices stay registered at front 2 (they always hold both) | ≈ 340 WebSockets per relay; front 2: session set-ups only (~4/s) | same | seconds |
+| front 1 comes back | all 10 000 devices register again (TLS + WebSocket + RegisterPk) | 10 000 on front 1 | 10 000 within 1 s, no failed connect, 7.8 CPU-s (≈ 1 300 per core-second) | connected within ~1 s, registered within 5–10 s (hbbs, Measured › Restarts); the clients' back-off spreads it further |
+| hbbs or nginx restart on a front | same 10 000 | same | same | same; hbbs keeps known hosts (Measured › Restarts) |
 
-Prices from hetzner.com on 2026-11-07 (eu-central); CX/CAX "Cost-Optimized" were marked
-"currently unavailable" that day. Hetzner Cloud servers have no bandwidth guarantee; the AX line
-has a guaranteed 1 Gbit/s port and unlimited traffic (traffic on Cloud: only outgoing counts).
+The listen backlogs (nginx 8192, hbbs/hbbr 8192, `somaxconn` 8192) hold a full 10 000-device
+burst without SYN drops (Measured › Restarts and reconnect storms; the `ListenQueueOverflow` alert
+watches it in production).
 
-| Scenario (p99.9 relay out) | AX41 nodes (N+1) | Cost | CX33 nodes (2 fronts + relays, N+1) | Cost | Traffic/month |
+### Criteria 3–5: signalling, downloads, API, TURN
+
+- **Signalling**: front 2 alone with 20 000 WebSockets: nginx 0.82 GB + 0.86 core, hbbs 0.48 GB +
+  0.44 core (*computed* from the planning rows), on top of its relay share: 53 % CPU in the worst
+  case above. With Caddy instead: 2.2 GB + 1.5 cores of signalling, 64 % CPU: the reason the
+  fronts should run nginx.
+- **Release downloads**: put the release files on object storage (Hetzner Object Storage,
+  ~€6.49/month with 1 TB egress included; one full rollout = 0.35 TB) and point
+  `platforms.*.url` in `latest.json` there; the updaters accept any https URL because the files
+  are signed. The relays then serve only the manifest. As a safety net the nginx config caps
+  `/download/` and `/q/` per node at 32 parallel downloads × 512 KB/s = 128 Mbit/s (13 % of the
+  port; more get 503 and the updaters retry on their next check), so even a forced update served
+  from a front leaves the relayed sessions ≥ 87 % of the port. The manifest is never limited.
+- **API storms**: all 10 000 devices within 20 s = 1 500 req/s: tether-api 0.9 core +
+  nginx 0.12 core on front 1 (Measured › tether-api, proxy-benchmark.md (e)): 20 % of an AX41 on
+  top of the worst-case 53 % lands at ~70 % for the 20 s of the storm, then back. If front 1 is
+  down the devices use front 2 (their server list), which then carries the same.
+- **TURN**: 64 allocations per hbbs (`TURN_MAX_ALLOCATIONS`) × 2 fronts = 128 sessions over UDP
+  (~4 % of 3 000). With a front down, 64 sessions fall back to the WebSocket relay: +67 Mbit/s,
+  2.5 % of the pessimistic peak, inside the table above.
+
+### Criterion 6: headroom alerts (deploy/monitoring, docs/monitoring.md)
+
+In layout A the largest location holds 3 of 8 nodes: after losing it the rest carry 8/5 = 1.6×
+their load. To still be under 65 % then, the normal load must stay under 65 % / 1.6 = **40 %**.
+The `tether-headroom` rule group (`deploy/monitoring/prometheus/rules/tether.yml`) warns at that
+level, early enough to order a node (AX41: usually provisioned within a day):
+
+| Alert | Fires when | Action |
+|---|---|---|
+| `CapacityEgress` | a node sends > 40 % of its port for 15 min | add a relay node (keep the locations balanced) |
+| `CapacityCpu` | CPU > 40 % for 30 min | add a node |
+| `CapacityMemory` | memory used > 40 % for 30 min | find the cause (on AX41 it should never happen) |
+| `CapacitySignalling` | a front holds > 15 000 WebSockets for 30 min | the device count outgrew the 10 000 plan: fronts need 2× room |
+| `ListenQueueOverflow` | any listen-queue overflow | check backlogs / somaxconn |
+
+The existing `HighCpu` (90 %), `MemoryLow`, `ConntrackAlmostFull`, `HbbrSaturated` (per-node
+sessions; set its threshold to the node's plan, e.g. 620 for an AX41) and `TurnAllocationsNearCap`
+stay as the "now" alarms. For other layouts the factor is N / (N − largest location).
+
+### Path from today (1 CX23 primary + 1 Oracle backup)
+
+Relayed peak by device count (pessimistic: 30 % of devices in a session at peak, 75 % of those
+relayed, p99.9 as in the capacity model) and the smallest layout that survives losing its largest
+location at ≤ 65 %:
+
+| Devices | Relayed sessions | Peak out (p99.9) | Layout (FSN1 / NBG1 / HEL1) | Capacity after losing a location | Cost |
 |---|---|---|---|---|---|
-| expected 1.83 Gbit/s | 3 + 1 = **4** | **€236** | 2 + 7 + 1 = 10 | €90 | 94 TB (cloud: 200 TB incl.) |
-| pessimistic 2.67 Gbit/s | 5 + 1 = 6 | €354 | 2 + 9 + 1 = 12 | €108 | 140 TB (240 TB incl.) |
-| all relayed 3.51 Gbit/s | 6 + 1 = 7 | €413 | 2 + 12 + 1 = 15 | €135 | 190 TB (300 TB incl.) |
+| today (< 1 000) | < 225 | < 0.33 Gbit/s | CX23 + Oracle (no location redundancy) | – | ~€5 |
+| 1 000 | 225 | 0.33 | 1 / 1 / – (two AX41 fronts) | 0.65 | €118 |
+| 2 500 | 560 | 0.75 | 1 / 1 / 1 | 1.30 | €177 |
+| 5 000 | 1 125 | 1.40 | 2 / 2 / 1 | 1.95 | €295 |
+| 7 500 | 1 690 | 2.04 | 2 / 2 / 2 (option B) | 2.60 | €354 |
+| 10 000 | 2 250 | 2.67 | 3 / 3 / 2 (option A) | 3.25 | €472 |
 
-The two fronts count as relays in the AX41 column (they have the CPU and RAM for both). Their
-registrations need ~1 PC core and 1.7 GB each, which an AX41 has to spare; on CX33 fronts they
-would take half the node, so CX33 fronts do not relay.
+Steps (each: watch the alerts and the dashboards for a week before the next):
 
-Recommendation: **4 × AX41** (€236/month): guaranteed bandwidth, no traffic accounting, 2.6 Gbit/s
-planned capacity, 1.95 with one node down. Cheaper: CX33 fleet (€90/month) if the type is
-available and best-effort bandwidth is acceptable; watch for steal time and throughput. Keep the
-Oracle VM as `|backup` relay (free), never as a front.
+1. **Now** (no new servers): switch both nodes to nginx (`PROXY=nginx`, proxy-benchmark.md
+   "Migration"): Oracle (1 GB) then holds memory for ~9 000 instead of ~4 000 devices, the CX23
+   gets 45 % less signalling CPU. Install the monitoring (docs/monitoring.md) if not done.
+2. **At ~1 000 devices, or before relying on the setup**: order an AX41 in NBG1, install it as
+   `tether-desk2` (same key pair; DNS switch as in relay-ha.md "Hetzner primary, Oracle backup"),
+   Oracle becomes `|backup` relay only. Move release files to object storage.
+3. **Before ~2 500 devices**: replace the CX23 front by an AX41 in FSN1 (`tether-desk`: copy key,
+   tether-api data and certificate state, switch DNS), add the first HEL1 relay.
+4. **At ~5 000 devices** (or `CapacityEgress`): one more relay in FSN1 and NBG1 (2 / 2 / 1).
+5. **At ~7 500**: second HEL1 relay (2 / 2 / 2).
+6. **At ~10 000** (or `CapacityEgress` again): the third node in FSN1 and NBG1 (3 / 3 / 2).
+
+Adding a relay: `PROXY=nginx install.sh relayN.<domain>` with the same key pair (and `keys.env`
+during a rotation), add it to both fronts' `RELAY_SERVERS`, restart hbbs on the fronts (sessions on
+hbbr are untouched), add it to the monitoring.
 
 ## Kernel and limits
 
 `server/sysctl/90-tether.conf` (installed by `install.sh`):
 `nf_conntrack_max` 524 288 (two tracked connections per proxied WebSocket),
 `somaxconn` / `tcp_max_syn_backlog` 8192 (storms), `rmem_max` 8 MiB (hbbs `-M`), BBR + fq,
-`ip_local_reserved_ports` 21114-21125. File descriptors: hbbs/hbbr/Caddy units already have
+`ip_local_reserved_ports` 21114-21126. File descriptors: hbbs/hbbr/Caddy units already have
 `LimitNOFILE` ~1M (a front needs ~20 000 for Caddy, 10 000 for hbbs, plus 2 per relayed session);
 tether-api now 65 536.
 
-## Monitoring (for the metrics work in progress)
+## Monitoring
 
-What this model needs per node, and the alert levels it implies (the Prometheus exporter is being
-added separately; names here are descriptive):
+What this model needs per node. The metrics and alerts now exist ([monitoring.md](monitoring.md));
+the scale-out thresholds are the `tether-headroom` alerts above (40 %), this table lists the
+signals behind them:
 
 | Signal | Source today | Alert |
 |---|---|---|
 | registered hosts (WebSocket) | hbbs `/readyz` `sessions=N` | < 80 % of yesterday's at the same time (mass disconnect) |
 | relayed sessions | hbbr `/readyz` `sessions=N` | per node > 70 % of planned (AX41 ~620, CX33 ~285 at 1.05 Mbit/s) |
 | egress bit/s | NIC (`/proc/net/dev`) | > 65 % of port (AX41) / > 300 Mbit/s (Cloud) for 5 min |
-| Caddy RSS | process | > 1.6 × devices × 145 KB + 420 KB × relayed sessions |
+| front-end memory | process (Caddy) / node memory (nginx) | Caddy > 1.6 × devices × 111 KB + 420 KB × relayed sessions; nginx 41 KB + 130 KB |
 | CPU, steal | `/proc/stat` | > 70 % for 5 min; steal > 10 % (Cloud) |
 | `ListenOverflows`, `ListenDrops` | `nstat` | any increase |
 | conntrack count / max | `/proc/sys/net/netfilter/` | > 70 % |
@@ -354,25 +482,19 @@ added separately; names here are descriptive):
 
 ## Rollout plan
 
-1. **Now, current nodes** (no new servers): build from this branch (`scripts/build-relay.sh`,
-   `scripts/test-relay.sh`), then on Oracle 2 (backup) first, Hetzner after, as in the previous
-   updates: back up binaries, Caddyfile and units (`*.bak-…`); install `hbbs`, `hbbr`,
-   `tether-api`, `server/caddy/Caddyfile`, `server/systemd/tether-{hbbs,api}.service`,
-   `server/sysctl/90-tether.conf` to `/etc/sysctl.d/` (`sysctl -e -p …`; a `dist/linux-relay` bundle needs `sysctl/` next to `install.sh`, which installs it when present); `systemctl daemon-reload`; restart
-   tether-api, then hbbs (hosts re-register in seconds now), then Caddy (`systemctl restart
-   tether-https`; validate first with `RELAY_HOST` set, see relay-ha.md), hbbr last (it drains).
-   Checks: `/readyz` on 21121/21122, `/api/policy`, a `/q/` link download (headers + size), a
-   session through each relay, `nstat ListenOverflows`, hbbs log free of `TOO_FREQUENT` bursts.
-   Rollback: the `.bak` files.
-2. **Before ~3 000 devices**: move `tether-desk2` off the Oracle VM (1 GB) to a front-sized node;
-   keep Oracle as `|backup` relay in `RELAY_SERVERS`.
-3. **When relayed peak passes ~300 Mbit/s** (or ~300 relayed sessions on the CX23): add relay
-   nodes: `install.sh relay3.<domain>` with the same key pair (and `keys.env` during a rotation),
-   add them to both fronts' `RELAY_SERVERS`, restart hbbs (sessions on hbbr are untouched).
-4. **Before ~5 000 devices**: replace the CX23 front by an AX41 (registrations alone need ~1 core
-   per 10 000 devices). Move as in "Hetzner primary, Oracle backup" (relay-ha.md): copy key,
-   tether-api data, Caddy certificate; switch the DNS name.
-5. Each step: watch the signals above for a week before the next.
+The steps by device count are in [Path from today](#path-from-today-1-cx23-primary--1-oracle-backup).
+Each software update, on every node (Oracle backup first, then the others one by one): build from
+this branch (`scripts/build-relay.sh`, `scripts/test-relay.sh`); back up binaries, front-end
+config and units (`*.bak-…`); install `hbbs`, `hbbr`, `tether-api`, the front-end config
+(`server/caddy/Caddyfile` or, with `PROXY=nginx`, `server/nginx/nginx.conf` through install.sh),
+the units and `server/sysctl/90-tether.conf` (`sysctl -e -p …`; a `dist/linux-relay` bundle needs
+`sysctl/` next to `install.sh`); `systemctl daemon-reload`; restart tether-api, then hbbs (hosts
+re-register in seconds), then the front end (Caddy: `systemctl restart tether-https`, validate
+first with `RELAY_HOST` set; nginx: `systemctl reload tether-https`, which keeps the WebSockets),
+hbbr last (it drains). Checks: `/readyz` on 21121/21122, `/api/policy`, a `/q/` link download
+(headers + size), a session through each relay, `nstat ListenOverflows`, hbbs log free of
+`TOO_FREQUENT` bursts. Rollback: the `.bak` files (for the front end: proxy-benchmark.md
+"Rollback").
 
 ## Runbook
 
@@ -381,17 +503,25 @@ added separately; names here are descriptive):
   `IP_BLOCK_IDS_PER_DAY` in `/etc/tether/server.env`, restart hbbs.
 - *Sessions lag on one relay*: `curl -s localhost:21121/readyz` (sessions), NIC throughput,
   hbbr log `Downgrade` lines; at the 1 Gbit/s cap every session there queues: add a relay node.
-- *Caddy killed (OOM)*: devices × 145 KB is the floor; no GOMEMLIMIT/MemoryMax below it.
+- *Caddy killed (OOM)*: devices × 111 KB is the floor; no GOMEMLIMIT/MemoryMax below it. nginx
+  needs 41 KB per device.
 - *API 503 "busy"*: 32 workers busy; with the new Caddyfile downloads no longer hold workers.
   Check for slow clients in Caddy's log.
 - *Heartbeats 429 for a whole site*: new devices behind one IP are limited to 30/min; they appear
   over the next minutes.
-- *Release day*: publish per channel; a forced update to all devices saturates the first front
-  for ~50 minutes.
+- *Release day*: publish per channel, files on object storage. Served by an nginx front, downloads
+  are capped at 128 Mbit/s per node (32 × 512 KB/s; the 33rd gets 503 and retries later); a
+  Caddy front has no cap and a forced update to all devices saturates it for ~50 minutes.
 - Load test a change: `tools/load/hosts-run.sh`, `relay-run.sh`, `relay-ab.sh` (two builds),
   `api-run.sh`, `qdl-run.sh`, `dl-run.sh`, `restart-run.sh`; profile hbbr with `relay-perf.sh`.
 
 ## Not verified
+
+- The target architecture: AX41 availability in HEL1 at order time, the ~6 PC-core equivalence of
+  an AX41, Cloud bandwidth (0.46 Gbit/s per CX33 is an assumption), Hetzner Object Storage price
+  (third-party figure €6.49 with 1 TB egress) and its reliability for release downloads.
+- The nginx front under SELinux enforcing on EL9 (labels and boolean set by install.sh, not run on
+  such a host); the layouts were computed, not load-tested across locations.
 
 - Hetzner vCPU speed relative to the test PC (0.5–0.7 assumed), AX41 CPU equivalent (~6 PC cores
   assumed). Measure on the first new node with `tools/load/relay-run.sh` from a second machine.

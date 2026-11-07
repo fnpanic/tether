@@ -1,0 +1,20 @@
+# nginx's connection and request counters (stub_status on 127.0.0.1:21126) as Prometheus metrics
+# on 127.0.0.1:21125, where Caddy serves its own (PROXY=nginx only; docs/monitoring.md).
+[Unit]
+Description=Tether nginx Prometheus exporter
+After=tether-https.service
+
+[Service]
+Type=simple
+DynamicUser=true
+ExecStart=/usr/local/bin/nginx-prometheus-exporter --web.listen-address=127.0.0.1:21125 --nginx.scrape-uri=http://127.0.0.1:21126/stub_status
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

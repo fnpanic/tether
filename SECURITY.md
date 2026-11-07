@@ -213,6 +213,14 @@ works; Alt+Tab leaves; a lone Alt and Alt+F4 on TetherQS do not stall it).
 - Client IPs behind Caddy: hbbs takes the last `X-Forwarded-For` hop, which Caddy sets to the
   peer it saw; Caddy overwrites `X-Real-IP` (read by hbbr) the same way. A client cannot choose the
   IP the brute-force and IP-change checks see.
+- The front end can be nginx instead of Caddy (`PROXY=nginx`, [docs/proxy-benchmark.md](docs/proxy-benchmark.md)):
+  same routes and header rules (`X-Forwarded-For` and `X-Real-IP` overwritten with the peer),
+  TLS 1.2/1.3 AEAD only, session tickets off, `/qcache/` reachable only through
+  `X-Accel-Redirect`, no access log. nginx and its ACME module come from nginx.org's signed
+  repository and are patched by the OS's automatic updates; under SELinux nginx runs confined
+  (`httpd_t`, read-only on tether-api's data). Wrong IPs on `/_metrics/*` get 403 instead of a
+  closed connection. Basic-auth hashes are bcrypt cost 5 (the passwords are 24 random bytes;
+  nginx checks the hash in the worker that also carries the WebSockets).
 - A host's signalling path (the connection hbbs sends its punch-hole, relay and ICE messages
   over) is only a connection whose registration hbbs accepted: `RegisterPeer` from the host's IP
   with its key known, or `RegisterPk` passing upstream's UUID/key checks. Naming an ID is not

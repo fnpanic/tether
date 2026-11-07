@@ -75,3 +75,35 @@ tests:
             exp_annotations:
               summary: "TLS certificate of https://tether-desk.duckdns.org/readyz/relay expires in 9d 23h 45m 0s"
               description: "Caddy renews 30 days ahead: renewal has failed for over two weeks. Check tether-https logs (TLS-ALPN-01 on 443)."
+  - interval: 1m
+    input_series:
+      - series: 'node_network_transmit_bytes_total{job="node",node="relay3",device="eth0"}'
+        values: '0+3750000000x40'
+      - series: 'node_network_speed_bytes{job="node",node="relay3",device="eth0"}'
+        values: '125000000x40'
+      - series: 'hbbs_connections{job="hbbs",node="tether-desk",transport="ws"}'
+        values: '16000x40'
+      - series: 'node_netstat_TcpExt_ListenOverflows{job="node",node="tether-desk"}'
+        values: '0 0 0 0 0 120 120 120 120 120'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CapacityEgress
+        exp_alerts:
+          - exp_labels: { severity: warning, node: relay3 }
+            exp_annotations:
+              summary: "relay3 sends 50% of its port"
+              description: "Over 40 % for 15 minutes: after a location failure the remaining relays would run above 65 %. Add a relay node (docs/scaling.md)."
+      - eval_time: 35m
+        alertname: CapacitySignalling
+        exp_alerts:
+          - exp_labels: { severity: warning, node: tether-desk }
+            exp_annotations:
+              summary: "tether-desk holds 16000 WebSockets"
+              description: "Every front holds every device. The plan is 10 000 devices with 2x burst room per front (docs/scaling.md): more than 15 000 means the device count has outgrown it."
+      - eval_time: 6m
+        alertname: ListenQueueOverflow
+        exp_alerts:
+          - exp_labels: { severity: warning, job: node, node: tether-desk }
+            exp_annotations:
+              summary: "tether-desk dropped 120 incoming connections (listen queue full)"
+              description: "A reconnect storm overflowed a listen backlog: check somaxconn (sysctl 90-tether.conf) and the front end's backlog."

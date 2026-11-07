@@ -1,0 +1,8 @@
+# Bench front: Traefik (static config), dynamic routes in traefik-routes.yml.
+entryPoints:
+  https:
+    address: "127.0.0.1:28443"
+    transport: { respondingTimeouts: { readTimeout: 0, idleTimeout: 3600s } }
+providers:
+  file: { filename: "@W@/traefik-routes.yml" }
+log: { level: ERROR }

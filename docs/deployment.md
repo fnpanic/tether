@@ -36,6 +36,9 @@ No other paid resources were created.
    - `server/systemd/tether-https.service` enabled; TCP 443 opened in the OCI security list and firewalld;
    - port 80 fallback: `firewall-cmd --permanent --add-forward-port=port=80:proto=tcp:toport=443 --add-port=80/tcp` plus an OCI ingress rule for TCP 80;
    - the certificate comes from Let's Encrypt via TLS-ALPN-01 on 443 (no port 80 needed) and renews automatically.
+   - Alternative front end: `sudo PROXY=nginx ./install.sh <host>` installs nginx from nginx.org
+     with its ACME module instead (same routes, same unit name, 2.7× less memory per device);
+     why and how to switch and back: [proxy-benchmark.md](proxy-benchmark.md).
 5. Relay API (`tether-api`, 0.3.0+): binary at `/usr/local/bin/tether-api` (`install`, not `mv`,
    so SELinux labels are right), user `tether-api`, data in `/var/lib/tether-api` (0750; Caddy's
    user is in group `tether-api` to read `download/`), `server/systemd/tether-api.service`,
