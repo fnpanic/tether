@@ -12,7 +12,7 @@ page that scrolls sideways. Since round 2 also: a table or control that only fit
 sideways inside its box (`hscroll`), a scroll area squeezed below 60 px (`scroll-tiny`), text cut
 with "…" and no tooltip (`ellipsis-notitle`) and a placeholder wider than its empty field
 (`placeholder-cut`); since round 3 a control whose label wraps taller than the control itself
-(`label-spill`: the extra line spills out of the button). Results: `findings.json` next to the screenshots. `UIAUDIT_OUT` sets the
+(`label-spill`: the extra line spills out of the button); since round 4 content wholly past the edge of a box that does not scroll (`cut-off`). Results: `findings.json` next to the screenshots. `UIAUDIT_OUT` sets the
 output folder, `CLONE` the checkout to audit, `UIAUDIT_PORT` the Vite port.
 
 ## What was checked
@@ -21,12 +21,12 @@ Each state in light and dark, at every size of its window:
 
 | Window | Sizes (CSS px) | States |
 | --- | --- | --- |
-| Tether main, Simple | 1000×660 (default), 820×560 (min), 1280×720, 1093×614 (1366×768 at 125 %), 911×512 (at 150 %) | Home, many recent devices, More menu, long ID input, Settings (all 7 sections), Recordings |
-| Tether main, Advanced | 1280×800 (default), 1000×600 (min), 1280×720, 1093×614, 911×512 | 5,000 hosts, no hosts, no match, detail panel, selection bar, palette, tag rules, tag colours, Team, open sessions, keyboard help, Settings |
-| Tether connection window | 380×560 (fixed), 380×512 | two clients, second tab |
-| Tether session | 1280×800 (default), 640×400 (min), 1280×720, 1093×614, 911×512 | toolbar, remote actions menu, lock confirmation, quality menu, statistics, chat; file transfer |
-| TetherQS | 420×560 (fixed), 420×512 | idle, click-only, long branding and logo, update and macOS banners, update required, request (long name), request with banners, session, chat with long messages, two sessions, two sessions with chat, Help/Diagnostics, recording consent |
-| Tether Manage | 1180×800 (default), 900×600 (min), 1280×720, 1093×614, 911×512 | unlock, all 10 pages, 10,000 devices, 4,500 session events, new group, add technician, new custom app, diagnostics ticket, policy publish sheet |
+| Tether main, Simple | 1000×660 (default), 820×560 (min), 1280×672, 1093×566 (1366×768 at 125 %), 911×464 (at 150 %): work areas, taskbar off | Home, no recent devices, many recent devices, More menu, long ID input, Settings (all 7 sections), Recordings |
+| Tether main, Advanced | 1280×800 (default), 1000×600 (min), 1280×672, 1093×566, 911×464 | 5,000 hosts, no hosts, no match, detail panel, selection bar, palette, tag rules, tag colours, Team, open sessions, keyboard help, Settings |
+| Tether connection window | 380×560 (fixed), 380×464 | two clients, second tab |
+| Tether session | 1280×800 (default), 640×400 (min), 1280×672, 1093×566, 911×464 | toolbar, remote actions menu, lock confirmation, quality menu, statistics, chat; file transfer |
+| TetherQS | 420×560 (fixed), 420×464 | idle, click-only, long branding and logo, update and macOS banners, update required, request (long name), request with banners, session, chat with long messages, two sessions, two sessions with chat, Help/Diagnostics, recording consent |
+| Tether Manage | 1180×800 (default), 900×600 (min), 1280×672, 1093×566, 911×464 | unlock, all 10 pages, 10,000 devices, 4,500 session events, new group, add technician, new custom app, diagnostics ticket, policy publish sheet |
 
 Window chrome that only a real window has (reasoned from code): the Windows title bar controls
 (120 px, drawn by the page only in Tauri) still fit the Advanced title bar at 911 px; Manage uses
@@ -96,3 +96,25 @@ Recent "More" menu item wrapping.
 Final run: Manage 220, TetherQS 52, Tether 358 state × size × theme combinations, 0 issues
 (Tether's More menu re-checked after its fix). The real technician app (debug build, over CDP, 5
 sizes × 2 themes) shows Send to support whole with the error below it.
+
+## Round 4 (2026-11-08): real work areas
+
+A real-window check in the Hyper-V VM at 1366×768, 150 % found what the tool passed: maximized,
+the technician app gets the work area, 911×464 (Windows 11 taskbar: 48 CSS px at every scale,
+72 device px at 150 %), not 911×512. Simple Home's "No sessions yet" card lay at y 399-527 in a
+464 px window inside a `main` that did not scroll, and with recent devices the Recent grid got a
+51 px strip. The tool now uses the work areas (911×464, 1093×566, 1280×672; connection window and
+TetherQS 464 px high) and has a `cut-off` check: an element wholly past the bottom or right edge
+of a box that does not scroll is unreachable, unless something moved it there on purpose
+(transform, absolute/fixed position, a collapsed box, or a box whose tooltip lists the whole
+content, like the host tag row). Before the fix it flags Home at 911×464 (`cut-off` for the empty
+state, `scroll-tiny` with recent devices); after it, 0 issues.
+
+| Where | Size | What was wrong | Fix |
+| --- | --- | --- | --- |
+| Tether Simple Home | 911×464, 1093×566 | "No sessions yet" below the window; Recent tiles in a 51 px strip; nothing scrolled | under 640 px height (`short:` variant, DESIGN.md) cards pad 24, gaps one step smaller, the page scrolls as a whole and Recent is no inner scroll area; the empty state fits without scrolling |
+
+Run with the new sizes: Tether 368, TetherQS 52, Tether Manage 260 state × size × theme
+combinations, 0 issues (new scenario `home-empty`, `?recent=0` in the mock). The real-window
+check in the VM with a release build of this round was not repeated (the release build was
+stopped by the PC running out of memory).

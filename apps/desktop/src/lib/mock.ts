@@ -46,7 +46,8 @@ export const mock = {
         state.password = Math.random().toString(36).slice(2, 8);
         return undefined as T;
       case "recent_peers":
-        // `?hosts=N` also fills the recent list (Home search shows from 5 devices).
+        // `?hosts=N` also fills the recent list (Home search shows from 5 devices); `?recent=0` empties it.
+        if (new URLSearchParams(location.search).get("recent") === "0") return [] as T;
         return (new URLSearchParams(location.search).has("hosts") ? [...state.peers, ...(await fleet()).peers.slice(0, 40)] : state.peers) as T;
       case "remove_peer":
         state.peers = state.peers.filter((p) => p.id !== a.id);
