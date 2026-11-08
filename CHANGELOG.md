@@ -6,6 +6,26 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Fixed
+- **Tether no longer crashes on Disconnect when a start request arrives at that moment.** 0.5.27
+  died (BEX64 0xc0000409, every tether.exe gone) when Disconnect was clicked in a session to the
+  technician app's own ID. Cause: the single-instance window (a second start of Tether, a forwarded
+  `--connect` or link, the connection window's "session started/ended") ran its handler inside
+  the event loop while the closing session window was being torn down; its window call found
+  Tauri's window table borrowed and panicked, and release builds abort on a panic. The loopback
+  session hit it every time (its own "host session ended" arrives exactly then); a normal session
+  only when a request lands in those milliseconds (reproduced in `apps/desktop/e2e/disconnect-e2e.mjs`:
+  the viewer died on the first try). These requests are now handled on a worker thread in order.
+  A panic is logged with its backtrace before the process ends.
+- **Tether refuses a session to its own ID** with "That is this device's own ID…" (Connect box,
+  `--connect`, links) instead of mirroring its screen into itself.
+- **Tether Simple Home fits 1366×768 at 125 % and 150 %.** In the 911×464 window the "No sessions
+  yet" card lay below the window and Recent tiles got a 51 px strip, with nothing to scroll.
+  Under 640 px height the cards are denser and the page scrolls as a whole (DESIGN.md).
+- **Layout audit uses the real work areas** (Windows 11 taskbar 48 px): 911×464 and 1093×566,
+  1280×672, and flags content that lies wholly past the edge of a box that does not scroll
+  (`cut-off`; it counted as hidden on purpose before). docs/ui-audit.md, round 4.
+
 ## [Manage 0.5.11] — 2026-11-08
 Tether Manage only.
 

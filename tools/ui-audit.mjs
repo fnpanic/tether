@@ -14,13 +14,16 @@ mkdirSync(OUT, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- window size sets: [name, w, h, dpr]
-const common = [["1280x720", 1280, 720, 1], ["1366@125", 1093, 614, 1.25], ["1366@150", 911, 512, 1.5]];
+// A maximized window on 1366x768 gets the work area: screen / scale minus the Windows 11 taskbar,
+// which is 48 CSS px at any scale (measured in the VM at 150 %: 911x464, taskbar 72 device px).
+const TASKBAR = 48, work = (scale) => [Math.floor(1366 / scale), Math.floor(768 / scale) - TASKBAR, scale];
+const common = [["1280x720", 1280, 720 - TASKBAR, 1], ["1366@125", ...work(1.25)], ["1366@150", ...work(1.5)]];
 const SIZES = {
   main: [["default", 1000, 660, 1], ["min", 820, 560, 1], ...common],
   adv: [["default", 1280, 800, 1], ["min", 1000, 600, 1], ...common],
   session: [["default", 1280, 800, 1], ["min", 640, 400, 1], ...common],
-  cm: [["fixed", 380, 560, 1], ["small-screen", 380, 512, 1.5]],
-  quick: [["fixed", 420, 560, 1], ["small-screen", 420, 512, 1.5]],
+  cm: [["fixed", 380, 560, 1], ["small-screen", 380, work(1.5)[1], 1.5]],
+  quick: [["fixed", 420, 560, 1], ["small-screen", 420, work(1.5)[1], 1.5]],
   manage: [["default", 1180, 800, 1], ["min", 900, 600, 1], ...common],
 };
 
@@ -64,6 +67,7 @@ const APPS = {
     scenarios: [
       ["home", "main", "/#/"],
       ["home-many", "main", "/?hosts=200#/"],
+      ["home-empty", "main", "/?recent=0#/"],
       ["home-more-menu", "main", "/#/", { act: (p) => btn(p, "More") }],
       ["home-longid", "main", "/#/", { act: (p) => p.getByRole("textbox", { name: "Remote device ID" }).fill("1234567890123456789012345678901234567890") }],
       ["home-search-none", "main", "/?hosts=200#/", { act: (p) => p.getByRole("textbox", { name: "Search recent devices" }).fill("zzzzzz") }],
@@ -201,8 +205,13 @@ function audit() {
       const scrollY = /auto|scroll/.test(s.overflowY) && a.scrollHeight > a.clientHeight + 1;
       const scrollX = /auto|scroll/.test(s.overflowX) && a.scrollWidth > a.clientWidth + 1;
       if ((outY && !scrollY) || (outX && !scrollX)) {
-        // fully outside = hidden on purpose (off-canvas) unless it is a scroller's content; only partial clipping counts
+        // Partly outside = clipped. Fully outside is hidden on purpose (moved off-canvas, a collapsed box)
+        // only when something moved it there; content that simply flows past the box is unreachable.
         const inter = Math.max(0, Math.min(r.right, b.right) - Math.max(r.left, b.left)) * Math.max(0, Math.min(r.bottom, b.bottom) - Math.max(r.top, b.top));
+        // A one-line box with the whole list in its tooltip (host tags) hides the rest on purpose too.
+        let moved = b.width < 2 || b.height < 2 || !!a.title;
+        for (let m = el; m && m !== a && !moved; m = m.parentElement) { const ms = getComputedStyle(m); moved = ms.transform !== "none" || ms.position === "absolute" || ms.position === "fixed"; }
+        if (!inter && !moved && (r.top >= b.bottom - 1 || r.left >= b.right - 1)) out.push(["cut-off", `${label(el)} past the edge of ${label(a)}, which does not scroll (el ${Math.round(r.left)},${Math.round(r.top)} box ${Math.round(b.right)},${Math.round(b.bottom)})`]);
         if (inter > 0) out.push(["clipped", `${label(el)} clipped by ${label(a)} (el ${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.right)},${Math.round(r.bottom)} box ${Math.round(b.left)},${Math.round(b.top)},${Math.round(b.right)},${Math.round(b.bottom)})`]);
       }
       handled = true;

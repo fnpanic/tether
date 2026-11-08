@@ -36,7 +36,7 @@ function ThisDevice({ s, onToast, onRefresh }: { s: Status | null; onToast: (m: 
   const [reveal, setReveal] = useState(false);
   const copy = (v: string, what: string) => navigator.clipboard.writeText(v).then(() => onToast(`${what} copied`));
   return (
-    <section className="flex flex-col rounded-2xl border border-hairline bg-tile p-8">
+    <section className="flex flex-col rounded-2xl border border-hairline bg-tile p-8 short:p-6">
       <div className="text-caption text-muted">This device</div>
       <div className="mt-2 flex items-center gap-2">
         <div className="font-mono text-display font-semibold tabular-nums" aria-label="Your ID">
@@ -47,7 +47,7 @@ function ThisDevice({ s, onToast, onRefresh }: { s: Status | null; onToast: (m: 
         </IconButton>
       </div>
 
-      <div className="mt-8 text-caption text-muted">One-time password</div>
+      <div className="mt-8 text-caption text-muted short:mt-4">One-time password</div>
       <div className="mt-1 flex items-center gap-1">
         <div className="mr-2 min-w-[7.5rem] font-mono text-headline tabular-nums tracking-[0.12em]" aria-label="One-time password">
           {s?.password ? (reveal ? s.password : "•".repeat(s.password.length)) : "—"}
@@ -70,7 +70,7 @@ function ThisDevice({ s, onToast, onRefresh }: { s: Status | null; onToast: (m: 
         </IconButton>
       </div>
 
-      <div className="mt-auto flex items-center gap-2 pt-8 text-caption text-muted">
+      <div className="mt-auto flex items-center gap-2 pt-8 text-caption text-muted short:pt-4">
         <Lock size={14} />
         End-to-end encrypted. Nobody gets in without your approval.
       </div>
@@ -94,7 +94,7 @@ function ConnectBox({ peers, onConnect }: { peers: Peer[]; onConnect: (id: strin
   const go = (id = clean, conn?: string) => id && onConnect(id, conn);
 
   return (
-    <section className="flex flex-col rounded-2xl border border-hairline bg-tile p-8">
+    <section className="flex flex-col rounded-2xl border border-hairline bg-tile p-8 short:p-6">
       <div className="text-caption text-muted">Remote device</div>
       <form
         className="relative mt-3"
@@ -139,7 +139,7 @@ function ConnectBox({ peers, onConnect }: { peers: Peer[]; onConnect: (id: strin
           </Button>
         </div>
       </form>
-      <p className="mt-auto pt-8 text-caption text-muted">Ask for their ID. They confirm the request on their screen, or give you their password.</p>
+      <p className="mt-auto pt-8 text-caption text-muted short:pt-4">Ask for their ID. They confirm the request on their screen, or give you their password.</p>
     </section>
   );
 }
@@ -258,15 +258,15 @@ export function Home() {
         </IconButton>
       </TitleBar>
 
-      <main className="flex min-h-0 flex-1 flex-col overflow-hidden px-8 pb-6 pt-4">
-        <div className="mx-auto flex min-h-0 w-full max-w-[980px] flex-1 flex-col">
+      <main className="flex min-h-0 flex-1 flex-col overflow-y-auto px-8 pb-6 pt-4">
+        <div className="mx-auto flex min-h-0 w-full max-w-[980px] flex-1 flex-col short:min-h-fit">
           <MacPermissions />
           <div className="grid shrink-0 grid-cols-[1.1fr_1fr] gap-6">
             <ThisDevice s={s} onToast={toast.show} onRefresh={refresh} />
             <ConnectBox peers={peers} onConnect={connect} />
           </div>
 
-          <div className="mt-8 flex shrink-0 items-end gap-3">
+          <div className="mt-8 flex shrink-0 items-end gap-3 short:mt-6">
             <h2 className="text-headline font-semibold">Recent</h2>
             <div className="flex-1" />
             {peers.length > 4 && (
@@ -278,12 +278,12 @@ export function Home() {
           </div>
 
           {peers.length === 0 ? (
-            <div className="mt-4 rounded-2xl bg-parchment px-6 py-12 text-center">
+            <div className="mt-4 rounded-2xl bg-parchment px-6 py-12 text-center short:py-8">
               <div className="text-callout font-semibold">No sessions yet</div>
               <div className="mt-1 text-caption text-muted">Devices you connect to appear here.</div>
             </div>
           ) : (
-            <div className="-mx-2 mt-2 grid min-h-0 flex-1 grid-cols-[repeat(auto-fill,minmax(200px,1fr))] content-start gap-6 overflow-y-auto p-2">
+            <div className="-mx-2 mt-2 grid min-h-0 flex-1 grid-cols-[repeat(auto-fill,minmax(200px,1fr))] content-start gap-6 overflow-y-auto p-2 short:flex-none short:overflow-visible">
               {shown.map((p) => (
                 <PeerCard
                   key={p.id}

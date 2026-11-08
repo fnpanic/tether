@@ -262,7 +262,9 @@ pub fn run(args: &[String]) -> Option<ExitCode> {
             }
         }),
         Cmd::Connect(c) => {
-            let checked = policy::check_outgoing().and_then(|_| c.password.as_ref().map(read_password).transpose());
+            let checked = security::check_not_self(&c.peer)
+                .and_then(|_| policy::check_outgoing())
+                .and_then(|_| c.password.as_ref().map(read_password).transpose());
             return match checked {
                 Ok(pw) => {
                     let _ = CONNECT.set(Mutex::new(Some((c, pw))));

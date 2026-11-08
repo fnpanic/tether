@@ -93,6 +93,16 @@ pub fn check_peer_id(id: &str) -> Result<(), String> {
     }
 }
 
+/// A session to this device's own ID would show its screen inside itself and feed its input back.
+pub fn check_not_self(peer: &str) -> Result<(), String> {
+    // The ID the window shows (status sync), else this profile's config (a `--connect` process).
+    let own = Some(librustdesk::ui::api::get_connect_status().id).filter(|i| !i.is_empty()).unwrap_or_else(hbb_common::config::Config::get_id);
+    if peer == own {
+        return Err("That is this device's own ID. Enter the ID of the device you want to connect to.".to_owned());
+    }
+    Ok(())
+}
+
 /// Permanent passwords: at least 12 characters with at least three character classes.
 pub fn check_password_strength(pw: &str) -> Result<(), String> {
     if pw.chars().count() < 12 {

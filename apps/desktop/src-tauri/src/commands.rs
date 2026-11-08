@@ -150,6 +150,7 @@ fn mac_fix(app: tauri::AppHandle, which: String) -> R<()> {
 async fn open_session(app: AppHandle, peer: String, conn: Option<String>, from: Option<String>, view_only: Option<bool>) -> R<String> {
     let peer = peer.trim().replace(' ', "");
     security::check_peer_id(&peer)?;
+    security::check_not_self(&peer)?;
     crate::policy::check_outgoing()?;
     let conn = match conn.as_deref() {
         None | Some("default") => "default",
@@ -182,6 +183,7 @@ fn session_start(
     video: Channel<InvokeResponseBody>,
 ) -> R<()> {
     security::check_peer_id(&peer)?;
+    security::check_not_self(&peer)?;
     if !key.chars().all(|c| c.is_ascii_hexdigit()) || key.len() != 32 {
         return Err("invalid session key".to_owned());
     }

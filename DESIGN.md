@@ -75,6 +75,9 @@ and is never applied below 12px.
 - Spacing scale (px): 4 · 8 · 12 · 16 · 24 · 32 · 48 · 80. Cards pad 24, dialogs 32, window
   gutters 32.
 - Control heights: 32 (compact), 36 (default), 44 (primary CTA and inputs).
+- Short windows (under 640 px high: 1366×768 at 125 % and 150 % leave 566 / 464 px): one step
+  down the spacing scale (Tailwind variant `short:`), and the view scrolls as a whole instead of
+  squeezing an inner scroll area below one row.
 - Radius scale only: `5` chips · `8` utility buttons, thumbnails · `11` capsules, menus, inputs in
   dense forms · `18` cards, dialogs, panels · `full` primary CTAs, search, segmented controls,
   circular icon buttons. Nothing else.

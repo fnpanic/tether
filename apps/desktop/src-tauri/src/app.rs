@@ -83,7 +83,7 @@ pub fn run(args: Vec<String>) {
     let mut builder = tauri::Builder::default();
     if matches!(mode, Mode::Main) {
         // First plugin: a second start exits before doing anything else.
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| second_instance(app, &argv)));
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| second_instance_later(app, argv)));
     }
     #[allow(unused_mut)]
     let mut app = builder
@@ -189,8 +189,25 @@ pub fn run(args: Vec<String>) {
     });
 }
 
-/// Runs in the first instance when Tether is started again: a forwarded session request opens a
-/// session window, anything else brings the main window to the front.
+/// The single-instance plugin calls this from its window procedure, which also runs nested in the
+/// event loop: closing a window pumps sent messages while tauri holds its window table, and any
+/// window call then panics ("RefCell already mutably borrowed"; release builds abort, 0xc0000409).
+/// 0.5.27 died so on Disconnect from a session to this device's own ID: the `--cm` process's
+/// "host session ended" arrived while the session window was being destroyed. One worker thread
+/// handles the requests instead, in the order they came.
+fn second_instance_later(app: &AppHandle, argv: Vec<String>) {
+    static TX: OnceLock<std::sync::mpsc::Sender<Vec<String>>> = OnceLock::new();
+    let tx = TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
+        let app = app.clone();
+        std::thread::spawn(move || rx.iter().for_each(|argv| second_instance(&app, &argv)));
+        tx
+    });
+    let _ = tx.send(argv);
+}
+
+/// Runs in the first instance (on `second_instance_later`'s thread) when Tether is started again:
+/// a forwarded session request opens a session window, anything else brings the main window to the front.
 fn second_instance(app: &AppHandle, argv: &[String]) {
     match argv.get(1).map(String::as_str) {
         Some(MINIMIZE_MAIN_ARG) => return host_session_started(app, argv.get(2)),
@@ -210,16 +227,14 @@ fn second_instance(app: &AppHandle, argv: &[String]) {
         Ok(r) => r,
         Err(e) => return hbb_common::log::warn!("forwarded session refused: {e}"),
     };
-    // Called from a window message on the main thread; building a webview there can deadlock.
-    let app = app.clone();
-    std::thread::spawn(move || match open_session_with(&app, &c) {
+    match open_session_with(app, &c) {
         Ok(key) => {
             if let (Some(pw), Some(s)) = (pw, sink::get()) {
                 s.set_pending_password(&key, pw);
             }
         }
         Err(e) => hbb_common::log::warn!("forwarded session: {e}"),
-    });
+    }
 }
 
 /// Hands a session request to a running Tether (its single-instance window), like the plugin does

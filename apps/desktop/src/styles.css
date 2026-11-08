@@ -3,6 +3,8 @@
 @import "@fontsource-variable/inter";
 
 @custom-variant dark (&:where(.dark, .dark *));
+/* Short windows (1366x768 at 125 % and 150 %: 566 / 464 px work area): denser spacing, the page scrolls as a whole. */
+@custom-variant short (@media (max-height: 640px));
 
 @theme {
   --font-sans: -apple-system, "SF Pro Text", "SF Pro Display", "Inter Variable", system-ui, sans-serif;

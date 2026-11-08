@@ -28,6 +28,13 @@ pub const ORG: &str = "app.tether";
 pub const MAIN_GUI_ENV: &str = "TETHER_MAIN_GUI";
 
 fn main() -> ExitCode {
+    // Release builds abort on panic (0xc0000409, no message anywhere): log it first.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        hbb_common::log::error!("panic: {info}\n{}", std::backtrace::Backtrace::force_capture());
+        hbb_common::log::logger().flush();
+        default_hook(info);
+    }));
     // Must run before anything reads config paths, service names or the IPC socket name.
     // TETHER_PROFILE gives a separate identity (config dir, ID, IPC pipe) so a host and a viewer
     // can run side by side on one machine during development.
