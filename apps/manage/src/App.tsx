@@ -69,11 +69,13 @@ export function App() {
 
   // Only the newest check's answer counts: an older, slower one must not overwrite it.
   const liveSeq = useRef(0);
+  // Checks answered so far: each one arms the next retry, also when it failed the same way.
+  const [checks, setChecks] = useState(0);
   const reloadLive = useCallback(() => {
     const n = ++liveSeq.current;
     return api.live().then(
-      (l) => void (n === liveSeq.current && (setLive(l), setLiveError(null))),
-      (e) => void (n === liveSeq.current && setLiveError(e.message)),
+      (l) => void (n === liveSeq.current && (setLive(l), setLiveError(null), setChecks((c) => c + 1))),
+      (e) => void (n === liveSeq.current && (setLiveError(e.message), setChecks((c) => c + 1))),
     );
   }, []);
 
@@ -91,7 +93,7 @@ export function App() {
     if (!retry) return;
     const t = setTimeout(reloadLive, 30_000);
     return () => clearTimeout(t);
-  }, [retry, live, liveError]);
+  }, [retry, checks]);
 
   useEffect(() => {
     if (!state?.unlocked) return;

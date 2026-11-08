@@ -38,7 +38,7 @@ export function PolicyBar() {
         <StatusDot tone={line.tone} />
         <span title={liveError ?? undefined}>
           {line.text}
-          {/* A later check failed: the value before is from the one before. */}
+          {/* A later check failed: the value shown is from the check before. */}
           {live && liveError && <span className="text-danger"> (earlier check; checking again failed: {liveError})</span>}
         </span>
       </span>
