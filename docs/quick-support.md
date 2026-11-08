@@ -92,12 +92,27 @@ session continues. Without a session TetherQS restarts with `pre-elevate-service
 current one-time password are kept (handed over to the new process). The main process stays a
 normal-user process either way.
 
-The technician can also request elevation from inside a session (core `ElevationRequest`), which
-starts the same portable service without a restart.
+The technician can also request it from inside a session: **Remote actions → Request admin
+access** (core `ElevationRequest`, `session_elevate`; shown for a TetherQS host on Windows,
+disabled once admin access is on). It starts the same portable service without a restart; the
+customer confirms one UAC prompt and can be asked again after a No.
 
 Limits: without admin access the technician sees a black/frozen screen while a UAC prompt is open
 and cannot type into elevated windows. If the customer declines the UAC prompt, TetherQS keeps
 running without admin access.
+
+What the technician sees (viewer, `apps/desktop/src/lib/elevation.ts`): while a UAC prompt is open
+on a host without admin access, a notice at the top of the picture ("An admin prompt (UAC) is
+open…"); the session stays connected and usable (it is not an error). When the prompt closes, the
+notice goes and a toast says how it ended: "Admin access is on…" after Yes to Tether's own
+request, "Admin access was declined…" when that request brought no admin access within 5 s (No,
+Esc, or the prompt closed), and "…was answered or closed" for any other prompt (a program or a
+protected folder; the host cannot learn that answer, consent.exe runs as SYSTEM). An unanswered
+prompt is closed by Windows after about 2 minutes (122 s measured on Windows 11 24H2), which
+counts as No; the session keeps running meanwhile. An elevated window in
+front gets its own notice ("…runs as administrator…") until it is no longer in front. With admin
+access on, the technician sees the secure desktop and no notices. Tested with
+`apps/desktop/e2e/vm-uac-e2e.mjs`.
 
 ## Policy (profile `customer`)
 
