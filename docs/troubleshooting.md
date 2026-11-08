@@ -114,11 +114,13 @@ included). The elevated helper (admin access) logs as SYSTEM and is not part of 
 
 The app sends to its relays one after the other: a relay that does not know the code (`404`) or is
 busy (`503`, 4 uploads at once) does not end the attempt; one that has the code but used, expired
-or closed does.
+or closed does. Without the window: `tether --diag-upload <code>` / `TetherQS --diag-upload <code>`
+(same steps, prints `sent` or the message below).
 
 | Message | Cause |
 | --- | --- |
 | "This code is not valid, has expired or was already used." | Typo, expired (24 h), already used, or the ticket was closed. Create a new ticket. |
+| "Could not reach the support server. Try again later; …" | No relay took the code, at least one could not be reached (no connection, timeout, or a `5xx` other than `503` from the proxy in front of it) and the others did not know the code: the code may be open on the unreachable one. Try again later (up to 0.5.26 this said "not valid"). |
 | "The server is busy. Try again in a minute." | Every relay is at its upload limit |
 | "Cannot reach the server: …" | The device is offline; use **Export diagnostics** and another channel. |
 | "Your organisation does not allow sending diagnostics." | Policy `diagnostics.upload` is off |

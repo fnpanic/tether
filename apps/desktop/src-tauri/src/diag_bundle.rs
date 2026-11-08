@@ -161,12 +161,16 @@ pub fn ticket(input: &str) -> Result<String, String> {
 }
 
 pub const NOT_VALID: &str = "This code is not valid, has expired or was already used. Ask your support contact for a new one.";
+/// No relay took the code, at least one did not know it, and at least one could not be reached:
+/// the code may well be open on the unreachable one, so "not valid" would be wrong.
+pub const UNREACHABLE: &str = "Could not reach the support server. Try again later; if it keeps failing, ask your support contact for a new code.";
 
 /// Upload to each relay in turn until one takes it. A relay that does not know the ticket answers
 /// 404 `not found` (Tether Manage opens it on every relay it knows; one may have been down, or the
 /// admin's Manage knows fewer relays than this app): the next relay is tried. 404 `ticket not open`
 /// (used, expired, closed there) ends it: the code is spent, even if another relay still has it open.
-/// `send(relay)`: the HTTP status and body, or Err when that relay could not be reached.
+/// `send(relay)`: the HTTP status and body, or Err when that relay could not be reached. A 5xx other
+/// than 503 (the relay's own "busy") is a proxy in front of an unreachable relay: counted as offline.
 pub fn upload_each(relays: &[String], mut send: impl FnMut(&str) -> Result<(u16, String), String>) -> Result<(), String> {
     let (mut refused, mut not_found, mut offline) = (None, false, None);
     for r in relays {
@@ -174,6 +178,7 @@ pub fn upload_each(relays: &[String], mut send: impl FnMut(&str) -> Result<(u16,
             Ok((200..=299, _)) => return Ok(()),
             Ok((404, body)) if body.trim() == "ticket not open" => return Err(NOT_VALID.into()),
             Ok((404, _)) => not_found = true,
+            Ok((s @ 500..=599, _)) if s != 503 => offline = Some(format!("HTTP {s}")),
             Ok((s, _)) => refused = Some(s),
             Err(e) => offline = Some(e),
         }
@@ -183,7 +188,8 @@ pub fn upload_each(relays: &[String], mut send: impl FnMut(&str) -> Result<(u16,
         (Some(503), ..) => Err("The server is busy. Try again in a minute.".into()),
         (Some(413), ..) => Err("The diagnostics are larger than the server accepts.".into()),
         (Some(s), ..) => Err(format!("The server refused the upload ({s}).")),
-        (None, true, _) => Err(NOT_VALID.into()),
+        (None, true, Some(_)) => Err(UNREACHABLE.into()),
+        (None, true, None) => Err(NOT_VALID.into()),
         (None, false, Some(e)) => Err(format!("Cannot reach the server: {e}")),
         (None, false, None) => Err("Cannot reach the server: no server in this build.".into()),
     }
@@ -284,7 +290,10 @@ password = "proxy-pass-77"
         assert_eq!(run([Ok(404), Ok(404)]).0, Err(NOT_VALID.into()));
         // Used (or expired, closed) on the first relay: no second upload on the other.
         assert_eq!(run([Ok(410), Ok(204)]), (Err(NOT_VALID.into()), 1));
-        assert_eq!(run([Ok(404), Err("down")]).0, Err(NOT_VALID.into()));
+        // Unknown on one relay and the other unreachable (it may hold the open ticket): not "invalid".
+        assert_eq!(run([Ok(404), Err("down")]).0, Err(UNREACHABLE.into()));
+        assert_eq!(run([Err("down"), Ok(404)]).0, Err(UNREACHABLE.into()));
+        assert_eq!(run([Ok(502), Ok(404)]).0, Err(UNREACHABLE.into()));
         assert!(run([Ok(404), Ok(503)]).0.unwrap_err().contains("busy"));
         assert!(run([Ok(413), Ok(404)]).0.unwrap_err().contains("larger"));
         assert!(run([Err("timeout"), Err("dns")]).0.unwrap_err().starts_with("Cannot reach the server: dns"));

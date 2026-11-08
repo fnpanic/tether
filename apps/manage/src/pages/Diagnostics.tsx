@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { RefreshCw } from "lucide-react";
+import { Archive, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { useApp } from "../App";
 import { api, bytes, invoke, when } from "../lib/ipc";
-import { Button, Card, ErrorText, IconButton, Modal, PageHeader, Segmented, Table, TextField } from "../components/ui";
+import { Button, Card, ErrorText, IconButton, Modal, PageHeader, Segmented, Sub, Table, TextField } from "../components/ui";
 import { RelayResults } from "../components/publish";
 import type { RelayResult } from "../lib/ipc";
 
@@ -16,9 +16,16 @@ interface Ticket {
   /** open → uploaded → closed (archived); open → expired (24 h without upload). */
   state: "open" | "uploaded" | "expired" | "closed";
   closed?: number | null;
-  /** Relays that have the ticket, and the one with the upload (diag_list merges them). */
+  /** Relays that have the ticket, and the one with the newest upload (diag_list merges them). */
   relays: string[];
   upload_relay?: string;
+  /** Every relay's upload of this code, newest first: each relay takes one, so there can be two. */
+  uploads?: Upload[];
+}
+interface Upload {
+  relay: string;
+  uploaded: number;
+  size: number | null;
 }
 interface Opened {
   ticket: string;
@@ -26,6 +33,8 @@ interface Opened {
   files: { name: string; size: number }[];
   diagnostics: string | null;
 }
+
+const host = (url: string) => url.replace(/^https?:\/\//, "");
 
 export function Diagnostics() {
   const { toast } = useApp();
@@ -39,18 +48,24 @@ export function Diagnostics() {
   const [confirmDelete, setConfirmDelete] = useState<Ticket | null>(null);
   const [results, setResults] = useState<{ title: string; results: RelayResult[] } | null>(null);
 
-  const load = (t = tab) =>
+  // The tab the newest request is for: an answer for a tab no longer shown is dropped.
+  const shown = useRef(tab);
+  const load = (t = shown.current) =>
     invoke<{ tickets: Ticket[]; failed: string[] }>("diag_list", { archived: t === "archived" }).then(
       (r) => {
+        if (shown.current !== t) return;
         setList(r.tickets);
         setFailed(r.failed);
+        setError(null);
       },
-      (e) => setError(e.message),
+      (e) => shown.current === t && setError(e.message),
     );
   useEffect(() => void load(), []);
   const showTab = (t: "active" | "archived") => {
+    shown.current = t;
     setTab(t);
     setList(null);
+    setFailed([]);
     load(t);
   };
 
@@ -81,10 +96,10 @@ export function Diagnostics() {
     }
   };
 
-  const openTicket = async (ticket: string) => {
+  const openTicket = async (ticket: string, relay: string) => {
     setError(null);
     try {
-      setOpened({ ticket, ...(await invoke<Omit<Opened, "ticket">>("diag_open", { ticket })) });
+      setOpened({ ticket, ...(await invoke<Omit<Opened, "ticket">>("diag_open", { ticket, relay })) });
     } catch (e: any) {
       setError(e.message);
     }
@@ -127,38 +142,52 @@ export function Diagnostics() {
         </div>
       </div>
       {failed.length > 0 && <p className="mb-2 text-caption text-warn">Not reachable: {failed.join("; ")}</p>}
-      <Table
-        head={tab === "archived" ? ["Code", "Note", "Created", "Closed", "Upload", ""] : ["Code", "Note", "Created", "Upload", ""]}
-        empty={list && !list.length ? (tab === "archived" ? "No closed tickets in the last 90 days." : "No tickets in the last 7 days.") : false}
-      >
+      <Table head={["Ticket", tab === "archived" ? "Created · closed" : "Created", "Upload", ""]} empty={list && !list.length ? (tab === "archived" ? "No closed tickets in the last 90 days." : "No tickets in the last 7 days.") : false}>
         {(list ?? [])
           .sort((a, b) => b.created - a.created)
-          .map((t) => (
-            <tr key={t.ticket}>
-              <td className="font-mono font-semibold tracking-wider select-text">{t.ticket}</td>
-              <td className="max-w-[320px] truncate" title={t.note}>
-                {t.note || "–"}
-              </td>
-              <td>{when(t.created)}</td>
-              {tab === "archived" && <td>{t.closed ? when(t.closed) : "–"}</td>}
-              <td className={t.uploaded ? "" : "text-muted"}>{t.uploaded ? `${bytes(t.size)} · ${when(t.uploaded)}` : t.state === "open" ? "Waiting" : t.state === "expired" ? "Expired, no upload" : "No upload"}</td>
-              <td className="whitespace-nowrap text-right">
-                <span className="inline-flex gap-1.5">
-                  <Button size="sm" disabled={!t.uploaded} onClick={() => openTicket(t.ticket)}>
-                    Open
-                  </Button>
-                  {tab === "active" && (
-                    <Button size="sm" title="No more uploads; the ticket moves to Archived (kept 90 days)" onClick={() => change(t, "diag_close")}>
-                      Close
-                    </Button>
-                  )}
-                  <Button size="sm" title="Remove the ticket and its upload for good" onClick={() => setConfirmDelete(t)}>
-                    Delete
-                  </Button>
-                </span>
-              </td>
-            </tr>
-          ))}
+          .map((t) => {
+            const uploads = t.uploads ?? (t.uploaded && t.upload_relay ? [{ relay: t.upload_relay, uploaded: t.uploaded, size: t.size }] : []);
+            return (
+              <tr key={t.ticket}>
+                <td className="max-w-0 w-full">
+                  <p className="font-mono font-semibold tracking-wider select-text">{t.ticket}</p>
+                  <p className="truncate text-footnote text-muted" title={t.note || undefined}>
+                    {t.note || "–"}
+                  </p>
+                </td>
+                <td className="whitespace-nowrap">
+                  {when(t.created)}
+                  {tab === "archived" && <Sub>{t.closed ? `closed ${when(t.closed)}` : "–"}</Sub>}
+                </td>
+                <td className="whitespace-nowrap">
+                  {uploads.length === 0 && <span className="text-muted">{t.state === "open" ? "Waiting" : t.state === "expired" ? "Expired, no upload" : "No upload"}</span>}
+                  {uploads.length > 1 && <Sub>{uploads.length} uploads, one per relay</Sub>}
+                  {uploads.map((u) => (
+                    <span key={u.relay} className="flex items-center gap-1">
+                      <span title={uploads.length > 1 ? u.relay : undefined}>
+                        {bytes(u.size)} · {when(u.uploaded)}
+                      </span>
+                      <IconButton label={uploads.length > 1 ? `Open the upload on ${host(u.relay)}` : `Open the upload of ${t.ticket}`} onClick={() => openTicket(t.ticket, u.relay)}>
+                        <FolderOpen size={16} />
+                      </IconButton>
+                    </span>
+                  ))}
+                </td>
+                <td className="w-px whitespace-nowrap text-right">
+                  <span className="inline-flex">
+                    {tab === "active" && (
+                      <IconButton label={`Close ${t.ticket}: no more uploads, moves to Archived (kept 90 days)`} onClick={() => change(t, "diag_close")}>
+                        <Archive size={16} />
+                      </IconButton>
+                    )}
+                    <IconButton label={`Delete ${t.ticket} and its uploads for good`} onClick={() => setConfirmDelete(t)}>
+                      <Trash2 size={16} />
+                    </IconButton>
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
       </Table>
 
       {created && (
@@ -185,7 +214,7 @@ export function Diagnostics() {
         <Modal onClose={() => setConfirmDelete(null)} width={460}>
           <h2 className="text-headline font-semibold">Delete ticket {confirmDelete.ticket}?</h2>
           <p className="mt-2 text-callout text-muted">
-            {confirmDelete.uploaded ? "The ticket and its diagnostics upload are removed from every relay for good." : "The ticket is removed from every relay for good."} This cannot be undone.
+            {confirmDelete.uploaded ? "The ticket and its diagnostics uploads are removed from every relay for good." : "The ticket is removed from every relay for good."} This cannot be undone.
           </p>
           <div className="mt-6 flex justify-end gap-2">
             <Button onClick={() => setConfirmDelete(null)}>Cancel</Button>

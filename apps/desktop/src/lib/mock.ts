@@ -159,6 +159,31 @@ export const mock = {
         return "C:\\Users\\demo" as T;
       case "fs_local_dir":
         return { path: a.path, entries: [{ name: "Documents", type: 1, size: 0, modified: 1761900000 }, { name: "Downloads", type: 1, size: 0, modified: 1761900000 }, { name: "report-q3.pdf", type: 4, size: 2483021, modified: 1761900000 }, { name: "notes.txt", type: 4, size: 1204, modified: 1761900000 }] } as T;
+      case "diag_info": {
+        // Settings › Diagnostics as on a real install (long names, two relays, one route failing).
+        const t = Math.floor(Date.now() / 1000);
+        return {
+          version: "0.5.27",
+          id: "731204986",
+          os: "Windows 10.0.26300 (Workstation)",
+          policy: { serial: 12, group: "Reception desks Hamburg", sources: ["relay", "cache"] },
+          relay: "relay-eu-west-1.support.example-company-name.com",
+          proxy: "http://proxy.corp.example-company-name.internal:3128",
+          dns: { host: "relay-eu-west-1.support.example-company-name.com", addrs: ["203.0.113.10", "2001:db8::10"], ms: 4 },
+          routes: [
+            { url: "wss://relay-eu-west-1.support.example-company-name.com/ws/id", via_proxy: true, ok: true, error: "", ms: 229, at: t - 60 },
+            { url: "wss://relay-us-east-2.support.example-company-name.com/ws/id", via_proxy: false, ok: false, error: "connection timed out after 5 s (tcp connect to 203.0.113.9:443)", ms: 5000, at: t - 60 },
+          ],
+          errors: ["[2026-11-08 09:12:40] WARN relay-us-east-2.support.example-company-name.com: connection timed out after 5 s"],
+          verboseUntil: 0,
+          logDir: "C:\Users\demo\AppData\Roaming\Tether\log",
+        } as T;
+      }
+      case "diag_upload":
+        // The code K7Q2M9XD is accepted; any other gets the message for an unreachable relay.
+        await new Promise((r) => setTimeout(r, 150));
+        if (a.ticket !== "K7Q2M9XD") throw "Could not reach the support server. Try again later; if it keeps failing, ask your support contact for a new code.";
+        return undefined as T;
       default:
         return undefined as T;
     }

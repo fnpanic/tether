@@ -39,17 +39,19 @@ export function PolicyBar() {
       </span>
       <span className="h-4 w-px bg-hairline" aria-hidden />
       <span className="flex items-center gap-2">
-        <StatusDot tone={!live ? (liveError ? "danger" : "muted") : behind ? "warn" : "ok"} />
+        <StatusDot tone={liveError ? "danger" : !live ? "muted" : behind ? "warn" : "ok"} />
         {!live ? (
           liveError ? (
             <span title={liveError}>Live: could not check ({liveError})</span>
           ) : (
             "Live: checking…"
           )
-        ) : live.serial == null ? (
-          "Live: nothing published yet"
         ) : (
-          `Live: serial ${live.serial} on ${on}/${of} relay${of === 1 ? "" : "s"}`
+          <span title={liveError ?? undefined}>
+            {live.serial == null ? "Live: nothing published yet" : `Live: serial ${live.serial} on ${on}/${of} relay${of === 1 ? "" : "s"}`}
+            {/* A later check failed: the value above is from the one before. */}
+            {liveError && <span className="text-danger"> (earlier check; checking again failed: {liveError})</span>}
+          </span>
         )}
       </span>
       {live?.unconfigured.map((h) => (

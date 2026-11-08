@@ -11,7 +11,8 @@ without an ellipsis, interactive elements covered by another element of the same
 page that scrolls sideways. Since round 2 also: a table or control that only fits by scrolling
 sideways inside its box (`hscroll`), a scroll area squeezed below 60 px (`scroll-tiny`), text cut
 with "…" and no tooltip (`ellipsis-notitle`) and a placeholder wider than its empty field
-(`placeholder-cut`). Results: `findings.json` next to the screenshots. `UIAUDIT_OUT` sets the
+(`placeholder-cut`); since round 3 a control whose label wraps taller than the control itself
+(`label-spill`: the extra line spills out of the button). Results: `findings.json` next to the screenshots. `UIAUDIT_OUT` sets the
 output folder, `CLONE` the checkout to audit, `UIAUDIT_PORT` the Vite port.
 
 ## What was checked
@@ -74,3 +75,24 @@ Checked in code and unit tests, not in a browser: Simple/Advanced switches size 
 against the screen's work area every time, never with a minimum larger than it (`main_fit`,
 `cargo test`); `fitScreen` leaves full-screen and maximized windows alone. Manage relay reads with
 one relay that never answers: `apps/desktop/e2e/relay-timing.mjs`.
+
+## Round 3 (2026-11-08)
+
+A second blind review found two cut-off controls the tool had passed: the Manage Diagnostics table
+(flagged by `hscroll`, merged anyway) and the technician app's "Send to support" (the browser mock
+had no `diag_info`, and a label spilling out of a button with `overflow: visible` was not checked).
+The desktop mock now answers `diag_info` and `diag_upload` like a real install (long relay names,
+a failing route), the new scenarios `settings-diag-sent` and `settings-diag-error` fill the code
+and send, and the `label-spill` check was added. Before the fix the tool flags Send to support at
+every size ("label 34px tall in a 28px control"); after it, 0 issues. The new check also found the
+Recent "More" menu item wrapping.
+
+| Where | Size | What was wrong | Fix |
+| --- | --- | --- | --- |
+| Manage Diagnostics, Active and Archived | 900×600, 911×512 | 721 px table in a 646 / 657 px box: Delete past the card edge | four columns: note under the code, closed date under created, each upload with its own Open button, Close and Delete as icon buttons (label in the tooltip) in a column that does not shrink |
+| Tether Settings › Diagnostics, Send to support | every size | the code field took the whole row (`w-full` of the field beat `w-40`), the label wrapped and "support" fell out of the button | field 10 rem, neither field nor button shrinks, label on one line |
+| Tether Recent, More menu | every size | "Remove from recents" wrapped in a 36 px item | menu as wide as its item, label on one line |
+
+Final run: Manage 220, TetherQS 52, Tether 358 state × size × theme combinations, 0 issues
+(Tether's More menu re-checked after its fix). The real technician app (debug build, over CDP, 5
+sizes × 2 themes) shows Send to support whole with the error below it.

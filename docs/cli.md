@@ -16,6 +16,7 @@ list). Arguments Tether does not know are passed to the RustDesk core unchanged 
 | `--version` | Print the version | e.g. `0.3.1` |
 | `--check-update` | Check the update channel now | `update 0.3.1 available (installed 0.3.0)` or `0.3.1 is up to date` |
 | `--policy-refresh` | Fetch the organisation policy and the server key list ([key-rotation.md](key-rotation.md)) now and apply them | `policy serial 12 (defaults, profile, group:pilot)` |
+| `--diag-upload <code>` | Send the diagnostics to support with a ticket code, as Settings › Diagnostics › Send to support ([troubleshooting.md](troubleshooting.md#send-to-support)); `TetherQS --diag-upload <code>` sends TetherQS's | `sent` |
 | `--diagnostics <out.zip>` | Write a diagnostics archive ([troubleshooting.md](troubleshooting.md#export-diagnostics)); `TetherQS --diagnostics <out.zip>` writes TetherQS's | `wrote <out.zip>` |
 | `--help`, `-h`, `/?` | Show the help | the help text |
 
