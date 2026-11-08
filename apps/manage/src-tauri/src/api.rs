@@ -1,8 +1,9 @@
 //! Relay API client. Every admin request is signed with `tether_trust::reqauth` over the exact
 //! path (with query) and body bytes that go on the wire.
 
-use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tether_trust::{reqauth, SigningKey};
 
 pub fn shared() -> &'static reqwest::Client {
@@ -14,8 +15,9 @@ fn client() -> &'static reqwest::Client {
     C.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
-            // Release uploads may be up to 200 MiB on a slow uplink.
-            .timeout(Duration::from_secs(30 * 60))
+            // Release uploads may be up to 200 MiB on a slow uplink; STALL and ANSWER end a
+            // transfer to a relay that stops taking part long before this.
+            .timeout(FILE)
             .user_agent(concat!("tether-manage/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("http client")
@@ -53,12 +55,46 @@ fn url(server: &str, path: &str) -> String {
 pub const QUICK: Duration = Duration::from_secs(10);
 /// Small signed writes (JSON documents, the download page; at most 512 KiB): the relay answers
 /// at once, so it must start answering within [`QUICK`] and finish within this. Only release file
-/// uploads ([`admin_upload`]) and copies ([`public`]) keep the client's 30 min.
+/// uploads ([`admin_upload`]) and copies ([`file`]) get [`FILE`].
 pub const WRITE: Duration = Duration::from_secs(30);
 /// A diagnostics upload (at most 2 MiB) from start to end, once it has started within [`QUICK`].
 pub const DIAG: Duration = Duration::from_secs(60);
 /// The macOS disk image (about 17 MB) the download page's facts are taken from.
 pub const DMG: Duration = Duration::from_secs(180);
+/// A release file (upload or copy) from start to end, for slow links. [`STALL`] and [`ANSWER`]
+/// end a transfer to a relay that stops taking part long before this.
+pub const FILE: Duration = Duration::from_secs(30 * 60);
+/// While a file goes out or comes in: no progress for this long fails that relay.
+pub const STALL: Duration = if cfg!(test) { Duration::from_secs(2) } else { Duration::from_secs(30) };
+/// After the last byte of an upload the relay checks the signature over the whole file and moves
+/// it into place before it answers (200 MB on a local relay: see docs/management.md).
+pub const ANSWER: Duration = if cfg!(test) { Duration::from_secs(2) } else { Duration::from_secs(30) };
+pub const CANCELLED: &str = "Cancelled.";
+
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Release publish: `true` ends every upload and file copy in progress with [`CANCELLED`]; a new
+/// publish sets it back to `false` first.
+pub fn set_cancel(on: bool) {
+    CANCEL.store(on, Ordering::SeqCst);
+}
+
+pub fn cancelled() -> bool {
+    CANCEL.load(Ordering::SeqCst)
+}
+
+/// `f`, or [`CANCELLED`] as soon as [`set_cancel`] is called.
+async fn cancellable<T>(f: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+    let watch = async {
+        while !cancelled() {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
+    match futures_util::future::select(std::pin::pin!(f), std::pin::pin!(watch)).await {
+        futures_util::future::Either::Left((r, _)) => r,
+        futures_util::future::Either::Right(_) => Err(CANCELLED.to_owned()),
+    }
+}
 
 /// Signed admin request with a small body: the answer must start within [`QUICK`] and be complete
 /// within [`WRITE`]. Returns the body on 2xx.
@@ -101,26 +137,52 @@ pub async fn admin_quick(server: &str, key: &SigningKey, path: &str) -> Result<V
     finish(client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(QUICK).send().await).await
 }
 
-/// Signed `PUT` of a large file; `sent(bytes so far)` runs as the body goes out (256 KiB steps).
+/// Signed `PUT` of a release file with the limits of [`upload`]; `sent(bytes so far)` runs as the
+/// body goes out (256 KiB steps).
 pub async fn admin_upload(server: &str, key: &SigningKey, path: &str, body: Vec<u8>, content_type: &str, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<Vec<u8>, String> {
     let sig = reqauth::sign_request(key, "PUT", path, &body, now());
-    let len = body.len();
+    let req = client().put(url(server, path)).header(reqauth::HEADER, sig).header("Content-Type", content_type);
+    let res = upload(req, body, sent).await?;
+    cancellable(read_body(res)).await
+}
+
+/// Sends `req` with `body` streamed in 256 KiB chunks, `sent(bytes so far)` as each one goes out.
+/// Fails when no chunk goes out for [`STALL`], when the answer has not started [`ANSWER`] after
+/// the last one, or on [`set_cancel`]. Returns the response once its head has arrived.
+pub async fn upload(req: reqwest::RequestBuilder, body: Vec<u8>, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<reqwest::Response, String> {
+    let len = body.len() as u64;
     let chunks: Vec<Vec<u8>> = body.chunks(256 * 1024).map(<[u8]>::to_vec).collect();
-    let mut done = 0u64;
+    // When the last chunk went out, and the bytes so far.
+    let mark = Arc::new(Mutex::new((Instant::now(), 0u64)));
+    let (m, mut done) = (mark.clone(), 0u64);
     // Lazy: a chunk is counted when the connection pulls it.
     let stream = futures_util::stream::iter(chunks.into_iter().map(move |c| {
         done += c.len() as u64;
+        *m.lock().unwrap() = (Instant::now(), done);
         sent(done);
         Ok::<_, std::io::Error>(c)
     }));
-    let req = client()
-        .put(url(server, path))
-        .header(reqauth::HEADER, sig)
-        .header("Content-Type", content_type)
-        // Explicit length: a streamed body would otherwise go out chunked.
-        .header("Content-Length", len)
-        .body(reqwest::Body::wrap_stream(stream));
-    finish(req.send().await).await
+    // Explicit length: a streamed body would otherwise go out chunked.
+    let send = async { req.header("Content-Length", len).body(reqwest::Body::wrap_stream(stream)).send().await.map_err(unreachable) };
+    let watch = async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let (at, n) = *mark.lock().unwrap();
+            if n < len && at.elapsed() > STALL {
+                return format!("The upload stalled: the server took nothing for {} s ({n} of {len} bytes sent).", STALL.as_secs());
+            }
+            if n == len && at.elapsed() > ANSWER {
+                return format!("No answer from the server within {} s after the upload.", ANSWER.as_secs());
+            }
+        }
+    };
+    let both = async {
+        match futures_util::future::select(std::pin::pin!(send), std::pin::pin!(watch)).await {
+            futures_util::future::Either::Left((r, _)) => r,
+            futures_util::future::Either::Right((e, _)) => Err(e),
+        }
+    };
+    cancellable(both).await
 }
 
 /// Unauthenticated `HEAD` of a public file: `Ok(false)` on 404. Gives up after [`QUICK`].
@@ -132,9 +194,10 @@ pub async fn exists(server: &str, path: &str) -> Result<bool, String> {
     }
 }
 
-/// Unauthenticated GET (public `latest.json`, `/api/policy`). `Ok(None)` on 404.
-pub async fn public(server: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
-    public_req(client().get(url(server, path))).await
+/// A release file from a relay (release copy, CDN): [`public_download`] within [`FILE`], ended
+/// by [`set_cancel`]. `Ok(None)` on 404.
+pub async fn file(server: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    cancellable(public_download(server, path, FILE)).await
 }
 
 /// [`public`] that gives up after [`QUICK`].
@@ -161,17 +224,31 @@ async fn finish(res: reqwest::Result<reqwest::Response>) -> Result<Vec<u8>, Stri
 }
 
 async fn read_body(res: reqwest::Response) -> Result<Vec<u8>, String> {
-    let status = res.status().as_u16();
-    let bytes = res.bytes().await.map_err(|e| if e.is_timeout() { "The server stopped answering in time.".to_owned() } else { format!("The connection broke while reading the answer: {e}") })?;
+    let (status, bytes) = read_all(res).await?;
     if (200..300).contains(&status) {
-        Ok(bytes.to_vec())
+        Ok(bytes)
     } else {
         Err(explain(status, &String::from_utf8_lossy(&bytes)))
     }
 }
 
+/// Status and whole body, whatever the status; a server that sends nothing for [`STALL`] fails.
+pub async fn read_all(mut res: reqwest::Response) -> Result<(u16, Vec<u8>), String> {
+    let status = res.status().as_u16();
+    let mut bytes = Vec::new();
+    loop {
+        match tokio::time::timeout(STALL, res.chunk()).await {
+            Err(_) => return Err(format!("The server stopped sending (nothing for {} s).", STALL.as_secs())),
+            Ok(Err(e)) => return Err(if e.is_timeout() { "The server stopped answering in time.".to_owned() } else { format!("The connection broke while reading the answer: {e}") }),
+            Ok(Ok(None)) => break,
+            Ok(Ok(Some(c))) => bytes.extend_from_slice(&c),
+        }
+    }
+    Ok((status, bytes))
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
@@ -225,6 +302,7 @@ mod tests {
     /// body, and the progress ends at the full size.
     #[test]
     fn upload_streams_with_progress() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let key = tether_trust::generate_key();
         let (server, handle) = one_shot(key.verifying_key());
         let data: Vec<u8> = (0..600_000u32).map(|i| i as u8).collect();
@@ -266,6 +344,96 @@ mod tests {
         assert_eq!(r.unwrap_err(), NO_ANSWER);
         assert!(t.elapsed() < QUICK + Duration::from_secs(2), "{:?}", t.elapsed());
         hold.join().unwrap();
+    }
+
+    /// Uploads that can be cancelled (the cancel switch is process-wide) run one at a time.
+    pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
+
+    /// Takes one connection and never answers: reads the whole body (`read`) or nothing, for `hold`.
+    fn silent(read: bool, hold: Duration) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let end = Instant::now() + hold;
+            s.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+            let mut buf = vec![0u8; 1 << 16];
+            while Instant::now() < end {
+                if !read {
+                    std::thread::sleep(Duration::from_millis(100));
+                } else if matches!(s.read(&mut buf), Ok(0)) {
+                    break;
+                }
+            }
+        });
+        (server, h)
+    }
+
+    fn put(server: &str, body: Vec<u8>) -> (Result<Vec<u8>, String>, Duration) {
+        let key = tether_trust::generate_key();
+        let t = Instant::now();
+        let r = tauri::async_runtime::block_on(admin_upload(server, &key, "/api/admin/release/stable/x/a.exe", body, "application/octet-stream", |_| {}));
+        (r, t.elapsed())
+    }
+
+    /// The relay takes the whole body and never answers: fails ANSWER after the last byte.
+    #[test]
+    fn upload_without_answer_fails_after_answer_limit() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (server, h) = silent(true, ANSWER + Duration::from_secs(4));
+        let (r, took) = put(&server, vec![7; 600_000]);
+        let e = r.unwrap_err();
+        assert!(e.contains("after the upload"), "{e}");
+        assert!(took >= ANSWER && took < ANSWER + Duration::from_secs(2), "{took:?}");
+        h.join().unwrap();
+    }
+
+    /// The relay takes nothing (the socket buffers fill): fails STALL after the last chunk went out.
+    #[test]
+    fn upload_to_a_relay_that_takes_nothing_stalls() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (server, h) = silent(false, STALL + Duration::from_secs(6));
+        let (r, took) = put(&server, vec![7; 64 << 20]);
+        let e = r.unwrap_err();
+        assert!(e.contains("stalled"), "{e}");
+        assert!(took < STALL + Duration::from_secs(3), "{took:?}");
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn cancel_ends_an_upload_at_once() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (server, h) = silent(true, ANSWER + Duration::from_secs(2));
+        let c = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(500));
+            set_cancel(true);
+        });
+        let (r, took) = put(&server, vec![7; 600_000]);
+        set_cancel(false);
+        assert_eq!(r.unwrap_err(), CANCELLED);
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+        c.join().unwrap();
+        h.join().unwrap();
+    }
+
+    /// A download whose body stops coming fails STALL after the last byte, not after its total.
+    #[test]
+    fn download_that_stops_sending_fails_after_stall() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nhalf").unwrap();
+            std::thread::sleep(STALL + Duration::from_secs(3));
+        });
+        let t = Instant::now();
+        let r = tauri::async_runtime::block_on(file(&server, "/download/stable/x/a.exe"));
+        assert!(r.unwrap_err().contains("stopped sending"));
+        assert!(t.elapsed() < STALL + Duration::from_secs(2), "{:?}", t.elapsed());
+        h.join().unwrap();
     }
 
     #[test]

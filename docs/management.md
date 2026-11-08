@@ -29,7 +29,10 @@ the same way:
 1. **Review.** A sheet lists what will change and every configured relay, each checked with
    `GET /api/admin/status`. If a relay does not answer, Publish stays disabled until you tick
    "Publish to the others anyway".
-2. **Publish** to every relay.
+2. **Publish** to every relay. With "Publish to the others anyway" ticked, the relays that did
+   not answer the check are left out (nothing is sent to them, not even a read) and their result
+   says **skipped (not reachable)**; this holds for policy, server keys, releases (both sheets and
+   Publish to missing relays), the download page, custom apps and the team roster.
 3. **Result per relay:** ✓ with what is live now, or the error. A relay that failed can be brought
    up to date later (policy: the bar's **Bring … up to date**; releases: **Publish to missing
    relays**).
@@ -121,7 +124,9 @@ relay it came from, so it must never name files that relay lacks: before a new i
 Halt, Resume, ramp, re-sign) goes to a relay, Manage checks (`HEAD`) that the relay serves every
 artifact and gzip copy the index lists. A relay whose upload failed, or that misses a file of an
 earlier release, keeps its previous index and is reported as failed with the missing files
-("… use Publish to missing relays"). **Publish to missing relays** copies the release and the newest
+("… use Publish to missing relays"). A relay that does not answer the read or the check is
+reported as **not reachable** instead ("not reachable (…); its release index was not updated. Do
+this again once it answers."): it may well have the files. **Publish to missing relays** copies the release and the newest
 index to it; later publishes reach it again.
 
 ### Server key
@@ -374,11 +379,33 @@ review sheet sets the **Rollout** and **Security release** for all of them, as t
 does (see "Rollout" there). A macOS technician build without its `.dmg` next to it is skipped
 and marked. Use the form below for mandatory, forced or minimum-version releases.
 
-While it publishes, the sheet shows the build being signed or uploaded, the relay (**Relay 1 of
-2 · host**) and the file, with a progress bar (MB sent and percent), and below it every build ×
-relay that has finished, failed ones with their error. The same progress shows for **Sign and
-publish** and **Publish to missing relays**. The result lists per relay what it now publishes,
-or every error there.
+While it publishes, the sheet shows the build being signed, then one line per relay (**Relay 1 of
+2 · host**, the file, a progress bar with MB sent and percent, "waiting for the relay to confirm"
+once a file is sent, "files uploaded, waiting for the other relays" when it has them all): the relays get the files **at the same time**, so a slow or silent relay
+does not hold up the others. Below that, every build × relay that has finished, failed ones with
+their error as soon as they fail. The same progress shows for **Sign and publish** and **Publish
+to missing relays**. The result lists per relay what it now publishes, or every error there.
+
+**Cancel** stays available while publishing (also Escape): it ends the uploads and copies in
+progress at once, publishes nothing (no release index, no `latest.json`; files that already went
+out stay unused until the next publish or a clean-up), and the remaining builds are not started.
+
+**A relay that stops answering during a publish** fails on its own, while the others go on:
+
+| Limit | Value | When |
+| --- | --- | --- |
+| First answer of a read or a small write | 10 s | everything except the file transfer itself |
+| Upload stalls | 30 s | the relay takes no data for 30 s while a file goes out |
+| Answer after the upload | 30 s | after the last byte the relay checks the signature over the whole file and stores it; a 200 MB release took 1.0 s on a local relay (`apps/desktop/e2e/hang-e2e.mjs`), so 30 s leaves room for slow disks |
+| Download (copy for Publish to missing relays, CDN re-read) | 10 s to the first byte, then 30 s without data | the next relay that publishes the file is tried |
+| Whole transfer | 30 min | a slow link: about 1 Mbit/s for 200 MB |
+| Cloudflare API (CDN) | 30 s to the answer, uploads as above | |
+
+With one silent relay a publish therefore ends after about 40 s (30 s answer limit plus 10 s for
+reading the release index), with that relay's error and the others published. **Publish the latest
+builds** leaves a relay that did not answer for one build out of the next builds and the download
+page, so several builds cost those 40 s once. Ticking "Publish to the others anyway" avoids the
+wait completely.
 
 **What devices get** lists every channel × app × platform with:
 
@@ -446,6 +473,15 @@ Every publish adds a version to every relay; nothing removes them by itself. Abo
   still delete (a version published in between is kept). The results show per relay what was
   deleted, kept or already gone. If the relays hold different release indexes the sheet says so:
   a lagging relay keeps its older version, so publish to the missing relays first.
+
+**A relay that does not answer** (10 s) blocks the clean-up on every relay: the sheet names it
+with its error, shows what the relays that answered would delete ("Would be deleted once every
+relay answers") and offers nothing. Reason: a version is deleted only when every relay that has it
+would drop it, and a silent relay's state is unknown; deleting on the others alone would leave
+the relays different with no way to check. Run it again once the relay answers, or remove the
+relay from the list. A delete sent anyway returns one result per relay ("not reachable" for the
+silent one, "nothing deleted: … does not answer" for the others); **Clean up after each publish**
+adds "Cleanup: skipped: … does not answer, so nothing was deleted anywhere".
 
 Only whole versions are deleted; `latest.json`, `releases.json`, the download page and unknown
 files are never touched. A relay without the clean-up (tether-api before it) answers "update its
@@ -545,8 +581,8 @@ stays; it needs the same code used twice within its 24 h.
 **A relay that does not answer** costs at most 10 s in every view and small write (ticket,
 policy, team, server keys, download page, release index, clean-up): Manage asks all relays at once,
 gives up on one that does not start answering within 10 s (a small write must finish within 30 s),
-and shows each relay's result. Only release file uploads and copies keep the long limit
-(30 min). The policy bar keeps the last live serial after a failed check, marked "earlier check;
+and shows each relay's result. Release file uploads and copies have their own limits (see
+Releases: 30 s without progress, 30 s for the answer after an upload). The policy bar keeps the last live serial after a failed check, marked "earlier check;
 checking again failed: …".
 
 Active tickets: uploads are kept 7 days, a code without upload expires after 24 h ("Expired, no

@@ -74,6 +74,10 @@ const audit = [
   { ts: now - 86400 * 2, kind: "alarm", action: "alarm", id: "305 662 950", uuid: "dXVpZC0zMDU2NjI5NTA=", conn_id: 0, typ: 0, info: '{"ip":"203.0.113.9"}', src: "91.4.77.9", relay: R1, nonce: "alarm-1" },
 ].sort((x, y) => y.ts - x.ts);
 
+// `?silent` in the browser preview: the first relay does not answer (publish sheets, clean-up).
+const silent = typeof location !== "undefined" && new URLSearchParams(location.search).has("silent");
+const NO_ANSWER = "No answer from the server in time.";
+
 // `?many` in the browser preview: 10 000 extra devices and 1 500 sessions, to check paging at fleet scale.
 if (typeof location !== "undefined" && new URLSearchParams(location.search).has("many")) {
   for (let i = 0; i < 10_000; i++) {
@@ -211,7 +215,7 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
     keys_lock: () => (unlocked = false),
     settings_set: () => (servers = String(a.settings.server).split(",").map((s: string) => s.trim()).filter(Boolean)),
     admin: () => (a.path === "/api/admin/status" ? status(R1) : admin[a.path] ?? null),
-    relays_check: () => servers.map((s) => ok(s, status(s))),
+    relays_check: () => servers.map((s) => (silent && s === R1 ? { server: s, ok: false, error: NO_ANSWER, detail: null } : ok(s, status(s)))),
     devices_all: () => ({ devices, failed: [] }),
     audit_all: () => ({ events: audit.filter((e) => e.ts >= a.since), failed: [] }),
     text_save: () => null,
@@ -264,6 +268,7 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       { kind: "technician", platform: "windows-x86_64", version: "0.5.1", file: "dist/windows/Tether_0.5.1_x64-setup.exe", published: "0.4.0", newer: true, problem: null },
     ],
     release_publish: () => servers.map((s) => ok(s, { url: `${s}/download/…` })),
+    release_cancel: () => null,
     release_index: () => ({
       channel: "stable",
       serial: 12,
@@ -287,8 +292,9 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       const vs = (dir: string) => ["0.5.24", "0.5.23", "0.5.22", "0.5.21", "0.5.20", "0.5.19"].map((v, i) =>
         i === 0 ? rel(dir, v, ["index", "latest.json", "download page"], "keep") : i <= keep ? rel(dir, v, i === 1 ? ["previous", "pinned"] : ["previous"], "keep") : v === "0.5.22" && dir.startsWith("technician") ? rel(dir, v, [], "keep") : rel(dir, v, [], "drop"));
       const groups = ["customer/windows-x86_64", "technician/windows-x86_64", "technician/darwin-universal"].map((dir) => ({ channel: "stable", dir, published: servers.map((s) => ({ server: s, version: "0.5.24" })), versions: vs(dir) }));
+      if (silent) groups.forEach((g) => g.versions.forEach((v) => v.offer && Object.assign(v, { offer: false, withheld: true })));
       const offer = groups.flatMap((g) => g.versions.filter((v) => v.offer));
-      return { keep, relays: servers, index_differs: false, groups, offer: { versions: offer.length, files: offer.reduce((n, v) => n + v.files.length, 0), bytes: offer.reduce((n, v) => n + v.bytes, 0) }, kept_versions: groups.flatMap((g) => g.versions).length - offer.length };
+      return { keep, relays: servers, index_differs: false, blocked: silent ? [{ server: R1, error: NO_ANSWER }] : [], groups, offer: { versions: offer.length, files: offer.reduce((n, v) => n + v.files.length, 0), bytes: offer.reduce((n, v) => n + v.bytes, 0) }, kept_versions: groups.flatMap((g) => g.versions).length - offer.length };
     },
     release_prune: () => servers.map((s) => ok(s, { deleted: a.delete, kept: [], gone: [], failed: [], freed_bytes: a.delete.length * 34_898_944 })),
     release_index_refresh: () => [],

@@ -99,8 +99,8 @@ export function PolicyPublish({ onClose }: { onClose: () => void }) {
   const [serial, setSerial] = useState<number | null>(null);
   const missing = live?.unconfigured ?? [];
 
-  const run = async () => {
-    const r = await api.publish(draft);
+  const run = async (skip: string[]) => {
+    const r = await api.publish(draft, skip);
     setSerial(r.serial);
     setDraft({ ...draft, serial: r.serial, issued_at: Math.floor(Date.now() / 1000) });
     reloadLive();

@@ -190,8 +190,8 @@ export function Team() {
         <PublishSheet
           title="Publish team roster"
           action="Publish"
-          run={async () => {
-            const r = await invoke<RelayResult[]>("team_publish", { roster: draft });
+          run={async (skip) => {
+            const r = await invoke<RelayResult[]>("team_publish", { roster: draft, skip });
             if (r.every((x) => x.ok)) setLoaded({ roster: draft, differ: [], failed: [] });
             return r;
           }}

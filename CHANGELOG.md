@@ -7,6 +7,26 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ## [Unreleased]
 
 ### Fixed
+- **Tether Manage: a silent relay no longer freezes release publishing** (round 4 of the blind
+  review, D1-D5). Release files go to all relays at once with one progress line per relay
+  (before: one relay after the other, 30 min each, multiplied per build). An upload fails when the
+  relay takes nothing for 30 s or has not answered 30 s after the last byte (a 200 MB release:
+  the relay answered after 1.0 s locally); copies for Publish to missing relays and the CDN's
+  re-read of older files must start within 10 s, stall at most 30 s, and try the next relay that
+  has the file (before: first relay only, 30 min); Cloudflare API calls must answer within 30 s.
+  **Cancel** (and Escape) now works while publishing and ends the uploads at once, publishing
+  nothing. Measured with one relay that never answers: a publish ends after about 40 s with that
+  relay's error and the other relay published (before: still waiting after 120 s).
+- **"Publish to the others anyway" is honoured**: the relays that did not answer the check get
+  nothing and are listed as "skipped (not reachable)" (releases, Publish to missing relays,
+  policy, server keys, download page, custom apps, team; before: releases still wrote to every
+  relay). Publish the latest builds also leaves a relay that did not answer for one build out of
+  the rest.
+- **Halt / Resume / ramp and index re-signing name a silent relay "not reachable"** instead of
+  "the relay lacks …; use Publish to missing relays".
+- **Clean up with a silent relay** shows which relay blocks it, with its error, what the others
+  would delete, and one result per relay (before: one error, no plan). Nothing is deleted while a
+  relay does not answer (docs/management.md, "Cleaning up old releases").
 - **Tether Manage: no view or small write waits on a relay that never answers** (round 3 of the
   blind review; "all relay reads" in round 2 was not true). Opening a diagnostics upload asks only
   the relay that has it (or the first that sends it) and gives up when it does not start within

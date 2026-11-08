@@ -53,8 +53,9 @@ export function ChangeList({ changes, empty = "No changes." }: { changes: Change
 }
 
 /**
- * Review sheet. `run` publishes to every relay and returns the per-relay results; `after` adds
- * content below them (e.g. how many devices already applied a policy).
+ * Review sheet. `run` publishes to every relay but those in `skip` (the ones that did not answer
+ * the check, when the admin chose to publish to the others anyway) and returns the per-relay
+ * results; `after` adds content below them (e.g. how many devices already applied a policy).
  */
 export function PublishSheet({
   title,
@@ -67,11 +68,12 @@ export function PublishSheet({
   progress,
   cdn: withCdn,
   blocked,
+  cancel,
 }: {
   title: string;
   children?: ReactNode;
   action: string;
-  run: () => Promise<RelayResult[]>;
+  run: (skip: string[]) => Promise<RelayResult[]>;
   after?: (results: RelayResult[]) => ReactNode;
   onClose: () => void;
   /** Blocks nothing; shown above the targets. */
@@ -82,12 +84,15 @@ export function PublishSheet({
   cdn?: boolean;
   /** The review content is not publishable yet (it shows why). */
   blocked?: boolean;
+  /** Stops the publish in progress (release uploads); without it the sheet cannot be left while busy. */
+  cancel?: () => void;
 }) {
   const [check, setCheck] = useState<RelayResult[] | null>(null);
   const [anyway, setAnyway] = useState(false);
   const [phase, setPhase] = useState<"review" | "busy" | "done">("review");
   const [results, setResults] = useState<RelayResult[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   const [cdn, setCdn] = useState<{ enabled: boolean; base: string } | null>(null);
   useEffect(() => {
@@ -97,11 +102,17 @@ export function PublishSheet({
   const toCdn = !!cdn?.enabled;
 
   const down = check?.filter((r) => !r.ok) ?? [];
+  const targets = check ? check.length - (anyway ? down.length : 0) : 0;
+  const stop = () => {
+    setCancelling(true);
+    cancel?.();
+  };
   const go = async () => {
     setPhase("busy");
     setError(null);
+    setCancelling(false);
     try {
-      setResults(await run());
+      setResults(await run(anyway ? down.map((r) => r.server) : []));
       setPhase("done");
     } catch (e: any) {
       setError(e.message);
@@ -117,11 +128,11 @@ export function PublishSheet({
         {progress && <div hidden={phase !== "busy"}>{progress}</div>}
         <ErrorText error={error} />
         <div className="mt-2 flex justify-end gap-2">
-          <Button onClick={onClose} disabled={phase === "busy"}>
-            Cancel
+          <Button onClick={phase === "busy" ? stop : onClose} disabled={phase === "busy" && (!cancel || cancelling)}>
+            {cancelling ? "Cancelling…" : "Cancel"}
           </Button>
-          <Button variant="primary" disabled={!check || blocked || phase === "busy" || (down.length > 0 && !anyway)} onClick={go}>
-            {phase === "busy" ? "Publishing…" : `${action} · ${check ? check.length - (anyway ? down.length : 0) : "…"} relay${check?.length === 1 ? "" : "s"}${toCdn ? " + CDN" : ""}`}
+          <Button variant="primary" disabled={!check || blocked || phase === "busy" || (down.length > 0 && !anyway) || (!!check && !targets)} onClick={go}>
+            {phase === "busy" ? "Publishing…" : `${action} · ${check ? targets : "…"} relay${targets === 1 ? "" : "s"}${toCdn ? " + CDN" : ""}`}
           </Button>
         </div>
       </>
@@ -134,7 +145,7 @@ export function PublishSheet({
     );
 
   return (
-    <Modal onClose={phase === "busy" ? undefined : onClose} width={640} title={<h2 className="text-headline font-semibold">{title}</h2>} footer={footer}>
+    <Modal onClose={phase !== "busy" ? onClose : cancel && !cancelling ? stop : undefined} width={640} title={<h2 className="text-headline font-semibold">{title}</h2>} footer={footer}>
       {phase !== "done" ? (
         <>
           <div>{children}</div>
@@ -166,7 +177,7 @@ export function PublishSheet({
             <label className="mt-3 flex items-start gap-2 text-caption">
               <input type="checkbox" className="mt-0.5" checked={anyway} onChange={(e) => setAnyway(e.target.checked)} />
               <span>
-                {down.length === 1 ? "One relay does not answer." : `${down.length} relays do not answer.`} Publish to the others anyway; bring it up to date later (the header shows relays that are behind).
+                {down.length === 1 ? "One relay does not answer." : `${down.length} relays do not answer.`} Publish to the others anyway: {down.length === 1 ? "it is" : "they are"} left out and listed as skipped; bring {down.length === 1 ? "it" : "them"} up to date later (the header shows relays that are behind).
               </span>
             </label>
           )}

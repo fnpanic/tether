@@ -114,6 +114,21 @@ export function CleanupSheet({ keepDefault, onClose }: { keepDefault: number; on
               {sel.delete.length ? `Frees ${bytes(sel.bytes)} on each of ${n} relay${n === 1 ? "" : "s"} (${sel.files} files, ${sel.delete.length} versions).` : "Nothing selected to delete."} Keeps {plan.kept_versions} versions.
             </p>
           )}
+          {!!plan?.blocked.length && (
+            <div className="mt-3 rounded-xl border border-danger/60 p-3 text-caption" role="alert">
+              <p className="font-semibold text-danger">Nothing can be deleted while a relay does not answer.</p>
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {plan.blocked.map((b) => (
+                  <li key={b.server} className="select-text">
+                    <span className="font-semibold">{host(b.server)}</span>: {b.error}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1 text-muted">
+                A version is only deleted when every relay that has it would drop it, and what a silent relay still needs is unknown. Below: what the relays that answered would delete. Run the clean-up again once every relay answers (or remove the relay from the list in Status and relays).
+              </p>
+            </div>
+          )}
           {plan?.index_differs && (
             <p className="mt-2 text-caption text-warn">The relays hold different release indexes. A lagging relay protects its older version (safe, but it stays): publish to the missing relays first (What devices get).</p>
           )}
@@ -164,7 +179,7 @@ export function CleanupSheet({ keepDefault, onClose }: { keepDefault: number; on
                               <span className="w-16">{v.files.length} files</span>
                               <span className="w-20">{bytes(v.bytes)}</span>
                               <span className="min-w-0 flex-1 truncate" title={v.files.join("\n")}>
-                                {v.offer ? "" : `Kept: ${reasons(v.why)}`}
+                                {v.offer ? "" : v.withheld ? "Would be deleted once every relay answers" : `Kept: ${reasons(v.why)}`}
                                 {others.length > 0 && ` (on ${others.map(host).join(", ")}; the other relays would delete it)`}
                               </span>
                             </li>

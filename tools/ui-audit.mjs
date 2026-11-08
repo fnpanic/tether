@@ -127,6 +127,8 @@ const APPS = {
       ["diag-open", "manage", "/", { page: "Diagnostics", act: (p) => p.getByRole("button", { name: /^Open the upload/ }).first().click({ timeout: 4000 }) }],
       ["publish-sheet", "manage", "/", { act: (p) => p.getByRole("button", { name: /^Publish/ }).first().click() }],
       ["releases-publish", "manage", "/", { page: "Releases", act: (p) => p.getByRole("button", { name: /^Publish \d+ new build/ }).click({ timeout: 4000 }) }],
+      ["releases-publish-silent", "manage", "/?silent", { page: "Releases", act: async (p) => { await p.getByRole("button", { name: /^Publish \d+ new build/ }).click({ timeout: 4000 }); await p.getByRole("dialog").getByRole("checkbox").check({ timeout: 4000 }); } }],
+      ["cleanup-silent", "manage", "/?silent", { page: "Releases", act: async (p) => { await p.getByRole("button", { name: /Clean up old releases/ }).click({ timeout: 4000 }); await p.getByText("Nothing can be deleted while a relay does not answer.").waitFor({ timeout: 4000 }); } }],
       ["download-review", "manage", "/", { page: "Download page", act: (p) => p.getByRole("button", { name: /review|publish/i }).first().click({ timeout: 4000 }) }],
     ],
   },

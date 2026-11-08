@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Check, ChevronRight, RefreshCw, Trash2, X } from "lucide-react";
@@ -133,32 +133,36 @@ function UploadProgress() {
     const un = listen<Progress>("release-progress", (e) => setS((s) => track(s, e.payload)));
     return () => void un.then((f) => f());
   }, []);
-  const c = s.current;
   const n = state.servers.length;
   return (
     <div className="mt-4 rounded-xl border border-hairline p-3" aria-live="polite">
-      {!c ? (
+      {!s.current.length ? (
         <p className="text-caption text-muted">Working…</p>
       ) : (
         <>
-          <p className="text-callout font-semibold">{release(c)}</p>
-          <p className="mt-1 text-caption text-muted">
-            {!c.server
-              ? `Signing ${c.file}…`
-              : c.server === "CDN"
-                ? `Cloudflare CDN · ${c.file || "working"}…`
-                : `Relay ${state.servers.indexOf(c.server) + 1} of ${n} · ${host(c.server)} · ${c.file === "latest.json" ? "writing latest.json" : `uploading ${c.file}`}`}
-          </p>
-          {c.server && c.total > 0 && (
-            <>
-              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-tile-2" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent(c)}>
-                <div className="h-full rounded-full bg-accent" style={{ width: `${percent(c)}%` }} />
-              </div>
-              <p className="mt-1 text-footnote text-muted">
-                {bytes(c.sent)} of {bytes(c.total)} · {percent(c)}%
+          <p className="text-callout font-semibold">{release(s.current[0])}</p>
+          {/* Every relay at once: one line and bar each. */}
+          {s.current.map((c) => (
+            <div key={c.server} className="mt-2">
+              <p className="text-caption text-muted">
+                {!c.server
+                  ? `Signing ${c.file}…`
+                  : c.server === "CDN"
+                    ? `Cloudflare CDN · ${c.file || "working"}…`
+                    : `Relay ${state.servers.indexOf(c.server) + 1} of ${n} · ${host(c.server)} · ${c.file === "latest.json" ? "writing latest.json" : c.file ? `uploading ${c.file}` : "files uploaded, waiting for the other relays"}`}
               </p>
-            </>
-          )}
+              {c.server && c.total > 0 && (
+                <>
+                  <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-tile-2" role="progressbar" aria-label={`Upload to ${target(c.server)}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent(c)}>
+                    <div className="h-full rounded-full bg-accent" style={{ width: `${percent(c)}%` }} />
+                  </div>
+                  <p className="mt-1 text-footnote text-muted">
+                    {bytes(c.sent)} of {bytes(c.total)} · {percent(c)}%{c.sent === c.total ? " · waiting for the relay to confirm" : ""}
+                  </p>
+                </>
+              )}
+            </div>
+          ))}
         </>
       )}
       {s.finished.length > 0 && (
@@ -245,9 +249,10 @@ function Overview() {
             setSync(null);
             load();
           }}
-          run={async () => {
-            const r = await invoke<RelayResult[]>("release_sync", { channel: sync.channel, kind: sync.kind, platform: sync.platform, version: sync.latest });
-            toast(`${sync.latest} published on every relay`);
+          cancel={() => void invoke("release_cancel")}
+          run={async (skip) => {
+            const r = await invoke<RelayResult[]>("release_sync", { channel: sync.channel, kind: sync.kind, platform: sync.platform, version: sync.latest, skip });
+            if (r.every((x) => x.ok)) toast(`${sync.latest} published on every relay`);
             return r;
           }}
         >
@@ -312,9 +317,14 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
   };
 
   const todo = (builds ?? []).filter((b) => b.newer && !b.problem);
+  const stop = useRef(false);
 
   /** Every release, then the page; one result row per relay, failed if anything failed there. */
-  const publishAll = async (): Promise<RelayResult[]> => {
+  const publishAll = async (skip: string[]): Promise<RelayResult[]> => {
+    stop.current = false;
+    // A relay that did not answer for one build is left out of the next ones (and the page) too.
+    const out = [...skip];
+    const silent = (e?: string) => /^skipped|No answer from the server|Could not reach the server|stalled|stopped sending/.test(e ?? "");
     const per = new Map<string, { errs: string[]; done: string[] }>(state.servers.map((sv) => [sv, { errs: [], done: [] }]));
     const add = (server: string, what: string, err?: string) => {
       if (!per.has(server)) per.set(server, { errs: [], done: [] });
@@ -324,20 +334,28 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
     if (!security) await remember(rollout);
     for (const b of todo) {
       const label = `${APP[b.kind]} ${OS[b.platform]} ${b.version}`;
+      if (stop.current) {
+        state.servers.forEach((sv) => add(sv, label, "cancelled, not published"));
+        continue;
+      }
       try {
         const r = await invoke<RelayResult[]>("release_publish", {
           args: { file: b.file, kind: b.kind, platform: b.platform, channel: channel.trim(), version: b.version, notes, mandatory: false, minimum_version: "", forced: false, rollout: ramp, security },
+          skip: out,
         });
-        r.forEach((x) => add(x.server, label, x.ok ? undefined : x.error));
+        r.forEach((x) => {
+          add(x.server, label, x.ok ? undefined : x.error);
+          if (!x.ok && silent(x.error) && !out.includes(x.server)) out.push(x.server);
+        });
       } catch (e: any) {
         state.servers.forEach((sv) => add(sv, label, e.message));
       }
     }
-    if (page && stable) {
+    if (page && stable && !stop.current) {
       try {
         // The saved design: Standard (built-in) or the custom template (docs/download-page.md).
         const html = await pageHtml(s, state.servers, invoke);
-        const r = await invoke<RelayResult[]>("page_publish", { html });
+        const r = await invoke<RelayResult[]>("page_publish", { html, skip: out.length < state.servers.length ? out : [] });
         r.forEach((x) => add(x.server, "Download page", x.ok ? undefined : x.error));
       } catch (e: any) {
         state.servers.forEach((sv) => add(sv, "Download page", e.message));
@@ -412,6 +430,10 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
             setReviewing(false);
             scan();
             onDone();
+          }}
+          cancel={() => {
+            stop.current = true;
+            void invoke("release_cancel");
           }}
           run={publishAll}
         >
@@ -649,10 +671,12 @@ export function Releases() {
             setRound((r) => r + 1);
             load();
           }}
-          run={async () => {
+          cancel={() => void invoke("release_cancel")}
+          run={async (skip) => {
             if (!security) await remember(rollout);
             const r = await invoke<RelayResult[]>("release_publish", {
               args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced, rollout: ramp, security },
+              skip,
             });
             toast(`Released ${version} to ${channel}`);
             setFile("");

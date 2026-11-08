@@ -16,6 +16,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+use crate::api;
+
 pub const API: &str = "https://api.cloudflare.com/client/v4";
 pub const DEFAULT_WORKER: &str = "tether-dl";
 pub const DEFAULT_BASE: &str = "https://tether-dl.thomas-schend.workers.dev";
@@ -135,10 +137,19 @@ pub fn parse_env(text: &str) -> Result<(String, String), String> {
     Ok((get("CLOUDFLARE_API_TOKEN")?, get("CLOUDFLARE_ACCOUNT_ID")?))
 }
 
+/// A small API call: Cloudflare must start answering within [`api::ANSWER`] (the client's own
+/// limit is the 30 min of a release upload).
 async fn call(req: reqwest::RequestBuilder) -> Result<Value, String> {
-    let res = req.send().await.map_err(|e| format!("Cloudflare: {e}"))?;
-    let status = res.status().as_u16();
-    let v: Value = res.bytes().await.ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    let res = match tokio::time::timeout(api::ANSWER, req.send()).await {
+        Ok(r) => r.map_err(|e| format!("Cloudflare: {e}"))?,
+        Err(_) => return Err(format!("Cloudflare: no answer within {} s", api::ANSWER.as_secs())),
+    };
+    answer(res).await
+}
+
+async fn answer(res: reqwest::Response) -> Result<Value, String> {
+    let (status, body) = api::read_all(res).await.map_err(|e| format!("Cloudflare: {e}"))?;
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     if !(200..300).contains(&status) || v["success"] == false {
         let msg = v["errors"].as_array().map(|e| e.iter().map(|e| format!("{} {}", e["code"], e["message"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("; "));
         return Err(format!("Cloudflare answered HTTP {status}: {}", msg.filter(|m| !m.is_empty()).unwrap_or_else(|| "no details".into())));
@@ -183,16 +194,11 @@ where
         let (ct, body) = multipart(&parts);
         let (len, step) = (body.len() as u64, format!("uploading {}", names.join(", ")));
         on(&step, 0, len);
-        // Streamed like api::admin_upload: a chunk is counted when the connection pulls it.
-        let chunks: Vec<Vec<u8>> = body.chunks(256 * 1024).map(<[u8]>::to_vec).collect();
-        let (on2, mut done) = (on.clone(), 0u64);
-        let stream = futures_util::stream::iter(chunks.into_iter().map(move |c| {
-            done += c.len() as u64;
-            on2(&step, done, len);
-            Ok::<_, std::io::Error>(c)
-        }));
-        let req = client.post(format!("{acct}/workers/assets/upload?base64=true")).bearer_auth(&jwt).header("Content-Type", ct).header("Content-Length", len).body(reqwest::Body::wrap_stream(stream));
-        let r = call(req).await?;
+        // Bounded like a relay upload (api::STALL while sending, api::ANSWER after the last byte).
+        let on2 = on.clone();
+        let req = client.post(format!("{acct}/workers/assets/upload?base64=true")).bearer_auth(&jwt).header("Content-Type", ct);
+        let res = api::upload(req, body, move |n| on2(&step, n, len)).await.map_err(|e| format!("Cloudflare: {e}"))?;
+        let r = answer(res).await?;
         if let Some(t) = r["result"]["jwt"].as_str() {
             jwt = t.to_owned(); // the completion token, after the last bucket
         }
@@ -256,10 +262,69 @@ mod tests {
         assert!(parse_env("CLOUDFLARE_API_TOKEN=x").unwrap_err().contains("CLOUDFLARE_ACCOUNT_ID"));
     }
 
+    /// A stand-in for api.cloudflare.com that answers the first `answered` calls like
+    /// [`deploy_flow_against_a_fake_api`] and then takes the next request without ever answering.
+    fn hanging_api(answered: usize, bucket: String) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for i in 0.. {
+                let Ok((s, _)) = listener.accept() else { return };
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let (mut line, mut len) = (String::new(), 0usize);
+                r.read_line(&mut line).unwrap();
+                loop {
+                    let mut h = String::new();
+                    r.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; len];
+                r.read_exact(&mut body).unwrap();
+                if i >= answered {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    return;
+                }
+                let text = json!({"success": true, "result": {"jwt": "upload-jwt", "buckets": [[bucket.clone()]]}}).to_string();
+                write!(&s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).unwrap();
+            }
+        });
+        api
+    }
+
+    /// Cloudflare that stops answering (the first call, or the bucket upload after its last byte):
+    /// the deploy fails after api::ANSWER, not after the client's 30 min.
+    #[test]
+    fn deploy_against_a_silent_api_fails_quickly() {
+        let _one = api::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let file = b"new release".to_vec();
+        let hash = asset_hash(&file, "/stable/c/w/n.exe.gz");
+        let mut assets = Assets::new();
+        assets.insert("/stable/c/w/n.exe.gz".into(), Asset { hash: hash.clone(), size: file.len() as u64, group: "stable/c/w".into(), version: "2".into() });
+        let creds = Creds { account_id: "acc".into(), token: "tok".into(), worker: "tether-dl".into() };
+        for (answered, expect) in [(0, "no answer within"), (1, "after the upload")] {
+            let base = hanging_api(answered, hash.clone());
+            let f = file.clone();
+            let t = std::time::Instant::now();
+            let r = tauri::async_runtime::block_on(deploy(&reqwest::Client::new(), &base, &creds, &assets, move |_| {
+                let f = f.clone();
+                async move { Ok(f) }
+            }, std::sync::Arc::new(|_: &str, _, _| {})));
+            let e = r.unwrap_err();
+            assert!(e.contains(expect), "{e}");
+            assert!(t.elapsed() < api::ANSWER + std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+        }
+    }
+
     /// The three API calls against a stand-in for api.cloudflare.com: manifest, one bucket with the
     /// file Cloudflare lacks (base64, field named by hash), then the script with the completion token.
     #[test]
     fn deploy_flow_against_a_fake_api() {
+        let _one = api::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
         let new_file = b"new release".to_vec();

@@ -259,7 +259,11 @@ button **Clean up old releases…** opens a sheet (same component family as the 
   [2] older version(s)" and "Clean up after each publish" (off by default). When on,
   `publish_upload` runs the prune (execute with the merged plan's offer) after a successful publish
   and adds a "Cleanup" line to the results. A relay that does not answer the dry run stops the
-  clean-up (nothing is deleted anywhere).
+  clean-up (nothing is deleted anywhere). Decided 2026-11-08: this stays so even though each relay
+  only deletes what it would drop itself; the merged offer needs every relay's plan, and deleting
+  on the reachable relays alone would leave them different. The plan of the relays that answered
+  is still shown (`blocked` lists the silent ones, their versions `withheld`), and an execute
+  returns one result per relay.
 
 The mock (`lib/mock.ts`) gets a canned plan so the sheet works in the browser preview.
 

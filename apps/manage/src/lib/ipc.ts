@@ -121,7 +121,7 @@ export const api = {
   /** Devices of every relay, merged by uuid. */
   devices: () => invoke<{ devices: Device[]; failed: string[] }>("devices_all"),
   saveSettings: (settings: Record<string, unknown>) => invoke("settings_set", { settings }),
-  publish: (bundle: Bundle) => invoke<{ serial: number; relays: RelayResult[] }>("policy_publish", { bundle }),
+  publish: (bundle: Bundle, skip: string[] = []) => invoke<{ serial: number; relays: RelayResult[] }>("policy_publish", { bundle, skip }),
   live: () => invoke<Live>("policy_live"),
   relays: () => invoke<RelayResult[]>("relays_check"),
 };
