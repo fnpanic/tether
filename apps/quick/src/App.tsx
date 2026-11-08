@@ -66,7 +66,7 @@ export function App() {
   return (
     <div className="flex h-full flex-col">
       <TitleBar title={s.branding.title} logo={s.branding.logo} onHelp={s.branding.diagnostics ? () => setHelp(!help) : undefined} helpOpen={help} />
-      <div className="flex min-h-0 flex-1 flex-col px-6 pb-5">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-5">
         {help ? (
           <Help customApp={s.branding.custom_app} status={s.status} lastCheck={s.update.last_check} stale={s.update.stale} onBack={() => setHelp(false)} />
         ) : (
@@ -582,7 +582,7 @@ function Help({ customApp, status, lastCheck, stale, onBack }: { customApp: stri
       ]
     : [];
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="-mx-2 flex min-h-0 flex-1 flex-col overflow-y-auto px-2">
       <button className="mb-3 inline-flex items-center gap-1.5 self-start text-caption text-accent" onClick={onBack}>
         <ArrowLeft size={14} /> Back
       </button>
