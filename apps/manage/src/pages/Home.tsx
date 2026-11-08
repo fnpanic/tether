@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useApp } from "../App";
 import { api, bytes, host, type RelayResult } from "../lib/ipc";
-import { liveCount } from "../components/policy-publish";
+import { liveCount, unchecked } from "../lib/live";
 import { Badge, Button, Card, ErrorText, IconButton, PageHeader, StatusDot, Table, TextField } from "../components/ui";
 
 function uptime(s: number) {
@@ -146,8 +146,10 @@ function Relays() {
 }
 
 export function Home() {
-  const { live, changes, dirty, go, publish, invalid } = useApp();
+  const { live, liveError, changes, dirty, go, publish, invalid } = useApp();
   const { on, of } = liveCount(live);
+  // Nothing found where the relays could not be read is not "None published".
+  const why = live?.serial == null ? (unchecked(live) ?? (live ? null : liveError)) : null;
   return (
     <>
       <PageHeader title="Status and relays" />
@@ -156,8 +158,8 @@ export function Home() {
         <Card className="flex flex-wrap items-center gap-6">
           <div className="min-w-[240px] flex-1">
             <p className="text-caption text-muted">Live policy</p>
-            <p className="mt-1 text-title font-semibold">{live?.serial != null ? `Serial ${live.serial}` : live ? "None published" : "…"}</p>
-            <p className="mt-1 text-caption text-muted">{live?.serial != null ? `On ${on} of ${of} relays` : ""}</p>
+            <p className="mt-1 text-title font-semibold">{live?.serial != null ? `Serial ${live.serial}` : why ? "Could not check" : live ? "None published" : "…"}</p>
+            <p className={`mt-1 text-caption ${why ? "text-danger" : "text-muted"}`}>{live?.serial != null ? `On ${on} of ${of} relays` : (why ?? "")}</p>
           </div>
           <div className="min-w-[240px] flex-1">
             <p className="text-caption text-muted">Draft</p>

@@ -82,6 +82,16 @@ const NO_ANSWER = "No answer from the server in time.";
 // comes too late for build 3.
 const mixed = typeof location !== "undefined" && new URLSearchParams(location.search).has("mixed");
 let mixedRun = 0;
+// `?uploading`: "Publish the latest builds" stays in progress: the first build is done on both
+// relays and the CDN, the second uploads (relay 1 at 50 %, relay 2 at 90 %), and nothing ends.
+const uploading = typeof location !== "undefined" && new URLSearchParams(location.search).has("uploading");
+/** Listeners of the preview's events (`release-progress`), in place of Tauri's. */
+const listeners: Record<string, ((payload: any) => void)[]> = {};
+export function mockListen(event: string, cb: (payload: any) => void) {
+  (listeners[event] ??= []).push(cb);
+  return () => void (listeners[event] = listeners[event].filter((x) => x !== cb));
+}
+const emit = (event: string, payload: unknown) => listeners[event]?.forEach((cb) => cb(payload));
 
 // `?many` in the browser preview: 10 000 extra devices and 1 500 sessions, to check paging at fleet scale.
 if (typeof location !== "undefined" && new URLSearchParams(location.search).has("many")) {
@@ -273,6 +283,13 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       { kind: "technician", platform: "windows-x86_64", version: "0.5.1", file: "dist/windows/Tether_0.5.1_x64-setup.exe", published: "0.4.0", newer: true, problem: null },
     ],
     release_publish: () => {
+      if (uploading) {
+        const p = (dir: string, server: string, file: string, sent: number, total: number, done = false) => ({ dir, version: "0.5.1", server, file, sent, total, done, error: null });
+        ["CDN", R1, R2].forEach((s) => emit("release-progress", p("customer/darwin-universal", s, "", 0, 0, true)));
+        emit("release-progress", p("technician/darwin-universal", R1, "Tether_0.5.1_universal.app.tar.gz", 8_700_000, 17_373_327));
+        emit("release-progress", p("technician/darwin-universal", R2, "Tether_0.5.1_universal.app.tar.gz", 15_600_000, 17_373_327));
+        return new Promise(() => {});
+      }
       if (!mixed) return servers.map((s) => ok(s, { url: `${s}/download/…`, live: true }));
       const n = ++mixedRun;
       const rows = servers.map((s, i) =>

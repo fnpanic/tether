@@ -3,14 +3,9 @@ import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { useApp } from "../App";
 import { api, host, invoke, midnight, type Device, type RelayResult } from "../lib/ipc";
+import { liveCount, liveLine } from "../lib/live";
 import { ChangeList, PublishSheet, RelayResults } from "./publish";
 import { Badge, Button, IconButton, Modal, StatusDot } from "./ui";
-
-/** Relays that serve the newest verified serial, out of all configured. */
-export function liveCount(live: ReturnType<typeof useApp>["live"]) {
-  const relays = live?.relays ?? [];
-  return { on: relays.filter((r) => r.verified && r.serial === live?.serial).length, of: relays.length };
-}
 
 export function PolicyBar() {
   const { live, liveError, changes, dirty, invalid, publish, go, reloadLive } = useApp();
@@ -18,6 +13,7 @@ export function PolicyBar() {
   const [busy, setBusy] = useState(false);
   const { on, of } = liveCount(live);
   const behind = live?.serial != null && on < of;
+  const line = liveLine(live, liveError);
 
   const sync = async () => {
     setBusy(true);
@@ -39,20 +35,12 @@ export function PolicyBar() {
       </span>
       <span className="h-4 w-px bg-hairline" aria-hidden />
       <span className="flex items-center gap-2">
-        <StatusDot tone={liveError ? "danger" : !live ? "muted" : behind ? "warn" : "ok"} />
-        {!live ? (
-          liveError ? (
-            <span title={liveError}>Live: could not check ({liveError})</span>
-          ) : (
-            "Live: checking…"
-          )
-        ) : (
-          <span title={liveError ?? undefined}>
-            {live.serial == null ? "Live: nothing published yet" : `Live: serial ${live.serial} on ${on}/${of} relay${of === 1 ? "" : "s"}`}
-            {/* A later check failed: the value above is from the one before. */}
-            {liveError && <span className="text-danger"> (earlier check; checking again failed: {liveError})</span>}
-          </span>
-        )}
+        <StatusDot tone={line.tone} />
+        <span title={liveError ?? undefined}>
+          {line.text}
+          {/* A later check failed: the value shown is from the check before. */}
+          {live && liveError && <span className="text-danger"> (earlier check; checking again failed: {liveError})</span>}
+        </span>
       </span>
       {live?.unconfigured.map((h) => (
         <button key={h} onClick={() => go("home")} title="The policy sends devices to this relay, but Tether Manage does not publish to it. Add it on Status and relays.">

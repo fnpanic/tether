@@ -5,6 +5,7 @@ import { Check, ChevronRight, RefreshCw, Trash2, X } from "lucide-react";
 import { useApp } from "../App";
 import { api, bytes, host, inTauri, invoke, target, when, type RelayResult } from "../lib/ipc";
 import { idle, percent, track, type Progress } from "../lib/progress";
+import { mockListen } from "../lib/mock";
 import { pageHtml } from "../lib/page-template";
 import { PublishSheet } from "../components/publish";
 import { CleanupSheet } from "../components/cleanup";
@@ -135,13 +136,13 @@ function UploadProgress() {
   const { state } = useApp();
   const [s, setS] = useState(idle);
   useEffect(() => {
-    if (!inTauri) return;
+    if (!inTauri) return mockListen("release-progress", (p: Progress) => setS((s) => track(s, p)));
     const un = listen<Progress>("release-progress", (e) => setS((s) => track(s, e.payload)));
     return () => void un.then((f) => f());
   }, []);
   const n = state.servers.length;
   return (
-    <div className="mt-4 rounded-xl border border-hairline p-3" aria-live="polite">
+    <div className="rounded-xl border border-hairline p-3" aria-live="polite">
       {!s.current.length ? (
         <p className="text-caption text-muted">Working…</p>
       ) : (

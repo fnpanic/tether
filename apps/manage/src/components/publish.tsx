@@ -142,9 +142,6 @@ export function PublishSheet({
   const footer =
     phase !== "done" ? (
       <>
-        {/* Mounted from the start so it already listens when the first event comes; in the footer
-            so it stays in view. */}
-        {progress && <div hidden={phase !== "busy"}>{progress}</div>}
         <ErrorText error={error} />
         <div className="mt-2 flex justify-end gap-2">
           <Button onClick={phase === "busy" ? stop : onClose} disabled={phase === "busy" && (!cancel || cancelling)}>
@@ -164,42 +161,49 @@ export function PublishSheet({
     );
 
   return (
-    <Modal onClose={phase !== "busy" ? onClose : cancel && !cancelling ? stop : undefined} width={640} title={<h2 className="text-headline font-semibold">{title}</h2>} footer={footer}>
+    // While publishing only the Cancel button stops it: Escape or a click beside the sheet (to bring
+    // the window to the front) used to cancel a whole run by accident.
+    <Modal onClose={phase !== "busy" ? onClose : undefined} width={640} title={<h2 className="text-headline font-semibold">{title}</h2>} footer={footer}>
       {phase !== "done" ? (
         <>
-          <div>{children}</div>
-          {warning && <div className="mt-4">{warning}</div>}
-          <h3 className="mb-2 mt-5 text-caption font-semibold">{toCdn ? "Publishes to every relay and the Cloudflare CDN" : "Publishes to every relay"}</h3>
-          {!check ? (
-            <p className="text-caption text-muted">Checking the relays…</p>
-          ) : (
-            <ul className="flex flex-col gap-1.5">
-              {check.map((r) => (
-                <li key={r.server} className="flex items-center gap-2 text-caption">
-                  <StatusDot tone={r.ok ? "ok" : "danger"} />
-                  <span className="font-semibold">{host(r.server)}</span>
-                  <span className={`min-w-0 flex-1 truncate ${r.ok ? "text-muted" : "text-danger"}`} title={r.error}>
-                    {r.ok ? `Reachable · API ${r.detail?.version ?? "?"} · policy serial ${r.detail?.policy_serial ?? "none"}` : r.error}
-                  </span>
-                </li>
-              ))}
-              {toCdn && (
-                <li className="flex items-center gap-2 text-caption">
-                  <StatusDot tone="ok" />
-                  <span className="font-semibold">Cloudflare CDN</span>
-                  <span className="min-w-0 flex-1 truncate text-muted">On · {host(cdn!.base)} · update files, devices fall back to the relays</span>
-                </li>
-              )}
-            </ul>
-          )}
-          {down.length > 0 && (
-            <label className="mt-3 flex items-start gap-2 text-caption">
-              <input type="checkbox" className="mt-0.5" checked={anyway} onChange={(e) => setAnyway(e.target.checked)} />
-              <span>
-                {down.length === 1 ? "One relay does not answer." : `${down.length} relays do not answer.`} Publish to the others anyway: {down.length === 1 ? "it is" : "they are"} left out and listed as skipped; bring {down.length === 1 ? "it" : "them"} up to date later (the header shows relays that are behind).
-              </span>
-            </label>
-          )}
+          {/* Mounted from the start so it already listens when the first event comes. While
+              publishing it is the content; the review, which can no longer change, is hidden. */}
+          {progress && <div hidden={phase !== "busy"}>{progress}</div>}
+          <div hidden={phase === "busy"}>
+            <div>{children}</div>
+            {warning && <div className="mt-4">{warning}</div>}
+            <h3 className="mb-2 mt-5 text-caption font-semibold">{toCdn ? "Publishes to every relay and the Cloudflare CDN" : "Publishes to every relay"}</h3>
+            {!check ? (
+              <p className="text-caption text-muted">Checking the relays…</p>
+            ) : (
+              <ul className="flex flex-col gap-1.5">
+                {check.map((r) => (
+                  <li key={r.server} className="flex items-center gap-2 text-caption">
+                    <StatusDot tone={r.ok ? "ok" : "danger"} />
+                    <span className="font-semibold">{host(r.server)}</span>
+                    <span className={`min-w-0 flex-1 truncate ${r.ok ? "text-muted" : "text-danger"}`} title={r.error}>
+                      {r.ok ? `Reachable · API ${r.detail?.version ?? "?"} · policy serial ${r.detail?.policy_serial ?? "none"}` : r.error}
+                    </span>
+                  </li>
+                ))}
+                {toCdn && (
+                  <li className="flex items-center gap-2 text-caption">
+                    <StatusDot tone="ok" />
+                    <span className="font-semibold">Cloudflare CDN</span>
+                    <span className="min-w-0 flex-1 truncate text-muted">On · {host(cdn!.base)} · update files, devices fall back to the relays</span>
+                  </li>
+                )}
+              </ul>
+            )}
+            {down.length > 0 && (
+              <label className="mt-3 flex items-start gap-2 text-caption">
+                <input type="checkbox" className="mt-0.5" checked={anyway} onChange={(e) => setAnyway(e.target.checked)} />
+                <span>
+                  {down.length === 1 ? "One relay does not answer." : `${down.length} relays do not answer.`} Publish to the others anyway: {down.length === 1 ? "it is" : "they are"} left out and listed as skipped; bring {down.length === 1 ? "it" : "them"} up to date later (the header shows relays that are behind).
+                </span>
+              </label>
+            )}
+          </div>
         </>
       ) : (
         <>

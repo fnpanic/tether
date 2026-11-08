@@ -6,6 +6,24 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Fixed
+- **Tether Manage: a click beside the publish sheet no longer cancels a release run.** While
+  publishing, Escape and a mouse click on the dimmed area around the sheet counted as Cancel; a
+  click to bring the window back to the front (e.g. after taking a screenshot) cancelled the
+  0.5.27 run during the macOS technician app upload (both relays logged a cancelled upload, HTTP
+  400 "request body incomplete", 2.6 s into the file; the rest of the run was skipped and had to
+  be started again). Now only the Cancel button stops a publish.
+- **Tether Manage: the publish sheet shows the progress as its content.** The upload progress sat
+  in the sheet's footer and squeezed the review above it, which stayed visible though it could no
+  longer change ("Publishes to every relay and the Cloudflare CDN" was cut in half at its edge).
+  While publishing the review is hidden and the progress takes its place; Cancel stays in view.
+- **Tether Manage: the live policy check says when it could not check.** When no relay could be
+  read, the bar said "Live: nothing published yet" (green), Status and relays "None published" and
+  the Live policy tab "Nothing published yet"; a check that failed outright left the Live policy
+  tab on "Reading the live policy from every relay…" for good. Now they say "could not check" with
+  each relay's reason, a failed or incomplete check is asked again every 30 s until every relay
+  answers, and an older, slower check no longer overwrites a newer one.
+
 ## [0.5.27] — 2026-11-08
 Tether / TetherQS 0.5.27 (Windows and macOS), Tether Manage 0.5.10; relays: tether-api (diagnostics tickets, deployed 2026-11-08). Rollout choice for automatic publishing, dialogs fit the screen, no relay call can hang, layout fixes in all windows, diagnostics from every app (TetherQS Send to support) with close/archive/delete.
 

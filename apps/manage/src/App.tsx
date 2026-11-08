@@ -1,6 +1,7 @@
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { Activity, FileCode2, History, KeyRound, Lock, Monitor, Package, Palette, ShieldCheck, Stethoscope, Users } from "lucide-react";
 import { api, emptyBundle, invoke, type AppState, type Bundle, type Change, type Live } from "./lib/ipc";
+import { incomplete } from "./lib/live";
 import { SELECTED, useToast } from "./components/ui";
 import { PolicyBar, PolicyPublish } from "./components/policy-publish";
 import { Gate } from "./pages/Gate";
@@ -66,20 +67,33 @@ export function App() {
   const reload = useCallback(async () => setState(await api.state()), []);
   useEffect(() => void reload(), [reload]);
 
-  const reloadLive = useCallback(
-    () =>
-      api.live().then(
-        (l) => (setLive(l), setLiveError(null)),
-        (e) => setLiveError(e.message),
-      ),
-    [],
-  );
+  // Only the newest check's answer counts: an older, slower one must not overwrite it.
+  const liveSeq = useRef(0);
+  // Checks answered so far: each one arms the next retry, also when it failed the same way.
+  const [checks, setChecks] = useState(0);
+  const reloadLive = useCallback(() => {
+    const n = ++liveSeq.current;
+    return api.live().then(
+      (l) => void (n === liveSeq.current && (setLive(l), setLiveError(null), setChecks((c) => c + 1))),
+      (e) => void (n === liveSeq.current && (setLiveError(e.message), setChecks((c) => c + 1))),
+    );
+  }, []);
 
   useEffect(() => {
     if (!state?.unlocked) return;
     invoke<Bundle>("policy_draft").then(setDraftState, (e) => show(e.message));
     reloadLive();
   }, [state?.unlocked, state?.settings.server]);
+
+  // A check that failed or that a relay did not answer (network not up yet, a relay restarting)
+  // is asked again every 30 s until every relay answers; before, it stayed as it was until a
+  // manual "Check again".
+  const retry = !!state?.unlocked && incomplete(live, liveError);
+  useEffect(() => {
+    if (!retry) return;
+    const t = setTimeout(reloadLive, 30_000);
+    return () => clearTimeout(t);
+  }, [retry, checks]);
 
   useEffect(() => {
     if (!state?.unlocked) return;

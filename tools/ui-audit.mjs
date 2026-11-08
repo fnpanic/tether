@@ -129,11 +129,34 @@ const APPS = {
       ["releases-publish", "manage", "/", { page: "Releases", act: (p) => p.getByRole("button", { name: /^Publish \d+ new build/ }).click({ timeout: 4000 }) }],
       ["releases-publish-silent", "manage", "/?silent", { page: "Releases", act: async (p) => { await p.getByRole("button", { name: /^Publish \d+ new build/ }).click({ timeout: 4000 }); await p.getByRole("dialog").getByRole("checkbox").check({ timeout: 4000 }); } }],
       ["releases-result-mixed", "manage", "/?mixed", { page: "Releases", act: async (p) => { await p.getByRole("button", { name: /^Publish \d+ new build/ }).click({ timeout: 4000 }); const d = p.getByRole("dialog"); await d.getByRole("button", { name: /^Sign and publish ·/ }).click({ timeout: 4000 }); await d.getByRole("button", { name: "Done" }).waitFor({ timeout: 8000 }); } }],
+      // Publishing in progress (mock progress events): the progress is the sheet's content, the review form is gone, nothing cut at the edge of its scroll area, Cancel in view.
+      ["releases-publishing", "manage", "/?uploading", { page: "Releases", act: async (p) => { await p.getByRole("button", { name: /^Publish \d+ new build/ }).click({ timeout: 4000 }); const d = p.getByRole("dialog"); await d.getByRole("button", { name: /^Sign and publish ·/ }).click({ timeout: 4000 }); await d.getByRole("progressbar").first().waitFor({ timeout: 4000 }); }, expect: publishing }],
       ["cleanup-silent", "manage", "/?silent", { page: "Releases", act: async (p) => { await p.getByRole("button", { name: /Clean up old releases/ }).click({ timeout: 4000 }); await p.getByText("Nothing can be deleted while a relay does not answer.").waitFor({ timeout: 4000 }); } }],
       ["download-review", "manage", "/", { page: "Download page", act: (p) => p.getByRole("button", { name: /review|publish/i }).first().click({ timeout: 4000 }) }],
     ],
   },
 };
+
+/** In-page check for a publish sheet while publishing: what the generic audit cannot tell (a
+ *  heading cut at the bottom of a scroll area is normal scrolling there). */
+function publishing() {
+  const d = document.querySelector("[role=dialog]");
+  if (!d) return [["publishing", "no dialog"]];
+  const out = [], shown = (el) => el.getClientRects().length > 0;
+  if ([...d.querySelectorAll("textarea,input,[role=radio],[role=switch]")].some(shown)) out.push(["publishing-form", "the review form is still shown while publishing (it can no longer change)"]);
+  if (![...d.querySelectorAll("[role=progressbar]")].some(shown)) out.push(["publishing-progress", "no upload progress shown"]);
+  const cancel = [...d.querySelectorAll("button")].find((b) => b.innerText.trim() === "Cancel");
+  if (!cancel || cancel.getBoundingClientRect().bottom > innerHeight) out.push(["publishing-cancel", "Cancel not in view"]);
+  for (const el of d.querySelectorAll("h2,h3,p,li")) {
+    if (!shown(el)) continue;
+    for (let a = el.parentElement; a && a !== d; a = a.parentElement) {
+      if (!/auto|scroll/.test(getComputedStyle(a).overflowY)) continue;
+      const r = el.getBoundingClientRect(), s = a.getBoundingClientRect();
+      if ((r.top < s.bottom - 1 && r.bottom > s.bottom + 1) || (r.top < s.top - 1 && r.bottom > s.top + 1)) out.push(["publishing-cut", `"${el.innerText.slice(0, 50)}" cut at the edge of the sheet's scroll area`]);
+    }
+  }
+  return out;
+}
 
 // ---- in-page audit
 function audit() {
@@ -256,6 +279,7 @@ try {
         const file = `${name}__${sz}__${theme}.png`;
         await p.screenshot({ path: `${OUT}/${file}` });
         const issues = await p.evaluate(audit).catch((e) => [["audit-error", String(e)]]);
+        if (o.expect) issues.push(...(await p.evaluate(o.expect).catch((e) => [["audit-error", String(e)]])));
         findings.push({ name, size: sz, theme, file, note, errs, issues });
         const bad = issues.filter((i) => i[0] !== "ellipsis");
         console.log(`${name} ${sz} ${theme}: ${bad.length} issues${note ? " | " + note : ""}${errs.length ? " | pageerror " + errs[0] : ""}`);
