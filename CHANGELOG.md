@@ -6,6 +6,9 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+## [0.5.27] — 2026-11-08
+Tether / TetherQS 0.5.27 (Windows and macOS), Tether Manage 0.5.10; relays: tether-api (diagnostics tickets, deployed 2026-11-08). Rollout choice for automatic publishing, dialogs fit the screen, no relay call can hang, layout fixes in all windows, diagnostics from every app (TetherQS Send to support) with close/archive/delete.
+
 ### Fixed
 - **Tether Manage: a silent relay no longer freezes release publishing** (round 4 of the blind
   review, D1-D5). Release files go to all relays at once with one progress line per relay
