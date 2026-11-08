@@ -90,9 +90,9 @@ pub async fn admin_upload(server: &str, key: &SigningKey, path: &str, body: Vec<
     finish(req.send().await).await
 }
 
-/// Unauthenticated `HEAD` of a public file: `Ok(false)` on 404.
+/// Unauthenticated `HEAD` of a public file: `Ok(false)` on 404. Gives up after [`QUICK`].
 pub async fn exists(server: &str, path: &str) -> Result<bool, String> {
-    match finish(client().head(url(server, path)).send().await).await {
+    match finish(client().head(url(server, path)).timeout(QUICK).send().await).await {
         Ok(_) => Ok(true),
         Err(e) if e.contains("HTTP 404") => Ok(false),
         Err(e) => Err(e),

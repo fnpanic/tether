@@ -136,7 +136,7 @@ export function Rules({ hosts, store, onClose }: { hosts: Host[]; store: Store; 
       >
         <TextField className="!h-9 !text-caption" placeholder="Tag (site:berlin)" aria-label="Rule tag" value={tag} onChange={(e) => setTag(e.target.value.slice(0, 64))} />
         <div>
-          <TextField className="!h-9 font-mono !text-caption" placeholder='Search (host:BER- or os:mac -#env:prod)' aria-label="Rule search" value={when} onChange={(e) => setWhen(e.target.value.slice(0, 1000))} />
+          <TextField className="!h-9 font-mono !text-caption" placeholder="e.g. host:BER- or os:mac" title="Search, e.g. host:BER- or os:mac -#env:prod" aria-label="Rule search" value={when} onChange={(e) => setWhen(e.target.value.slice(0, 1000))} />
           <div className="mt-1 text-footnote text-muted">{when ? (p.error ? `${p.error}. ` : "") + `${n.toLocaleString()} hosts match now` : " "}</div>
         </div>
         <Button type="submit" variant="primary" size="md" disabled={!normTag(tag) || !p.node}>
@@ -454,7 +454,9 @@ export function Sessions({ hosts, onClose, onToast }: { hosts: Map<string, Host>
           return (
             <div key={s.key} className="flex h-11 items-center gap-3 rounded-md px-2 hover:bg-tile-2">
               <div className="min-w-0 flex-1">
-                <div className="truncate text-caption font-semibold">{h ? label(h) : formatId(s.peer)}</div>
+                <div className="truncate text-caption font-semibold" title={h ? label(h) : formatId(s.peer)}>
+                  {h ? label(h) : formatId(s.peer)}
+                </div>
                 <div className="font-mono text-footnote text-muted">
                   {formatId(s.peer)} · {remote ? "Remote control" : "File transfer"}
                 </div>

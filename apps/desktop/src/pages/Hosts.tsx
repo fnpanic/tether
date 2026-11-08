@@ -489,7 +489,8 @@ export function Hosts() {
                 autoFocus
                 value={q}
                 onChange={(e) => setQ(e.target.value.slice(0, 1000))}
-                placeholder="Search name, ID, #tag, os:mac, is:online, seen:<7d …"
+                placeholder="Search hosts…"
+                title="Search name, ID, #tag, os:mac, is:online, seen:<7d"
                 aria-label="Search hosts"
                 spellCheck={false}
                 autoComplete="off"

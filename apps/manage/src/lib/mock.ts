@@ -198,7 +198,7 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       servers,
       data_dir: "C:\\Users\\you\\AppData\\Roaming\\Tether-Manage",
     }),
-    keys_unlock: () => (unlocked = true),
+    keys_unlock: () => (a.passphrase === "wrong" ? (() => { throw new Error("Wrong passphrase, or the key file is damaged."); })() : (unlocked = true)),
     serverkeys_live: () => ({ relays: skLive(), rotation: skRotation }),
     serverkeys_rotation_set: () => (skRotation = a.rotation),
     serverkeys_save_files: () => null,

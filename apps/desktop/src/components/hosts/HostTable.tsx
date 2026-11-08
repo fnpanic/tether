@@ -97,8 +97,12 @@ const Row = memo(function Row({
         <span className="shrink-0 text-muted">
           <PlatformIcon platform={h.os} size={15} />
         </span>
-        <span className="truncate font-semibold">{label(h)}</span>
-        {h.name && h.hostname && h.name !== h.hostname && <span className="truncate text-footnote text-muted">{h.hostname}</span>}
+        <span className="truncate font-semibold" title={label(h)}>
+          {label(h)}
+        </span>
+        {h.name && h.hostname && h.name !== h.hostname && <span className="truncate text-footnote text-muted" title={h.hostname}>
+            {h.hostname}
+          </span>}
         {h.pinned && <Pin size={12} className="shrink-0 text-muted" aria-label="Pinned" />}
       </span>
       <span role="gridcell" className="truncate font-mono text-footnote tabular-nums text-ink-80">

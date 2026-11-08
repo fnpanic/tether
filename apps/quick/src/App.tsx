@@ -136,7 +136,7 @@ function TitleBar({ title, logo, onHelp, helpOpen }: { title: string; logo: stri
   return (
     <div data-tauri-drag-region className="drag flex h-11 shrink-0 items-center gap-2 pl-6 pr-2">
       {logo && <img data-tauri-drag-region data-testid="qs-logo" src={logo} alt="" className="h-5 max-w-20 shrink-0 object-contain" draggable={false} />}
-      <span data-tauri-drag-region data-testid="qs-title" className="min-w-0 flex-1 truncate text-caption font-semibold">
+      <span data-tauri-drag-region data-testid="qs-title" className="min-w-0 flex-1 truncate text-caption font-semibold" title={title}>
         {title}
       </span>
       {onHelp && (
@@ -281,11 +281,14 @@ function Perms({ c, s, onError, also = [] }: { c: Client; s: State; onError: (m:
 
 function Request({ c, s, onError }: { c: Client; s: State; onError: (m: string) => void }) {
   return (
-    <Card className="mt-2 flex min-h-0 flex-1 flex-col !p-5">
+    // Not min-h-0: the card never shrinks below the permission list's minimum; the column scrolls.
+    <Card className="mt-2 flex flex-1 flex-col !p-5">
       <div className="flex items-center gap-3">
         <Avatar c={c} />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-callout font-semibold">{c.name || "Unknown"}</div>
+          <div className="truncate text-callout font-semibold" title={c.name || undefined}>
+            {c.name || "Unknown"}
+          </div>
           <div className="font-mono text-footnote text-muted">ID {formatId(c.peer_id)}</div>
         </div>
       </div>
@@ -298,7 +301,8 @@ function Request({ c, s, onError }: { c: Client; s: State; onError: (m: string) 
       <p className="mt-2 text-footnote text-muted">
         {s.branding.approve_mode === "click" ? "Accept lets them in right away." : "Accept lets them in right away, no password needed. Typing your one-time password lets them in too."} Below: what they may do.
       </p>
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      {/* At least three switches stay in view before Accept, however many banners sit above. */}
+      <div className="min-h-[7.75rem] flex-1 overflow-y-auto">
         <Perms c={c} s={s} onError={onError} />
       </div>
       <div className="mt-3 flex gap-2">
@@ -357,7 +361,9 @@ function InSession({ c, files, s, since, rec, onError, msgs, onSend, stacked }: 
       <div className="flex items-center gap-3">
         <Avatar c={c} />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-callout font-semibold">{c.name || formatId(c.peer_id)}</div>
+          <div className="truncate text-callout font-semibold" title={c.name || undefined}>
+            {c.name || formatId(c.peer_id)}
+          </div>
           <div className="text-footnote text-muted">is connected · {elapsed}</div>
         </div>
       </div>

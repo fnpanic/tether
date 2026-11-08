@@ -70,6 +70,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 /** A window built larger than its screen (1366x768 at 150 % is 911x512) and centred starts with
  *  its title bar above the screen: shrink it to the work area and centre it again. */
 async function fitScreen(w: import("@tauri-apps/api/window").Window) {
+  // A fullscreen session window (--fullscreen) or a maximized one already fits its screen.
+  if ((await w.isFullscreen()) || (await w.isMaximized())) return;
   const { LogicalSize } = await import("@tauri-apps/api/dpi");
   const s = (await w.innerSize()).toLogical(await w.scaleFactor());
   const fw = Math.min(s.width, screen.availWidth), fh = Math.min(s.height, screen.availHeight);

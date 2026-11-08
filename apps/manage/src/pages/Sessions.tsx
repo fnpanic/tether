@@ -5,7 +5,7 @@ import { useApp } from "../App";
 import { api, host, inTauri, invoke, type Device } from "../lib/ipc";
 import { actionLabel, alarmLabel, duration, matches, sessions, toCsv, type AuditEvent, type Row } from "../lib/sessions";
 import { paginate } from "../lib/paging";
-import { Badge, Button, ErrorText, IconButton, PageHeader, Pager, Segmented, Table, TextField } from "../components/ui";
+import { Badge, Button, ErrorText, IconButton, PageHeader, Pager, Segmented, Sub, Table, TextField } from "../components/ui";
 
 type Range = "1" | "7" | "30" | "90";
 const LIMIT = 5000;
@@ -72,7 +72,7 @@ export function Sessions() {
       </PageHeader>
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <TextField className="max-w-64 rounded-full" placeholder="Host or technician ID, name, IP, path…" aria-label="Search sessions" value={q} onChange={(e) => setQ(e.target.value)} />
+        <TextField className="max-w-64 rounded-full" placeholder="Host, technician, IP…" title="Host or technician ID, name, IP, path" aria-label="Search sessions" value={q} onChange={(e) => setQ(e.target.value)} />
         <Segmented<Range>
           label="Time range"
           value={range}
@@ -106,24 +106,25 @@ export function Sessions() {
           <ErrorText key={f} error={`Sessions of one relay are missing: ${f}`} />
         ))}
       </div>
-      <Table head={["Time", "Host", "Technician", "IP", "Action", "Duration"]} empty={events && !rows.length ? (q ? "No event matches the search." : "No session in this time range.") : false}>
+      <Table head={["Time", "Host", "Technician", "Action", "Duration"]} empty={events && !rows.length ? (q ? "No event matches the search." : "No session in this time range.") : false}>
         {pg.items.map((r) => {
           const d = device(r);
           return (
             <tr key={`${r.nonce ?? ""}|${r.uuid}|${r.conn_id}|${r.action}|${r.ts}`} data-testid="session-row">
               <td className="whitespace-nowrap" title={r.relay ? `Logged by ${host(r.relay)}` : undefined}>
-                {new Date(r.ts * 1000).toLocaleString()}
+                <p>{new Date(r.ts * 1000).toLocaleDateString()}</p>
+                <Sub>{new Date(r.ts * 1000).toLocaleTimeString()}</Sub>
               </td>
               <td>
                 <p className="whitespace-nowrap font-mono">{r.id || "–"}</p>
                 {d && <p className="text-footnote text-faint">{d.os}</p>}
+                <div title={r.src ? `Host posted from ${r.src}` : undefined}>
+                  <Sub mono>{r.ip || "–"}</Sub>
+                </div>
               </td>
               <td>
                 {r.peer_name && <p>{r.peer_name}</p>}
                 <p className="whitespace-nowrap font-mono text-footnote text-muted">{r.peer_id || "–"}</p>
-              </td>
-              <td className="font-mono text-footnote" title={r.src ? `Host posted from ${r.src}` : undefined}>
-                {r.ip || "–"}
               </td>
               <td>
                 <span className="flex items-center gap-1.5">

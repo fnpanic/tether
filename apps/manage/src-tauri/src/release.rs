@@ -129,8 +129,15 @@ fn custom_ramp(list: &str) -> Result<Vec<(u64, u8)>, String> {
     let mut steps: Vec<(u64, u8)> = Vec::new();
     for part in list.split(',') {
         let (h, p) = part.split_once('=').ok_or_else(|| bad("expected hours=percent steps"))?;
-        let h: f64 = h.trim().parse().map_err(|_| bad("hours must be a number"))?;
-        let p: u8 = p.trim().parse().map_err(|_| bad("percent must be a whole number"))?;
+        // Plain decimals only (no 1e2, +5, inf), the same check as the UI (rolloutProblem).
+        let (h, p) = (h.trim(), p.trim());
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let plain = match h.split_once('.') { Some((a, b)) => (digits(a) || a.is_empty()) && (digits(b) || b.is_empty()) && !(a.is_empty() && b.is_empty()), None => digits(h) };
+        if !plain || !digits(p) {
+            return Err(bad("hours and percent must be plain numbers"));
+        }
+        let h: f64 = h.parse().map_err(|_| bad("hours must be a number"))?;
+        let p: u8 = p.parse().map_err(|_| bad("percent must be a whole number"))?;
         if !(0.0..=CUSTOM_MAX_HOURS).contains(&h) {
             return Err(bad("hours must be 0 to 720 (30 days)"));
         }
@@ -480,7 +487,7 @@ mod tests {
         assert_eq!((r.start, r.steps.clone()), (50, vec![(0, 5), (5400, 25), (43_200, 100)]));
         assert_eq!(rollout("custom:0=100", 0).unwrap().steps, [(0, 100)]);
         assert_eq!(rollout("custom:0=1,0.01=100", 0).unwrap().steps, [(0, 1), (60, 100)], "whole minutes");
-        for bad in ["custom:", "custom:1=10,2=100", "custom:0=0,1=100", "custom:0=10,1=101", "custom:0=10,1=50", "custom:0=10,2=50,1=100", "custom:0=50,1=50,2=100", "custom:0=10,721=100", "custom:0=10,-1=100", "custom:0=10,x=100", "custom:0=10;1=100", "custom:0=10,0.001=100", "custom:0=1.5,1=100"] {
+        for bad in ["custom:", "custom:1=10,2=100", "custom:0=0,1=100", "custom:0=10,1=101", "custom:0=10,1=50", "custom:0=10,2=50,1=100", "custom:0=50,1=50,2=100", "custom:0=10,721=100", "custom:0=10,-1=100", "custom:0=10,x=100", "custom:0=10;1=100", "custom:0=10,0.001=100", "custom:0=1.5,1=100", "custom:0=5,1e2=100", "custom:0=5,0x10=100", "custom:0=5,2=100.0", "custom:0=5,2=1e2", "custom:0=5,inf=100", "custom:0=5,+2=100", "custom:0=5,2=+100"] {
             assert!(rollout(bad, 0).is_err(), "{bad}");
         }
         let many: Vec<String> = (0..17).map(|i| format!("{i}={}", if i == 16 { 100 } else { i + 1 })).collect();

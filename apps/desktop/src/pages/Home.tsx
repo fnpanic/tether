@@ -123,7 +123,9 @@ function ConnectBox({ peers, onConnect }: { peers: Peer[]; onConnect: (id: strin
                   <PlatformIcon platform={p.platform} size={16} />
                 </span>
                 <span className="font-mono text-caption">{formatId(p.id)}</span>
-                <span className="truncate text-caption text-muted">{p.hostname}</span>
+                <span className="truncate text-caption text-muted" title={p.hostname}>
+                  {p.hostname}
+                </span>
               </button>
             ))}
           </div>
@@ -154,7 +156,9 @@ function PeerCard({ p, onConnect, onRemove }: { p: Peer; onConnect: () => void; 
         <div className="grid aspect-[16/10] w-full place-items-center rounded-md bg-parchment text-muted group-hover:text-accent">
           <PlatformIcon platform={p.platform} size={28} />
         </div>
-        <div className="mt-3 truncate px-1 text-caption font-semibold">{p.hostname || p.username || "Unknown device"}</div>
+        <div className="mt-3 truncate px-1 text-caption font-semibold" title={p.hostname || p.username || undefined}>
+          {p.hostname || p.username || "Unknown device"}
+        </div>
         <div className="px-1 pb-1 font-mono text-footnote text-muted">{formatId(p.id)}</div>
       </button>
       <button

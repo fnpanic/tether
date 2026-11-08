@@ -149,6 +149,11 @@ export function PageHeader({ title, sub, children }: { title: string; sub?: stri
   );
 }
 
+/** Secondary line in a table cell (app version under the profile, IP under the host…). */
+export function Sub({ children, mono }: { children: ReactNode; mono?: boolean }) {
+  return <p className={`text-footnote text-muted ${mono ? "font-mono" : ""}`}>{children}</p>;
+}
+
 export function ErrorText({ error }: { error: string | null }) {
   if (!error) return null;
   return (
@@ -234,7 +239,6 @@ export function Modal({ children, onClose, width = 420, title, footer }: { child
   );
 }
 
-/** Table shell with the list-row look. */
 /** "101–200 of 10,000" and first/previous/next/last; hidden while everything fits on one page. */
 export function Pager({ page, pages, from, to, total, onPage, noun = "rows" }: { page: number; pages: number; from: number; to: number; total: number; onPage: (p: number) => void; noun?: string }) {
   if (pages <= 1) return null;
@@ -260,6 +264,10 @@ export function Pager({ page, pages, from, to, total, onPage, noun = "rows" }: {
   );
 }
 
+/**
+ * Table shell with the list-row look. It must fit its card from the 900 px minimum window up
+ * (docs/ui-audit.md): put secondary values under the main one (`Sub`) instead of adding columns.
+ */
 export function Table({ head, children, empty }: { head: string[]; children: ReactNode; empty?: string | false }) {
   return (
     <div className="overflow-auto rounded-2xl border border-hairline bg-tile">
@@ -267,13 +275,13 @@ export function Table({ head, children, empty }: { head: string[]; children: Rea
         <thead>
           <tr className="border-b border-hairline text-footnote text-muted">
             {head.map((h, i) => (
-              <th key={i} className="px-4 py-2.5 font-normal">
+              <th key={i} className="px-3 py-2.5 font-normal">
                 {h}
               </th>
             ))}
           </tr>
         </thead>
-        <tbody className="[&>tr:hover]:bg-tile-2 [&>tr]:border-b [&>tr]:border-hairline [&>tr:last-child]:border-0 [&_td]:px-4 [&_td]:py-2">{children}</tbody>
+        <tbody className="[&>tr:hover]:bg-tile-2 [&>tr]:border-b [&>tr]:border-hairline [&>tr:last-child]:border-0 [&_td]:px-3 [&_td]:py-2">{children}</tbody>
       </table>
       {empty && <p className="px-4 py-8 text-center text-caption text-muted">{empty}</p>}
     </div>

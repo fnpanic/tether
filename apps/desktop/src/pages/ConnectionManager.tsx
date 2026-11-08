@@ -179,7 +179,9 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
       <div className="animate-rise flex items-center gap-3 rounded-2xl border border-hairline bg-tile p-4">
         <div className="grid h-12 w-12 place-items-center rounded-full bg-accent text-callout font-semibold text-white">{initials}</div>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-callout font-semibold">{c.name || "Unknown"}</div>
+          <div className="truncate text-callout font-semibold" title={c.name || undefined}>
+            {c.name || "Unknown"}
+          </div>
           <div className="font-mono text-footnote text-muted">{formatId(c.peer_id)}</div>
         </div>
         {c.authorized && <div className="rounded-lg bg-ok/15 px-2 py-1 font-mono text-footnote text-ok">{elapsed}</div>}

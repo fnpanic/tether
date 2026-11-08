@@ -409,23 +409,34 @@ pub fn main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 /// switching to it grows the window (never past the screen); switching back only relaxes the minimum.
 pub fn fit_main(app: &AppHandle, advanced: bool) -> tauri::Result<()> {
     let Some(w) = app.get_webview_window("main") else { return Ok(()) };
-    if !advanced {
-        return w.set_min_size(Some(tauri::LogicalSize::new(820.0, 560.0)));
-    }
-    let s = w.scale_factor()?;
-    let cur = w.inner_size()?.to_logical::<f64>(s);
-    let (mut want_w, mut want_h) = (cur.width.max(1280.0), cur.height.max(800.0));
-    if let Ok(Some(m)) = w.current_monitor() {
-        let screen = m.size().to_logical::<f64>(m.scale_factor());
-        want_w = want_w.min(screen.width - 40.0);
-        want_h = want_h.min(screen.height - 80.0);
-    }
-    w.set_min_size(Some(tauri::LogicalSize::new(1000.0_f64.min(want_w), 600.0_f64.min(want_h))))?;
-    if want_w > cur.width + 1.0 || want_h > cur.height + 1.0 {
-        w.set_size(tauri::LogicalSize::new(want_w, want_h))?;
+    let cur = w.inner_size()?.to_logical::<f64>(w.scale_factor()?);
+    // The work area (screen minus taskbar or Dock), measured on every switch: the window may have
+    // moved to another screen since the last one.
+    let area = w.current_monitor().ok().flatten().map(|m| {
+        let a = m.work_area().size.to_logical::<f64>(m.scale_factor());
+        (a.width, a.height)
+    });
+    let (min, grow) = main_fit((cur.width, cur.height), area, advanced);
+    w.set_min_size(Some(tauri::LogicalSize::new(min.0, min.1)))?;
+    if let Some((gw, gh)) = grow {
+        w.set_size(tauri::LogicalSize::new(gw, gh))?;
         w.center()?;
     }
     Ok(())
+}
+
+/// Minimum size of the main window, and the size to grow it to (if it must grow), from its size and
+/// the work area (logical px). Never larger than the work area: on 1366x768 at 150 % (512 px high)
+/// a 560 px minimum pushed the window past the screen.
+fn main_fit(cur: (f64, f64), area: Option<(f64, f64)>, advanced: bool) -> ((f64, f64), Option<(f64, f64)>) {
+    let (aw, ah) = area.unwrap_or((f64::MAX, f64::MAX));
+    let (mw, mh): (f64, f64) = if advanced { (1000.0, 600.0) } else { (820.0, 560.0) };
+    let min = (mw.min(aw), mh.min(ah));
+    if !advanced {
+        return (min, None);
+    }
+    let want = (cur.0.max(1280.0).min(aw), cur.1.max(800.0).min(ah));
+    (min, (want.0 > cur.0 + 1.0 || want.1 > cur.1 + 1.0).then_some(want))
 }
 
 fn cm_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
@@ -690,7 +701,7 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::MinimizeFollower;
+    use super::{main_fit, MinimizeFollower};
 
     #[test]
     fn main_window_follows_every_minimize_of_the_connection_window() {
@@ -709,5 +720,20 @@ mod tests {
         let mut g = MinimizeFollower::default();
         assert!(!g.step(true, false));
         assert!(!g.step(true, true));
+    }
+
+    #[test]
+    fn main_window_fits_the_work_area() {
+        // 1366x768 at 150 %: work area about 911x488 (taskbar).
+        let small = Some((911.0, 488.0));
+        assert_eq!(main_fit((900.0, 488.0), small, false), ((820.0, 488.0), None));
+        assert_eq!(main_fit((900.0, 488.0), small, true), ((911.0, 488.0), Some((911.0, 488.0))));
+        // A large screen: the usual minimums; Advanced grows to 1280x800.
+        let big = Some((1920.0, 1040.0));
+        assert_eq!(main_fit((1000.0, 660.0), big, false), ((820.0, 560.0), None));
+        assert_eq!(main_fit((1000.0, 660.0), big, true), ((1000.0, 600.0), Some((1280.0, 800.0))));
+        assert_eq!(main_fit((1400.0, 900.0), big, true), ((1000.0, 600.0), None));
+        // Unknown monitor: the plain minimums.
+        assert_eq!(main_fit((1000.0, 660.0), None, false), ((820.0, 560.0), None));
     }
 }

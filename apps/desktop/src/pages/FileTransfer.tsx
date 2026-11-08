@@ -440,7 +440,9 @@ function Pane(p: PaneProps) {
               className={`mx-1 flex cursor-default items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-caption ${sel.names.includes(e.name) ? "bg-accent/15" : "hover:bg-parchment"}`}
             >
               {isDir(e) ? <Folder size={16} className="shrink-0 text-accent" /> : <File size={16} className="shrink-0 text-muted" />}
-              <span className="min-w-0 flex-1 truncate">{e.name}</span>
+              <span className="min-w-0 flex-1 truncate" title={e.name}>
+                {e.name}
+              </span>
               <span className="w-20 shrink-0 text-right font-mono text-footnote text-muted">{isDir(e) ? "" : fmtSize(e.size)}</span>
             </div>
           ))
@@ -473,7 +475,9 @@ function Jobs({ jobs, onCancel, onClear }: { jobs: Job[]; onCancel: (j: Job) => 
         return (
           <div key={j.id} className="flex items-center gap-3 border-t border-hairline px-3 py-2 text-caption">
             {j.upload ? <ArrowUpFromLine size={14} className="text-muted" /> : <ArrowDownToLine size={14} className="text-muted" />}
-            <span className="w-48 truncate">{j.name}</span>
+            <span className="w-48 truncate" title={j.name}>
+              {j.name}
+            </span>
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-parchment">
               <div className={`h-full rounded-full transition-all ${j.state === "error" ? "bg-danger" : "bg-accent"}`} style={{ width: `${pct}%` }} />
             </div>

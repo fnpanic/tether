@@ -649,7 +649,9 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
           <div className="flex items-center gap-2 pl-2 pr-3" data-tauri-drag-region>
             <span className={`h-2 w-2 rounded-full ${connected ? latencyColor : "bg-warn"}`} />
             {/* Narrow window: the name gives way so the toolbar fits (the window title has it too). */}
-            <span className="max-w-[180px] truncate text-caption font-normal max-[800px]:hidden">{name}</span>
+            <span className="max-w-[180px] truncate text-caption font-normal max-[800px]:hidden" title={name}>
+              {name}
+            </span>
             {secured && (
               <span title={fingerprint ? `End-to-end encrypted\nPeer fingerprint: ${fingerprint}` : "End-to-end encrypted"} className="text-white/70">
                 <ShieldCheck size={14} />
@@ -850,7 +852,7 @@ function KeyboardMenu({ kbd, mac, onChange, onForceQuit }: { kbd: KbdSettings; m
         <Keyboard size={17} />
       </TB>
       {open && (
-        <div role="menu" className="animate-fade absolute right-0 top-11 z-30 w-80 overflow-hidden rounded-xl border border-white/10 bg-[#272729] p-1 shadow-float" onMouseLeave={() => setOpen(false)}>
+        <div role="menu" className="animate-fade absolute right-0 top-11 z-30 max-h-[calc(100vh-7rem)] w-80 overflow-y-auto rounded-xl border border-white/10 bg-[#272729] p-1 shadow-float" onMouseLeave={() => setOpen(false)}>
           {kbd.dir === "pc-mac" && item("Windows shortcuts on the Mac", "Ctrl works as ⌘ (Ctrl+C, Ctrl+V…), the Win key as Control, Home/End, Ctrl+arrows like on Windows. Off: keys as on a Mac keyboard (e.g. for a terminal).", kbd.shortcuts, () => onChange({ shortcuts: !kbd.shortcuts }))}
           {kbd.dir === "mac-pc" && item("Mac shortcuts on the PC", "⌘ works as Ctrl (⌘C, ⌘V…), Control as the Windows key, ⌘/⌥+arrows like on a Mac.", kbd.shortcuts, () => onChange({ shortcuts: !kbd.shortcuts }))}
           {kbd.hook && item("Send system keys", "Win, Win+R, Alt+Space, Alt+Esc, Ctrl+Esc, Print go to the remote computer while this window is active. Ctrl+Alt+Home gives them back to this PC until you click into the picture.", kbd.system_keys, () => onChange({ systemKeys: !kbd.system_keys }))}

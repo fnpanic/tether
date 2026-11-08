@@ -4,7 +4,7 @@ import { useApp } from "../App";
 import { ago, api, midnight, type Device } from "../lib/ipc";
 import { paginate } from "../lib/paging";
 import { compareVersion } from "../lib/releases";
-import { Badge, ErrorText, IconButton, PageHeader, Pager, Segmented, Select, Table, TextField } from "../components/ui";
+import { Badge, ErrorText, IconButton, PageHeader, Pager, Segmented, Select, Sub, Table, TextField } from "../components/ui";
 
 /** "windows 10.0.26300" → "windows"; "macos 15.1" / "darwin 24.1" → "macos". */
 const family = (os: string) => {
@@ -149,7 +149,7 @@ export function Devices() {
           <ErrorText key={f} error={`Devices of one relay are missing: ${f}`} />
         ))}
       </div>
-      <Table head={["ID", "Profile", "Version", "OS", "Policy", "Last seen", "IP", "Group"]} empty={devices && !rows.length ? (filtered ? "No device matches the filters." : "No device has checked in yet.") : false}>
+      <Table head={["Device", "App", "Policy", "Last seen", "Group"]} empty={devices && !rows.length ? (filtered ? "No device matches the filters." : "No device has checked in yet.") : false}>
         {pg.items.map((d) => {
           const groups = Object.entries(draft.groups).filter(([, g]) => g.profile === d.profile);
           const stale = liveSerial != null && d.serial < liveSerial;
@@ -157,11 +157,14 @@ export function Devices() {
             <tr key={d.uuid}>
               <td>
                 <p className="whitespace-nowrap font-mono">{d.id || "–"}</p>
-                <p className="select-text font-mono text-footnote text-faint">{d.uuid}</p>
+                <p className="select-text break-all font-mono text-footnote text-faint">{d.uuid}</p>
               </td>
-              <td className="capitalize">{d.profile}</td>
-              <td>{d.version}</td>
-              <td className="text-muted">{d.os}</td>
+              <td>
+                <p className="capitalize">{d.profile}</p>
+                <Sub>
+                  {d.version} · {d.os}
+                </Sub>
+              </td>
               <td>
                 <span className="flex items-center gap-1.5">
                   {d.serial}
@@ -175,10 +178,14 @@ export function Devices() {
                     ))}
                 </span>
               </td>
-              <td title={new Date(d.last_seen * 1000).toLocaleString()}>{ago(d.last_seen)}</td>
-              <td className="font-mono text-footnote">{d.ip}</td>
               <td>
-                <Select className="min-w-40" aria-label={`Group of ${d.id || d.uuid}`} value={draft.assignments[d.uuid] ?? ""} onChange={(e) => assign(d.uuid, e.target.value)}>
+                <p className="whitespace-nowrap" title={new Date(d.last_seen * 1000).toLocaleString()}>
+                  {ago(d.last_seen)}
+                </p>
+                <Sub mono>{d.ip}</Sub>
+              </td>
+              <td>
+                <Select className="min-w-36" aria-label={`Group of ${d.id || d.uuid}`} value={draft.assignments[d.uuid] ?? ""} onChange={(e) => assign(d.uuid, e.target.value)}>
                   <option value="">No group</option>
                   {groups.map(([name]) => (
                     <option key={name}>{name}</option>
