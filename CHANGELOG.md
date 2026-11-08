@@ -6,6 +6,9 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+## [Manage 0.5.11] — 2026-11-08
+Tether Manage only.
+
 ### Fixed
 - **Tether Manage: a click beside the publish sheet no longer cancels a release run.** While
   publishing, Escape and a mouse click on the dimmed area around the sheet counted as Cancel; a
