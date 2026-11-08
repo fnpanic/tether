@@ -1,0 +1,61 @@
+{
+ "at": "2026-11-08T20:37:39.027Z",
+ "host": "490209544",
+ "results": [
+  {
+   "name": "No: request -> notice (no dialog) -> No -> notice gone, 'declined' toast, session goes on",
+   "ok": true,
+   "notice": "An admin prompt (UAC) is open on the remote computer. You cannot see or answer it from here: the person there has to click Yes or No.",
+   "gone_ms": 3,
+   "toast": "Admin access was declined on the remote computer (or its prompt was closed). The session continues without admin rights; you can request it again under Remote actions.",
+   "vm": [
+    "consent.exe before: True",
+    "consent.exe after: False"
+   ]
+  },
+  {
+   "name": "Timeout: unanswered prompt for up to 150 s, session stays usable",
+   "ok": true,
+   "open_s": 129,
+   "closed_by": "windows",
+   "toast": "Admin access was declined on the remote computer (or its prompt was closed). The session continues without admin rights; you can request it again under Remote actions."
+  },
+  {
+   "name": "Unrelated prompt: notice, No -> notice gone, neutral toast",
+   "ok": true,
+   "toast": "admin prompt on the remote computer was answered or closed."
+  },
+  {
+   "name": "Yes: request again -> Yes -> 'admin access is on', item disabled, TetherQS elevated",
+   "ok": true,
+   "toast": "Admin access is on: admin windows and UAC prompts now work in this session.",
+   "after_ms": 3,
+   "item": {
+    "disabled": true,
+    "hint": "Request admin access\nAdmin access is on"
+   },
+   "qs_elevated": true
+  },
+  {
+   "name": "With admin access: an unrelated prompt is visible in the picture, no notice",
+   "ok": true
+  }
+ ],
+ "events": [
+  "0.8s portable_service {\"running\":false}",
+  "1.4s msgbox {\"link\":\"\",\"retry\":false,\"text\":\"\",\"title\":\"\",\"type\":\"wait-uac\"}",
+  "2.7s msgbox {\"link\":\"\",\"retry\":false,\"text\":\"Please wait for confirmation of UAC...\",\"title\":\"Prompt\",\"type\":\"custom-uac-nocancel\"}",
+  "7.8s cancel_msgbox {\"tag\":\"custom-uac-nocancel-Prompt-Please wait for confirmation of UAC...-\"}",
+  "19.3s msgbox {\"link\":\"\",\"retry\":false,\"text\":\"\",\"title\":\"\",\"type\":\"wait-uac\"}",
+  "20.7s msgbox {\"link\":\"\",\"retry\":false,\"text\":\"Please wait for confirmation of UAC...\",\"title\":\"Prompt\",\"type\":\"custom-uac-nocancel\"}",
+  "142.7s cancel_msgbox {\"tag\":\"custom-uac-nocancel-Prompt-Please wait for confirmation of UAC...-\"}",
+  "159.7s msgbox {\"link\":\"\",\"retry\":false,\"text\":\"Please wait for confirmation of UAC...\",\"title\":\"Prompt\",\"type\":\"custom-uac-nocancel\"}",
+  "168.7s cancel_msgbox {\"tag\":\"custom-uac-nocancel-Prompt-Please wait for confirmation of UAC...-\"}",
+  "180.0s msgbox {\"link\":\"\",\"retry\":false,\"text\":\"\",\"title\":\"\",\"type\":\"wait-uac\"}",
+  "181.7s msgbox {\"link\":\"\",\"retry\":false,\"text\":\"Please wait for confirmation of UAC...\",\"title\":\"Prompt\",\"type\":\"custom-uac-nocancel\"}",
+  "185.7s portable_service {\"running\":true}",
+  "185.7s msgbox {\"link\":\"\",\"retry\":false,\"text\":\"Elevate successfully\",\"title\":\"Successful\",\"type\":\"custom-nocancel-success\"}",
+  "186.8s cancel_msgbox {\"tag\":\"custom-uac-nocancel-Prompt-Please wait for confirmation of UAC...-\"}",
+  "208.8s cancel_msgbox {\"tag\":\"custom-uac-nocancel-Prompt-Please wait for confirmation of UAC...-\"}"
+ ]
+}

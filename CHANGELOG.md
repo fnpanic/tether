@@ -20,6 +20,15 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   pointer moves but silently dropped every remote click and key press, with no warning on either
   side. The permission check now also asks `CGPreflightPostEventAccess`, so the Mac shows the
   Accessibility warning and the technician gets the "input is ignored" message (docs/macos.md).
+- **A UAC prompt on a TetherQS host no longer ends the technician's session.** While the customer's
+  PC showed an admin prompt, the viewer turned the host's notice ("Please wait for confirmation of
+  UAC...") into a red "Prompt" error screen with only Close, and ignored the host's message that the
+  prompt was gone, so after Yes or No the session stayed blocked until the technician closed it.
+  The same happened with the "elevated window in front" notice. Both are now a notice at the top
+  of the picture while the session keeps running; when the prompt closes the notice goes and a
+  toast says "Admin access is on", "Admin access was declined…" (No to Tether's own request) or
+  "…answered or closed" (other prompts). New: **Remote actions → Request admin access** asks a
+  TetherQS host for admin access (again after a No). Technician app only; TetherQS is unchanged.
 
 ## [0.5.29] — 2026-11-08
 Tether (technician app) 0.5.29, Windows and macOS (published 2026-11-08, rollout Immediately; index serial 28 on both relays, CDN copies verified); TetherQS stays 0.5.27, Tether Manage 0.5.11.

@@ -295,6 +295,12 @@ fn session_lock_screen(key: String) -> R<()> {
     with_session(&key, |s| s.lock_screen())
 }
 
+/// "Request admin access": a TetherQS host starts its elevated helper once its user confirms UAC.
+#[tauri::command]
+fn session_elevate(key: String) -> R<()> {
+    with_session(&key, |s| s.elevate_direct())
+}
+
 #[tauri::command]
 fn session_switch_display(key: String, display: i32) -> R<()> {
     with_session(&key, |s| s.switch_display(display))
@@ -559,6 +565,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         session_type_text,
         session_ctrl_alt_del,
         session_lock_screen,
+        session_elevate,
         session_switch_display,
         session_refresh,
         session_quality,

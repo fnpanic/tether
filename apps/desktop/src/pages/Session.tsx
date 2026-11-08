@@ -32,6 +32,7 @@ import { FileTransfer } from "./FileTransfer";
 import { mouseMask, MOUSE, wheelSteps, lockModes } from "../lib/input";
 import { classify, onFailure, reconnectMinutes, type Series } from "../lib/reconnect";
 import { passwordWhy, RESUME_GRACE_MS } from "../lib/login";
+import { ADMIN_ON, elevationError, hostNote, NOTE_TEXT, UAC_SETTLE_MS, uacOutcome, type HostNote } from "../lib/elevation";
 
 interface Display {
   x: number;
@@ -138,6 +139,20 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
   const [kbd, setKbd] = useState<KbdSettings | null>(null);
   // The person at the remote computer turned "Control mouse and keyboard" off.
   const [controlOff, setControlOff] = useState(false);
+  // Windows admin prompt notices from a TetherQS host (lib/elevation); the session goes on.
+  const [notes, setNotes] = useState<HostNote[]>([]);
+  const notesRef = useRef(notes);
+  const note = (n: HostNote, on: boolean) => {
+    const ns = notesRef.current.filter((x) => x !== n).concat(on ? [n] : []);
+    notesRef.current = ns;
+    setNotes(ns);
+  };
+  // The host's admin access (portable service): null until it reports, i.e. not a TetherQS on Windows.
+  const [adminOn, setAdminOnState] = useState<boolean | null>(null);
+  const adminRef = useRef<boolean | null>(null);
+  const uacTimer = useRef(0);
+  // The host accepted our "Request admin access" (wait-uac) and admin access has not come yet.
+  const elevRequested = useRef(false);
   const [imageQuality, setImageQuality] = useState("balanced");
   const [sharpen, setSharpenState] = useState<SharpenMode>(loadSharpen);
   // WebGL unavailable or its context lost: draw with the 2D canvas for the rest of this window.
@@ -204,6 +219,26 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       switch (e.name) {
         case "msgbox":
           onMsgbox(p.type, p.title, p.text, p.retry);
+          break;
+        case "cancel_msgbox": {
+          const n = hostNote(p.tag ?? "");
+          if (!n) break;
+          note(n, false);
+          if (n !== "uac") break;
+          // Yes to our request: admin access is reported within a few seconds; without it, it was No or closed.
+          clearTimeout(uacTimer.current);
+          uacTimer.current = window.setTimeout(() => {
+            const m = uacOutcome(!!adminRef.current, elevRequested.current);
+            elevRequested.current = false;
+            if (m) toast.show(m);
+          }, UAC_SETTLE_MS);
+          break;
+        }
+        case "portable_service":
+          if (p.running && adminRef.current === false) toast.show(ADMIN_ON);
+          if (p.running) elevRequested.current = false;
+          adminRef.current = !!p.running;
+          setAdminOnState(!!p.running);
           break;
         case "peer_info":
           setInfo(p);
@@ -309,6 +344,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       clearInterval(t);
       clearTimeout(retryTimer.current);
       clearTimeout(pwTimer.current);
+      clearTimeout(uacTimer.current);
       if (recRef.current.state === "on") invoke("recording_finished").catch(() => {});
       pipe.close();
       // Same IPC order: the option is back to the user's choice before the session goes.
@@ -336,6 +372,18 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       return;
     }
     if (type === "connecting" && series.current) return; // keep the reconnect overlay
+    const n = hostNote(type);
+    if (n) {
+      if (n === "uac") clearTimeout(uacTimer.current);
+      return note(n, true);
+    }
+    // Answers to "Request admin access" (the "Elevate successfully" box duplicates portable_service).
+    if (type === "wait-uac") {
+      elevRequested.current = true;
+      return toast.show("Admin access requested: the person at the remote computer has to confirm the Windows prompt (UAC).");
+    }
+    if (type === "elevation-error") return toast.show(elevationError(text));
+    if (type === "custom-nocancel-success") return;
     if (type === "input-password" || type === "re-input-password") {
       const show = () => {
         series.current = null;
@@ -612,9 +660,13 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
           <Overlay phase={phase} name={name} peer={peer} sessionKey={key} hostMissing={hostMissing} onLogin={() => (typed.current = true)} />
         ) : null}
         {rec.state === "on" && connected && <RecPill since={rec.since} />}
-        {controlOff && connected && (
-          <div role="status" className="pointer-events-none absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full border border-white/10 bg-black/75 px-4 py-2 text-footnote text-white/85 backdrop-blur">
-            View only: the person at the remote computer has turned off control of mouse and keyboard.
+        {connected && (controlOff || notes.length > 0) && (
+          <div className="pointer-events-none absolute top-16 left-1/2 z-10 flex w-max max-w-[min(640px,calc(100%-32px))] -translate-x-1/2 flex-col items-center gap-2">
+            {[...(controlOff ? ["View only: the person at the remote computer has turned off control of mouse and keyboard."] : []), ...notes.map((n) => NOTE_TEXT[n])].map((t) => (
+              <div key={t} role="status" data-testid="host-note" className="rounded-2xl border border-white/10 bg-black/75 px-4 py-2 text-center text-footnote text-white/85 backdrop-blur">
+                {t}
+              </div>
+            ))}
           </div>
         )}
         {toast.node}
@@ -717,7 +769,9 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
           <ActionsMenu
             windows={(info?.platform ?? "").toLowerCase().startsWith("windows")}
             service={!!info?.sas_enabled}
+            adminOn={adminOn}
             onCad={() => act(invoke("session_ctrl_alt_del", { key }))}
+            onElevate={() => act(invoke("session_elevate", { key }))}
             onAsk={setAsk}
           />
           <Sep />
@@ -871,7 +925,7 @@ function KeyboardMenu({ kbd, mac, onChange, onForceQuit }: { kbd: KbdSettings; m
 }
 
 /** Ctrl+Alt+Del, lock and restart: disruptive, so grouped, explained and (lock, restart) confirmed. */
-function ActionsMenu({ windows, service, onCad, onAsk }: { windows: boolean; service: boolean; onCad: () => void; onAsk: (a: "lock" | "restart") => void }) {
+function ActionsMenu({ windows, service, adminOn, onCad, onElevate, onAsk }: { windows: boolean; service: boolean; adminOn: boolean | null; onCad: () => void; onElevate: () => void; onAsk: (a: "lock" | "restart") => void }) {
   const [open, setOpen] = useState(false);
   const item = (label: string, hint: string, run: () => void, disabled = false) => (
     <button
@@ -900,6 +954,16 @@ function ActionsMenu({ windows, service, onCad, onAsk }: { windows: boolean; ser
               service ? "Opens the Windows security screen" : "Needs Tether installed on the remote PC. TetherQS cannot send it.",
               onCad,
               !service,
+            )}
+          {/* Only a TetherQS host reports admin access (portable service); an installed Tether has it. */}
+          {windows &&
+            !service &&
+            adminOn !== null &&
+            item(
+              "Request admin access",
+              adminOn ? "Admin access is on" : "The person at the remote computer confirms one Windows prompt (UAC). Then admin windows work.",
+              onElevate,
+              adminOn,
             )}
           {item("Lock screen…", service ? "Locks the remote computer" : "You will not be able to sign back in", () => onAsk("lock"))}
           {item("Restart…", "Ends the session", () => onAsk("restart"))}
