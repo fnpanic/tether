@@ -65,10 +65,10 @@ export function DownloadPage() {
     }
   };
 
-  const publish = async (): Promise<RelayResult[]> => {
+  const publish = async (skip: string[]): Promise<RelayResult[]> => {
     const h = await pageHtml(settings, state.servers, invoke);
     setHtml(h);
-    const r = await invoke<RelayResult[]>("page_publish", { html: h });
+    const r = await invoke<RelayResult[]>("page_publish", { html: h, skip });
     await api.saveSettings(settings);
     await reload();
     toast("Download page published");

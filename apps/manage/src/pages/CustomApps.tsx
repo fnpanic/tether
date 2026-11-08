@@ -219,8 +219,8 @@ export function CustomApps() {
     ...extra,
   });
 
-  const save = async (f: Form) => {
-    const r = await invoke<{ id: string; link: string; relays: RelayResult[] }>("custom_save", { args: { ...f, id: f.id ?? null, channel: f.channel.trim() } });
+  const save = async (f: Form, skip: string[] = []) => {
+    const r = await invoke<{ id: string; link: string; relays: RelayResult[] }>("custom_save", { args: { ...f, id: f.id ?? null, channel: f.channel.trim() }, skip });
     setLink(r.link);
     load();
     return r.relays;
@@ -328,7 +328,7 @@ export function CustomApps() {
         <PublishSheet
           title={form.id ? `Save ${form.name}` : `Create ${form.name}`}
           action={form.id ? "Save" : "Create"}
-          run={() => save(form)}
+          run={(skip) => save(form, skip)}
           onClose={() => {
             setStep(null);
             setLink(null);

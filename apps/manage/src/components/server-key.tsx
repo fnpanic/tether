@@ -143,8 +143,8 @@ export function ServerKey() {
   };
   const from = rot.from ?? (current || fromLive);
 
-  const publish = async (keys: ReturnType<typeof retireList>): Promise<RelayResult[]> => {
-    const r = await invoke<{ serial: number; relays: RelayResult[] }>("serverkeys_publish", { keys });
+  const publish = async (keys: ReturnType<typeof retireList>, skip: string[]): Promise<RelayResult[]> => {
+    const r = await invoke<{ serial: number; relays: RelayResult[] }>("serverkeys_publish", { keys, skip });
     await load();
     return r.relays;
   };
@@ -336,7 +336,7 @@ export function ServerKey() {
           title={sheet === "announce" ? "Publish key list: current + new" : "Publish key list: new key only"}
           action="Publish"
           onClose={() => setSheet(null)}
-          run={() => publish(sheet === "announce" ? announceList(rot, expiry ? Math.floor(new Date(expiry).getTime() / 1000) : undefined) : retireList(rot))}
+          run={(skip) => publish(sheet === "announce" ? announceList(rot, expiry ? Math.floor(new Date(expiry).getTime() / 1000) : undefined) : retireList(rot), skip)}
           after={(r) => r.some((x) => x.ok) && <p className="mt-4 text-caption text-muted">Devices pick it up with their next policy check.</p>}
         >
           <ul className="flex flex-col gap-1.5 text-caption">

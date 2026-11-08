@@ -10,6 +10,8 @@ export interface PruneVersion {
   relays: Record<string, "drop" | "keep">;
   /** Every relay that has it would drop it: offered for deletion. */
   offer: boolean;
+  /** The relays that answered would drop it, but one relay did not answer (`blocked`). */
+  withheld?: boolean;
 }
 
 export interface PruneGroup {
@@ -25,6 +27,8 @@ export interface PrunePlan {
   relays: string[];
   /** The relays hold different release indexes: a lagging one protects its older version. */
   index_differs: boolean;
+  /** Relays that did not answer the dry run: while there is one, nothing is offered. */
+  blocked: { server: string; error: string }[];
   groups: PruneGroup[];
   offer: { versions: number; files: number; bytes: number };
   kept_versions: number;
