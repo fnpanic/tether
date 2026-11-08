@@ -139,7 +139,8 @@ export function TextField({ className = "", ...rest }: React.InputHTMLAttributes
 export function useToast() {
   const [msg, setMsg] = useState<string | null>(null);
   const t = useRef<number>(0);
-  const show = (m: string, ms = 1800) => {
+  // Long messages stay long enough to read: about 60 ms per character, at least 1.8 s.
+  const show = (m: string, ms = Math.max(1800, m.length * 60)) => {
     setMsg(m);
     clearTimeout(t.current);
     t.current = window.setTimeout(() => setMsg(null), ms);
