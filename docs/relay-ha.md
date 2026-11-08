@@ -445,3 +445,16 @@ run, 1.82 GB freed (`tether_api_release_prune_freed_bytes_total` 1819645947), re
 because the relay move copied every release there on 2026-11-06 (file times = copy time); a later run
 with keep 3 removes 0.5.20 and 0.5.21. `releases.json`, `latest.json`, the 0.5.25 installer and `/` answer
 200. Disk: Hetzner 14 % used, Oracle 2 32 %. Log: `/var/lib/tether-api/release-prune.jsonl`.
+
+## Relay update 0.5.26: audit hardening (2026-11-08, ~01:00 CET)
+
+tether-api (upload cap and early refusal, minimum body rate, patched tiny_http so a huge
+`Content-Length` no longer aborts the process, streamed device lists and flush, signature/audit/qcache
+work outside the state lock, profiles on disk, index serial after rename) and hbbs (bounded
+per-connection queue, 5 s send timeout). Deployed with `C:ms
+ightelay-0526\deploy.sh` (backup
+`/root/bak-0526`), Oracle 2 first, then Hetzner. Binaries: hbbs `0320ad9eb5848691`, hbbr
+`e67273638390ef30`, tether-api `f7e69bcb7d81c103`. Verified on both: services active, RELAY_SERVERS kept,
+WebSocket 101, `/`, `releases.json`, `latest.json`, `/api/policy` 200, unknown `/q/m/` 404; a PUT announcing
+10 GB with no body got no answer (curl 000) and tether-api kept running (0 restarts, the next request 200);
+27/27 targets up. A 0.5.26 viewer then connected to the test VM through these relays (end-to-end encrypted).
