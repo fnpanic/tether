@@ -380,8 +380,8 @@ function Pane(p: PaneProps) {
       }}
     >
       <div className="flex items-center gap-2 border-b border-hairline px-3 py-2">
-        <span className="text-muted">{p.icon}</span>
-        <span className="text-caption font-semibold">{p.title}</span>
+        <span className="shrink-0 text-muted">{p.icon}</span>
+        <span className="min-w-0 truncate text-caption font-semibold" title={p.title}>{p.title}</span>
         <div className="flex-1" />
         {p.onNewFolder && (
           <IconButton label="New folder" onClick={p.onNewFolder}>

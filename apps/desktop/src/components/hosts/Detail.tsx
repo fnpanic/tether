@@ -57,7 +57,7 @@ export function Detail({
   const history = entry?.history ?? [];
 
   return (
-    <aside aria-label="Host details" className="flex w-[320px] shrink-0 flex-col overflow-y-auto border-l border-hairline bg-canvas px-5 py-5">
+    <aside aria-label="Host details" className="flex w-[320px] shrink-0 flex-col overflow-y-auto *:shrink-0 border-l border-hairline bg-canvas px-5 py-5">
       <div className="flex items-start gap-3">
         <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-parchment text-muted">
           <PlatformIcon platform={h.os} size={22} />

@@ -115,12 +115,12 @@ export function Sessions() {
                 {new Date(r.ts * 1000).toLocaleString()}
               </td>
               <td>
-                <p className="font-mono">{r.id || "–"}</p>
+                <p className="whitespace-nowrap font-mono">{r.id || "–"}</p>
                 {d && <p className="text-footnote text-faint">{d.os}</p>}
               </td>
               <td>
                 {r.peer_name && <p>{r.peer_name}</p>}
-                <p className="font-mono text-footnote text-muted">{r.peer_id || "–"}</p>
+                <p className="whitespace-nowrap font-mono text-footnote text-muted">{r.peer_id || "–"}</p>
               </td>
               <td className="font-mono text-footnote" title={r.src ? `Host posted from ${r.src}` : undefined}>
                 {r.ip || "–"}

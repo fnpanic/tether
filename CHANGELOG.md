@@ -6,6 +6,17 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Fixed
+- **Nothing cut off at small window sizes** (all windows of Tether, TetherQS and Tether Manage
+  checked at their default and minimum sizes, 1280×720 and 1366×768 at 125 % and 150 %, light and
+  dark; [docs/ui-audit.md](docs/ui-audit.md), `tools/ui-audit.mjs`). A window larger than its
+  screen shrinks to the work area and re-centres, so its title bar is no longer above the screen;
+  the connection window is never placed above the top edge. TetherQS Help and the idle view
+  scroll. Advanced: host list drops columns that do not fit, detail panel scrolls, selection bar
+  wraps, status bar stays on one line, keyboard help scrolls. Session: toolbar fits a 640 px window,
+  chat stays below the toolbar. File transfer and Manage tables: long host names and IDs no longer
+  wrap or squeeze.
+
 ## [0.5.26] — 2026-11-08
 Tether / TetherQS 0.5.26 (Windows and macOS), Tether Manage 0.5.9 (built with TETHER_ADMIN_PUB_KEY); relays: tether-api and hbbs (deployed 2026-11-08). Audit fixes (client and relay) and the shortcut ledger.
 

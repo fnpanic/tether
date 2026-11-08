@@ -67,6 +67,18 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 
 // Windows start hidden to avoid a white flash; reveal after the first paint.
 // macOS (WKWebView) runs no animation frames while the window is hidden, so a timer reveals it too.
+/** A window built larger than its screen (1366x768 at 150 % is 911x512) and centred starts with
+ *  its title bar above the screen: shrink it to the work area and centre it again. */
+async function fitScreen(w: import("@tauri-apps/api/window").Window) {
+  const { LogicalSize } = await import("@tauri-apps/api/dpi");
+  const s = (await w.innerSize()).toLogical(await w.scaleFactor());
+  const fw = Math.min(s.width, screen.availWidth), fh = Math.min(s.height, screen.availHeight);
+  if (fw >= s.width && fh >= s.height) return;
+  await w.setMinSize(new LogicalSize(Math.min(640, fw), Math.min(400, fh)));
+  await w.setSize(new LogicalSize(fw, fh));
+  await w.center();
+}
+
 if (inTauri) {
   let shown = false;
   const reveal = async () => {
@@ -76,6 +88,7 @@ if (inTauri) {
     const w = getCurrentWindow();
     // The CM window may already be minimized by a session that started before the first paint.
     if (await w.isMinimized()) return;
+    await fitScreen(w).catch(() => {});
     await w.show();
     await w.setFocus();
   };

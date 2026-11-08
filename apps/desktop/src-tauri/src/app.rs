@@ -438,9 +438,11 @@ fn cm_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         let s = m.scale_factor();
         let size = m.size().to_logical::<f64>(s);
         let pos = m.position().to_logical::<f64>(s);
+        // Never past the screen's top-left: on a short screen (1366x768 at 150 % = 512 logical
+        // pixels high) the bottom-right anchor put the title bar and its controls off-screen.
         let _ = w.set_position(tauri::LogicalPosition::new(
-            pos.x + size.width - 380.0 - 16.0,
-            pos.y + size.height - 560.0 - 56.0,
+            (pos.x + size.width - 380.0 - 16.0).max(pos.x),
+            (pos.y + size.height - 560.0 - 56.0).max(pos.y),
         ));
     }
     Ok(w)
