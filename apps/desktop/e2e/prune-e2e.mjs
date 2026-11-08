@@ -78,7 +78,7 @@ let browser, manage;
 try {
   for (let i = 0; i < 60 && !apiOut.includes("listening"); i++) await sleep(250);
   if (!apiOut.includes("listening")) throw new Error(`tether-api did not start: ${apiOut}`);
-  manage = spawn(MANAGE, [], { env: { ...process.env, TETHER_MANAGE_DIR: vault, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9447" }, stdio: "ignore" });
+  manage = spawn(MANAGE, [], { env: { ...process.env, TETHER_MANAGE_DIR: vault, WEBVIEW2_USER_DATA_FOLDER: join(work, "wv2"), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9447" }, stdio: "ignore" });
   for (let i = 0; i < 80 && !browser; i++) {
     browser = await chromium.connectOverCDP("http://127.0.0.1:9447").catch(() => null);
     if (!browser) await sleep(500);

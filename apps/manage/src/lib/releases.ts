@@ -85,10 +85,79 @@ export const rampPresets = {
   now: [[0, 100]],
 } as const satisfies Record<string, readonly (readonly [number, number])[]>;
 
+export type Steps = readonly (readonly [number, number])[];
+
+/** The custom ramp's fields: first wave, then hours from the start until 10 %, 50 % and 100 %. */
+export interface CustomRamp {
+  first: number;
+  h10: number;
+  h50: number;
+  h100: number;
+}
+export const defaultCustom: CustomRamp = { first: 5, h10: 2, h50: 12, h100: 48 };
+
+/** `custom:<hours>=<percent>,…` for release::rollout; steps the first wave already reaches are left out. */
+export function customRollout(c: CustomRamp): string {
+  const steps: [number, number][] = [[0, c.first]];
+  for (const [p, h] of [
+    [10, c.h10],
+    [50, c.h50],
+    [100, c.h100],
+  ] as const)
+    if (p > c.first) steps.push([h, p]);
+  return "custom:" + steps.map(([h, p]) => `${h}=${p}`).join(",");
+}
+
+/** Fields of a `custom:` rollout made by [customRollout]; null for any other shape. */
+export function customFields(rollout: string): CustomRamp | null {
+  const s = rampSteps(rollout);
+  if (!s || !rollout.startsWith("custom:")) return null;
+  const at = (p: number) => s.find((x) => x[1] === p)?.[0];
+  const first = s[0][1];
+  const c = { first, h10: (at(10) ?? 0) / 3600, h50: (at(50) ?? 0) / 3600, h100: (at(100) ?? 0) / 3600 };
+  return customRollout(c) === rollout ? c : null;
+}
+
+/** Hours of a ramp step, as release::rollout reads them (whole minutes, at most 30 days). */
+const MAX_HOURS = 720;
+
+/** Why release::rollout would refuse `rollout`, or null. Must match it (release.rs). */
+export function rolloutProblem(rollout: string): string | null {
+  if (!rollout.startsWith("custom:")) return rollout in rampPresets || rollout === "" ? null : `unknown rollout ${rollout}`;
+  const steps: [number, number][] = [];
+  for (const part of rollout.slice(7).split(",")) {
+    const [h, p, extra] = part.split("=");
+    const hours = Number(h),
+      percent = Number(p);
+    if (extra !== undefined || !h?.trim() || !p?.trim() || !Number.isFinite(hours) || !Number.isInteger(percent)) return "Each step needs hours and a whole percent.";
+    if (hours < 0 || hours > MAX_HOURS) return "Hours must be 0 to 720 (30 days).";
+    if (percent < 1 || percent > 100) return "Percent must be 1 to 100.";
+    const secs = Math.round(hours * 60) * 60;
+    const last = steps[steps.length - 1];
+    if (!last && secs !== 0) return "The first step starts at once.";
+    if (last && (secs <= last[0] || percent <= last[1])) return "Each step must come later and reach more devices than the one before.";
+    steps.push([secs, percent]);
+  }
+  if (steps.length > 16) return "At most 16 steps.";
+  if (steps[steps.length - 1][1] !== 100) return "The last step must reach 100 %.";
+  return null;
+}
+
+/** The steps of a preset or a valid `custom:` rollout; null when release::rollout would refuse it. */
+export function rampSteps(rollout: string): Steps | null {
+  if (rolloutProblem(rollout)) return null;
+  if (!rollout.startsWith("custom:")) return rampPresets[(rollout || "standard") as keyof typeof rampPresets];
+  return rollout
+    .slice(7)
+    .split(",")
+    .map((x) => x.split("=").map(Number))
+    .map(([h, p]) => [Math.round(h * 60) * 60, p] as const);
+}
+
 const after = (s: number) => (s === 0 ? "at once" : s % 86400 === 0 ? `after ${s / 86400} d` : s % 3600 === 0 ? `after ${s / 3600} h` : `after ${Math.round(s / 60)} min`);
 
 /** "1 % at once → 10 % after 1 h → …" */
-export function describeRamp(steps: readonly (readonly [number, number])[] | undefined): string {
+export function describeRamp(steps: Steps | null | undefined): string {
   if (!steps?.length) return "";
   if (steps.length === 1 && steps[0][1] === 100 && steps[0][0] === 0) return "Every device at once";
   return steps.map(([s, p]) => `${p} % ${after(s)}`).join(" → ");

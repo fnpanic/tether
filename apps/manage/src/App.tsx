@@ -22,6 +22,8 @@ interface Ctx {
   setDraft: (b: Bundle) => void;
   /** What the relays serve now; null while loading or when unreachable. */
   live: Live | null;
+  /** Why the last live check failed (the relays' answers stay in `live`). */
+  liveError: string | null;
   reloadLive: () => Promise<void>;
   /** Draft compared with the live policy. */
   changes: Change[];
@@ -55,6 +57,7 @@ export function App() {
   const [page, setPage] = useState<PageId>("home");
   const [draft, setDraftState] = useState<Bundle>(emptyBundle());
   const [live, setLive] = useState<Live | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
   const [changes, setChanges] = useState<Change[]>([]);
   const [invalid, setInvalid] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
@@ -63,7 +66,14 @@ export function App() {
   const reload = useCallback(async () => setState(await api.state()), []);
   useEffect(() => void reload(), [reload]);
 
-  const reloadLive = useCallback(() => api.live().then(setLive, (e) => show(`Could not read the live policy: ${e.message}`)), []);
+  const reloadLive = useCallback(
+    () =>
+      api.live().then(
+        (l) => (setLive(l), setLiveError(null)),
+        (e) => setLiveError(e.message),
+      ),
+    [],
+  );
 
   useEffect(() => {
     if (!state?.unlocked) return;
@@ -92,6 +102,7 @@ export function App() {
     draft,
     setDraft,
     live,
+    liveError,
     reloadLive,
     changes,
     dirty: changes.length > 0,
