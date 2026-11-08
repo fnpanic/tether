@@ -27,12 +27,15 @@ if (inTauri) {
     if (await getCurrentWindow().isMinimized()) return;
     // 560 high on a 512-high screen (1366x768 at 150 %): centred, the title bar with Close started
     // above the screen. Shrink to the work area (the content scrolls) and centre again.
-    const w = getCurrentWindow();
-    const s = (await w.innerSize()).toLogical(await w.scaleFactor());
-    if (s.height > screen.availHeight) {
+    const fit = async () => {
+      const w = getCurrentWindow();
+      const s = (await w.innerSize()).toLogical(await w.scaleFactor());
+      if (s.height <= screen.availHeight) return;
       const { LogicalSize } = await import("@tauri-apps/api/dpi");
-      await w.setSize(new LogicalSize(s.width, screen.availHeight)).then(() => w.center()).catch(() => {});
-    }
+      await w.setSize(new LogicalSize(s.width, screen.availHeight));
+      await w.center();
+    };
+    await fit().catch(() => {}); // never keeps the window hidden
     await getCurrentWindow().show();
     await getCurrentWindow().setFocus();
   };
