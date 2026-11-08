@@ -458,3 +458,15 @@ ightelay-0526\deploy.sh` (backup
 WebSocket 101, `/`, `releases.json`, `latest.json`, `/api/policy` 200, unknown `/q/m/` 404; a PUT announcing
 10 GB with no body got no answer (curl 000) and tether-api kept running (0 restarts, the next request 200);
 27/27 targets up. A 0.5.26 viewer then connected to the test VM through these relays (end-to-end encrypted).
+
+## Relay update 0.5.27: diagnostics tickets (2026-11-08)
+
+tether-api: tickets can be closed (archived, kept 90 days) and deleted (`POST /api/admin/diag/<t>/close`,
+`DELETE /api/admin/diag/<t>`, `GET /api/admin/diag?archived=1`, `state` per ticket); a used, expired or
+closed code answers `404 ticket not open` (unknown: `404 not found`), so new apps stop instead of trying
+the other relay; a body that ends before its `Content-Length` is refused (`400`) and the ticket stays open.
+Deployed with `C:ms
+ightelay-0527\deploy.sh` (backup `/root/bak-0527`), Oracle 2 first, then Hetzner.
+tether-api `793caf1a2745440a` (hbbs unchanged `0320ad9eb5848691`). Verified on both: services active,
+RELAY_SERVERS kept, WebSocket 101, `/`, `/api/policy`, `releases.json` 200, unknown ticket upload
+`404 not found`, unsigned close 401, 27/27 targets up. Older apps keep working (plain 404s).
