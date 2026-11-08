@@ -6,6 +6,9 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+## [0.5.28] — 2026-11-08
+Tether (technician app) 0.5.28, Windows and macOS; TetherQS stays 0.5.27.
+
 ### Fixed
 - **Tether no longer crashes on Disconnect when a start request arrives at that moment.** 0.5.27
   died (BEX64 0xc0000409, every tether.exe gone) when Disconnect was clicked in a session to the
