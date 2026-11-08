@@ -6,6 +6,9 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+## [0.5.30] — 2026-11-08
+Tether (technician app) 0.5.30, Windows and macOS; TetherQS stays 0.5.27, Tether Manage 0.5.11.
+
 ### Fixed
 - Tether (technician app): sessions to a host could be silently view-only. A "View only" session
   (Advanced mode, `--view-only`) switches the core's saved per-peer view-only option on and back
