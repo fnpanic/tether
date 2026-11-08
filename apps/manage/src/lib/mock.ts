@@ -21,7 +21,7 @@ const FEATURES: Feature[] = [
   f("policy.fast-apply", "policy", "Fast apply (check every minute)", "bool", "N"),
   f("customer.title", "customer", "Window title / company name", "text", "Tether Support", ["customer"]),
   f("customer.close-after-session", "customer", "Quit when the session ends", "bool", "N", ["customer"]),
-  f("customer.elevate", "customer", "Offer \"Elevate\" (admin access for UAC prompts)", "bool", "Y", ["customer"]),
+  f("customer.elevate", "customer", "Admin access for UAC prompts (Elevate button, technician requests)", "bool", "Y", ["customer"]),
 ];
 
 const R1 = "https://tether-desk.duckdns.org";

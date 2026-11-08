@@ -97,6 +97,13 @@ access** (core `ElevationRequest`, `session_elevate`; shown for a TetherQS host 
 disabled once admin access is on). It starts the same portable service without a restart; the
 customer confirms one UAC prompt and can be asked again after a No.
 
+Policy `customer.elevate` off covers both ways (from TetherQS 0.5.28): the customer's button is
+hidden, and the host refuses a technician's request before any UAC prompt opens (core option
+`allow-elevate` = `N`, `connection.rs` `handle_elevation_request`). The technician gets "Admin access
+could not be requested: it is turned off by policy on that computer." and the session continues.
+TetherQS 0.5.27 and older still start the prompt on request. Test: `apps/desktop/e2e/vm-elevpol-e2e.mjs`
+(VM, both cases).
+
 Limits: without admin access the technician sees a black/frozen screen while a UAC prompt is open
 and cannot type into elevated windows. If the customer declines the UAC prompt, TetherQS keeps
 running without admin access.

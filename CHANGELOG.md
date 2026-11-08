@@ -6,6 +6,21 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+## [TetherQS 0.5.28] — 2026-11-09
+TetherQS 0.5.28, Windows and macOS; Tether (technician app) stays 0.5.30, Tether Manage 0.5.11.
+
+### Changed
+- TetherQS: policy `customer.elevate` off now also refuses the technician's **Remote actions →
+  Request admin access**. Up to 0.5.27 it only hid the customer's own button, and a technician
+  could still bring up the UAC prompt. The host now answers with the reason and opens no prompt;
+  the technician sees "Admin access could not be requested: it is turned off by policy on that
+  computer." (no technician-app update needed). The policy maps to the core option
+  `allow-elevate`; label "Admin access for UAC prompts (Elevate button, technician requests)".
+  Tested on the VM with Tether 0.5.30: policy off → message, no UAC prompt, session continues;
+  policy on → prompt opens, No → "declined", session continues.
+- TetherQS (macOS): Accessibility counts as granted only when macOS also lets the app post events
+  (`CGPreflightPostEventAccess`, as Tether 0.5.30).
+
 ## [0.5.30] — 2026-11-08
 Tether (technician app) 0.5.30, Windows and macOS (published 2026-11-09; index serial 30 on both relays,
 files identical to dist/ by SHA-256 on both relays and the CDN, the .dmg on the relays only as designed);

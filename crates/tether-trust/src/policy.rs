@@ -168,7 +168,7 @@ pub const FEATURES: &[Feature] = &[
     t!("customer.accent-color", "customer", "Accent colour (#rrggbb)", "Akzentfarbe (#rrggbb)", Kind::Text, "#0071e3", CUST),
     t!("customer.welcome", "customer", "Welcome text", "Begrüßungstext", Kind::Text, "Give this ID and password to your support technician.", CUST),
     b!("customer.close-after-session", "customer", "Quit when the session ends", "Nach Sitzungsende beenden", "N", None, CUST),
-    b!("customer.elevate", "customer", "Offer \"Elevate\" (admin access for UAC prompts)", "\"Erhöhen\" anbieten (Adminrechte für UAC)", "Y", None, CUST),
+    b!("customer.elevate", "customer", "Admin access for UAC prompts (Elevate button, technician requests)", "Adminrechte für UAC (Erhöhen-Knopf, Anfragen des Technikers)", "Y", Some("allow-elevate"), CUST),
 ];
 
 /// Core options that policy can never set: they guarantee encryption, TLS verification,
@@ -499,6 +499,20 @@ mod tests {
         let layer: Layer = [(SERVERS_LIST.to_owned(), rule(State::Locked, Some("relay2.example.com")))].into();
         b.profiles.insert(PROFILE_TECHNICIAN.into(), layer);
         assert!(b.validate().is_ok());
+    }
+
+    #[test]
+    fn elevate_off_reaches_the_core_of_tetherqs_only() {
+        // The host's elevation-request handler reads `allow-elevate`: a technician's "Request
+        // admin access" must honour the policy like the customer's own Elevate button.
+        let mut b = Bundle::default();
+        b.profiles.insert(PROFILE_CUSTOMER.into(), [("customer.elevate".to_owned(), rule(State::Locked, Some("N")))].into());
+        let qs = resolve(Some(&b), PROFILE_CUSTOMER, "d", None);
+        assert!(qs.core_overrides().contains(&("allow-elevate", "N".to_owned())));
+        b.profiles.insert(PROFILE_CUSTOMER.into(), [("customer.elevate".to_owned(), rule(State::Off, None))].into());
+        assert!(resolve(Some(&b), PROFILE_CUSTOMER, "d", None).core_overrides().contains(&("allow-elevate", "N".to_owned())));
+        let tech = resolve(Some(&b), PROFILE_TECHNICIAN, "d", None);
+        assert!(!tech.core_overrides().iter().chain(tech.core_defaults().iter()).any(|(k, _)| *k == "allow-elevate"));
     }
 
     #[test]

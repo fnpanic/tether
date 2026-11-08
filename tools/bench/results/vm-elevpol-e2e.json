@@ -1,0 +1,18 @@
+{
+ "at": "2026-11-08T23:18:46.248Z",
+ "tech": "C:\\install\\.claude\\elevpol-tech\\tether.exe",
+ "results": [
+  {
+   "step": "policy off",
+   "toast": "Admin access could not be requested: it is turned off by policy on that computer.",
+   "uac_prompt_opened": false,
+   "session_alive": true
+  },
+  {
+   "step": "policy on",
+   "uac_prompt_opened": true,
+   "toast": "Admin access was declined on the remote computer (or its prompt was closed). The session continues without admin rights; you can request it again under Remote actions.",
+   "session_alive": true
+  }
+ ]
+}

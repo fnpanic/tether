@@ -2637,7 +2637,7 @@ index 8e4c56c..7fa5007 100644
 +    }
 +}
 diff --git a/src/server/connection.rs b/src/server/connection.rs
-index e9ea313..2956b2f 100644
+index e9ea313..71f5b01 100644
 --- a/src/server/connection.rs
 +++ b/src/server/connection.rs
 @@ -194,6 +194,10 @@ lazy_static::lazy_static! {
@@ -2933,7 +2933,18 @@ index e9ea313..2956b2f 100644
                      #[cfg(windows)]
                      Some(misc::Union::SelectedSid(sid)) => {
                          if let Some(current_process_sid) =
-@@ -5310,6 +5474,7 @@ impl Connection {
+@@ -4693,6 +4857,10 @@ impl Connection {
+         let mut err;
+         if !self.keyboard {
+             err = "No permission".to_string();
++        } else if Config::get_option("allow-elevate") == "N" {
++            // Tether: policy `customer.elevate` off. The customer's own Elevate button is hidden
++            // then; a technician's request must not reach the UAC prompt either.
++            err = "it is turned off by policy on that computer.".to_string();
+         } else {
+             err = "No need to elevate".to_string();
+             if !crate::platform::is_installed() && !portable_client::running() {
+@@ -5310,6 +5478,7 @@ impl Connection {
              return;
          }
          self.closed = true;
@@ -2941,7 +2952,7 @@ index e9ea313..2956b2f 100644
          // If voice A,B -> C, and A,B has voice call
          // B disconnects, C will reset the voice call input.
          //
-@@ -5356,6 +5521,10 @@ impl Connection {
+@@ -5356,6 +5525,10 @@ impl Connection {
          msg_out.set_misc(misc);
          self.send(msg_out).await;
          raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
@@ -2952,7 +2963,7 @@ index e9ea313..2956b2f 100644
      }
  
      async fn handle_read_job_init_result(
-@@ -5813,6 +5982,44 @@ impl Connection {
+@@ -5813,6 +5986,44 @@ impl Connection {
          }
      }
  
@@ -2997,7 +3008,7 @@ index e9ea313..2956b2f 100644
      fn is_authed_remote_conn(&self) -> bool {
          if let Some(id) = self.authed_conn_id.as_ref() {
              return id.conn_type() == AuthConnType::Remote;
-@@ -7224,6 +7431,13 @@ mod test {
+@@ -7224,6 +7435,13 @@ mod test {
      // test that admits connections holds this first; a poisoned lock is still a lock.
      static UNAUTHORIZED_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
  
@@ -3011,7 +3022,7 @@ index e9ea313..2956b2f 100644
      fn unauthorized_count() -> usize {
          UNAUTHORIZED_CONNS.lock().unwrap().len()
      }
-@@ -7874,3 +8088,104 @@ mod test {
+@@ -7874,3 +8092,104 @@ mod test {
          assert!(!replaced_by(&conn(3, remote, key(7, "other")), 2, &mine));
      }
  }

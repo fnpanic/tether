@@ -24,5 +24,7 @@ describe("elevation", () => {
     expect(elevationError("No need to elevate")).toMatch(/already on/);
     expect(elevationError("No permission")).toMatch(/turned off/);
     expect(elevationError("Failed to run portable service process")).toMatch(/could not be requested: Failed/);
+    // TetherQS with policy customer.elevate off (connection.rs handle_elevation_request).
+    expect(elevationError("it is turned off by policy on that computer.")).toBe("Admin access could not be requested: it is turned off by policy on that computer.");
   });
 });
