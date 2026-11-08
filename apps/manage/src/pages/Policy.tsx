@@ -5,7 +5,7 @@ import { useApp } from "../App";
 import { api, host, invoke, PROFILES, when, type Bundle, type Device, type Effective, type Feature, type Layer, type Rule } from "../lib/ipc";
 import { byArea, FeatureRow, sameRule, shown, type Lang } from "../components/features";
 import { ChangeList } from "../components/publish";
-import { liveCount } from "../components/policy-publish";
+import { liveCount, unchecked } from "../lib/live";
 import { Badge, Button, Card, ErrorText, IconButton, Label, Modal, PageHeader, SELECTED, Segmented, Select, StatusDot, Table, TextField } from "../components/ui";
 
 type Scope = { kind: "profile"; name: string } | { kind: "group"; name: string };
@@ -50,14 +50,24 @@ function Preview({ draft, profile, devices }: { draft: Bundle; profile: string; 
 
 /** Read-only: what the relays serve now, per profile, with sources, and the draft beside it. */
 function LiveView({ features, lang }: { features: Feature[]; lang: Lang }) {
-  const { live, draft, changes, reloadLive } = useApp();
+  const { live, liveError, draft, changes, reloadLive } = useApp();
   const [profile, setProfile] = useState<string>("technician");
   const [onlyDiff, setOnlyDiff] = useState<"all" | "diff">("all");
   const [draftEff, setDraftEff] = useState<Effective | null>(null);
   useEffect(() => {
     invoke<Effective>("policy_preview", { bundle: draft, profile, device: "" }).then(setDraftEff, () => setDraftEff(null));
   }, [draft, profile]);
-  if (!live) return <p className="text-caption text-muted">Reading the live policy from every relay…</p>;
+  if (!live)
+    return liveError ? (
+      <div className="flex items-center gap-3">
+        <ErrorText error={`Could not read the live policy: ${liveError}`} />
+        <Button size="sm" onClick={reloadLive}>
+          Check again
+        </Button>
+      </div>
+    ) : (
+      <p className="text-caption text-muted">Reading the live policy from every relay…</p>
+    );
   const { on, of } = liveCount(live);
   const name = (id: string) => features.find((f) => f.id === id)?.[lang] ?? id;
   const rows = (live.effective[profile] ?? []).filter((r) => onlyDiff === "all" || draftEff?.values[r.id] !== r.value);
@@ -67,7 +77,7 @@ function LiveView({ features, lang }: { features: Feature[]; lang: Lang }) {
       <section>
         <div className="mb-3 flex items-end justify-between">
           <div>
-            <h2 className="text-headline font-semibold">{live.serial == null ? "Nothing published yet" : `Serial ${live.serial} · live on ${on} of ${of} relays`}</h2>
+            <h2 className="text-headline font-semibold">{live.serial != null ? `Serial ${live.serial} · live on ${on} of ${of} relays` : unchecked(live) ? "Could not check: no relay answered with a policy" : "Nothing published yet"}</h2>
             <p className="mt-1 text-caption text-muted">Read from each relay's public GET /api/policy and verified with this app's admin key{live.issued_at ? ` · issued ${when(live.issued_at)}` : ""}.</p>
           </div>
           <Button size="sm" onClick={reloadLive}>

@@ -19,7 +19,11 @@ signed requests. Nothing in it is needed by technicians or customers.
 A bar at the top of every screen shows the policy state, for example
 **Draft has 3 changes · Live: serial 4 on 1/2 relays**, with one **Publish…** button (see
 [Publish](#publish)), **Bring 1 relay up to date** when a relay serves an older policy, and a warning
-badge when the policy names a relay that is not in the relay list.
+badge when the policy names a relay that is not in the relay list. The live part is read from
+every relay at unlock (10 s limit each). When no relay could be read it says **Live: could not
+check (host: reason; …)**, never "nothing published yet"; while the last check failed or a relay
+did not answer it, the check is asked again every 30 s until every relay answers (the refresh
+button next to it asks at once). The Live policy tab and Status and relays say the same.
 
 ### Publishing pattern
 
@@ -380,7 +384,8 @@ review sheet sets the **Rollout** and **Security release** for all of them, as t
 does (see "Rollout" there). A macOS technician build without its `.dmg` next to it is skipped
 and marked. Use the form below for mandatory, forced or minimum-version releases.
 
-While it publishes, the sheet shows the build being signed, then one line per relay (**Relay 1 of
+While it publishes, the progress replaces the review (notes, rollout and the relay list can no
+longer change, so they are hidden; Cancel stays at the bottom). It shows the build being signed, then one line per relay (**Relay 1 of
 2 · host**, the file, a progress bar with MB sent and percent, "waiting for the relay to confirm"
 once a file is sent, "files uploaded, waiting for the other relays" when it has them all): the relays get the files **at the same time**, so a slow or silent relay
 does not hold up the others. Below that, every build × relay that has finished, failed ones with
@@ -405,7 +410,9 @@ The toast matches: "Released X to channel" only when every relay has it, otherwi
 relays only", "... some relays need attention", "Too late to cancel: X is live on 2 of 2 relays"
 or "Cancelled after <build>".
 
-**Cancel** stays available while publishing (also Escape). Until the first relay starts writing
+**Cancel** stays available while publishing; only the button stops it (Escape and a click beside
+the sheet do nothing while it publishes: a click to bring the window to the front once cancelled a
+whole run). Until the first relay starts writing
 the signed release index, it stops the publish: the uploads and copies in progress end at once,
 and the steps after them (CDN, index read and check, index write) are not started. Nothing is
 published (no release index, no `latest.json`; files that already went out stay unused until the
