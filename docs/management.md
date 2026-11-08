@@ -516,19 +516,38 @@ edited (their settings are only on that PC).
 
 ## Diagnostics tickets
 
-1. **Create ticket** with a note (who and what, up to 256 characters). Manage opens it with the same
-   code on every relay of the server setting.
+1. **Create ticket** with a note (who and what, up to 256 characters). Manage picks the code and
+   opens it on every relay of the server setting at once. A relay that does not answer within 10 s
+   is named in the error ("Saved on some relays, but not on: …"); the code is in the list and works
+   on the other relays.
 2. Read the 8-character code to the user. Codes avoid ambiguous characters (no I, O, 0, 1). It is
    valid for 24 hours and for one upload.
 3. The user enters it in the technician app under **Settings → Diagnostics → Send to support**, or
    in TetherQS under **Help** (title bar `?`) **→ Send to support**.
 4. The ticket shows the upload size and time, whichever relay the app sent it to (the list merges
-   all relays; a relay that does not answer is named above the table). **Open** lists the files
-   and shows `diagnostics.json`; **Save zip…** stores the bundle.
+   all relays, asked at once with a 10 s limit; a relay that does not answer is named above the
+   table). The folder button next to an upload (**Open the upload**) downloads it from the relay
+   that has it (it must start within 10 s and finish within 60 s), lists the files and shows
+   `diagnostics.json`; **Save zip…** stores the bundle.
 5. **Close** when the case is done: no more uploads with that code, and the ticket moves to
    **Archived** (note, dates, size, **Open**), kept 90 days with its upload. **Delete** (asks
    first) removes a ticket and its upload from every relay for good, active or archived.
    Close and Delete act on every relay; when one fails, the result of each relay is shown.
+
+**One upload per code, per relay.** Each relay takes one upload per code. The apps stop at the
+first relay that takes the upload, and a relay that has the code but used, expired or closed ends
+the attempt. A second upload is still possible: Manage opens the ticket on every relay, so when an
+app reaches relay 1 first after another upload went to relay 2 (where relay 1 never saw it), relay
+1 takes it too. Manage then lists both ("2 uploads, one per relay"), each with its own button,
+and Close and Delete act on both. The relays do not tell each other about uploads, so this race
+stays; it needs the same code used twice within its 24 h.
+
+**A relay that does not answer** costs at most 10 s in every view and small write (ticket,
+policy, team, server keys, download page, release index, clean-up): Manage asks all relays at once,
+gives up on one that does not start answering within 10 s (a small write must finish within 30 s),
+and shows each relay's result. Only release file uploads and copies keep the long limit
+(30 min). The policy bar keeps the last live serial after a failed check, marked "earlier check;
+checking again failed: …".
 
 Active tickets: uploads are kept 7 days, a code without upload expires after 24 h ("Expired, no
 upload") and leaves the list after 7 days. States and retention: [api.md](api.md#post-apidiagticket).

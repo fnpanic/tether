@@ -28,6 +28,8 @@ Usage: tether [command]
   --check-update                    check for an update and print the result
   --policy-refresh                  fetch the organisation policy now
   --diagnostics <out.zip>           write a diagnostics archive (logs, settings without secrets)
+  --diag-upload <code>              send the diagnostics to support with a ticket code (as Settings ›
+                                    Diagnostics › Send to support)
   --help, -h, /?                    show this help
 
 Exit codes: 0 ok, 1 error, 2 bad arguments, 3 offline, 4 policy signature rejected,
@@ -59,6 +61,7 @@ pub enum Cmd {
     Version,
     Help,
     Diagnostics(PathBuf),
+    DiagUpload(String),
     CheckUpdate,
     PolicyRefresh,
 }
@@ -104,6 +107,10 @@ pub fn parse(args: &[String]) -> Option<Result<Cmd, String>> {
         "--diagnostics" => Some(match args {
             [_, out] if !out.starts_with("--") => Ok(Cmd::Diagnostics(PathBuf::from(out))),
             _ => Err("usage: --diagnostics <out.zip>".into()),
+        }),
+        "--diag-upload" => Some(match args {
+            [_, code] if !code.starts_with("--") => Ok(Cmd::DiagUpload(code.clone())),
+            _ => Err("usage: --diag-upload <code>".into()),
         }),
         "--connect" | "--file-transfer" | "--view-camera" | "--terminal" => Some(parse_connect(args).map(Cmd::Connect)),
         _ => None,
@@ -238,6 +245,7 @@ pub fn run(args: &[String]) -> Option<ExitCode> {
         Cmd::Version => Ok(update::VERSION.into()),
         Cmd::GetId => Ok(librustdesk::ipc::get_id()),
         Cmd::Diagnostics(out) => diag::export_to(&out).map(|_| format!("wrote {}", out.display())),
+        Cmd::DiagUpload(code) => diag::upload(&code).map(|()| "sent".to_owned()),
         Cmd::PolicyRefresh => policy::refresh().map(|_| {
             let e = policy::effective();
             format!("policy serial {} ({})", e.serial, e.sources.join(", "))
@@ -321,6 +329,7 @@ mod tests {
             "--connect 123456789 --password-env",
             "--get-id extra",
             "--diagnostics",
+            "--diag-upload",
         ] {
             assert!(matches!(p(s), Some(Err(_))), "{s} accepted");
         }
@@ -333,6 +342,7 @@ mod tests {
         assert_eq!(p("--check-update"), Some(Ok(Cmd::CheckUpdate)));
         assert_eq!(p("--policy-refresh"), Some(Ok(Cmd::PolicyRefresh)));
         assert_eq!(p("--diagnostics out.zip"), Some(Ok(Cmd::Diagnostics("out.zip".into()))));
+        assert_eq!(p("--diag-upload K7Q2M9XD"), Some(Ok(Cmd::DiagUpload("K7Q2M9XD".into()))));
         for core in ["--server", "--cm", "--service", "--install-service", "--tray", "--password Secret-1234"] {
             assert_eq!(p(core), None, "{core}");
         }

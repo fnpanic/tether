@@ -66,6 +66,24 @@ fn main() -> ExitCode {
         };
     }
 
+    if std::env::args().nth(1).as_deref() == Some("--diag-upload") {
+        // Help › Send to support without the window (docs/troubleshooting.md).
+        let Some(code) = std::env::args().nth(2) else {
+            eprintln!("usage: TetherQS --diag-upload <code>");
+            return ExitCode::FAILURE;
+        };
+        return match diag::upload(&code) {
+            Ok(()) => {
+                println!("sent");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("diagnostics: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     let ui_start = std::env::args().len() == 1;
     if ui_start {
         #[cfg(windows)]

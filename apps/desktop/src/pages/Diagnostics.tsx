@@ -179,9 +179,9 @@ export function Diagnostics() {
               placeholder="Ticket code"
               aria-label="Support ticket code"
               spellCheck={false}
-              className="!h-9 w-40 font-mono tracking-[0.15em]"
+              className="!h-9 !w-40 shrink-0 font-mono tracking-[0.15em]"
             />
-            <Button size="sm" variant="primary" type="submit" disabled={busy || ticket.length !== 8}>
+            <Button size="sm" variant="primary" type="submit" disabled={busy || ticket.length !== 8} className="shrink-0 whitespace-nowrap">
               Send to support
             </Button>
           </form>

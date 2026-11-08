@@ -7,6 +7,32 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ## [Unreleased]
 
 ### Fixed
+- **Tether Manage: no view or small write waits on a relay that never answers** (round 3 of the
+  blind review; "all relay reads" in round 2 was not true). Opening a diagnostics upload asks only
+  the relay that has it (or the first that sends it) and gives up when it does not start within
+  10 s (60 s for the whole zip; before: every relay, 30 min). Create ticket, Close/Delete, policy,
+  team, server keys, download page, release index and clean-up writes must start answering within
+  10 s and finish within 30 s, and go to all relays at once with one result per relay (before:
+  one relay after the other, 30 min each). The Keys page, the download page (preview, publish and
+  "Then update the download page"; it read only the first relay), Diagnostics, Team, Custom apps,
+  Bring relays up to date and the clean-up review read all relays at once with the 10 s limit;
+  the macOS disk image facts for a custom download page come from the first relay that sends the
+  file within 180 s. Only release file uploads and copies keep the 30 min limit. Measured with one
+  silent relay: every call about 10 s (`apps/desktop/e2e/relay-timing.mjs`, 19 calls).
+- **Diagnostics: "could not reach the support server" instead of "not valid"** when the relay
+  that has the ticket is down and the other relay does not know the code (technician app and
+  TetherQS; a `5xx` other than `503` counts as unreachable).
+- **Tether Manage: both uploads of a code are listed**: each relay takes one upload per code, so a
+  code used on one relay could be uploaded once more on the other and that upload stayed hidden.
+  The ticket now lists every upload with its own Open button; Close and Delete act on all of them.
+- **Tether Manage: Diagnostics table fits from 900 px** (Delete was past the card edge at 900×600
+  and 911×512): note under the code, closed date under created, icon buttons with labels.
+  An earlier error disappears after the next good load, and switching tabs quickly no longer shows
+  the other tab's list. The policy bar marks the live serial as from an earlier check when a later
+  check failed (it kept showing "Live: serial N" as if current).
+- **Tether: "Send to support" and "Remove from recents" labels no longer cut** (Settings ›
+  Diagnostics: the code field took the whole row and the label wrapped out of the button; the
+  Recent "More" menu item wrapped onto a second line).
 - **Nothing cut off at small window sizes** (all windows of Tether, TetherQS and Tether Manage
   checked at their default and minimum sizes, 1280×720 and 1366×768 at 125 % and 150 %, light and
   dark; [docs/ui-audit.md](docs/ui-audit.md), `tools/ui-audit.mjs`). A window larger than its
@@ -50,6 +76,8 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   short window.
 
 ### Added
+- **`--diag-upload <code>`** for `tether` and `TetherQS`: Send to support from the command line
+  ([cli.md](docs/cli.md)).
 - **Tether Manage: rollout for "Publish the latest builds"**: its review sheet now has the
   Rollout (Standard / Fast / Immediately / Custom) and Security release controls of the Sign and
   publish form, so the one-click publish no longer always uses the Standard ramp.

@@ -48,18 +48,51 @@ fn url(server: &str, path: &str) -> String {
 }
 
 /// Small reads a view waits for (live policy, relay health): no answer within this counts as
-/// unreachable, instead of the client's 30 min upload timeout.
+/// unreachable, instead of the client's 30 min upload timeout. Also the limit for the first byte
+/// of a file download ([`admin_download`], [`public_download`]).
 pub const QUICK: Duration = Duration::from_secs(10);
+/// Small signed writes (JSON documents, the download page; at most 512 KiB): the relay answers
+/// at once, so it must start answering within [`QUICK`] and finish within this. Only release file
+/// uploads ([`admin_upload`]) and copies ([`public`]) keep the client's 30 min.
+pub const WRITE: Duration = Duration::from_secs(30);
+/// A diagnostics upload (at most 2 MiB) from start to end, once it has started within [`QUICK`].
+pub const DIAG: Duration = Duration::from_secs(60);
+/// The macOS disk image (about 17 MB) the download page's facts are taken from.
+pub const DMG: Duration = Duration::from_secs(180);
 
-/// Signed admin request; returns the response body on 2xx.
+/// Signed admin request with a small body: the answer must start within [`QUICK`] and be complete
+/// within [`WRITE`]. Returns the body on 2xx.
 pub async fn admin(server: &str, key: &SigningKey, method: &str, path: &str, body: Vec<u8>, content_type: &str) -> Result<Vec<u8>, String> {
     let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
     let sig = reqauth::sign_request(key, method, path, &body, now());
-    let mut req = client().request(m, url(server, path)).header(reqauth::HEADER, sig);
+    let mut req = client().request(m, url(server, path)).header(reqauth::HEADER, sig).timeout(WRITE);
     if !body.is_empty() {
         req = req.header("Content-Type", content_type).body(body);
     }
-    finish(req.send().await).await
+    read_body(started(req).await?).await
+}
+
+/// Signed `GET` of a file: the answer must start within [`QUICK`] and be complete within `total`.
+pub async fn admin_download(server: &str, key: &SigningKey, path: &str, total: Duration) -> Result<Vec<u8>, String> {
+    let sig = reqauth::sign_request(key, "GET", path, b"", now());
+    read_body(started(client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(total)).await?).await
+}
+
+/// Unauthenticated `GET` of a file with the limits of [`admin_download`]; `Ok(None)` on 404.
+pub async fn public_download(server: &str, path: &str, total: Duration) -> Result<Option<Vec<u8>>, String> {
+    match read_body(started(client().get(url(server, path)).timeout(total)).await?).await {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.contains("HTTP 404") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Sends `req`; a relay that accepts the connection but sends no answer within [`QUICK`] fails.
+async fn started(req: reqwest::RequestBuilder) -> Result<reqwest::Response, String> {
+    match tokio::time::timeout(QUICK, req.send()).await {
+        Ok(r) => r.map_err(unreachable),
+        Err(_) => Err(NO_ANSWER.to_owned()),
+    }
 }
 
 /// Signed `GET` that gives up after [`QUICK`].
@@ -117,8 +150,17 @@ async fn public_req(req: reqwest::RequestBuilder) -> Result<Option<Vec<u8>>, Str
     }
 }
 
+const NO_ANSWER: &str = "No answer from the server in time.";
+
+fn unreachable(e: reqwest::Error) -> String {
+    if e.is_timeout() { NO_ANSWER.to_owned() } else { format!("Could not reach the server: {e}") }
+}
+
 async fn finish(res: reqwest::Result<reqwest::Response>) -> Result<Vec<u8>, String> {
-    let res = res.map_err(|e| if e.is_timeout() { "No answer from the server in time.".to_owned() } else { format!("Could not reach the server: {e}") })?;
+    read_body(res.map_err(unreachable)?).await
+}
+
+async fn read_body(res: reqwest::Response) -> Result<Vec<u8>, String> {
     let status = res.status().as_u16();
     let bytes = res.bytes().await.map_err(|e| if e.is_timeout() { "The server stopped answering in time.".to_owned() } else { format!("The connection broke while reading the answer: {e}") })?;
     if (200..300).contains(&status) {
@@ -193,6 +235,37 @@ mod tests {
         let (m, _, b) = handle.join().unwrap();
         assert_eq!((m.as_str(), b == data), ("PUT", true));
         assert_eq!(*seen.lock().unwrap(), [262_144, 524_288, 600_000]);
+    }
+
+    /// A relay that accepts the connection and never answers: a download and a small write give
+    /// up after QUICK, not after their total limit.
+    #[test]
+    fn silent_relay_fails_quickly() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let hold = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            std::thread::sleep(QUICK + Duration::from_secs(3));
+            drop(s);
+        });
+        let key = tether_trust::generate_key();
+        let t = std::time::Instant::now();
+        let r = tauri::async_runtime::block_on(admin_download(&server, &key, "/api/admin/diag/AAAAAAAA", Duration::from_secs(600)));
+        assert_eq!(r.unwrap_err(), NO_ANSWER);
+        assert!(t.elapsed() < QUICK + Duration::from_secs(2), "{:?}", t.elapsed());
+        hold.join().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let hold = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            std::thread::sleep(QUICK + Duration::from_secs(3));
+            drop(s);
+        });
+        let t = std::time::Instant::now();
+        let r = tauri::async_runtime::block_on(admin(&server, &key, "POST", "/api/admin/diag-ticket", b"{}".to_vec(), "application/json"));
+        assert_eq!(r.unwrap_err(), NO_ANSWER);
+        assert!(t.elapsed() < QUICK + Duration::from_secs(2), "{:?}", t.elapsed());
+        hold.join().unwrap();
     }
 
     #[test]

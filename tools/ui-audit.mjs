@@ -68,6 +68,7 @@ const APPS = {
       ["home-longid", "main", "/#/", { act: (p) => p.getByRole("textbox", { name: "Remote device ID" }).fill("1234567890123456789012345678901234567890") }],
       ["home-search-none", "main", "/?hosts=200#/", { act: (p) => p.getByRole("textbox", { name: "Search recent devices" }).fill("zzzzzz") }],
       ...["Security", "Unattended access", "Recording", "Appearance", "Network", "Diagnostics", "About"].map((s) => [`settings-${s.split(" ")[0].toLowerCase()}`, "main", "/#/", { act: async (p) => { await btn(p, "Settings"); await p.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: s, exact: true }).click(); } }]),
+      ...[["settings-diag-sent", "K7Q2M9XD"], ["settings-diag-error", "ZZZZZZZZ"]].map(([n, code]) => [n, "main", "/#/", { act: async (p) => { await btn(p, "Settings"); await p.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: "Diagnostics", exact: true }).click(); await p.getByRole("textbox", { name: "Support ticket code" }).fill(code); await btn(p, "Send to support"); await sleep(400); await p.getByRole("button", { name: "Send to support" }).scrollIntoViewIfNeeded(); } }]),
       ["recordings", "main", "/#/", { act: (p) => btn(p, "Recordings") }],
       ["hosts", "adv", "/?hosts=5000#/hosts"],
       ["hosts-empty", "adv", "/?hosts=0#/hosts"],
@@ -123,7 +124,7 @@ const APPS = {
       ["team-add", "manage", "/", { page: "Team", act: (p) => btn(p, "Add technician") }],
       ["custom-new", "manage", "/", { page: "Custom apps", act: (p) => btn(p, "New custom app") }],
       ["diag-created", "manage", "/", { page: "Diagnostics", act: async (p) => { const t = p.locator("main input, main textarea").first(); await t.fill(LONG); await btn(p, "Create ticket"); } }],
-      ["diag-open", "manage", "/", { page: "Diagnostics", act: (p) => p.locator("main button:enabled", { hasText: /^Open$/ }).first().click({ timeout: 4000 }) }],
+      ["diag-open", "manage", "/", { page: "Diagnostics", act: (p) => p.getByRole("button", { name: /^Open the upload/ }).first().click({ timeout: 4000 }) }],
       ["publish-sheet", "manage", "/", { act: (p) => p.getByRole("button", { name: /^Publish/ }).first().click() }],
       ["releases-publish", "manage", "/", { page: "Releases", act: (p) => p.getByRole("button", { name: /^Publish \d+ new build/ }).click({ timeout: 4000 }) }],
       ["download-review", "manage", "/", { page: "Download page", act: (p) => p.getByRole("button", { name: /review|publish/i }).first().click({ timeout: 4000 }) }],
@@ -201,6 +202,8 @@ function audit() {
       if (ctx.measureText(el.placeholder).width > room + 1) out.push(["placeholder-cut", `${label(el)} placeholder ${Math.round(ctx.measureText(el.placeholder).width)}>${Math.round(room)}`]);
     }
     if (hasText && el.clientHeight > 0 && el.scrollHeight > el.clientHeight + 2 && cs.overflowY !== "visible" && !/auto|scroll/.test(cs.overflowY)) out.push(["text-cut-v", `${label(el)} ${el.scrollHeight}>${el.clientHeight}`]);
+    // a control whose label wraps past its own (fixed) height: the extra line spills out of the button
+    if (ia && hasText && el.clientHeight > 0 && el.scrollHeight > el.clientHeight + 2 && cs.overflowY === "visible") out.push(["label-spill", `${label(el)} label ${el.scrollHeight}px tall in a ${el.clientHeight}px control`]);
     // interactive element covered by something else in the same layer
     if (ia && r.left >= 0 && r.top >= 0 && r.right <= vw && r.bottom <= vh) {
       const x = r.left + r.width / 2, y = r.top + r.height / 2;

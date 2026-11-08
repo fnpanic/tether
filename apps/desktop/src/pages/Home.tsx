@@ -169,8 +169,8 @@ function PeerCard({ p, onConnect, onRemove }: { p: Peer; onConnect: () => void; 
         <MoreHorizontal size={16} />
       </button>
       {menu && (
-        <div className="animate-fade absolute right-5 top-14 z-10 w-48 overflow-hidden rounded-xl border border-hairline bg-tile p-1 shadow-float" onMouseLeave={() => setMenu(false)}>
-          <button className="flex h-9 w-full items-center gap-2 rounded-md px-3 text-caption text-danger hover:bg-tile-2" onClick={onRemove}>
+        <div className="animate-fade absolute right-5 top-14 z-10 w-max min-w-48 overflow-hidden rounded-xl border border-hairline bg-tile p-1 shadow-float" onMouseLeave={() => setMenu(false)}>
+          <button className="flex h-9 w-full items-center gap-2 whitespace-nowrap rounded-md px-3 text-caption text-danger hover:bg-tile-2" onClick={onRemove}>
             <Trash2 size={15} /> Remove from recents
           </button>
         </div>

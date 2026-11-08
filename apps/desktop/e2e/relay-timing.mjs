@@ -1,6 +1,8 @@
 // Tether Manage relay reads with one relay that never answers (docs/ui-audit.md, round 2):
 // Rollouts, Devices, Sessions, Releases and the release-index publish step must come back within
-// about 10 s (api::QUICK) and name that relay's error. Two local tether-api relays; relay B sits
+// about 10 s (api::QUICK) and name that relay's error. Round 3 adds the calls a blind review found
+// hanging or sequential: Create ticket and the other small writes, Diagnostics list and Open, Keys,
+// the download page, Team, Custom apps, Cleanup and Bring relays up to date. Two local tether-api relays; relay B sits
 // behind a proxy that accepts every connection and never answers.
 //   node e2e/relay-timing.mjs <manage.exe>
 // Env: BIN (WSL dir with tether-api), VAULT (test vault, as live-timing.mjs).
@@ -77,6 +79,24 @@ try {
   // (the key is not in the new channel's index, so the call ends in that error after publishing).
   await call("Publish index (release_control)", "release_control", { channel: "timing", key: "technician/windows-x86_64", action: "halt" }, (v) => JSON.stringify(v), false);
   await call("Rollouts after the publish", "release_index", { channel: "timing" }, (v) => `serial ${v.serial}, ${JSON.stringify(v.relays)}`);
+  // Round 3.
+  await call("Create ticket (POST diag-ticket)", "admin", { method: "POST", path: "/api/admin/diag-ticket", body: { note: "timing" } }, (v) => JSON.stringify(v));
+  let ticket = null;
+  await call("Diagnostics list (diag_list)", "diag_list", { archived: false }, (v) => ((ticket = v.tickets[0]?.ticket), `${v.tickets.length} tickets, failed ${JSON.stringify(v.failed)}`));
+  writeFileSync(join(work, "diagnostics.json"), "{}");
+  execFileSync("powershell", ["-NoProfile", "-Command", `Compress-Archive -LiteralPath '${join(work, "diagnostics.json")}' -DestinationPath '${join(work, "d.zip")}'`]);
+  const up = await fetch(`http://127.0.0.1:22170/api/diag/${ticket}`, { method: "POST", headers: { "Content-Type": "application/zip" }, body: readFileSync(join(work, "d.zip")) });
+  console.log(`     upload of ${ticket} to relay A: HTTP ${up.status}`);
+  await call("Diagnostics Open, zip on relay A (diag_open)", "diag_open", { ticket }, (v) => `${v.files.length} files, ${v.size} bytes`, false);
+  await call("Diagnostics Open on the silent relay (diag_open relay B)", "diag_open", { ticket, relay: "http://127.0.0.1:22171" }, (v) => JSON.stringify(v), false);
+  await call("Diagnostics Close (diag_close)", "diag_close", { ticket }, (v) => JSON.stringify(v));
+  await call("Keys page (serverkeys_live)", "serverkeys_live", {}, (v) => JSON.stringify(v.relays.map((r) => [r.server, r.note])));
+  await call("Download page (page_render)", "page_render", { title: "t", intro: "i", technician: true, customer: true }, (v) => v.slice(0, 80), false);
+  await call("Download page data (page_data)", "page_data", {}, (v) => JSON.stringify(v), false);
+  await call("Team (team_load)", "team_load", {}, (v) => JSON.stringify(v.failed));
+  await call("Custom apps (custom_list)", "custom_list", {}, (v) => `${v.length} apps`, false);
+  await call("Cleanup review (release_prune_plan)", "release_prune_plan", {}, (v) => JSON.stringify(v).slice(0, 120));
+  await call("Policy: bring relays up to date (policy_sync)", "policy_sync", {}, (v) => JSON.stringify(v), false);
   await b.close().catch(() => {});
 } finally {
   kill(pid);

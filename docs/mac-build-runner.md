@@ -192,6 +192,16 @@ bash tools/macbuild/jobs/tether/submit.sh            # HEAD of this checkout; --
 python tools/macbuild/macbuild.py wait --user tether <id> --interval 300
 ```
 
+`submit.sh --diag-upload` sends [`diagupload.sh`](../tools/macbuild/jobs/tether/diagupload.sh)
+instead (only `keys.env` as secret; nothing is signed, installed or swapped): debug builds of
+Tether and TetherQS (only debug builds take `TETHER_DEV_API`) and `tether-api` in `$JOB_CACHE/src`,
+a throw-away admin key from the `admin_request` example of `crates/tether-trust`, the relay on
+127.0.0.1 with that key, a ticket per app opened with a signed request (curl), then each app's
+`--diag-upload <code>` with a dead relay listed first. Checks: the relay lists the upload, serves
+a zip that opens and holds `diagnostics.json`, and refuses the used code; the key, the relay data
+and the apps' throw-away HOME are deleted. First run: job `20261108T093709Z-ebc984ce2ca51eb2`, `ok`
+in 6 min (debug builds incremental), both apps PASS on macOS 15.7.4 (833 and 991 byte zips).
+
 `submit.sh` builds both UIs on the PC under `buildlock.sh` (npm is blocked on the Mac), packs
 `git archive HEAD` + `prebuilt/` as `src.tgz`, and sends `build.sh` + `swap.sh` with `keys.env`
 (`C:\vms\mac59\keys.env`) and `cs.p12`/`p12.pass` (`C:\vms\macsign`) as secrets. On the Mac

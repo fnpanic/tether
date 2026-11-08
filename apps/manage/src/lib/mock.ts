@@ -330,7 +330,10 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
     },
     diag_list: () => {
       const all = admin["/api/admin/diag"] as { state: string }[];
-      return { tickets: all.filter((t) => (t.state === "closed") === !!a.archived).map((t) => ({ ...t, relays: servers })), failed: [] };
+      // The first ticket was uploaded on two relays (each takes one upload per code).
+      const uploads = (t: { ticket: string; uploaded?: number | null; size?: number | null }) =>
+        !t.uploaded ? [] : t.ticket === "K7Q2M9XD" ? [{ relay: servers[servers.length - 1], uploaded: t.uploaded, size: t.size }, { relay: servers[0], uploaded: t.uploaded - 900, size: 150_000 }] : [{ relay: servers[0], uploaded: t.uploaded, size: t.size }];
+      return { tickets: all.filter((t) => (t.state === "closed") === !!a.archived).map((t) => ({ ...t, relays: servers, uploads: uploads(t as never), upload_relay: uploads(t as never)[0]?.relay })), failed: [] };
     },
     diag_close: () => {
       const t = (admin["/api/admin/diag"] as { ticket: string; state: string; closed?: number }[]).find((x) => x.ticket === a.ticket);

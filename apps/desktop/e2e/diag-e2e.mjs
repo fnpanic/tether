@@ -4,7 +4,9 @@
 // archives and deletes tickets. Checks the zip contents (and that no secret is in it), the
 // refusals (wrong, used, expired, closed code, bad format), the 2 MiB limit, the upload cap
 // (4 at once per relay) and the cases behind "diagnostics cannot be sent": the app reaches the
-// second relay first, and a ticket only one relay knows.
+// second relay first, and a ticket only one relay knows. Since round 3 also: the relay holding
+// the ticket is down while the other does not know the code ("could not reach", not "not valid"),
+// and one code uploaded once on each relay (Manage lists, opens and deletes both uploads).
 //
 // - tether-api from scripts/build-relay.sh (WSL, BIN), twice, data dirs in a temp folder here;
 //   a small proxy per relay stands in for Caddy;
@@ -15,7 +17,7 @@
 //   config and logs apart from the PC's real ones. Technician over invoke, TetherQS over its UI.
 //
 //   node e2e/diag-e2e.mjs
-// Env: TECH_EXE, QS_EXE, MANAGE_EXE (default C:\cargo-target\diagtix\debug\…), BIN, VAULT.
+// Env: TECH_EXE, QS_EXE, MANAGE_EXE (default C:\cargo-target\diagtix\debug\…, or T for that folder), BIN, VAULT.
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -25,7 +27,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
 
-const T = "C:\\cargo-target\\diagtix\\debug";
+const T = process.env.T || "C:\\cargo-target\\diagtix\\debug";
 const TECH = process.env.TECH_EXE || join(T, "tether.exe");
 const QS = process.env.QS_EXE || join(T, "TetherQS.exe");
 const MANAGE = process.env.MANAGE_EXE || join(T, "tether-manage.exe");
@@ -51,6 +53,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  (${detail})` : ""}`);
 };
 const NOT_VALID = "This code is not valid, has expired or was already used";
+const UNREACHABLE = "Could not reach the support server";
 const t0 = Math.floor(Date.now() / 1000);
 // Valid alphabet, created two days ago on both relays: expired.
 const EXPIRED = "EXPXRED2";
@@ -67,6 +70,7 @@ for (const [i, r] of RELAYS.entries()) {
   p.stderr.on("data", (d) => (r.out += d));
   procs.push(p);
   r.server = createServer(async (req, res) => {
+    if (r.down) return req.socket.destroy(); // a relay that is down (connection reset)
     const body = await new Promise((ok) => { const c = []; req.on("data", (d) => c.push(d)); req.on("end", () => ok(Buffer.concat(c))); });
     const headers = { ...req.headers };
     delete headers.host;
@@ -171,7 +175,7 @@ const post = (base, path, body) =>
     rq.end(body);
   });
 
-let manage, tech, qs, M, A, Q;
+let manage, tech, qs, M, A, Q, res9;
 const kill = (p) => { try { if (p) execFileSync("taskkill", ["/PID", String(p.pid), "/T", "/F"], { stdio: "ignore" }); } catch {} };
 try {
   for (const r of RELAYS) {
@@ -189,8 +193,8 @@ try {
   const open = async (note) => (await M.invoke("admin", { method: "POST", path: "/api/admin/diag-ticket", body: { note } })).ticket;
   const list = async (archived = false) => (await M.invoke("diag_list", { archived })).tickets;
   const entry = async (t, archived = false) => (await list(archived)).find((x) => x.ticket === t);
-  const download = async (t, app) => {
-    const got = await M.invoke("diag_open", { ticket: t });
+  const download = async (t, app, relay) => {
+    const got = await M.invoke("diag_open", relay ? { ticket: t, relay } : { ticket: t });
     const file = join(work, `${app}-${t}.zip`);
     await M.invoke("diag_save", { path: file });
     return { got, file };
@@ -234,6 +238,36 @@ try {
   e = await A.invokeErr("diag_upload", { ticket: t3 });
   row = await entry(t3);
   check("technician: relay 2 says 404, the upload lands on relay 1", e === null && zipOn(RELAYS[0], t3) && row?.upload_relay === R1, e ?? JSON.stringify(row));
+
+  // The relay with the ticket is down and the other does not know the code: the code may well be
+  // valid, so the app must not call it invalid.
+  setServers(R1);
+  const t8 = await open("relay 1 only, then down");
+  setServers(`${R1},${R2}`);
+  RELAYS[0].down = true;
+  e = await A.invokeErr("diag_upload", { ticket: t8 });
+  check("technician: relay with the ticket down, the other 404 -> 'could not reach', not 'not valid'", e?.includes(UNREACHABLE) && !e.includes(NOT_VALID), e);
+  RELAYS[0].down = false;
+  e = await A.invokeErr("diag_upload", { ticket: t8 });
+  check("technician: the same code works once that relay is back", e === null && zipOn(RELAYS[0], t8), e ?? "");
+
+  // One upload per code holds per relay: a code used on relay 2 can still be uploaded once on
+  // relay 1 (an app that reached relay 1 first). Manage lists both, opens each, deletes both.
+  const t9 = await open("uploaded on both relays");
+  e = await A.invokeErr("diag_upload", { ticket: t9 });
+  // The second upload: a small valid zip of its own (a different size from the app's).
+  writeFileSync(join(work, "diagnostics.json"), JSON.stringify({ app: "second upload" }));
+  execFileSync("powershell", ["-NoProfile", "-Command", `Compress-Archive -LiteralPath '${join(work, "diagnostics.json")}' -DestinationPath '${join(work, "second.zip")}'`]);
+  const st9 = await post(R1, `/api/diag/${t9}`, readFileSync(join(work, "second.zip")));
+  row = await entry(t9);
+  check("a used code is taken once more by the relay where it was still open", e === null && st9 === 204 && zipOn(RELAYS[0], t9) && zipOn(RELAYS[1], t9), `${e} ${st9}`);
+  check("Manage lists both uploads of the code, newest first", row?.uploads?.length === 2 && row.uploads[0].relay === R1 && row.uploads[1].relay === R2 && row.upload_relay === R1, JSON.stringify(row?.uploads));
+  const both = [await download(t9, "both-r1", R1), await download(t9, "both-r2", R2)];
+  check("Manage opens each upload from its relay", both[0].got.size === row.uploads[0].size && both[1].got.size === row.uploads[1].size && both[0].got.size !== both[1].got.size, both.map((d) => d.got.size).join(" vs "));
+  e = await M.invokeErr("diag_open", { ticket: t9, relay: "http://127.0.0.1:1" });
+  check("Manage opens uploads only from its configured relays", e?.includes("not in the relay list"), e);
+  res9 = await M.invoke("diag_delete", { ticket: t9 });
+  check("delete removes both uploads", res9.every((x) => x.ok) && !zipOn(RELAYS[0], t9) && !zipOn(RELAYS[1], t9), JSON.stringify(res9));
 
   // Upload cap: relay 2's four slots taken by slow uploads -> 503 there, relay 1 takes it.
   const hold = await open("slot holder");
@@ -329,6 +363,10 @@ try {
   setServers(R1);
   const q3 = await open("TetherQS relay 1 only");
   setServers(`${R1},${R2}`);
+  RELAYS[0].down = true;
+  msg = await send(q3);
+  check("TetherQS: relay with the ticket down, the other 404 -> 'could not reach', not 'not valid'", msg.includes(UNREACHABLE) && !msg.includes(NOT_VALID), msg);
+  RELAYS[0].down = false;
   msg = await send(q3);
   check("TetherQS: relay 2 says 404, the upload lands on relay 1", msg.startsWith("Sent") && zipOn(RELAYS[0], q3) && (await entry(q3))?.upload_relay === R1, msg);
   const qbig = [1, 2, 3].map((i) => join(qsLog, `big-e2e-${i}.log`));

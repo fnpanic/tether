@@ -73,17 +73,18 @@ impl App {
     fn admin_key(&self) -> R<SigningKey> {
         self.keys.lock().unwrap().as_ref().map(|k| k.admin.clone()).ok_or_else(|| "Unlock the keys first.".to_owned())
     }
-    /// Reads give up after [`api::QUICK`] (a relay that never answers must not hold up a view);
-    /// writes and diagnostics downloads (a zip may be large) keep the long client timeout.
+    /// Reads give up after [`api::QUICK`] (a relay that never answers must not hold up a view),
+    /// small writes after [`api::WRITE`]. Diagnostics zips: [`api::admin_download`]; release files:
+    /// [`api::admin_upload`].
     async fn call_on(&self, server: &str, method: &str, path: &str, body: Vec<u8>, ct: &str) -> R<Vec<u8>> {
-        if method.eq_ignore_ascii_case("GET") && !path.starts_with("/api/admin/diag/") {
+        if method.eq_ignore_ascii_case("GET") {
             return api::admin_quick(server, &self.admin_key()?, path).await;
         }
         api::admin(server, &self.admin_key()?, method, path, body, ct).await
     }
     /// Reads ask every node at once and take the first in list order that answered; writes go to
-    /// every node (each keeps a full copy of policy, releases, download page and tickets), so any
-    /// node can serve clients alone.
+    /// every node at once (each keeps a full copy of policy, releases, download page and tickets),
+    /// so any node can serve clients alone, and one silent node fails after [`api::WRITE`].
     async fn call(&self, method: &str, path: &str, body: Vec<u8>, ct: &str) -> R<Vec<u8>> {
         let servers = self.servers();
         if method.eq_ignore_ascii_case("GET") {
@@ -97,21 +98,21 @@ impl App {
             }
             return Err(last);
         }
-        let mut first: Option<Vec<u8>> = None;
         let mut body = body;
-        let mut failed = Vec::new();
-        for sv in &servers {
-            match self.call_on(sv, method, path, body.clone(), ct).await {
+        // The same diagnostics ticket code on every node: chosen here, so all nodes get it at once.
+        if path == "/api/admin/diag-ticket" {
+            if let Ok(mut req) = serde_json::from_slice::<Value>(&body) {
+                if req.get("ticket").is_none() {
+                    req["ticket"] = json!(diag::new_ticket());
+                    body = serde_json::to_vec(&req).unwrap();
+                }
+            }
+        }
+        let got = futures_util::future::join_all(servers.iter().map(|sv| self.call_on(sv, method, path, body.clone(), ct))).await;
+        let (mut first, mut failed) = (None, Vec::new());
+        for (sv, r) in servers.iter().zip(got) {
+            match r {
                 Ok(out) => {
-                    // The same diagnostics ticket code on every node: the first issues it.
-                    if path == "/api/admin/diag-ticket" && first.is_none() {
-                        if let (Ok(t), Ok(mut req)) = (serde_json::from_slice::<Value>(&out), serde_json::from_slice::<Value>(&body)) {
-                            if let Some(id) = t.get("ticket") {
-                                req["ticket"] = id.clone();
-                                body = serde_json::to_vec(&req).unwrap();
-                            }
-                        }
-                    }
                     first.get_or_insert(out);
                 }
                 Err(e) => failed.push(format!("{sv}: {e}")),
@@ -341,7 +342,7 @@ fn serverkeys_generate(app: State<App>, passphrase: String) -> R<String> {
 
 /// The signed key list every relay serves (`GET /api/server-keys`), verified with this admin key.
 async fn live_server_keys(server: &str, key: &VerifyingKey) -> Value {
-    match api::public(server, "/api/server-keys").await {
+    match api::public_quick(server, "/api/server-keys").await {
         Ok(None) => json!({ "server": server, "reachable": true, "note": "No server key list published" }),
         Ok(Some(raw)) => match KeyList::open(&raw, &[*key]) {
             Ok(l) => json!({ "server": server, "reachable": true, "verified": true, "serial": l.serial, "issued_at": l.issued_at, "keys": l.keys }),
@@ -376,7 +377,7 @@ fn check_expiry(keys: &[ServerKey], now: u64) -> Result<(), String> {
 /// public through Caddy as `/rendezvous/pubkey`. Older hbbs or Caddyfile: an error.
 async fn signing_key(server: &str) -> R<String> {
     const OLD: &str = "This relay does not report the key hbbs signs with (update hbbs and the Caddyfile)";
-    let raw = api::public(server, "/rendezvous/pubkey").await?.ok_or(OLD)?;
+    let raw = api::public_quick(server, "/rendezvous/pubkey").await?.ok_or(OLD)?;
     parse_signing_key(&raw).ok_or_else(|| OLD.to_owned())
 }
 
@@ -389,10 +390,12 @@ fn parse_signing_key(raw: &[u8]) -> Option<String> {
 #[tauri::command]
 async fn serverkeys_live(app: State<'_, App>) -> R<Value> {
     let key = app.admin_key()?.verifying_key();
+    // Every relay and both reads at once, each bounded by api::QUICK.
+    let servers = app.servers();
+    let got = futures_util::future::join_all(servers.iter().map(|sv| futures_util::future::join(live_server_keys(sv, &key), signing_key(sv)))).await;
     let mut relays = Vec::new();
-    for sv in app.servers() {
-        let mut r = live_server_keys(&sv, &key).await;
-        match signing_key(&sv).await {
+    for (mut r, signing) in got {
+        match signing {
             Ok(k) => r["signing"] = json!(k),
             Err(e) => r["signing_note"] = json!(e),
         }
@@ -414,10 +417,9 @@ async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>) -> R<Valu
     let admin = app.admin_key()?;
     // Only serials of lists signed by this admin key count: a relay can report or serve any
     // number, and a huge one would end rotations for good (devices never accept a lower serial).
-    let mut live = Vec::new();
-    for sv in app.servers() {
-        live.extend(verified_serial(&live_server_keys(&sv, &admin.verifying_key()).await));
-    }
+    let vk = admin.verifying_key();
+    let servers = app.servers();
+    let live: Vec<u64> = futures_util::future::join_all(servers.iter().map(|sv| live_server_keys(sv, &vk))).await.iter().filter_map(verified_serial).collect();
     let local = fs::read_dir(app.path("server-keys/published")).into_iter().flatten().flatten()
         .filter_map(|e| e.path().file_stem()?.to_str()?.parse::<u64>().ok());
     let serial = next_serial(live.into_iter().chain(local), "server key list")?;
@@ -426,17 +428,19 @@ async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>) -> R<Valu
     list.validate()?;
     let payload = serde_json::to_vec(&list).unwrap();
     let doc = serde_json::to_vec(&envelope::sign(&payload, &admin)).unwrap();
-    let mut results = Vec::new();
-    for sv in app.servers() {
-        let r = match app.call_on(&sv, "PUT", "/api/admin/server-keys", doc.clone(), "application/json").await {
+    // Every relay at once: the write bounded by api::WRITE, the read-back by api::QUICK.
+    let (app, doc, vk, serial) = (&*app, &doc, &vk, list.serial);
+    let results = futures_util::future::join_all(servers.iter().map(|sv| async move {
+        let r = match app.call_on(sv, "PUT", "/api/admin/server-keys", doc.clone(), "application/json").await {
             Err(e) => Err(e),
-            Ok(_) => match verified_serial(&live_server_keys(&sv, &admin.verifying_key()).await) {
-                Some(s) if s == list.serial => Ok(json!({ "serial": s })),
+            Ok(_) => match verified_serial(&live_server_keys(sv, vk).await) {
+                Some(s) if s == serial => Ok(json!({ "serial": s })),
                 s => Err(format!("Uploaded, but the relay still serves serial {}", s.map_or("none".into(), |s| s.to_string()))),
             },
         };
-        results.push(RelayResult::of(&sv, r));
-    }
+        RelayResult::of(sv, r)
+    }))
+    .await;
     if let Some(e) = none_ok(&results) {
         return Err(e);
     }
@@ -480,7 +484,7 @@ async fn policy_draft(app: State<'_, App>) -> R<Bundle> {
     }
     // First run on this PC: start from what the server serves, but only if we signed it.
     let key = app.admin_key()?.verifying_key();
-    let raw = api::public(&app.server(), "/api/policy").await.ok().flatten();
+    let raw = api::public_quick(&app.server(), "/api/policy").await.ok().flatten();
     Ok(raw.and_then(|r| envelope::open_json(&r, &[key]).ok()).and_then(|p| Bundle::from_json(&p).ok()).unwrap_or_default())
 }
 
@@ -610,10 +614,8 @@ async fn policy_publish(app: State<'_, App>, bundle: Bundle) -> R<Value> {
     // An unreachable relay gets the document later (policy_sync); the serial only has to be above
     // every policy this admin key signed that a relay serves, and this PC's own published ones.
     // Not `/api/admin/status` policy_serial: that is whatever the relay claims (see next_serial).
-    let mut live = Vec::new();
-    for sv in app.servers() {
-        live.extend(live_doc(&sv, &key.verifying_key()).await.bundle.map(|b| b.serial));
-    }
+    let vk = key.verifying_key();
+    let live: Vec<u64> = futures_util::future::join_all(app.servers().iter().map(|sv| live_doc(sv, &vk))).await.into_iter().filter_map(|d| d.bundle.map(|b| b.serial)).collect();
     b.serial = next_serial(live.into_iter().chain(app.published().into_keys()), "policy")?;
     b.issued_at = api::now();
     let payload = serde_json::to_vec(&b).unwrap();
@@ -629,8 +631,8 @@ async fn policy_publish(app: State<'_, App>, bundle: Bundle) -> R<Value> {
 
 /// PUT a signed policy document to `servers` and confirm each one serves `serial` afterwards.
 async fn put_policy(app: &App, servers: &[String], doc: &[u8], serial: u64, key: &VerifyingKey) -> Vec<RelayResult> {
-    let mut out = Vec::new();
-    for sv in servers {
+    // Every relay at once: the write bounded by api::WRITE, the read-back by api::QUICK.
+    futures_util::future::join_all(servers.iter().map(|sv| async move {
         let r = match app.call_on(sv, "PUT", "/api/admin/policy", doc.to_vec(), "application/json").await {
             Err(e) => Err(e),
             Ok(_) => {
@@ -642,9 +644,9 @@ async fn put_policy(app: &App, servers: &[String], doc: &[u8], serial: u64, key:
                 }
             }
         };
-        out.push(RelayResult::of(sv, r));
-    }
-    out
+        RelayResult::of(sv, r)
+    }))
+    .await
 }
 
 /// Bring relays that are behind (or serve a document this key did not sign) to the newest policy
@@ -652,11 +654,9 @@ async fn put_policy(app: &App, servers: &[String], doc: &[u8], serial: u64, key:
 #[tauri::command]
 async fn policy_sync(app: State<'_, App>) -> R<Vec<RelayResult>> {
     let key = app.admin_key()?.verifying_key();
-    let mut docs = Vec::new();
-    for sv in app.servers() {
-        let d = live_doc(&sv, &key).await;
-        docs.push((sv, d));
-    }
+    let servers = app.servers();
+    let got = futures_util::future::join_all(servers.iter().map(|sv| live_doc(sv, &key))).await;
+    let docs: Vec<(String, LiveDoc)> = servers.into_iter().zip(got).collect();
     let (serial, raw) = docs
         .iter()
         .filter_map(|(_, d)| Some((d.bundle.as_ref()?.serial, d.raw.clone()?)))
@@ -802,7 +802,7 @@ async fn put_manifest(app: &App, ui: &AppHandle, server: &str, u: &Upload) -> R<
     let url = format!("{server}/download/{}/{}/{}", u.channel, u.dir, u.name);
     let new = release::platform_keys(&u.platform).iter().map(|k| (k.to_string(), release::Platform { signature: u.sig.clone(), url: url.clone() })).collect();
     // Read before writing: another OS's build of the same version in this manifest stays listed.
-    let existing = api::public(server, &format!("/download/{}/{}/latest.json", u.channel, u.dir)).await?;
+    let existing = api::public_quick(server, &format!("/download/{}/{}/latest.json", u.channel, u.dir)).await?;
     let manifest = release::Manifest {
         version: u.version.clone(),
         notes: u.notes.clone(),
@@ -1184,8 +1184,9 @@ async fn release_control(app: State<'_, App>, channel: String, key: String, acti
 async fn release_index_refresh(app: State<'_, App>) -> R<Vec<Value>> {
     let servers = app.servers();
     let mut channels: Vec<String> = Vec::new();
-    for sv in &servers {
-        if let Ok(b) = app.call_on(sv, "GET", "/api/admin/releases", Vec::new(), "application/json").await {
+    let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", "/api/admin/releases", Vec::new(), "application/json"))).await;
+    for r in got {
+        if let Ok(b) = r {
             for f in serde_json::from_slice::<Vec<Value>>(&b).unwrap_or_default() {
                 if f["path"] == "releases.json" {
                     if let Some(c) = f["channel"].as_str().filter(|c| !channels.iter().any(|x| x == c)) {
@@ -1366,8 +1367,10 @@ async fn release_sync(app: State<'_, App>, ui: AppHandle, channel: String, kind:
     let servers = app.servers();
     let mut source = None;
     let mut targets = Vec::new();
-    for sv in &servers {
-        let m = api::public(sv, &format!("/download/{channel}/{dir}/latest.json")).await.ok().flatten().and_then(|b| serde_json::from_slice::<release::Manifest>(&b).ok());
+    let path = format!("/download/{channel}/{dir}/latest.json");
+    let got = futures_util::future::join_all(servers.iter().map(|sv| api::public_quick(sv, &path))).await;
+    for (sv, m) in servers.iter().zip(got) {
+        let m = m.ok().flatten().and_then(|b| serde_json::from_slice::<release::Manifest>(&b).ok());
         match m {
             Some(m) if m.version == version => {
                 source.get_or_insert((sv.clone(), m));
@@ -1406,27 +1409,29 @@ async fn release_sync(app: State<'_, App>, ui: AppHandle, channel: String, kind:
     // accept an identical copy), before their latest.json.
     let live = relay_indexes(&app, &u.channel, &servers).await?;
     let best = live.iter().filter_map(|(_, i)| i.as_ref()).max_by_key(|i| i.0.serial).map(|i| (i.0.serial, i.1.clone()));
-    let mut out = Vec::new();
-    for sv in &servers {
+    // Every relay at once; only the file uploads keep the long limit (api::admin_upload).
+    let (app, ui, u, targets, live, best) = (&*app, &ui, &u, &targets, &live, &best);
+    let out = futures_util::future::join_all(servers.iter().map(|sv| async move {
         let r = if targets.contains(sv) {
             let behind = live.iter().find(|(s, _)| s == sv).is_some_and(|(_, i)| i.as_ref().map(|i| i.0.serial) < best.as_ref().map(|b| b.0));
-            match (&best, behind) {
+            match (best, behind) {
                 (Some((_, raw)), true) => async {
-                    upload_files(&app, &ui, sv, &u).await?;
+                    upload_files(app, ui, sv, u).await?;
                     app.call_on(sv, "PUT", &format!("/api/admin/release/{}/releases.json", u.channel), raw.clone(), "application/json").await?;
-                    let url = put_manifest(&app, &ui, sv, &u).await;
-                    emit(&ui, Progress { done: true, error: url.as_ref().err().cloned(), ..Progress::new(&u, sv, "") });
+                    let url = put_manifest(app, ui, sv, u).await;
+                    emit(ui, Progress { done: true, error: url.as_ref().err().cloned(), ..Progress::new(u, sv, "") });
                     url
                 }
                 .await
                 .map(|url| json!({ "url": url })),
-                _ => upload_release_reported(&app, &ui, sv, &u).await.map(|url| json!({ "url": url })),
+                _ => upload_release_reported(app, ui, sv, u).await.map(|url| json!({ "url": url })),
             }
         } else {
             Ok(json!({ "already": true }))
         };
-        out.push(RelayResult::of(sv, r));
-    }
+        RelayResult::of(sv, r)
+    }))
+    .await;
     Ok(out)
 }
 
@@ -1524,8 +1529,10 @@ async fn prune_plan(app: &App, keep: usize) -> R<(Value, Vec<PruneVer>)> {
     let pin = cdn_pins(&assets);
     let body = serde_json::to_vec(&json!({ "dry_run": true, "keep": keep, "pin": pin })).unwrap();
     let mut plans = Vec::new();
-    for sv in app.servers() {
-        let out = app.call_on(&sv, "POST", "/api/admin/releases/prune", body.clone(), "application/json").await.map_err(|e| format!("{sv}: {}", prune_error(e)))?;
+    let servers = app.servers();
+    let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "POST", "/api/admin/releases/prune", body.clone(), "application/json"))).await;
+    for (sv, out) in servers.into_iter().zip(got) {
+        let out = out.map_err(|e| format!("{sv}: {}", prune_error(e)))?;
         plans.push((sv, serde_json::from_slice::<Value>(&out).map_err(err)?));
     }
     Ok((merge_plans(keep, &plans), pin))
@@ -1545,12 +1552,9 @@ fn offered(plan: &Value) -> Vec<PruneVer> {
 /// Execute on every relay: each recomputes its plan and deletes only what it still would drop.
 async fn prune_execute(app: &App, keep: usize, pin: &[PruneVer], delete: &[PruneVer]) -> Vec<RelayResult> {
     let body = serde_json::to_vec(&json!({ "dry_run": false, "keep": keep, "pin": pin, "delete": delete })).unwrap();
-    let mut out = Vec::new();
-    for sv in app.servers() {
-        let r = app.call_on(&sv, "POST", "/api/admin/releases/prune", body.clone(), "application/json").await.map_err(prune_error);
-        out.push(RelayResult::of(&sv, r.and_then(|b| serde_json::from_slice::<Value>(&b).map_err(err))));
-    }
-    out
+    let servers = app.servers();
+    let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "POST", "/api/admin/releases/prune", body.clone(), "application/json"))).await;
+    servers.iter().zip(got).map(|(sv, r)| RelayResult::of(sv, r.map_err(prune_error).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(err)))).collect()
 }
 
 #[tauri::command]
@@ -1600,19 +1604,30 @@ async fn auto_prune(app: &App) -> Option<RelayResult> {
 
 #[tauri::command]
 async fn page_render(app: State<'_, App>, title: String, intro: String, technician: bool, customer: bool) -> R<String> {
-    let server = app.server();
+    let servers = app.servers();
+    const OS: [(&str, &str, &str); 2] = [("windows", "Windows", release::WINDOWS), ("macos", "macOS", release::MAC)];
+    const APPS: [(&str, &str); 2] = [("technician", "Tether for technicians"), ("customer", "Tether Quick Support")];
+    let path = |kind: &str, platform: &str| format!("/download/stable/{kind}/{platform}/latest.json");
+    // Every read at once (the index and each latest.json on every relay), each bounded by
+    // api::QUICK: one silent relay costs one QUICK, not one per read.
+    let reads = OS.iter().flat_map(|(_, _, p)| APPS.iter().map(move |(k, _)| (*k, *p))).flat_map(|(k, p)| servers.iter().map(move |sv| (sv, path(k, p))));
+    let (indexes, got) = futures_util::future::join(relay_indexes(&app, "stable", &servers), futures_util::future::join_all(reads.map(|(sv, p)| async move { api::public_quick(sv, &p).await }))).await;
     // Halt changes only the signed index, not latest.json.
-    let ix = relay_indexes(&app, "stable", &app.servers()).await?.into_iter().filter_map(|(_, i)| i.map(|i| i.0)).max_by_key(|i| i.serial);
+    let ix = indexes?.into_iter().filter_map(|(_, i)| i.map(|i| i.0)).max_by_key(|i| i.serial);
+    let mut got = got.into_iter();
     let mut halted = vec![];
     let mut sections = vec![];
-    for (id, name, platform) in [("windows", "Windows", release::WINDOWS), ("macos", "macOS", release::MAC)] {
+    for (id, name, platform) in OS {
         let mut offers = vec![];
-        for (on, kind, label) in [(technician, "technician", "Tether for technicians"), (customer, "customer", "Tether Quick Support")] {
-            if !on {
+        for (kind, label) in APPS {
+            // This manifest on every relay, in relay order (the order of `reads`).
+            let mine: Vec<_> = got.by_ref().take(servers.len()).collect();
+            if !(if kind == "technician" { technician } else { customer }) {
                 continue;
             }
-            let path = format!("/download/stable/{kind}/{platform}/latest.json");
-            let m: Option<Value> = match api::public(&server, &path).await? {
+            let path = path(kind, platform);
+            // The first relay in list order that answered.
+            let m: Option<Value> = match first_answer(&servers, mine)? {
                 Some(b) => Some(serde_json::from_slice(&b).map_err(|_| format!("{path} is not valid JSON"))?),
                 None => None,
             };
@@ -1642,6 +1657,18 @@ async fn page_render(app: State<'_, App>, title: String, intro: String, technici
         return Err("There is no stable release of the offered apps yet. Publish one first.".into());
     }
     Ok(release::download_page(&title, &intro, &sections))
+}
+
+/// The first answer in relay order (a 404 is an answer: `None`); every relay's error when none answered.
+fn first_answer(servers: &[String], got: Vec<R<Option<Vec<u8>>>>) -> R<Option<Vec<u8>>> {
+    let mut errors = Vec::new();
+    for (sv, r) in servers.iter().zip(got) {
+        match r {
+            Ok(b) => return Ok(b),
+            Err(e) => errors.push(format!("{sv}: {e}")),
+        }
+    }
+    Err(errors.join("; "))
 }
 
 /// `version` of `kind/platform` is halted in the signed index.
@@ -1682,7 +1709,7 @@ async fn page_data(app: State<'_, App>) -> R<Value> {
         let (mut file, mut size, mut sha256, mut cdn_url) = (e.file.clone(), e.size, e.sha256.clone(), (e.urls.len() > 1).then(|| e.urls[0].clone()));
         if key == &release::index_key("technician", release::MAC) {
             file = release::dmg_name(&e.version);
-            let Some((n, h)) = dmg_facts(&app.server(), &file).await? else { continue };
+            let Some((n, h)) = dmg_facts(&app.servers(), &file).await? else { continue };
             (size, sha256, cdn_url) = (n, h, None);
         }
         out.insert(key.clone(), json!({ "version": e.version, "file": file, "size": size, "sha256": sha256, "notes": e.notes,
@@ -1691,18 +1718,31 @@ async fn page_data(app: State<'_, App>) -> R<Value> {
     Ok(Value::Object(out))
 }
 
-/// Size and SHA-256 of a disk image on the relay; file names carry the version, so one download
-/// per version and session.
-async fn dmg_facts(server: &str, file: &str) -> R<Option<(u64, String)>> {
+/// Size and SHA-256 of a disk image (not in the signed index): downloaded from the first relay in
+/// list order that sends it, each try bounded ([`api::QUICK`] to start, [`api::DMG`] in all). File
+/// names carry the version, so one download per version and session.
+async fn dmg_facts(servers: &[String], file: &str) -> R<Option<(u64, String)>> {
     static SEEN: Mutex<BTreeMap<String, (u64, String)>> = Mutex::new(BTreeMap::new());
-    let key = format!("{server}/{file}");
-    if let Some(f) = SEEN.lock().unwrap().get(&key) {
+    if let Some(f) = SEEN.lock().unwrap().get(file) {
         return Ok(Some(f.clone()));
     }
-    let Some(b) = api::public(server, &format!("/download/stable/technician/{}/{file}", release::MAC)).await? else { return Ok(None) };
-    let f = (b.len() as u64, tether_trust::release::sha256_hex(&b));
-    SEEN.lock().unwrap().insert(key, f.clone());
-    Ok(Some(f))
+    let path = format!("/download/stable/technician/{}/{file}", release::MAC);
+    let mut errors = Vec::new();
+    for sv in servers {
+        match api::public_download(sv, &path, api::DMG).await {
+            Ok(Some(b)) => {
+                let f = (b.len() as u64, tether_trust::release::sha256_hex(&b));
+                SEEN.lock().unwrap().insert(file.to_owned(), f.clone());
+                return Ok(Some(f));
+            }
+            Ok(None) => {}
+            Err(e) => errors.push(format!("{sv}: {e}")),
+        }
+    }
+    if errors.len() == servers.len() {
+        return Err(errors.join("; "));
+    }
+    Ok(None)
 }
 
 /// Uploaded page templates: every version is kept as `page-templates/<millis>-<name>.html`.
@@ -1862,15 +1902,19 @@ fn add_downloads(base: &mut Value, other: &Value) {
 /// (logo, colours, settings).
 #[tauri::command]
 async fn custom_list(app: State<'_, App>) -> R<Vec<Value>> {
-    let mut server = app.call_json("GET", "/api/admin/custom", None).await?;
     let first = app.server();
-    let mut lists = Vec::new();
-    for sv in app.servers() {
-        if let Ok(b) = app.call_on(&sv, "GET", "/api/admin/custom", Vec::new(), "application/json").await {
-            lists.push(serde_json::from_slice::<Value>(&b).unwrap_or(Value::Null));
+    let servers = app.servers();
+    // Every relay at once, each bounded by api::QUICK.
+    let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", "/api/admin/custom", Vec::new(), "application/json"))).await;
+    let (mut lists, mut errors) = (Vec::new(), Vec::new());
+    for (sv, r) in servers.iter().zip(got) {
+        match r {
+            Ok(b) => lists.push(serde_json::from_slice::<Value>(&b).map_err(|_| format!("{sv}: unexpected custom app list"))?),
+            Err(e) => errors.push(format!("{sv}: {e}")),
         }
     }
-    // `server` is one of `lists` (the first that answered): start from zero, then add every relay.
+    let mut server = lists.first().cloned().ok_or_else(|| errors.join("; "))?;
+    // `server` is the first relay's list that answered: start from zero, then add every relay.
     for row in server.as_array_mut().into_iter().flatten() {
         row["downloads"] = json!(0);
     }
@@ -1921,8 +1965,9 @@ async fn custom_delete(app: State<'_, App>, id: String) -> R<Vec<RelayResult>> {
 #[tauri::command]
 async fn team_load(app: State<'_, App>) -> R<Value> {
     let (mut first, mut differ, mut failed) = (None::<Roster>, Vec::new(), Vec::new());
-    for sv in app.servers() {
-        let r = app.call_on(&sv, "GET", "/api/admin/team", Vec::new(), "application/json").await;
+    let servers = app.servers();
+    let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", "/api/admin/team", Vec::new(), "application/json"))).await;
+    for (sv, r) in servers.into_iter().zip(got) {
         match r.and_then(|b| serde_json::from_slice::<Roster>(&b).map_err(|_| "unexpected team roster".to_owned())) {
             Ok(r) => match &first {
                 None => first = Some(r),
@@ -1955,13 +2000,25 @@ struct DiagFile {
     size: u64,
 }
 
+/// The upload of `ticket` on `relay` (from the list's `uploads`), or without `relay` from whichever
+/// relay sends it first. A relay that does not start answering within [`api::QUICK`] fails, so a
+/// silent relay cannot hold up a zip another relay has.
 #[tauri::command]
-async fn diag_open(app: State<'_, App>, ticket: String) -> R<Value> {
+async fn diag_open(app: State<'_, App>, ticket: String, relay: Option<String>) -> R<Value> {
     if !diag::valid_ticket(&ticket) {
         return Err("invalid ticket".into());
     }
-    // The first relay that has the upload (call() tries the next one on a 404).
-    let zip = app.call("GET", &format!("/api/admin/diag/{ticket}"), vec![], "").await?;
+    let key = app.admin_key()?;
+    let path = format!("/api/admin/diag/{ticket}");
+    let servers = match relay {
+        // Only a configured relay gets this signed request.
+        Some(r) => vec![app.servers().into_iter().find(|s| *s == r).ok_or("This relay is not in the relay list.")?],
+        None => app.servers(),
+    };
+    let many = servers.len() > 1;
+    let (key, path) = (&key, &path);
+    let tries = servers.iter().map(|sv| Box::pin(async move { api::admin_download(sv, key, path, api::DIAG).await.map_err(|e| if many { format!("{sv}: {e}") } else { e }) }));
+    let zip = futures_util::future::select_ok(tries).await?.0;
     let mut ar = zip::ZipArchive::new(Cursor::new(&zip)).map_err(|e| format!("The upload is not a valid zip: {e}"))?;
     let mut files = vec![];
     let mut diagnostics = None;
@@ -1986,8 +2043,10 @@ async fn diag_open(app: State<'_, App>, ticket: String) -> R<Value> {
 async fn diag_list(app: State<'_, App>, archived: bool) -> R<Value> {
     let path = if archived { "/api/admin/diag?archived=1" } else { "/api/admin/diag" };
     let (mut lists, mut failed) = (Vec::new(), Vec::new());
-    for sv in app.servers() {
-        match app.call_on(&sv, "GET", path, Vec::new(), "application/json").await {
+    let servers = app.servers();
+    let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", path, Vec::new(), "application/json"))).await;
+    for (sv, r) in servers.into_iter().zip(got) {
+        match r {
             Ok(b) => lists.push((sv.clone(), serde_json::from_slice::<Vec<Value>>(&b).map_err(|_| format!("{sv}: unexpected ticket list"))?)),
             Err(e) => failed.push(format!("{sv}: {e}")),
         }
