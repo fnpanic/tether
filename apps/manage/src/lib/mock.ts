@@ -280,7 +280,7 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
           ? ok(s, { url: `${s}/download/…`, live: true })
           : n === 2
             ? { server: s, ok: false, error: "The upload stalled: the server took nothing for 30 s (1572864 of 3145728 bytes sent). (release index not updated on this relay)", detail: null }
-            : ok(s, { live: true, warning: `legacy latest.json not updated: ${NO_ANSWER} Older apps (before 0.5.24) do not see this release yet; run Publish to missing relays later.` }),
+            : ok(s, { live: true, warning: `release index written, so it is live here; legacy latest.json not updated: ${NO_ANSWER} Older apps (before 0.5.24) do not see this release yet; run Publish to missing relays later.` }),
       );
       const late = { server: "Cancel", ok: false, error: `Too late to cancel: Tether_0.5.1_x64-setup.exe 0.5.1 is live on ${servers.join(", ")} (the release index was already being written). To stop devices installing it, halt it under Rollouts.`, detail: null };
       return n === 3 ? [...rows, late] : rows;

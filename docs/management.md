@@ -391,8 +391,9 @@ to missing relays**. The result lists per relay what it now publishes, or every 
 signed release index written (from here the release is **live** on that relay: devices from
 0.5.24 on update from the index), then the legacy `latest.json`. A relay whose index was written
 but whose `latest.json` write failed is **live with a warning** (a check mark, "Live (release
-index)", and in orange "legacy latest.json not updated: <error> Older apps (before 0.5.24) do
-not see this release yet; run Publish to missing relays later"); it is never reported as not
+index)", and in orange "release index written, so it is live here; legacy latest.json not
+updated: <error> Older apps (before 0.5.24) do not see this release yet; run Publish to missing
+relays later"); it is never reported as not
 published, and when every relay ended like that the publish is a success with warnings (the
 result screen opens, not an error on the review screen). The summary line is "Published on every
 relay", "Live on every relay. Some need attention", "Not every relay has it" or, after a Cancel,

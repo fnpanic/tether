@@ -924,7 +924,7 @@ fn too_late(what: &str, relays: &[String]) -> RelayResult {
 /// A relay result whose release index was written (the release is live there) but whose legacy
 /// latest.json write failed with `e`: a success with a warning, not a failure.
 fn live_without_manifest(e: &str) -> Value {
-    json!({ "live": true, "warning": format!("legacy latest.json not updated: {e} Older apps (before 0.5.24) do not see this release yet; run Publish to missing relays later.") })
+    json!({ "live": true, "warning": format!("release index written, so it is live here; legacy latest.json not updated: {e} Older apps (before 0.5.24) do not see this release yet; run Publish to missing relays later.") })
 }
 
 /// The update file the CDN serves for a release: the gzip copy if there is one, else the artifact.
