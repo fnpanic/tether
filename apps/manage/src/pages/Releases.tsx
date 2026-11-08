@@ -124,6 +124,12 @@ function useRememberRollout() {
 /** The ramp in words, for hints and review sheets. */
 const rampText = (rollout: string, security: boolean) => (security ? "Security release: every device at once" : describeRamp(rampSteps(rollout)) || "—");
 
+/** The publish run in progress: one press of Publish, whose builds all carry this id, so a Cancel
+ *  pressed while the next build is starting still stops it (release_cancel). One sheet at a time. */
+let run = 0;
+const startRun = () => (run = Date.now() * 1000 + Math.floor(Math.random() * 1000));
+const cancelRun = () => void invoke("release_cancel", { run });
+
 /** Live view of a release upload (events from release_publish / release_sync). */
 function UploadProgress() {
   const { state } = useApp();
@@ -249,9 +255,9 @@ function Overview() {
             setSync(null);
             load();
           }}
-          cancel={() => void invoke("release_cancel")}
+          cancel={cancelRun}
           run={async (skip) => {
-            const r = await invoke<RelayResult[]>("release_sync", { channel: sync.channel, kind: sync.kind, platform: sync.platform, version: sync.latest, skip });
+            const r = await invoke<RelayResult[]>("release_sync", { channel: sync.channel, kind: sync.kind, platform: sync.platform, version: sync.latest, skip, run: startRun() });
             if (r.every((x) => x.ok)) toast(`${sync.latest} published on every relay`);
             return r;
           }}
@@ -322,6 +328,7 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
   /** Every release, then the page; one result row per relay, failed if anything failed there. */
   const publishAll = async (skip: string[]): Promise<RelayResult[]> => {
     stop.current = false;
+    const id = startRun();
     // A relay that did not answer for one build is left out of the next ones (and the page) too.
     const out = [...skip];
     const silent = (e?: string) => /^skipped|No answer from the server|Could not reach the server|stalled|stopped sending/.test(e ?? "");
@@ -342,6 +349,7 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
         const r = await invoke<RelayResult[]>("release_publish", {
           args: { file: b.file, kind: b.kind, platform: b.platform, channel: channel.trim(), version: b.version, notes, mandatory: false, minimum_version: "", forced: false, rollout: ramp, security },
           skip: out,
+          run: id,
         });
         r.forEach((x) => {
           add(x.server, label, x.ok ? undefined : x.error);
@@ -354,7 +362,7 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
     if (page && stable && !stop.current) {
       try {
         // The saved design: Standard (built-in) or the custom template (docs/download-page.md).
-        const html = await pageHtml(s, state.servers, invoke);
+        const html = await pageHtml(s, state.servers, invoke, out.length < state.servers.length ? out : []);
         const r = await invoke<RelayResult[]>("page_publish", { html, skip: out.length < state.servers.length ? out : [] });
         r.forEach((x) => add(x.server, "Download page", x.ok ? undefined : x.error));
       } catch (e: any) {
@@ -433,7 +441,7 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
           }}
           cancel={() => {
             stop.current = true;
-            void invoke("release_cancel");
+            cancelRun();
           }}
           run={publishAll}
         >
@@ -671,12 +679,14 @@ export function Releases() {
             setRound((r) => r + 1);
             load();
           }}
-          cancel={() => void invoke("release_cancel")}
+          cancel={cancelRun}
           run={async (skip) => {
+            const id = startRun();
             if (!security) await remember(rollout);
             const r = await invoke<RelayResult[]>("release_publish", {
               args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced, rollout: ramp, security },
               skip,
+              run: id,
             });
             toast(`Released ${version} to ${channel}`);
             setFile("");

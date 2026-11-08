@@ -1,7 +1,7 @@
 //! Relay API client. Every admin request is signed with `tether_trust::reqauth` over the exact
 //! path (with query) and body bytes that go on the wire.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tether_trust::{reqauth, SigningKey};
@@ -71,19 +71,30 @@ pub const STALL: Duration = if cfg!(test) { Duration::from_secs(2) } else { Dura
 pub const ANSWER: Duration = if cfg!(test) { Duration::from_secs(2) } else { Duration::from_secs(30) };
 pub const CANCELLED: &str = "Cancelled.";
 
-static CANCEL: AtomicBool = AtomicBool::new(false);
+/// The release publish or copy in progress (its run id) and the run the last Cancel was for.
+static RUN: AtomicU64 = AtomicU64::new(0);
+static CANCEL: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Run ids for calls without one (the UI's ids are below 2^63).
+static OWN: AtomicU64 = AtomicU64::new(1 << 63);
 
-/// Release publish: `true` ends every upload and file copy in progress with [`CANCELLED`]; a new
-/// publish sets it back to `false` first.
-pub fn set_cancel(on: bool) {
-    CANCEL.store(on, Ordering::SeqCst);
+/// A release publish or copy starts or goes on with run `run`: the UI's id for one press of
+/// Publish, which may publish several builds one after another. A Cancel of that run that came
+/// before (between two builds) stays in force. `None`: a run of its own.
+pub fn begin(run: Option<u64>) {
+    RUN.store(run.unwrap_or_else(|| OWN.fetch_add(1, Ordering::SeqCst)), Ordering::SeqCst);
+}
+
+/// Cancel run `run` (`None`: the one in progress): every upload and file copy of it ends with
+/// [`CANCELLED`], and the publish stops before its first release index write.
+pub fn cancel(run: Option<u64>) {
+    CANCEL.store(run.unwrap_or_else(|| RUN.load(Ordering::SeqCst)), Ordering::SeqCst);
 }
 
 pub fn cancelled() -> bool {
-    CANCEL.load(Ordering::SeqCst)
+    CANCEL.load(Ordering::SeqCst) == RUN.load(Ordering::SeqCst)
 }
 
-/// `f`, or [`CANCELLED`] as soon as [`set_cancel`] is called.
+/// `f`, or [`CANCELLED`] as soon as the run is cancelled ([`cancel`]).
 async fn cancellable<T>(f: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
     let watch = async {
         while !cancelled() {
@@ -148,7 +159,7 @@ pub async fn admin_upload(server: &str, key: &SigningKey, path: &str, body: Vec<
 
 /// Sends `req` with `body` streamed in 256 KiB chunks, `sent(bytes so far)` as each one goes out.
 /// Fails when no chunk goes out for [`STALL`], when the answer has not started [`ANSWER`] after
-/// the last one, or on [`set_cancel`]. Returns the response once its head has arrived.
+/// the last one, or on [`cancel`]. Returns the response once its head has arrived.
 pub async fn upload(req: reqwest::RequestBuilder, body: Vec<u8>, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<reqwest::Response, String> {
     let len = body.len() as u64;
     let chunks: Vec<Vec<u8>> = body.chunks(256 * 1024).map(<[u8]>::to_vec).collect();
@@ -195,7 +206,7 @@ pub async fn exists(server: &str, path: &str) -> Result<bool, String> {
 }
 
 /// A release file from a relay (release copy, CDN): [`public_download`] within [`FILE`], ended
-/// by [`set_cancel`]. `Ok(None)` on 404.
+/// by [`cancel`]. `Ok(None)` on 404.
 pub async fn file(server: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
     cancellable(public_download(server, path, FILE)).await
 }
@@ -214,6 +225,11 @@ async fn public_req(req: reqwest::RequestBuilder) -> Result<Option<Vec<u8>>, Str
 }
 
 const NO_ANSWER: &str = "No answer from the server in time.";
+
+/// `e` (from this module) says the relay did not answer or broke off, not what it answered.
+pub fn unreachable_error(e: &str) -> bool {
+    ["No answer from the server", "Could not reach the server", "stopped sending", "stopped answering", "connection broke", "upload stalled"].iter().any(|p| e.contains(p))
+}
 
 fn unreachable(e: reqwest::Error) -> String {
     if e.is_timeout() { NO_ANSWER.to_owned() } else { format!("Could not reach the server: {e}") }
@@ -404,15 +420,24 @@ pub(crate) mod tests {
     fn cancel_ends_an_upload_at_once() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (server, h) = silent(true, ANSWER + Duration::from_secs(2));
+        begin(None);
         let c = std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(500));
-            set_cancel(true);
+            cancel(None);
         });
         let (r, took) = put(&server, vec![7; 600_000]);
-        set_cancel(false);
+        c.join().unwrap();
+        assert!(cancelled());
+        // A new run is not cancelled; a Cancel of a run before it began is kept.
+        begin(None);
+        assert!(!cancelled());
+        cancel(Some(7));
+        assert!(!cancelled());
+        begin(Some(7));
+        assert!(cancelled());
+        begin(None);
         assert_eq!(r.unwrap_err(), CANCELLED);
         assert!(took < Duration::from_millis(1500), "{took:?}");
-        c.join().unwrap();
         h.join().unwrap();
     }
 

@@ -185,7 +185,11 @@ export function PublishSheet({
       ) : (
         <>
           <p className="mb-3 text-callout text-muted">
-            {results.every((r) => r.ok) ? "Published on every relay." : "Not every relay has it. Fix the relay and publish again, or bring it up to date from the header."}
+            {results.some((r) => r.server === "Cancel")
+              ? "Cancel came too late: the release index was already being written, so it is published where marked done."
+              : results.every((r) => r.ok)
+                ? "Published on every relay."
+                : "Not every relay has it. Fix the relay and publish again, or bring it up to date from the header."}
           </p>
           <RelayResults results={results} />
           {after?.(results)}

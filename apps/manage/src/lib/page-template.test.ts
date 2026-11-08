@@ -170,7 +170,7 @@ test("Standard (the default) is today's generator, unchanged", async () => {
     calls.length = 0;
     const f = await buildPage(s, ["https://r1"], inv);
     assert.equal(f.html, "<!doctype html>GENERATED");
-    assert.deepEqual(calls, [["page_render", { title: "Remote support", intro: "Download Tether to get help from our support team.", technician: true, customer: true }]]);
+    assert.deepEqual(calls, [["page_render", { title: "Remote support", intro: "Download Tether to get help from our support team.", technician: true, customer: true, skip: [] }]]);
   }
 });
 

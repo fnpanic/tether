@@ -285,16 +285,17 @@ type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 
 /** The page to publish for `s`: Standard is exactly today's `page_render`; Custom fills the stored
  *  template and throws its errors. Used by Download page and by Releases after a stable publish. */
-export async function buildPage(s: PageSettings, servers: string[], invoke: Invoke, now = Math.floor(Date.now() / 1000)): Promise<Filled> {
+/** `skip`: relays left out of the publish; they are not read. */
+export async function buildPage(s: PageSettings, servers: string[], invoke: Invoke, now = Math.floor(Date.now() / 1000), skip: string[] = []): Promise<Filled> {
   const title = s.page_title ?? "Remote support";
   const intro = s.page_intro ?? "Download Tether to get help from our support team.";
   if (s.page_design !== "custom") {
-    const html = await invoke<string>("page_render", { title, intro, technician: s.page_technician ?? true, customer: s.page_customer ?? true });
+    const html = await invoke<string>("page_render", { title, intro, technician: s.page_technician ?? true, customer: s.page_customer ?? true, skip });
     return { html, errors: [], warnings: [], used: [] };
   }
   if (!s.page_template) throw new Error("Choose a template file for the custom design, or switch to Standard.");
   const tpl = await invoke<string>("page_template_read", { file: s.page_template });
-  const releases = await invoke<Record<string, Rel>>("page_data");
+  const releases = await invoke<Record<string, Rel>>("page_data", { skip });
   const custom = /tether\.custom\./.test(tpl) ? await invoke<CustomApp[]>("custom_list") : [];
   const host = (u: string) => u.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   const cdn = s.cdn?.enabled && s.cdn.base ? host(s.cdn.base) : null;
@@ -302,8 +303,8 @@ export async function buildPage(s: PageSettings, servers: string[], invoke: Invo
 }
 
 /** `buildPage`, throwing when the template has errors. */
-export async function pageHtml(s: PageSettings, servers: string[], invoke: Invoke): Promise<string> {
-  const f = await buildPage(s, servers, invoke);
+export async function pageHtml(s: PageSettings, servers: string[], invoke: Invoke, skip: string[] = []): Promise<string> {
+  const f = await buildPage(s, servers, invoke, undefined, skip);
   if (f.errors.length) throw new Error(`The page template has errors: ${f.errors.join("; ")}`);
   return f.html;
 }
