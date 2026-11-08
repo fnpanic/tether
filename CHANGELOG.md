@@ -6,8 +6,11 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Changed
+- Tether: toasts stay about 60 ms per character, so long messages no longer vanish after 1.8 s; the own-ID refusal reads "That is this device's own ID: it cannot connect to itself." (also fits Advanced, where nothing was typed). Not in the published 0.5.28, which was built from f6c0a59.
+
 ## [0.5.28] — 2026-11-08
-Tether (technician app) 0.5.28, Windows and macOS; TetherQS stays 0.5.27.
+Tether (technician app) 0.5.28, Windows and macOS (built from f6c0a59; published 2026-11-08, rollout Immediately); TetherQS stays 0.5.27.
 
 ### Fixed
 - **Tether no longer crashes on Disconnect when a start request arrives at that moment.** 0.5.27
