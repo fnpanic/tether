@@ -48,6 +48,8 @@ const DIAG_KEEP: u64 = 7 * DAY;
 /// Closed (archived) tickets, with their upload, are kept this long after closing.
 const DIAG_ARCHIVE_KEEP: u64 = 90 * DAY;
 const MIN_FREE: u64 = 2 << 30;
+/// 404 body for a ticket this relay has but that takes no upload (docs/api.md).
+const TICKET_NOT_OPEN: &str = "ticket not open";
 const TICKET_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 const LIMIT_SMALL: u64 = 4096;
@@ -451,6 +453,7 @@ fn body_to_file(rq: &mut Request, data: &Path, limit: u64, mode: u32) -> Result<
         return Err(too_large());
     }
     check_space(data, rq.body_length().map_or(limit, |n| n as u64))?;
+    let expect = rq.body_length().map(|n| n as u64);
     let tmp = tmp_path(data);
     let r = (|| -> io::Result<u64> {
         let mut f = OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
@@ -460,6 +463,9 @@ fn body_to_file(rq: &mut Request, data: &Path, limit: u64, mode: u32) -> Result<
     })();
     let body = Body::File { path: tmp, len: *r.as_ref().unwrap_or(&0), nonce: None };
     match r {
+        // A client gone before its Content-Length arrived: not an upload (a diagnostics ticket
+        // would be used up by a truncated zip).
+        Ok(n) if expect.is_some_and(|e| e != n) => Err(text(400, "request body incomplete")),
         Ok(n) if n <= limit => Ok(body),
         Ok(_) => Err(too_large()),
         Err(e) => {
@@ -848,9 +854,15 @@ impl App {
         Ok(self.keys.clone())
     }
 
-    /// Index of the open diagnostics ticket `ticket`, or 404.
+    /// Index of the open diagnostics ticket `ticket`, or 404: body `ticket not open` when this
+    /// relay has it but it is used, expired or closed (the apps then stop instead of trying the
+    /// next relay, which may still have the code open), `not found` when unknown.
     fn open_ticket(&self, ticket: &str, t: u64) -> Result<usize, Resp> {
-        self.tickets.iter().position(|k| k.ticket == ticket && k.state(t) == "open").ok_or_else(not_found)
+        match self.tickets.iter().position(|k| k.ticket == ticket) {
+            Some(i) if self.tickets[i].state(t) == "open" => Ok(i),
+            Some(_) => Err(text(404, TICKET_NOT_OPEN)),
+            None => Err(not_found()),
+        }
     }
 
     /// Lets `f` make the response after the state lock is released (file work that needs no

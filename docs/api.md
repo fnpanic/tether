@@ -73,13 +73,16 @@ Clients send it after each policy check.
 ### `POST /api/diag/<ticket>`
 Upload a diagnostics zip for a ticket an admin opened. `<ticket>` is 8 characters `[A-HJ-NP-Z2-9]`
 (no ambiguous letters). Body `application/zip`, ≤ 2 MiB. `204` if the ticket is open (state
-`open`, below) on this relay, else `404` (unknown, already used, expired or closed; answered before
-the body is read). One upload per ticket. Upload limits as for release uploads ("Limits" below):
-`503` with `Retry-After: 30` while 4 uploads run, `413` over 2 MiB, `408` below the minimum rate.
+`open`, below) on this relay, else `404`, answered before the body is read: body `not found` when
+the relay does not know the ticket, `ticket not open` when it is used, expired or closed there. One upload per ticket. Upload limits as for release uploads ("Limits" below):
+`503` with `Retry-After: 30` while 4 uploads run, `413` over 2 MiB, `408` below the minimum rate,
+`400 request body incomplete` when the client went away before its `Content-Length` arrived (the
+ticket stays open; up to 0.5.26 such a truncated body was stored and used the ticket up).
 
 Tickets are per relay: Tether Manage opens the same code on every relay it knows, and an app
-uploads to the relay it reaches. The apps (0.5.27 and later) try every relay in turn and go on
-after a `404` or `503`; Manage lists the tickets of all relays merged and finds the upload.
+uploads to the relay it reaches. The apps (0.5.27 and later) try every relay in turn: on to the
+next after `404 not found` or `503`, stop at `ticket not open` (so a used code gets no second upload
+on another relay); Manage lists the tickets of all relays merged and finds the upload.
 
 **Ticket states** (`state` in the admin listing):
 

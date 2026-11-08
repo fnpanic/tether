@@ -162,17 +162,19 @@ pub fn ticket(input: &str) -> Result<String, String> {
 
 pub const NOT_VALID: &str = "This code is not valid, has expired or was already used. Ask your support contact for a new one.";
 
-/// Upload to each relay in turn until one takes it. A relay answers 404 when the ticket is not
-/// open there (Tether Manage opens it on every relay it knows; one may have been down, or the
-/// admin's Manage knows fewer relays than this app), so a 404 tries the next relay.
-/// `send(relay)`: the HTTP status, or Err when that relay could not be reached.
-pub fn upload_each(relays: &[String], mut send: impl FnMut(&str) -> Result<u16, String>) -> Result<(), String> {
+/// Upload to each relay in turn until one takes it. A relay that does not know the ticket answers
+/// 404 `not found` (Tether Manage opens it on every relay it knows; one may have been down, or the
+/// admin's Manage knows fewer relays than this app): the next relay is tried. 404 `ticket not open`
+/// (used, expired, closed there) ends it: the code is spent, even if another relay still has it open.
+/// `send(relay)`: the HTTP status and body, or Err when that relay could not be reached.
+pub fn upload_each(relays: &[String], mut send: impl FnMut(&str) -> Result<(u16, String), String>) -> Result<(), String> {
     let (mut refused, mut not_found, mut offline) = (None, false, None);
     for r in relays {
         match send(r) {
-            Ok(200..=299) => return Ok(()),
-            Ok(404) => not_found = true,
-            Ok(s) => refused = Some(s),
+            Ok((200..=299, _)) => return Ok(()),
+            Ok((404, body)) if body.trim() == "ticket not open" => return Err(NOT_VALID.into()),
+            Ok((404, _)) => not_found = true,
+            Ok((s, _)) => refused = Some(s),
             Err(e) => offline = Some(e),
         }
     }
@@ -270,7 +272,8 @@ password = "proxy-pass-77"
             let mut sent = vec![];
             let r = upload_each(&relays, |h| {
                 sent.push(h.to_owned());
-                answers[sent.len() - 1].map_err(str::to_owned)
+                // 410 here stands for 404 "ticket not open".
+                answers[sent.len() - 1].map(|s| if s == 410 { (404, "ticket not open\n".into()) } else { (s, "not found".into()) }).map_err(str::to_owned)
             });
             (r, sent.len())
         };
@@ -279,10 +282,12 @@ password = "proxy-pass-77"
         assert_eq!(run([Ok(204), Ok(404)]), (Ok(()), 1));
         assert_eq!(run([Err("down"), Ok(204)]), (Ok(()), 2));
         assert_eq!(run([Ok(404), Ok(404)]).0, Err(NOT_VALID.into()));
+        // Used (or expired, closed) on the first relay: no second upload on the other.
+        assert_eq!(run([Ok(410), Ok(204)]), (Err(NOT_VALID.into()), 1));
         assert_eq!(run([Ok(404), Err("down")]).0, Err(NOT_VALID.into()));
         assert!(run([Ok(404), Ok(503)]).0.unwrap_err().contains("busy"));
         assert!(run([Ok(413), Ok(404)]).0.unwrap_err().contains("larger"));
         assert!(run([Err("timeout"), Err("dns")]).0.unwrap_err().starts_with("Cannot reach the server: dns"));
-        assert!(upload_each(&[], |_| Ok(204)).unwrap_err().contains("no server"));
+        assert!(upload_each(&[], |_| Ok((204, String::new()))).unwrap_err().contains("no server"));
     }
 }

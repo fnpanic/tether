@@ -54,7 +54,7 @@ pub fn upload(ticket: &str) -> Result<(), String> {
             .header("Content-Type", "application/zip")
             .body(data.clone())
             .send()
-            .map(|r| r.status().as_u16())
+            .map(|r| (r.status().as_u16(), tether_trust::read_limited(r, 256).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()))
             .map_err(|e| commands::with_causes(&e))
     });
     match &r {

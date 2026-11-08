@@ -13,6 +13,11 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   stayed "Waiting", or a code that one relay did not know was "not valid". The technician app and
   TetherQS now try every relay in turn (on to the next after `404` or `503`), and Manage merges the
   ticket lists of all relays and shows where the upload is.
+- **Relays: an upload cut short is no longer stored.** A client that went away before its
+  `Content-Length` arrived left a truncated diagnostics zip and a used-up ticket; now `400` and the
+  ticket stays open (release uploads were already safe: their signature covers the whole body).
+  A used, expired or closed ticket answers `404 ticket not open` (unknown: `404 not found`), so
+  the apps stop there instead of uploading a second time to another relay.
 
 ### Added
 - **TetherQS: Send to support** in the Help view (Windows and macOS, policy `diagnostics.upload`):

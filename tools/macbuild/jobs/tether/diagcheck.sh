@@ -1,7 +1,8 @@
 #!/bin/bash
 # Diagnostics check on the Mac (build.sh with TETHER_DIAG_CHECK=1): the built Tether.app and
 # TetherQS.app each write their diagnostics zip (`--diagnostics`) under a throw-away HOME (no real
-# config or logs of this Mac are read), twice: the first run creates the config (ID, key pair,
+# config or logs of this Mac are read; TETHER_PROFILE keeps the technician app off the running
+# Tether's IPC), twice: the first run creates the config (ID, key pair,
 # salt), then a planted config file with secrets and a log file are added. The zip must hold
 # diagnostics.json, logs/ and config/, and no secret value. Zips and the report go to $OUT.
 #   diagcheck.sh <Tether.app> <TetherQS.app> <out dir>
@@ -13,13 +14,13 @@ fails=0
 for which in tech qs; do
   if [ $which = tech ]; then bin="$APP/Contents/MacOS/tether"; else bin="$QAPP/Contents/MacOS/TetherQS"; fi
   [ -x "$bin" ] || bin=$(ls "$(dirname "$bin")"/* | head -1)
-  HOME=$H "$bin" --diagnostics "$H/$which-0.zip" >/dev/null 2>&1
+  HOME=$H TETHER_PROFILE=diagcheck "$bin" --diagnostics "$H/$which-0.zip" >/dev/null 2>&1
   for d in "$H"/Library/Preferences/*/; do
     printf 'password = "planted-secret-123"\n[options]\nrecording-upload-token = "planted-token-456"\n[socks]\nproxy = "proxy:3128"\npassword = "planted-proxy-pass"\n' >"$d/Planted.toml"
   done
-  mkdir -p "$H/Library/Logs/Tether" "$H/Library/Logs/Tether-QS"
+  mkdir -p "$H/Library/Logs/Tether-diagcheck" "$H/Library/Logs/Tether-QS"
   for d in "$H"/Library/Logs/*/; do echo "[2026-11-08 00:00:00] ERROR diagcheck planted line" >"$d/diagcheck.log"; done
-  HOME=$H "$bin" --diagnostics "$OUT/diag-$which.zip"
+  HOME=$H TETHER_PROFILE=diagcheck "$bin" --diagnostics "$OUT/diag-$which.zip"
   "${JOB_PYTHON:-python3}" - "$OUT/diag-$which.zip" "$H" "$which" <<'PY' || fails=$((fails + 1))
 import re, sys, zipfile, pathlib, json
 z, home, which = zipfile.ZipFile(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]

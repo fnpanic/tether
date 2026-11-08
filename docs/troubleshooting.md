@@ -113,7 +113,8 @@ warnings, the log folder), `logs/` (TetherQS's own logs of the last 24 h: Window
 included). The elevated helper (admin access) logs as SYSTEM and is not part of it.
 
 The app sends to its relays one after the other: a relay that does not know the code (`404`) or is
-busy (`503`, 4 uploads at once) does not end the attempt.
+busy (`503`, 4 uploads at once) does not end the attempt; one that has the code but used, expired
+or closed does.
 
 | Message | Cause |
 | --- | --- |

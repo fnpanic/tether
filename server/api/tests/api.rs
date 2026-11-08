@@ -293,8 +293,18 @@ fn diag_ticket_flow() {
     let big = vec![0u8; (2 << 20) + 1];
     assert_eq!(s.req("POST", &format!("/api/diag/{ticket}"), &[("Content-Type", "application/zip")], &big).status, 413);
     let zip = b"PK\x03\x04 fake zip".to_vec();
+    // A client that goes away before its Content-Length arrived does not use up the ticket.
+    let mut c = TcpStream::connect(&s.addr).unwrap();
+    c.write_all(format!("POST /api/diag/{ticket} HTTP/1.1\r\nHost: t\r\nContent-Length: 1000\r\n\r\nPK").as_bytes()).unwrap();
+    c.shutdown(std::net::Shutdown::Write).unwrap();
+    // tiny_http may drop the half-closed connection without an answer; the ticket is what counts.
+    let _ = c.read_to_end(&mut Vec::new());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(s.admin(&k, "GET", "/api/admin/diag", b"").json()[0]["uploaded"].is_null());
     assert_eq!(s.req("POST", &format!("/api/diag/{ticket}"), &[("Content-Type", "application/zip")], &zip).status, 204);
-    assert_eq!(s.req("POST", &format!("/api/diag/{ticket}"), &[], &zip).status, 404);
+    let used = s.req("POST", &format!("/api/diag/{ticket}"), &[], &zip);
+    assert_eq!((used.status, used.body.as_slice()), (404, &b"ticket not open"[..]), "used: the apps stop here");
+    assert_eq!(s.req("POST", "/api/diag/ABCDEFGH", &[], b"PK").body, b"not found", "unknown: the apps try the next relay");
 
     let list = s.admin(&k, "GET", "/api/admin/diag", b"").json();
     assert_eq!(list[0]["ticket"], ticket.as_str());
@@ -327,7 +337,7 @@ fn diag_ticket_flow() {
 #[test]
 fn diag_close_archive_delete() {
     let (s, k) = admin_server();
-    let zip = b"PK fake zip".to_vec();
+    let zip = b"PK\x03\x04 fake zip".to_vec();
     let up = |t: &str| s.req("POST", &format!("/api/diag/{t}"), &[("Content-Type", "application/zip")], &zip).status;
     let open = |note: &str| s.admin(&k, "POST", "/api/admin/diag-ticket", format!(r#"{{"note":"{note}"}}"#).as_bytes()).json()["ticket"].as_str().unwrap().to_owned();
     let (a, b, c) = (open("uploaded then closed"), open("closed before upload"), open("deleted"));
@@ -350,6 +360,7 @@ fn diag_close_archive_delete() {
     assert_eq!(s.req("POST", &path, &[(reqauth::HEADER, &sig)], b"").status, 401, "replay");
     // Closed: no upload (404 like an expired code), closing again is a no-op.
     assert_eq!(up(&b), 404);
+    assert_eq!(s.req("POST", &format!("/api/diag/{b}"), &[], &zip).body, b"ticket not open");
     assert_eq!(s.admin(&k, "POST", &path, b"").status, 204);
     assert_eq!(s.admin(&k, "POST", &format!("/api/admin/diag/{a}/close"), b"").status, 204);
     assert_eq!(s.admin(&k, "POST", "/api/admin/diag/ZZZZZZZZ/close", b"").status, 404);
@@ -404,7 +415,8 @@ fn diag_expiry_and_retention() {
         }
     });
     let zip = b"PK".to_vec();
-    assert_eq!(s.req("POST", "/api/diag/AAAAAAAA", &[("Content-Type", "application/zip")], &zip).status, 404, "expired");
+    let r = s.req("POST", "/api/diag/AAAAAAAA", &[("Content-Type", "application/zip")], &zip);
+    assert_eq!((r.status, r.body.as_slice()), (404, &b"ticket not open"[..]), "expired");
     // Retention runs before the server listens.
     let ids = |v: serde_json::Value| v.as_array().unwrap().iter().map(|x| format!("{}:{}", x["ticket"].as_str().unwrap(), x["state"].as_str().unwrap())).collect::<Vec<_>>();
     assert_eq!(ids(s.admin(&k, "GET", "/api/admin/diag", b"").json()), ["AAAAAAAA:expired"]);

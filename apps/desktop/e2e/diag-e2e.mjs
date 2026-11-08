@@ -34,9 +34,11 @@ const VAULT = process.env.VAULT || "C:\\vms\\manage-test";
 const PROFILE = "diag-e2e";
 const PASS = readFileSync(join(VAULT, "test-passphrase.txt"), "utf8").trim();
 const ADMIN_PUB = readFileSync(join(VAULT, "env.txt"), "utf8").trim().split(/\s+/)[0];
+// Fresh ports per run: WSL's localhost forwarding can keep a port of the last run for a while.
+const BASE = 22200 + 4 * Math.floor(Math.random() * 200);
 const RELAYS = [
-  { api: 22180, proxy: 22181 },
-  { api: 22182, proxy: 22183 },
+  { api: BASE, proxy: BASE + 1 },
+  { api: BASE + 2, proxy: BASE + 3 },
 ];
 const [R1, R2] = RELAYS.map((r) => `http://127.0.0.1:${r.proxy}`);
 const work = mkdtempSync(join(tmpdir(), "diag-e2e-"));
@@ -106,9 +108,9 @@ function plant(cfgDir) {
 }
 function checkZip(app, files, cfgDir, expect) {
   const names = Object.keys(files).sort();
-  check(`${app}: zip has diagnostics.json, logs/, config/`, names.includes("diagnostics.json") && names.some((n) => n.startsWith("logs/")) && names.some((n) => n.startsWith("config/")), names.join(", "));
+  check(`${app}: zip has diagnostics.json, logs/, config/`, names.includes("diagnostics.json") && names.includes("logs/e2e.log") && names.some((n) => n.startsWith("config/")), names.join(", "));
   const info = JSON.parse(files["diagnostics.json"].toString("utf8"));
-  check(`${app}: diagnostics.json is the app's`, expect(info), JSON.stringify(info).slice(0, 200));
+  check(`${app}: diagnostics.json is the app's, with the log's errors`, expect(info) && info.errors.some((l) => l.includes("planted log line")), JSON.stringify(info).slice(0, 200));
   check(`${app}: planted config is redacted, the proxy host kept`, /<redacted>/.test(files["config/Planted.toml"]?.toString()) && files["config/Planted.toml"].toString().includes("proxy:3128"));
   const all = Buffer.concat(Object.values(files)).toString("latin1");
   const secrets = secretsOf(cfgDir);
@@ -144,6 +146,21 @@ function holdSlots(r, ticket, n) {
     return s;
   });
 }
+/** Status line of a request with only its head sent (the relay refuses an oversized body unread). */
+const headOnly = (r, head) =>
+  new Promise((ok) => {
+    const s = connect(r.api, "127.0.0.1");
+    let got = "";
+    s.on("data", (d) => (got += d));
+    s.on("error", () => {});
+    s.on("close", () => ok(Number(got.split(" ")[1])));
+    s.write(head);
+    setTimeout(() => s.destroy(), 5000);
+  });
+const plantLog = (dir) => {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "e2e.log"), "[2026-11-08 08:00:00.000] ERROR [e2e] planted log line\n");
+};
 const post = (base, path, body) =>
   new Promise((ok, bad) => {
     const rq = request(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/zip", "Content-Length": body.length } }, (res) => {
@@ -186,6 +203,7 @@ try {
   const techInfo = await A.invoke("diag_info");
   const techCfg = join(techInfo.logDir, "..", "config");
   plant(techCfg);
+  plantLog(techInfo.logDir);
 
   const t1 = await open("e2e technician");
   check("Manage opens the ticket on both relays", RELAYS.every((r) => tickets(r).some((k) => k.ticket === t1)), t1);
@@ -229,7 +247,9 @@ try {
   held.forEach((s) => s.destroy());
   const t5 = await open("both busy");
   held = [...holdSlots(RELAYS[0], hold, 4), ...holdSlots(RELAYS[1], hold, 4)];
-  await sleep(700);
+  await sleep(1000);
+  const probe = [await post(R1, `/api/diag/${hold}`, Buffer.from("PK")), await post(R2, `/api/diag/${hold}`, Buffer.from("PK"))];
+  check("both relays at their upload cap answer 503", probe.every((x) => x === 503), probe.join(","));
   e = await A.invokeErr("diag_upload", { ticket: t5 });
   check("technician: both relays at the cap -> 'busy, try again'", e?.includes("busy"), e);
   held.forEach((s) => s.destroy());
@@ -247,7 +267,7 @@ try {
   check("technician: bundle over 2 MiB is sent as diagnostics.json only", e === null && bigNames.length === 1 && bigNames[0] === "diagnostics.json", e ?? bigNames.join(","));
   big.forEach((f) => rmSync(f, { force: true }));
   const t7 = await open("raw limit");
-  const st = await post(R2, `/api/diag/${t7}`, randomBytes((2 << 20) + 1)).catch((x) => String(x));
+  const st = await headOnly(RELAYS[1], `POST /api/diag/${t7} HTTP/1.1\r\nHost: t\r\nContent-Type: application/zip\r\nContent-Length: ${(2 << 20) + 1}\r\n\r\n`);
   check("relay: a body over 2 MiB is refused (413), the ticket stays open", st === 413 && (await entry(t7))?.state === "open", String(st));
 
   // ---------------------------------------------------------------- close, archive, delete
@@ -279,16 +299,18 @@ try {
 
   // ---------------------------------------------------------------- TetherQS
   const qsCfg = join(process.env.APPDATA, `Tether-QS-${PROFILE}`, "config");
+  const qsLog = join(process.env.APPDATA, `Tether-QS-${PROFILE}`, "log");
   plant(qsCfg);
+  plantLog(qsLog);
   qs = spawn(QS, [], { env: { ...appEnv, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9463" }, stdio: "ignore" });
   Q = await cdp(9463);
   const qp = Q.page;
   await qp.getByRole("button", { name: "Help" }).click({ timeout: 30000 });
   const send = async (code) => {
     await qp.getByTestId("qs-diag-code").fill(code);
-    await qp.evaluate(() => document.querySelector('[data-testid="qs-diag-result"]')?.remove());
     await qp.getByRole("button", { name: "Send", exact: true }).click();
-    await qp.getByTestId("qs-diag-result").waitFor({ timeout: 60000 });
+    // The click shows "Sending…" and clears the last result; wait for the new one.
+    await qp.waitForFunction(() => !document.body.innerText.includes("Sending…") && document.querySelector('[data-testid="qs-diag-result"]'), null, { timeout: 60000 });
     return qp.getByTestId("qs-diag-result").innerText();
   };
   const q1 = await open("e2e TetherQS");
@@ -309,8 +331,6 @@ try {
   setServers(`${R1},${R2}`);
   msg = await send(q3);
   check("TetherQS: relay 2 says 404, the upload lands on relay 1", msg.startsWith("Sent") && zipOn(RELAYS[0], q3) && (await entry(q3))?.upload_relay === R1, msg);
-  const qsLog = join(process.env.APPDATA, `Tether-QS-${PROFILE}`, "log");
-  mkdirSync(qsLog, { recursive: true });
   const qbig = [1, 2, 3].map((i) => join(qsLog, `big-e2e-${i}.log`));
   qbig.forEach((f) => writeFileSync(f, randomBytes(1 << 20)));
   const q6 = await open("TetherQS too large");

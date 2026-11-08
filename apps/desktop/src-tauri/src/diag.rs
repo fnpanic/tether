@@ -132,7 +132,7 @@ pub fn upload(ticket: &str) -> Result<(), String> {
     let relays: Vec<String> = policy::relay_bases().into_iter().map(|r| r.0).collect();
     let r = diag_bundle::upload_each(&relays, |host| {
         policy::api_via(&[host.to_owned()], |c, base| c.post(format!("{base}/api/diag/{ticket}")).header("Content-Type", "application/zip").body(data.clone()))
-            .map(|r| r.status().as_u16())
+            .map(|r| (r.status().as_u16(), tether_trust::read_limited(r, 256).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()))
             .map_err(|e| e.trim_start_matches("offline: ").to_owned())
     });
     match &r {
