@@ -225,7 +225,7 @@ function Overview() {
               <td className="text-right">
                 {missing.length > 0 &&
                   (source ? (
-                    <Button size="sm" variant="secondary" title="Publish to missing relays" onClick={() => setSync(row)}>
+                    <Button size="sm" variant="secondary" title="Publish to missing relays" aria-label="Publish to missing relays" onClick={() => setSync(row)}>
                       Publish to missing
                     </Button>
                   ) : (
