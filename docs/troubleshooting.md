@@ -72,7 +72,9 @@ to that account's profile and are not part of the export.
 ## Export diagnostics
 
 **Export diagnostics** writes `tether-diagnostics-<unix time>.zip` to the user's Downloads folder.
-`tether --diagnostics <out.zip>` writes the same archive ([cli.md](cli.md)).
+`tether --diagnostics <out.zip>` writes the same archive ([cli.md](cli.md)); so does
+`TetherQS --diagnostics <out.zip>` for TetherQS (its own logs and config; on Windows the exe has no
+console, check the file).
 
 | Entry | Content |
 | --- | --- |
@@ -93,19 +95,39 @@ host names and file names. Tell the user before they send a bundle outside the o
 
 1. Support creates a ticket in Tether Manage → **Diagnostics** ([management.md](management.md#diagnostics-tickets))
    and reads the 8-character code to the user.
-2. The user enters it on the Diagnostics page (policy `diagnostics.upload`) and clicks
-   **Send to support**. Input is uppercased; only letters and digits are kept.
-3. Support refreshes the ticket list and clicks **Open**.
+2. The user enters it (policy `diagnostics.upload`; input is uppercased, spaces dropped) and
+   clicks **Send to support** / **Send**:
+   - technician app (Windows, macOS): **Settings → Diagnostics → Send to support**;
+   - TetherQS (Windows, macOS): **Help** (title bar `?`, policy `diagnostics.page`) → **Send to support**.
+3. Support refreshes the ticket list and clicks **Open**, and **Close**s the ticket when done.
 
 The bundle is the same as the export. If it is larger than 2 MiB, only `diagnostics.json` is sent
 (no logs, no config); ask for an exported file in that case. Codes are valid for 24 hours and one
-upload; the server keeps uploads for 7 days.
+upload; the server keeps uploads for 7 days, closed (archived) tickets 90 days.
+
+TetherQS bundle: `diagnostics.json` (`app: "TetherQS"`, version, ID, servers, proxy without
+credentials, admin access, policy serial and group, custom app name, OS, the last 40 errors and
+warnings, the log folder), `logs/` (TetherQS's own logs of the last 24 h: Windows
+`%APPDATA%\Tether-QS\log`, macOS `~/Library/Logs/Tether-QS`) and `config/*.toml` redacted as above
+(other files of the config folder, e.g. the hand-over file with the one-time password, are never
+included). The elevated helper (admin access) logs as SYSTEM and is not part of it.
+
+The app sends to its relays one after the other: a relay that does not know the code (`404`) or is
+busy (`503`, 4 uploads at once) does not end the attempt; one that has the code but used, expired
+or closed does.
 
 | Message | Cause |
 | --- | --- |
-| "This code is not valid or was already used." | Typo, expired (24 h) or already used. Create a new ticket. |
+| "This code is not valid, has expired or was already used." | Typo, expired (24 h), already used, or the ticket was closed. Create a new ticket. |
+| "The server is busy. Try again in a minute." | Every relay is at its upload limit |
 | "Cannot reach the server: …" | The device is offline; use **Export diagnostics** and another channel. |
 | "Your organisation does not allow sending diagnostics." | Policy `diagnostics.upload` is off |
+
+Up to 0.5.26 the apps sent only to the relay they had used last (after an update check: the last
+relay of the list) and stopped at its answer, and Tether Manage listed the tickets of its first
+relay only: with two relays an upload went to relay 2 and stayed "Waiting" in Manage, or a code
+one relay did not know was "not valid". TetherQS had no upload at all. Fixed in the next release
+of the apps and Tether Manage.
 
 Verified 2026-11-03 (Hyper-V VM in corporate mode, TLS-inspecting proxy): ticket created in
 Tether Manage, upload and open in about 7 s, config secrets redacted.

@@ -516,11 +516,20 @@ edited (their settings are only on that PC).
 
 ## Diagnostics tickets
 
-1. **Create ticket** with a note (who and what, up to 256 characters).
+1. **Create ticket** with a note (who and what, up to 256 characters). Manage opens it with the same
+   code on every relay of the server setting.
 2. Read the 8-character code to the user. Codes avoid ambiguous characters (no I, O, 0, 1). It is
    valid for 24 hours and for one upload.
-3. The user enters it under **Settings → Diagnostics → Send to support**.
-4. The ticket shows the upload size and time. **Open** lists the files and shows
-   `diagnostics.json`; **Save zip…** stores the bundle.
+3. The user enters it in the technician app under **Settings → Diagnostics → Send to support**, or
+   in TetherQS under **Help** (title bar `?`) **→ Send to support**.
+4. The ticket shows the upload size and time, whichever relay the app sent it to (the list merges
+   all relays; a relay that does not answer is named above the table). **Open** lists the files
+   and shows `diagnostics.json`; **Save zip…** stores the bundle.
+5. **Close** when the case is done: no more uploads with that code, and the ticket moves to
+   **Archived** (note, dates, size, **Open**), kept 90 days with its upload. **Delete** (asks
+   first) removes a ticket and its upload from every relay for good, active or archived.
+   Close and Delete act on every relay; when one fails, the result of each relay is shown.
 
-Uploads are kept on the server for 7 days. What the bundle contains: [troubleshooting.md](troubleshooting.md#export-diagnostics).
+Active tickets: uploads are kept 7 days, a code without upload expires after 24 h ("Expired, no
+upload") and leaves the list after 7 days. States and retention: [api.md](api.md#post-apidiagticket).
+What the bundle contains: [troubleshooting.md](troubleshooting.md#export-diagnostics).

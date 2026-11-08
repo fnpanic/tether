@@ -6,6 +6,9 @@
 mod app;
 mod commands;
 mod custom;
+mod diag;
+#[path = "../../../desktop/src-tauri/src/diag_bundle.rs"]
+mod diag_bundle;
 mod netpolicy;
 mod policy;
 mod security;
@@ -29,6 +32,11 @@ const PRE_ELEVATE: &str = "pre-elevate-service";
 
 fn main() -> ExitCode {
     *hbb_common::config::APP_NAME.write().unwrap() = APP_NAME.to_owned();
+    // Debug builds: a separate identity (config, logs, IPC) for tests, as the technician app's TETHER_PROFILE.
+    #[cfg(debug_assertions)]
+    if let Some(p) = std::env::var("TETHER_PROFILE").ok().filter(|p| !p.is_empty()) {
+        *hbb_common::config::APP_NAME.write().unwrap() = format!("{APP_NAME}-{p}");
+    }
     #[cfg(target_os = "macos")]
     {
         *hbb_common::config::ORG.write().unwrap() = ORG.to_owned();
@@ -40,6 +48,23 @@ fn main() -> ExitCode {
     security::apply_policy();
     netpolicy::apply();
     policy::load_cached();
+    if std::env::args().nth(1).as_deref() == Some("--diagnostics") {
+        // Same archive as the technician app's `--diagnostics` (docs/troubleshooting.md).
+        let Some(out) = std::env::args().nth(2) else {
+            eprintln!("usage: TetherQS --diagnostics <out.zip>");
+            return ExitCode::FAILURE;
+        };
+        return match diag::export_to(Path::new(&out)) {
+            Ok(()) => {
+                println!("wrote {out}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("diagnostics: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     let ui_start = std::env::args().len() == 1;
     if ui_start {

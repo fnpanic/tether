@@ -74,6 +74,10 @@ qs=$(codesign -d -r- "$QAPP" 2>&1 | grep designated)
 log "requirement QS: $qs"
 echo "$qs" | grep -q 'certificate root = H"bcf53642c6c9f74356a3d12ae740bcc0eb59fb33"' &&
   codesign --verify --deep --strict "$QAPP" || fail "QS signature"
+if [ "${TETHER_DIAG_CHECK:-0}" = 1 ]; then
+  log "diagnostics check"
+  bash "$JOB_WORK/diagcheck.sh" "$APP" "$QAPP" "$OUT" || fail "diagnostics check"
+fi
 ls -l "$OUT"
 trap - EXIT
 cleanup

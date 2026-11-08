@@ -45,7 +45,11 @@ const HB_IP_PER_MIN: u32 = 30;
 const HISTORY_KEEP: usize = 50;
 const TICKET_OPEN: u64 = DAY;
 const DIAG_KEEP: u64 = 7 * DAY;
+/// Closed (archived) tickets, with their upload, are kept this long after closing.
+const DIAG_ARCHIVE_KEEP: u64 = 90 * DAY;
 const MIN_FREE: u64 = 2 << 30;
+/// 404 body for a ticket this relay has but that takes no upload (docs/api.md).
+const TICKET_NOT_OPEN: &str = "ticket not open";
 const TICKET_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 const LIMIT_SMALL: u64 = 4096;
@@ -131,6 +135,29 @@ struct Ticket {
     created: u64,
     uploaded: Option<u64>,
     size: Option<u64>,
+    /// Closed by an admin: archived, no more uploads (docs/api.md "Diagnostics tickets").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closed: Option<u64>,
+}
+
+impl Ticket {
+    /// open → uploaded → closed; open → expired (24 h without an upload) → closed or removed.
+    fn state(&self, t: u64) -> &'static str {
+        match (self.closed, self.uploaded) {
+            (Some(_), _) => "closed",
+            (None, Some(_)) => "uploaded",
+            (None, None) if t < self.created + TICKET_OPEN => "open",
+            _ => "expired",
+        }
+    }
+
+    /// Removed (with its zip) after this time.
+    fn keep_until(&self) -> u64 {
+        match self.closed {
+            Some(c) => c + DIAG_ARCHIVE_KEEP,
+            None => self.uploaded.unwrap_or(self.created) + DIAG_KEEP,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -426,6 +453,7 @@ fn body_to_file(rq: &mut Request, data: &Path, limit: u64, mode: u32) -> Result<
         return Err(too_large());
     }
     check_space(data, rq.body_length().map_or(limit, |n| n as u64))?;
+    let expect = rq.body_length().map(|n| n as u64);
     let tmp = tmp_path(data);
     let r = (|| -> io::Result<u64> {
         let mut f = OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
@@ -435,6 +463,9 @@ fn body_to_file(rq: &mut Request, data: &Path, limit: u64, mode: u32) -> Result<
     })();
     let body = Body::File { path: tmp, len: *r.as_ref().unwrap_or(&0), nonce: None };
     match r {
+        // A client gone before its Content-Length arrived: not an upload (a diagnostics ticket
+        // would be used up by a truncated zip).
+        Ok(n) if expect.is_some_and(|e| e != n) => Err(text(400, "request body incomplete")),
         Ok(n) if n <= limit => Ok(body),
         Ok(_) => Err(too_large()),
         Err(e) => {
@@ -823,9 +854,15 @@ impl App {
         Ok(self.keys.clone())
     }
 
-    /// Index of the open diagnostics ticket `ticket`, or 404.
+    /// Index of the open diagnostics ticket `ticket`, or 404: body `ticket not open` when this
+    /// relay has it but it is used, expired or closed (the apps then stop instead of trying the
+    /// next relay, which may still have the code open), `not found` when unknown.
     fn open_ticket(&self, ticket: &str, t: u64) -> Result<usize, Resp> {
-        self.tickets.iter().position(|k| k.ticket == ticket && k.uploaded.is_none() && t < k.created + TICKET_OPEN).ok_or_else(not_found)
+        match self.tickets.iter().position(|k| k.ticket == ticket) {
+            Some(i) if self.tickets[i].state(t) == "open" => Ok(i),
+            Some(_) => Err(text(404, TICKET_NOT_OPEN)),
+            None => Err(not_found()),
+        }
     }
 
     /// Lets `f` make the response after the state lock is released (file work that needs no
@@ -1004,6 +1041,8 @@ impl App {
             ("DELETE", r) if r.starts_with("custom/") => LIMIT_SMALL,
             ("GET", "policy-history" | "devices" | "diag" | "releases" | "status" | "custom" | "audit" | "team") => LIMIT_SMALL,
             ("GET", r) if r.starts_with("diag/") || r.starts_with("policy-history/") => LIMIT_SMALL,
+            ("POST", r) if r.starts_with("diag/") && r.ends_with("/close") => LIMIT_SMALL,
+            ("DELETE", r) if r.starts_with("diag/") => LIMIT_SMALL,
             _ => return Err(not_found()),
         };
         let body = body.bytes(limit)?;
@@ -1030,7 +1069,9 @@ impl App {
                 v.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
                 self.json_file(|w| serde_json::to_writer(w, &v))
             }
-            ("GET", "diag") => Ok(json(&self.tickets)),
+            ("GET", "diag") => self.list_tickets(url),
+            ("POST", r) if r.starts_with("diag/") => self.close_ticket(r["diag/".len()..].strip_suffix("/close").unwrap_or_default()),
+            ("DELETE", r) if r.starts_with("diag/") => self.delete_ticket(&r["diag/".len()..]),
             ("GET", "audit") => self.audit_read(url),
             ("GET", "releases") => self.list_releases(),
             ("GET", r) if r.starts_with("policy-history/") => {
@@ -1129,10 +1170,61 @@ impl App {
             },
         };
         let created = now();
-        self.tickets.push(Ticket { ticket: ticket.clone(), note: req.note, created, uploaded: None, size: None });
+        self.tickets.push(Ticket { ticket: ticket.clone(), note: req.note, created, uploaded: None, size: None, closed: None });
         let tickets = self.tickets.clone();
         self.save("diag/tickets.json", &tickets).map_err(internal)?;
         Ok(json(&serde_json::json!({"ticket": ticket, "expires": created + TICKET_OPEN})))
+    }
+
+    /// Active tickets (open, uploaded, expired), or with `?archived=1` the closed ones; each with
+    /// its `state`.
+    fn list_tickets(&self, url: &str) -> Result<Resp, Resp> {
+        let archived = match url.split_once('?').map(|q| q.1) {
+            None => false,
+            Some("archived=1") => true,
+            Some(q) => return Err(text(400, &format!("unknown parameter {q}"))),
+        };
+        let t = now();
+        let v: Vec<serde_json::Value> = self
+            .tickets
+            .iter()
+            .filter(|k| k.closed.is_some() == archived)
+            .map(|k| {
+                let mut v = serde_json::to_value(k).unwrap_or_default();
+                v["state"] = k.state(t).into();
+                v
+            })
+            .collect();
+        Ok(json(&v))
+    }
+
+    fn save_tickets(&self) -> Result<(), Resp> {
+        self.save("diag/tickets.json", &self.tickets).map_err(internal)
+    }
+
+    /// Archive: no more uploads; the entry and its zip stay DIAG_ARCHIVE_KEEP. Closing again is a no-op.
+    fn close_ticket(&mut self, ticket: &str) -> Result<Resp, Resp> {
+        let k = self.tickets.iter_mut().find(|k| k.ticket == ticket).ok_or_else(not_found)?;
+        if k.closed.is_none() {
+            k.closed = Some(now());
+            self.save_tickets()?;
+            eprintln!("diag ticket {ticket} closed");
+        }
+        Ok(empty(204))
+    }
+
+    /// Removes the ticket and its zip for good, in any state.
+    fn delete_ticket(&mut self, ticket: &str) -> Result<Resp, Resp> {
+        let i = self.tickets.iter().position(|k| k.ticket == ticket).ok_or_else(not_found)?;
+        let k = self.tickets.remove(i);
+        if let Err(e) = self.save_tickets() {
+            self.tickets.insert(i, k);
+            return Err(e);
+        }
+        // The ticket is a validated entry of the list, so this path stays inside diag/.
+        let _ = fs::remove_file(self.data.join("diag").join(format!("{ticket}.zip")));
+        eprintln!("diag ticket {ticket} deleted");
+        Ok(empty(204))
     }
 
     fn put_custom(&mut self, id: &str, body: &[u8]) -> Result<Resp, Resp> {
@@ -1385,7 +1477,7 @@ impl App {
         let diag = self.data.join("diag");
         let n = self.tickets.len();
         self.tickets.retain(|k| {
-            let keep = t < k.uploaded.unwrap_or(k.created) + DIAG_KEEP;
+            let keep = t < k.keep_until();
             if !keep {
                 let _ = fs::remove_file(diag.join(format!("{}.zip", k.ticket)));
             }

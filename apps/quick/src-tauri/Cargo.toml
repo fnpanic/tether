@@ -24,6 +24,8 @@ tether-trust = { path = "../../../crates/tether-trust" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls", "rustls-tls", "rustls-tls-native-roots", "gzip", "zstd", "socks"] }
 # Already in the tree (reqwest gzip): unpacks the CDN's gzip copy of TetherQS.exe.
 flate2 = "1"
+# Diagnostics zip (same as the technician app; deflate through the flate2 above).
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 tauri-plugin-single-instance = "2"
 
 [dev-dependencies]

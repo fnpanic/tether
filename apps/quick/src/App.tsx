@@ -68,7 +68,7 @@ export function App() {
       <TitleBar title={s.branding.title} logo={s.branding.logo} onHelp={s.branding.diagnostics ? () => setHelp(!help) : undefined} helpOpen={help} />
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-5">
         {help ? (
-          <Help customApp={s.branding.custom_app} status={s.status} lastCheck={s.update.last_check} stale={s.update.stale} onBack={() => setHelp(false)} />
+          <Help customApp={s.branding.custom_app} upload={s.branding.diagnostics_upload} status={s.status} lastCheck={s.update.last_check} stale={s.update.stale} onBack={() => setHelp(false)} />
         ) : (
           <>
             <UpdateBanner s={s} />
@@ -529,7 +529,7 @@ function Footer({ s, onError }: { s: State; onError: (m: string) => void }) {
   );
 }
 
-function Help({ customApp, status, lastCheck, stale, onBack }: { customApp: string | null; status: number; lastCheck: string | null; stale?: boolean; onBack: () => void }) {
+function Help({ customApp, upload, status, lastCheck, stale, onBack }: { customApp: string | null; upload: boolean; status: number; lastCheck: string | null; stale?: boolean; onBack: () => void }) {
   const [d, setD] = useState<Diagnostics | null>(null);
   const [err, setErr] = useState("");
   // Per server; missing = checking. The local rows never wait for it.
@@ -596,8 +596,58 @@ function Help({ customApp, status, lastCheck, stale, onBack }: { customApp: stri
           </div>
         ))}
       </Card>
+      {upload && <SendDiagnostics />}
       <p className="mt-4 text-footnote text-muted">Admin prompts (UAC) are only visible to your technician after you allow admin access.</p>
     </div>
+  );
+}
+
+/** Help › Send to support: the ticket code from support, then the diagnostics bundle (logs, settings without secrets). */
+function SendDiagnostics() {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  return (
+    <Card className="mt-3 !p-5">
+      <div className="mb-1 text-callout font-semibold">Send to support</div>
+      <p className="mb-2 text-caption text-muted">Enter the code your support contact gave you. Sends logs and settings, never passwords.</p>
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setBusy(true);
+          setMsg(null);
+          api.diagUpload(code).then(
+            () => {
+              setMsg({ ok: true, text: "Sent. Tell your support contact." });
+              setCode("");
+              setBusy(false);
+            },
+            (err) => {
+              setMsg({ ok: false, text: String(err) });
+              setBusy(false);
+            },
+          );
+        }}
+      >
+        <input
+          data-testid="qs-diag-code"
+          aria-label="Support ticket code"
+          value={code}
+          onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))}
+          placeholder="Ticket code"
+          className="h-9 min-w-0 flex-1 rounded-xl border border-hairline bg-parchment px-3.5 font-mono text-caption tracking-wider outline-none focus-visible:border-focus"
+        />
+        <Button variant="primary" className="!h-9" type="submit" disabled={busy || code.length !== 8}>
+          {busy ? "Sending…" : "Send"}
+        </Button>
+      </form>
+      {msg && (
+        <p data-testid="qs-diag-result" role="status" className={`mt-2 text-caption ${msg.ok ? "text-ink-80" : "text-danger"}`}>
+          {msg.text}
+        </p>
+      )}
+    </Card>
   );
 }
 
