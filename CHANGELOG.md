@@ -6,6 +6,13 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Fixed
+- macOS host (Tether, TetherQS): a Mac whose Accessibility switch was on, but which macOS did not
+  yet let post events (grant from an earlier build, or switched on after the app started), took
+  pointer moves but silently dropped every remote click and key press, with no warning on either
+  side. The permission check now also asks `CGPreflightPostEventAccess`, so the Mac shows the
+  Accessibility warning and the technician gets the "input is ignored" message (docs/macos.md).
+
 ## [0.5.29] — 2026-11-08
 Tether (technician app) 0.5.29, Windows and macOS (published 2026-11-08, rollout Immediately; index serial 28 on both relays, CDN copies verified); TetherQS stays 0.5.27, Tether Manage 0.5.11.
 

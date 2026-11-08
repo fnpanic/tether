@@ -2055,10 +2055,31 @@ index f6e48a1..600a09e 100644
  pub(crate) mod update_hash;
  #[cfg(target_os = "macos")]
 diff --git a/src/platform/macos.rs b/src/platform/macos.rs
-index d321d12..0e01ef2 100644
+index d321d12..9b58a9e 100644
 --- a/src/platform/macos.rs
 +++ b/src/platform/macos.rs
-@@ -2215,3 +2215,17 @@ mod update_tests {
+@@ -96,6 +96,8 @@ const PRIVILEGED_UPDATE_BODY: &str = r#"
+ static CG_CURSOR_MUTEX: Mutex<()> = Mutex::new(());
+ 
+ extern "C" {
++    // Tether: macOS 10.15+, CoreGraphics. Whether this process may post events (clicks, keys).
++    fn CGPreflightPostEventAccess() -> bool;
+     fn CGSCurrentCursorSeed() -> i32;
+     fn CGEventCreate(r: *const c_void) -> *const c_void;
+     fn CGEventGetLocation(e: *const c_void) -> CGPoint;
+@@ -138,7 +140,10 @@ fn unsafe_is_process_trusted(prompt: bool) -> bool {
+             value,
+             kAXTrustedCheckOptionPrompt as _,
+         );
+-        AXIsProcessTrustedWithOptions(options as _) == YES
++        // Tether: an Accessibility switch that is on can still be refused for posting events
++        // (granted to an earlier build, or not yet applied to a process started before the grant):
++        // the pointer then moves but clicks and keys are dropped. Count that as not trusted.
++        AXIsProcessTrustedWithOptions(options as _) == YES && CGPreflightPostEventAccess()
+     }
+ }
+ 
+@@ -2215,3 +2220,17 @@ mod update_tests {
          std::fs::remove_dir_all(test_dir).unwrap();
      }
  }

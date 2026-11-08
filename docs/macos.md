@@ -131,6 +131,14 @@ What the apps do about it (0.5.4):
   steps above; with only Accessibility missing, a message says that input is ignored.
 - Without that message (an older Mac app), the technician's window explains the likely cause
   after 8 s without a picture.
+- **Accessibility "on" but clicks and keys ignored (fixed 2026-11-08):** macOS can report the
+  Accessibility switch as granted (`AXIsProcessTrusted`) while it still refuses to let the app
+  post events, e.g. a grant made for an earlier build or one switched on after the app started.
+  The pointer then moves (tooltips appear) but clicks and keys do nothing, and up to 0.5.29 no
+  warning appeared. Tether and TetherQS now also ask `CGPreflightPostEventAccess`; when it is
+  refused they show the Accessibility warning (Mac) and the "input is ignored" message
+  (technician). Fix: Fix Accessibility, switch the app on, then quit and reopen it. Don't press
+  Fix again while the switch is on and the app has not been reopened: Fix clears the entry.
 
 ## Remote input and App Nap
 
