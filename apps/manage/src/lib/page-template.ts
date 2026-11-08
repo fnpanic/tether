@@ -296,7 +296,7 @@ export async function buildPage(s: PageSettings, servers: string[], invoke: Invo
   if (!s.page_template) throw new Error("Choose a template file for the custom design, or switch to Standard.");
   const tpl = await invoke<string>("page_template_read", { file: s.page_template });
   const releases = await invoke<Record<string, Rel>>("page_data", { skip });
-  const custom = /tether\.custom\./.test(tpl) ? await invoke<CustomApp[]>("custom_list") : [];
+  const custom = /tether\.custom\./.test(tpl) ? await invoke<CustomApp[]>("custom_list", { skip }) : [];
   const host = (u: string) => u.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   const cdn = s.cdn?.enabled && s.cdn.base ? host(s.cdn.base) : null;
   return fill(tpl, { title, intro, relays: servers.map(host), cdn, now, releases, custom }, { allowExternal: s.page_allow_external });

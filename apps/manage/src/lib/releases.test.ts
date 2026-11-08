@@ -1,7 +1,7 @@
 // node --test src/lib/releases.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compareVersion, customFields, customRollout, defaultCustom, describeRamp, groupReleases, rampPresets, rampSteps, rolloutProblem, rolloutState } from "./releases.ts";
+import { compareVersion, customFields, customRollout, defaultCustom, describeRamp, groupReleases, rampPresets, rampSteps, rolloutProblem, rolloutState, perRelay, releaseToast, Tally } from "./releases.ts";
 
 test("one group per release, manifest separate, newest first", () => {
   const f = (path: string, size = 1) => ({ channel: "stable", path, size, modified: size });
@@ -129,4 +129,56 @@ test("custom ramps: built from the fields, checked as release::rollout does", ()
     assert.equal(rampSteps(bad), null, bad);
   }
   assert.match(rolloutProblem(customRollout({ first: 5, h10: 2, h50: 2, h100: 48 })) ?? "", /later/);
+});
+
+const A = "http://127.0.0.1:1", B = "http://127.0.0.1:2", C = "http://127.0.0.1:3";
+const ok = (server: string, detail: any = { live: true, url: "u" }) => ({ server, ok: true, detail });
+const bad = (server: string, error: string) => ({ server, ok: false, error, detail: null });
+
+test("a build that failed everywhere is split per relay, errors with '; ' inside kept whole", () => {
+  const m = perRelay(`${A}: The upload stalled: x; y; ${B}: not reachable (z); its index`, [A, B]);
+  assert.deepEqual([...m!], [[A, "The upload stalled: x; y"], [B, "not reachable (z); its index"]]);
+  assert.equal(perRelay("Could not read the file", [A, B]), null);
+});
+
+test("Cancel at a build boundary: the live build is named, no 'Not every relay'", () => {
+  const t = new Tally([A, B, C], []);
+  t.results("QS 0.9.40", [ok(A), ok(B), ok(C)]);
+  t.error("Mac 0.9.40", "Cancelled. Nothing was published; …");
+  t.cancel("Win 0.9.40");
+  const rows = t.rows();
+  assert.ok(rows.every((r) => r.ok && r.detail.published[0] === "QS 0.9.40" && /cancelled/.test(r.detail.warning)));
+  assert.equal(t.summary(), "Cancelled after QS 0.9.40; QS 0.9.40 is live on every relay. The builds after it were not published.");
+  assert.ok(!/^Published /.test(t.toast("0.9.40")));
+});
+
+test("silent relays are skipped for the later builds and each row has only its own error", () => {
+  const t = new Tally([A, B, C], []);
+  t.error("QS", `${A}: The upload stalled: a; ${B}: The upload stalled: b; ${C}: Could not read`);
+  assert.deepEqual(t.skip, [A, B]);
+  t.results("Win", [bad(A, "skipped (not reachable)"), bad(B, "skipped (not reachable)"), ok(C, { live: true, warning: "legacy latest.json not updated: x" })]);
+  const [ra, , rc] = t.rows();
+  assert.equal(ra.error, "QS: The upload stalled: a\nWin: skipped (not reachable)");
+  assert.ok(!rc.ok && rc.detail.published[0] === "Win" && /legacy latest.json/.test(rc.detail.warning));
+  assert.match(t.summary(), /^Not every relay has it\. Win is live on 127\.0\.0\.1:3\. /);
+});
+
+test("the single-publish toast matches the result", () => {
+  assert.equal(releaseToast("1.0", "stable", [ok(A), ok(B)]), "Released 1.0 to stable");
+  assert.equal(releaseToast("1.0", "stable", [ok(A), bad(B, "x"), ok("CDN")]), "Released 1.0 to stable on 1 of 2 relays only");
+  assert.equal(releaseToast("1.0", "stable", [ok(A), ok(B), bad("Cancel", "Too late")]), "Too late to cancel: 1.0 is live on 2 of 2 relays");
+  assert.equal(releaseToast("1.0", "stable", [ok(A, { live: true, warning: "w" })]), "Released 1.0 to stable; some relays need attention");
+});
+
+test("toasts after a Cancel name what happened, not a plain success", () => {
+  const t = new Tally([A], []);
+  t.results("QS", [ok(A), { server: "Cancel", ok: false, error: "Too late", detail: null }]);
+  assert.equal(t.toast("1.0"), "Cancel came too late: it is live where marked done");
+  const c = new Tally([A], []);
+  c.results("QS", [ok(A)]);
+  c.cancel("Win");
+  assert.equal(c.toast("1.0"), "Cancelled after QS");
+  const n = new Tally([A], []);
+  n.cancel("QS");
+  assert.equal(n.toast("1.0"), "Cancelled. Nothing was published");
 });

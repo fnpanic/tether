@@ -77,6 +77,11 @@ const audit = [
 // `?silent` in the browser preview: the first relay does not answer (publish sheets, clean-up).
 const silent = typeof location !== "undefined" && new URLSearchParams(location.search).has("silent");
 const NO_ANSWER = "No answer from the server in time.";
+// `?mixed`: "Publish the latest builds" gets mixed per-relay results: build 1 live everywhere (the
+// second relay without its legacy latest.json), build 2 fails on the second relay, then Cancel
+// comes too late for build 3.
+const mixed = typeof location !== "undefined" && new URLSearchParams(location.search).has("mixed");
+let mixedRun = 0;
 
 // `?many` in the browser preview: 10 000 extra devices and 1 500 sessions, to check paging at fleet scale.
 if (typeof location !== "undefined" && new URLSearchParams(location.search).has("many")) {
@@ -267,7 +272,19 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       { kind: "technician", platform: "darwin-universal", version: "0.5.1", file: "dist/macos/Tether_0.5.1_universal.app.tar.gz", published: "0.4.0", newer: true, problem: null },
       { kind: "technician", platform: "windows-x86_64", version: "0.5.1", file: "dist/windows/Tether_0.5.1_x64-setup.exe", published: "0.4.0", newer: true, problem: null },
     ],
-    release_publish: () => servers.map((s) => ok(s, { url: `${s}/download/…` })),
+    release_publish: () => {
+      if (!mixed) return servers.map((s) => ok(s, { url: `${s}/download/…`, live: true }));
+      const n = ++mixedRun;
+      const rows = servers.map((s, i) =>
+        i === 0
+          ? ok(s, { url: `${s}/download/…`, live: true })
+          : n === 2
+            ? { server: s, ok: false, error: "The upload stalled: the server took nothing for 30 s (1572864 of 3145728 bytes sent). (release index not updated on this relay)", detail: null }
+            : ok(s, { live: true, warning: `release index written, so it is live here; legacy latest.json not updated: ${NO_ANSWER} Older apps (before 0.5.24) do not see this release yet; run Publish to missing relays later.` }),
+      );
+      const late = { server: "Cancel", ok: false, error: `Too late to cancel: Tether_0.5.1_x64-setup.exe 0.5.1 is live on ${servers.join(", ")} (the release index was already being written). To stop devices installing it, halt it under Rollouts.`, detail: null };
+      return n === 3 ? [...rows, late] : rows;
+    },
     release_cancel: () => null,
     release_index: () => ({
       channel: "stable",

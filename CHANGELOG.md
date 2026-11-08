@@ -7,6 +7,27 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ## [Unreleased]
 
 ### Fixed
+- **Tether Manage: a release whose index was written is reported as live** (round 6 of the blind
+  review). When a relay took the signed release index but its legacy `latest.json` write failed,
+  the relay was reported as not published, and when that happened on every relay the publish
+  failed with an error while devices were already updating. Now that relay is live with a warning
+  ("legacy latest.json not updated ... run Publish to missing relays later"), the publish is a
+  success with warnings and the sheet shows the result. Same for Publish to missing relays.
+- **Cancel after the index write always says it was too late**: "Too late to cancel: <release> is
+  live on <relays>", also when `latest.json` then stalls. Cancel during the automatic clean-up
+  skips it and says so (the release stays live); before, it was ignored.
+- **Publish the latest builds: Cancel at a build boundary names the build that went live**
+  ("Cancelled after <build>; <build> is live on every relay") instead of "Not every relay has it"
+  with only the cancelled builds listed. Each relay row lists every build live there and every
+  build that is not, with the reason; the summary says where each build is live.
+- **Relays that go silent on a whole build are skipped for the remaining builds and the page**
+  (reported as skipped), and each relay row shows only its own error, not every relay's.
+- **A custom download-page template no longer contacts a left-out relay** (`custom_list` takes the
+  publish's skip list).
+- **The publish toast matches the result**: no "Released X" after a too-late Cancel or with failed
+  relays.
+- **update-e2e refuses a client or Manage exe older than the last code commit** and defaults to
+  the `update-e2e` cargo target (judge 5's one failure came from an old prebuilt client).
 - **Tether Manage: Publish to missing relays never half-publishes** (round 5 of the blind review).
   A relay behind on the release index got the newest index without the files of other releases
   it names (three relays: relay 3 served an index pointing at `TetherQS-0.9.1.exe` it lacked).

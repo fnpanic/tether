@@ -7,9 +7,13 @@
 //   tether-api, other /download/* files from tether-api's data dir); it can also misbehave like a
 //   compromised relay or CDN: tampered index, replayed older index, swapped (downgraded) binary;
 // - Tether Manage (copy of the test vault C:\vms\manage-test) publishes through the proxy;
-// - tether.exe (debug build of this branch: TETHER_SERVER=127.0.0.1:22116, key A, test vault
-//   keys; TETHER_DEV_API = the proxy) as host "up-host"; a 0.5.23 build (keyrot-e2e's, without
-//   ReleaseHint in its proto) as host "up-old"; a viewer "up-view" for the running session.
+// - tether.exe (debug build of THIS checkout's HEAD: TETHER_SERVER=127.0.0.1:22116, key A, test
+//   vault keys; TETHER_DEV_API = the proxy), and Tether Manage from the same HEAD, both in TARGET
+//   (default C:\cargo-target\update-e2e; e.g. /c/vms/night/build-e2e.sh update-e2e 22116 desktop,
+//   then the same with manage, after committing). An exe older than the last commit to its code
+//   stops the run (an old prebuilt client once failed the superseded-download check); STALE_OK=1
+//   skips that check. Host "up-host"; a 0.5.23 build (keyrot-e2e's, without ReleaseHint in its
+//   proto) as host "up-old"; a viewer "up-view" for the running session.
 // Checks: the hbbs push reaches the running client within ~1 min and it fetches and verifies the
 // signed index; the rollout bucket is respected; the update is downloaded, verified and staged;
 // halt and resume; a custom ramp (as "Publish the latest builds" sends it) is signed into the index
@@ -24,16 +28,16 @@
 // both.
 //
 //   node e2e/update-e2e.mjs
-// Env: TECH_EXE, OLD_EXE, MANAGE_EXE, BIN (WSL dir with hbbs/hbbr/tether-api), KEY_A, VAULT.
+// Env: TARGET, TECH_EXE, OLD_EXE, MANAGE_EXE, STALE_OK, BIN (WSL dir with hbbs/hbbr/tether-api), KEY_A, VAULT.
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer, request } from "node:http";
 import { chromium } from "playwright-core";
 
-const T = "C:\\cargo-target\\updimpl";
+const T = process.env.TARGET || "C:\\cargo-target\\update-e2e";
 const TECH = process.env.TECH_EXE || `${T}\\debug\\tether.exe`;
 const OLD = process.env.OLD_EXE || "C:\\cargo-target\\keyrot\\debug\\tether.exe";
 const MANAGE = process.env.MANAGE_EXE || `${T}\\debug\\tether-manage.exe`;
@@ -298,6 +302,14 @@ function bucket(uuid, app, version) {
 
 async function main() {
   for (const f of [TECH, OLD, MANAGE]) if (!existsSync(f)) throw new Error(`missing ${f}`);
+  // The client and Manage under test must be built from this checkout's HEAD (OLD is old on purpose).
+  // Per exe the newest commit that changed its code (not docs, e2e scripts, tools or the other app).
+  // shortcut: compares file times, so build after committing; embed the commit id if this misfires.
+  for (const [f, other] of [[TECH, "apps/manage"], [MANAGE, "apps/desktop"]]) {
+    const code = ["log", "-1", "--format=%ct", "--", ".", ":!docs", ":!*.md", ":!apps/desktop/e2e", ":!tools", `:!${other}`];
+    const head = Number(execFileSync("git", code, { cwd: resolve(import.meta.dirname, "..", "..", ".."), encoding: "utf8" }).trim()) * 1000;
+    if (statSync(f).mtimeMs < head && !process.env.STALE_OK) throw new Error(`${f} is older than this checkout's last commit to its code (${new Date(head).toISOString()}): build it from HEAD after committing (see the header) or set STALE_OK=1`);
+  }
   console.log(`work dir ${work}`);
   startServers();
   await until("tether-api", () => fetch(API + "/api/policy", { signal: AbortSignal.timeout(3000) }).then((r) => r.status === 404), 30000, 500);

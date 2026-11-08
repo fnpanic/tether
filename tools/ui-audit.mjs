@@ -128,6 +128,7 @@ const APPS = {
       ["publish-sheet", "manage", "/", { act: (p) => p.getByRole("button", { name: /^Publish/ }).first().click() }],
       ["releases-publish", "manage", "/", { page: "Releases", act: (p) => p.getByRole("button", { name: /^Publish \d+ new build/ }).click({ timeout: 4000 }) }],
       ["releases-publish-silent", "manage", "/?silent", { page: "Releases", act: async (p) => { await p.getByRole("button", { name: /^Publish \d+ new build/ }).click({ timeout: 4000 }); await p.getByRole("dialog").getByRole("checkbox").check({ timeout: 4000 }); } }],
+      ["releases-result-mixed", "manage", "/?mixed", { page: "Releases", act: async (p) => { await p.getByRole("button", { name: /^Publish \d+ new build/ }).click({ timeout: 4000 }); const d = p.getByRole("dialog"); await d.getByRole("button", { name: /^Sign and publish ·/ }).click({ timeout: 4000 }); await d.getByRole("button", { name: "Done" }).waitFor({ timeout: 8000 }); } }],
       ["cleanup-silent", "manage", "/?silent", { page: "Releases", act: async (p) => { await p.getByRole("button", { name: /Clean up old releases/ }).click({ timeout: 4000 }); await p.getByText("Nothing can be deleted while a relay does not answer.").waitFor({ timeout: 4000 }); } }],
       ["download-review", "manage", "/", { page: "Download page", act: (p) => p.getByRole("button", { name: /review|publish/i }).first().click({ timeout: 4000 }) }],
     ],

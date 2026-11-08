@@ -95,7 +95,7 @@ pub fn cancelled() -> bool {
 }
 
 /// `f`, or [`CANCELLED`] as soon as the run is cancelled ([`cancel`]).
-async fn cancellable<T>(f: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+pub async fn cancellable<T>(f: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
     let watch = async {
         while !cancelled() {
             tokio::time::sleep(Duration::from_millis(250)).await;

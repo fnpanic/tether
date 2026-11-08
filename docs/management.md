@@ -387,6 +387,24 @@ does not hold up the others. Below that, every build × relay that has finished,
 their error as soon as they fail. The same progress shows for **Sign and publish** and **Publish
 to missing relays**. The result lists per relay what it now publishes, or every error there.
 
+**What the result shows.** Per relay, what actually happened, in order: files uploaded, then the
+signed release index written (from here the release is **live** on that relay: devices from
+0.5.24 on update from the index), then the legacy `latest.json`. A relay whose index was written
+but whose `latest.json` write failed is **live with a warning** (a check mark, "Live (release
+index)", and in orange "release index written, so it is live here; legacy latest.json not
+updated: <error> Older apps (before 0.5.24) do not see this release yet; run Publish to missing
+relays later"); it is never reported as not
+published, and when every relay ended like that the publish is a success with warnings (the
+result screen opens, not an error on the review screen). The summary line is "Published on every
+relay", "Live on every relay. Some need attention", "Not every relay has it" or, after a Cancel,
+what is live (below). For **Publish the latest builds** each relay row names every build that
+went live there and, one line per build, every build that did not with the reason (failed,
+skipped because the relay did not answer, cancelled); the summary names where each build is live.
+A build that fails on every relay is split per relay: each row shows only its own relay's error.
+The toast matches: "Released X to channel" only when every relay has it, otherwise "... on 1 of 2
+relays only", "... some relays need attention", "Too late to cancel: X is live on 2 of 2 relays"
+or "Cancelled after <build>".
+
 **Cancel** stays available while publishing (also Escape). Until the first relay starts writing
 the signed release index, it stops the publish: the uploads and copies in progress end at once,
 and the steps after them (CDN, index read and check, index write) are not started. Nothing is
@@ -396,9 +414,14 @@ builds are not started (also when Cancel is pressed just as the next build start
 one press of Publish share a run id). Once an index write has started, the publish is not rolled
 back (an index cannot be taken back: relays only take a higher serial, and a "rollback" would
 itself be a new publish): it finishes the index and `latest.json` on the relays it reached, every
-step bounded as below, then shows **"Cancel came too late"** with a **Cancel** line naming the
-relays where the release is now published. To stop devices installing it, **Halt** it under
-Rollouts. No clean-up runs after a Cancel. Publish to missing relays works the same way per relay:
+step bounded as below, then shows **"Cancel came too late"** with a **Cancel** line "Too late to
+cancel: <release> is live on <relays>" (also when `latest.json` then fails or stalls: the index
+made it live). To stop devices installing it, **Halt** it under Rollouts. The automatic clean-up
+does not run after a Cancel, also when Cancel is pressed while it reads the relays: its
+**Cleanup** line says "skipped: Cancel was pressed, so no old versions were deleted. The release
+stays live". In **Publish the latest builds**, Cancel between two builds keeps the builds already
+live and says so: "Cancelled after <build>; <build> is live on every relay. The builds after it
+were not published." Publish to missing relays works the same way per relay:
 a relay whose index write had not started gets "Cancelled. Not published on this relay"; one that
 was already writing finishes and is named in the "Too late to cancel" line.
 
@@ -415,8 +438,10 @@ was already writing finishes and is named in the "Too late to cancel" line.
 
 With one silent relay a publish therefore ends after about 40 s (30 s answer limit plus 10 s for
 reading the release index), with that relay's error and the others published. **Publish the latest
-builds** leaves a relay that did not answer for one build out of the next builds and the download
-page, so several builds cost those 40 s once. Ticking "Publish to the others anyway" avoids the
+builds** leaves a relay that did not answer for one build (also when the build failed on every
+relay) out of the next builds and the download page, listed there as "skipped (not reachable)", so
+several builds cost those 40 s once; a left-out relay gets no request at all, also not for the
+custom apps a custom download-page template shows. Ticking "Publish to the others anyway" avoids the
 wait completely.
 
 **What devices get** lists every channel × app × platform with:
