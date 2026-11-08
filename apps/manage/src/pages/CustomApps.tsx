@@ -87,10 +87,25 @@ function Editor({ form, set, features, onReview, onClose }: { form: Form; set: (
   const areas = byArea(features, "customer", (f) => !["customer.title", "customer.accent-color", "customer.welcome"].includes(f.id));
   const ok = form.name.trim() && form.days >= 1 && form.days <= 366 && (!form.accent || /^#[0-9a-fA-F]{6}$/.test(form.accent));
   return (
-    <Modal onClose={onClose} width={860}>
-      <h2 className="text-headline font-semibold">{form.id ? `Edit ${form.name}` : "New custom app"}</h2>
-      <p className="mt-1 text-caption text-muted">A TetherQS download with your customer's name, logo, colour and settings, behind a private link.</p>
-      <div className="mt-5 grid max-h-[62vh] grid-cols-2 gap-x-6 gap-y-4 overflow-auto pr-1">
+    <Modal
+      onClose={onClose}
+      width={860}
+      title={
+        <>
+          <h2 className="text-headline font-semibold">{form.id ? `Edit ${form.name}` : "New custom app"}</h2>
+          <p className="mt-1 text-caption text-muted">A TetherQS download with your customer's name, logo, colour and settings, behind a private link.</p>
+        </>
+      }
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" disabled={!ok} onClick={onReview}>
+            Review…
+          </Button>
+        </div>
+      }
+    >
+      <div className="grid grid-cols-2 gap-x-6 gap-y-4">
         <Label text="Name" hint="Window title and company name in TetherQS; also the download's file name. 1–64 characters.">
           <TextField autoFocus maxLength={64} value={form.name} onChange={(e) => set({ ...form, name: e.target.value })} placeholder="ACME Support" />
         </Label>
@@ -170,12 +185,6 @@ function Editor({ form, set, features, onReview, onClose }: { form: Form; set: (
             </div>
           ))}
         </div>
-      </div>
-      <div className="mt-6 flex justify-end gap-2">
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="primary" disabled={!ok} onClick={onReview}>
-          Review…
-        </Button>
       </div>
     </Modal>
   );
@@ -354,25 +363,29 @@ export function CustomApps() {
         </PublishSheet>
       )}
       {results && (
-        <Modal onClose={() => setResults(null)}>
-          <h2 className="mb-4 text-headline font-semibold">Result per relay</h2>
+        <Modal
+          onClose={() => setResults(null)}
+          title={<h2 className="text-headline font-semibold">Result per relay</h2>}
+          footer={
+            <div className="flex justify-end">
+              <Button
+                variant="primary"
+                onClick={() => {
+                  setResults(null);
+                  setLink(null);
+                }}
+              >
+                Done
+              </Button>
+            </div>
+          }
+        >
           <RelayResults results={results} />
           {link && (
             <div className="mt-4">
               <CopyField label="private link" value={link} />
             </div>
           )}
-          <div className="mt-6 flex justify-end">
-            <Button
-              variant="primary"
-              onClick={() => {
-                setResults(null);
-                setLink(null);
-              }}
-            >
-              Done
-            </Button>
-          </div>
         </Modal>
       )}
     </>

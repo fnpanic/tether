@@ -47,6 +47,10 @@ fn url(server: &str, path: &str) -> String {
     format!("{}{path}", server.trim_end_matches('/'))
 }
 
+/// Small reads a view waits for (live policy, relay health): no answer within this counts as
+/// unreachable, instead of the client's 30 min upload timeout.
+pub const QUICK: Duration = Duration::from_secs(10);
+
 /// Signed admin request; returns the response body on 2xx.
 pub async fn admin(server: &str, key: &SigningKey, method: &str, path: &str, body: Vec<u8>, content_type: &str) -> Result<Vec<u8>, String> {
     let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
@@ -56,6 +60,12 @@ pub async fn admin(server: &str, key: &SigningKey, method: &str, path: &str, bod
         req = req.header("Content-Type", content_type).body(body);
     }
     finish(req.send().await).await
+}
+
+/// Signed `GET` that gives up after [`QUICK`].
+pub async fn admin_quick(server: &str, key: &SigningKey, path: &str) -> Result<Vec<u8>, String> {
+    let sig = reqauth::sign_request(key, "GET", path, b"", now());
+    finish(client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(QUICK).send().await).await
 }
 
 /// Signed `PUT` of a large file; `sent(bytes so far)` runs as the body goes out (256 KiB steps).
@@ -91,7 +101,16 @@ pub async fn exists(server: &str, path: &str) -> Result<bool, String> {
 
 /// Unauthenticated GET (public `latest.json`, `/api/policy`). `Ok(None)` on 404.
 pub async fn public(server: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
-    match finish(client().get(url(server, path)).send().await).await {
+    public_req(client().get(url(server, path))).await
+}
+
+/// [`public`] that gives up after [`QUICK`].
+pub async fn public_quick(server: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    public_req(client().get(url(server, path)).timeout(QUICK)).await
+}
+
+async fn public_req(req: reqwest::RequestBuilder) -> Result<Option<Vec<u8>>, String> {
+    match finish(req.send().await).await {
         Ok(b) => Ok(Some(b)),
         Err(e) if e.contains("HTTP 404") => Ok(None),
         Err(e) => Err(e),
@@ -99,9 +118,9 @@ pub async fn public(server: &str, path: &str) -> Result<Option<Vec<u8>>, String>
 }
 
 async fn finish(res: reqwest::Result<reqwest::Response>) -> Result<Vec<u8>, String> {
-    let res = res.map_err(|e| format!("Could not reach the server: {e}"))?;
+    let res = res.map_err(|e| if e.is_timeout() { "No answer from the server in time.".to_owned() } else { format!("Could not reach the server: {e}") })?;
     let status = res.status().as_u16();
-    let bytes = res.bytes().await.map_err(|e| format!("The connection broke while reading the answer: {e}"))?;
+    let bytes = res.bytes().await.map_err(|e| if e.is_timeout() { "The server stopped answering in time.".to_owned() } else { format!("The connection broke while reading the answer: {e}") })?;
     if (200..300).contains(&status) {
         Ok(bytes.to_vec())
     } else {

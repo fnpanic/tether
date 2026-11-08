@@ -258,13 +258,10 @@ async fn admin(app: State<'_, App>, method: String, path: String, body: Option<V
 /// Health of every configured relay (`GET /api/admin/status` on each).
 #[tauri::command]
 async fn relays_check(app: State<'_, App>) -> R<Vec<RelayResult>> {
-    app.admin_key()?;
-    let mut out = Vec::new();
-    for sv in app.servers() {
-        let r = app.call_on(&sv, "GET", "/api/admin/status", Vec::new(), "application/json").await;
-        out.push(RelayResult::of(&sv, r.map(|b| serde_json::from_slice(&b).unwrap_or(Value::Null))));
-    }
-    Ok(out)
+    let key = app.admin_key()?;
+    let servers = app.servers();
+    let got = futures_util::future::join_all(servers.iter().map(|sv| api::admin_quick(sv, &key, "/api/admin/status"))).await;
+    Ok(servers.iter().zip(got).map(|(sv, r)| RelayResult::of(sv, r.map(|b| serde_json::from_slice(&b).unwrap_or(Value::Null)))).collect())
 }
 
 /// Devices from every relay, merged by uuid (clients heartbeat to whichever relay they use).
@@ -516,7 +513,7 @@ fn verified_policy(raw: &[u8], key: &VerifyingKey) -> R<Bundle> {
 
 async fn live_doc(server: &str, key: &VerifyingKey) -> LiveDoc {
     let mut d = LiveDoc { raw: None, bundle: None, serial: None, issued_at: None, note: None };
-    match api::public(server, "/api/policy").await {
+    match api::public_quick(server, "/api/policy").await {
         Ok(None) => d.note = Some("No policy published".into()),
         Ok(Some(raw)) => {
             match verified_policy(&raw, key) {
@@ -546,13 +543,16 @@ async fn live_doc(server: &str, key: &VerifyingKey) -> LiveDoc {
 /// and relays the policy names that are not in this app's relay list.
 #[tauri::command]
 async fn policy_live(app: State<'_, App>) -> R<Value> {
-    let key = app.admin_key()?.verifying_key();
+    let admin = app.admin_key()?;
+    let key = admin.verifying_key();
     let servers = app.servers();
     let mut relays = Vec::new();
     let mut best: Option<Bundle> = None;
-    for sv in &servers {
-        let reach = app.call_on(sv, "GET", "/api/admin/status", Vec::new(), "application/json").await.map(|_| ());
-        let d = live_doc(sv, &key).await;
+    // All relays at once, each request bounded by api::QUICK: one slow or dead relay must not
+    // hold up the others (the view shows nothing until every relay has answered).
+    let per = futures_util::future::join_all(servers.iter().map(|sv| futures_util::future::join(api::admin_quick(sv, &admin, "/api/admin/status"), live_doc(sv, &key)))).await;
+    for (sv, (reach, d)) in servers.iter().zip(per) {
+        let reach = reach.map(|_| ());
         relays.push(json!({
             "server": sv,
             "reachable": reach.is_ok(),
@@ -705,7 +705,7 @@ struct ReleaseArgs {
     mandatory: bool,
     minimum_version: String,
     forced: bool,
-    /// Ramp preset (`standard` = D4 default, `fast`, `now`); "" = standard.
+    /// Ramp preset (`standard` = D4 default, `fast`, `now`, `custom:<hours>=<percent>,…`); "" = standard.
     #[serde(default)]
     rollout: String,
     /// Unix seconds the ramp starts; 0 = now.
@@ -834,6 +834,7 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs) 
     if !a.minimum_version.is_empty() && !release::valid_version(&a.minimum_version) {
         return Err("Minimum version must look like 0.3.0.".into());
     }
+    let rollout = release::rollout(&a.rollout, if a.rollout_start == 0 { api::now() } else { a.rollout_start })?;
     let (dir, name) = release::target(&a.kind, &a.platform, &a.version)?;
     let data = fs::read(&a.file).map_err(|e| format!("Could not read the file: {e}"))?;
     let sign = |bytes: &[u8], file: &str| -> R<String> {
@@ -857,7 +858,6 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs) 
     if let Some(p) = &packed {
         files.push((format!("{name}.gz"), p.clone()));
     }
-    let rollout = release::rollout(&a.rollout, if a.rollout_start == 0 { api::now() } else { a.rollout_start })?;
     let security = a.security;
     let u = Upload {
         channel: a.channel,

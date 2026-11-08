@@ -111,7 +111,8 @@ export function Badge({ tone = "muted", children, title }: { tone?: Tone; childr
 const field = "w-full rounded-xl border border-hairline bg-parchment px-3 text-caption text-ink placeholder:text-faint focus-visible:border-focus focus-visible:outline-offset-0";
 
 export function TextField({ className = "", ...rest }: React.InputHTMLAttributes<HTMLInputElement>) {
-  return <input className={`h-9 ${field} ${className}`} {...rest} />;
+  // A width from the caller (w-16) replaces w-full; both in one class list, w-full won.
+  return <input className={`h-9 ${/(^|\s)w-/.test(className) ? field.replace("w-full ", "") : field} ${className}`} {...rest} />;
 }
 
 export function TextArea({ className = "", ...rest }: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
@@ -202,16 +203,32 @@ export function useToast() {
   return { show, node };
 }
 
-export function Modal({ children, onClose, width = 420 }: { children: ReactNode; onClose?: () => void; width?: number }) {
+/**
+ * Fits the window: at most its height minus a margin. `title` and `footer` (the action buttons)
+ * always stay visible; the content between them scrolls.
+ */
+export function Modal({ children, onClose, width = 420, title, footer }: { children?: ReactNode; onClose?: () => void; width?: number; title?: ReactNode; footer?: ReactNode }) {
   useEffect(() => {
     const k = (e: KeyboardEvent) => e.key === "Escape" && onClose?.();
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
   }, [onClose]);
+  // Shorter padding on short windows (1366 × 768 at 150 % is ~512 CSS px tall).
+  const pad = "px-8 [@media(max-height:640px)]:px-6";
+  const edge = "pt-8 [@media(max-height:640px)]:pt-5";
+  const bottom = "pb-8 [@media(max-height:640px)]:pb-5";
   return (
-    <div className="animate-fade fixed inset-0 z-40 grid place-items-center bg-black/40" onMouseDown={onClose}>
-      <div role="dialog" aria-modal style={{ width }} className="animate-rise max-w-[92vw] rounded-2xl border border-hairline bg-tile p-8 shadow-float" onMouseDown={(e) => e.stopPropagation()}>
-        {children}
+    <div className="animate-fade fixed inset-0 z-40 grid place-items-center bg-black/40 p-4" onMouseDown={onClose}>
+      <div
+        role="dialog"
+        aria-modal
+        style={{ width }}
+        className="animate-rise flex max-h-[calc(100vh-2rem)] max-w-[92vw] flex-col rounded-2xl border border-hairline bg-tile shadow-float"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        {title && <div className={`shrink-0 ${pad} ${edge}`}>{title}</div>}
+        <div className={`min-h-0 flex-1 overflow-auto ${pad} ${title ? "pt-4" : edge} ${footer ? "pb-1" : bottom}`}>{children}</div>
+        {footer && <div className={`shrink-0 ${pad} ${bottom} pt-4`}>{footer}</div>}
       </div>
     </div>
   );

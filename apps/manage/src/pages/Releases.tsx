@@ -8,7 +8,7 @@ import { idle, percent, track, type Progress } from "../lib/progress";
 import { pageHtml } from "../lib/page-template";
 import { PublishSheet } from "../components/publish";
 import { CleanupSheet } from "../components/cleanup";
-import { describeRamp, groupReleases, rampPresets, rolloutState, type IndexView, type ReleaseGroup } from "../lib/releases";
+import { customFields, customRollout, defaultCustom, describeRamp, groupReleases, rampSteps, rolloutProblem, rolloutState, type CustomRamp, type IndexView, type ReleaseGroup } from "../lib/releases";
 import { Badge, Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Table, TextArea, TextField, Toggle } from "../components/ui";
 
 interface Release {
@@ -46,6 +46,76 @@ const release = (p: Progress) => {
   const [kind, platform] = p.dir.split("/") as [Kind, Platform];
   return `${APP[kind] ?? kind} for ${OS[platform] ?? platform} ${p.version}`;
 };
+
+/** A ramp preset or a custom ramp; `value` as release_publish takes it (release::rollout). */
+function RolloutPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const custom = value.startsWith("custom:");
+  const [fields, setFields] = useState<CustomRamp>(() => customFields(value) ?? defaultCustom);
+  const set = (c: CustomRamp) => {
+    setFields(c);
+    onChange(customRollout(c));
+  };
+  const num = (k: keyof CustomRamp, label: string) => (
+    <TextField
+      type="number"
+      className="w-[72px] shrink-0"
+      min={k === "first" ? 1 : 0}
+      max={k === "first" ? 100 : 720}
+      step={k === "first" ? 1 : 0.5}
+      value={Number.isNaN(fields[k]) ? "" : fields[k]}
+      aria-label={label}
+      onChange={(e) => set({ ...fields, [k]: e.target.value === "" ? NaN : Number(e.target.value) })}
+    />
+  );
+  return (
+    <div className="flex flex-col gap-2">
+      <Segmented<string>
+        label="Rollout"
+        value={custom ? "custom" : value || "standard"}
+        onChange={(v) => onChange(v === "custom" ? customRollout(fields) : v)}
+        options={[
+          { value: "standard", label: "Standard" },
+          { value: "fast", label: "Fast" },
+          { value: "now", label: "Immediately" },
+          { value: "custom", label: "Custom" },
+        ]}
+      />
+      {custom && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 whitespace-nowrap text-caption">
+          <span className="flex items-center gap-1.5">{num("first", "Percent of devices at once")} % at once</span>
+          {fields.first < 10 && <span className="flex items-center gap-1.5">10 % after {num("h10", "Hours until 10 %")} h</span>}
+          {fields.first < 50 && <span className="flex items-center gap-1.5">50 % after {num("h50", "Hours until 50 %")} h</span>}
+          {fields.first < 100 && <span className="flex items-center gap-1.5">100 % after {num("h100", "Hours until 100 %")} h</span>}
+        </div>
+      )}
+      {custom && <ErrorText error={rolloutProblem(value)} />}
+    </div>
+  );
+}
+
+function SecurityToggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div>
+        <p className="text-caption font-semibold">Security release</p>
+        <p className="text-footnote text-muted">Skips the rollout: every device gets it at once.</p>
+      </div>
+      <Toggle label="Security release" checked={checked} onChange={onChange} />
+    </div>
+  );
+}
+
+/** Saves the rollout as the next publish's default (settings.rollout); never blocks the publish. */
+function useRememberRollout() {
+  const { state, reload } = useApp();
+  return async (rollout: string) => {
+    if (state.settings.rollout === rollout) return;
+    await api.saveSettings({ ...state.settings, rollout }).then(reload, () => {});
+  };
+}
+
+/** The ramp in words, for hints and review sheets. */
+const rampText = (rollout: string, security: boolean) => (security ? "Security release: every device at once" : describeRamp(rampSteps(rollout)) || "—");
 
 /** Live view of a release upload (events from release_publish / release_sync). */
 function UploadProgress() {
@@ -203,12 +273,15 @@ interface Build {
  */
 function LatestBuilds({ onDone }: { onDone: () => void }) {
   const { state, reload, toast } = useApp();
+  const remember = useRememberRollout();
   const s = state.settings;
   const [folder, setFolder] = useState<string>(s.release_folder ?? "");
   const [channel, setChannel] = useState("stable");
   const [builds, setBuilds] = useState<Build[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
+  const [rollout, setRollout] = useState<string>(s.rollout ?? "standard");
+  const [security, setSecurity] = useState(false);
   const [page, setPage] = useState(true);
   const [reviewing, setReviewing] = useState(false);
   const stable = channel.trim() === "stable";
@@ -239,11 +312,12 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
       if (err) per.get(server)!.errs.push(`${what}: ${err}`);
       else per.get(server)!.done.push(what);
     };
+    await remember(rollout);
     for (const b of todo) {
       const label = `${APP[b.kind]} ${OS[b.platform]} ${b.version}`;
       try {
         const r = await invoke<RelayResult[]>("release_publish", {
-          args: { file: b.file, kind: b.kind, platform: b.platform, channel: channel.trim(), version: b.version, notes, mandatory: false, minimum_version: "", forced: false },
+          args: { file: b.file, kind: b.kind, platform: b.platform, channel: channel.trim(), version: b.version, notes, mandatory: false, minimum_version: "", forced: false, rollout, security },
         });
         r.forEach((x) => add(x.server, label, x.ok ? undefined : x.error));
       } catch (e: any) {
@@ -324,6 +398,7 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
           action="Sign and publish"
           progress={<UploadProgress />}
           cdn
+          blocked={!!rolloutProblem(rollout)}
           onClose={() => {
             setReviewing(false);
             scan();
@@ -339,10 +414,14 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
               </li>
             ))}
           </ul>
-          <div className="mt-3">
+          <div className="mt-3 flex flex-col gap-3">
             <Label text="Release notes (optional)">
               <TextArea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
             </Label>
+            <Label text="Rollout" hint={rampText(rollout, security)}>
+              <RolloutPicker value={rollout} onChange={setRollout} />
+            </Label>
+            <SecurityToggle checked={security} onChange={setSecurity} />
           </div>
           <p className="mt-3 text-caption text-muted">
             Each build is signed with the update key and uploaded to every relay on channel {channel.trim()}: not mandatory, not forced, no minimum version (use Sign and publish below for those).
@@ -402,6 +481,7 @@ function CleanupSettings({ onOpen }: { onOpen: () => void }) {
 
 export function Releases() {
   const { toast, state } = useApp();
+  const remember = useRememberRollout();
   const [cleanup, setCleanup] = useState(false);
   const [file, setFile] = useState("");
   const [kind, setKind] = useState<Kind>("technician");
@@ -412,7 +492,7 @@ export function Releases() {
   const [mandatory, setMandatory] = useState(false);
   const [minimumVersion, setMinimumVersion] = useState("");
   const [forced, setForced] = useState(false);
-  const [rollout, setRollout] = useState("standard");
+  const [rollout, setRollout] = useState<string>(state.settings.rollout ?? "standard");
   const [security, setSecurity] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [list, setList] = useState<Release[] | null>(null);
@@ -536,19 +616,13 @@ export function Releases() {
           <Label text="Minimum version" hint="Older versions are blocked. Leave empty for none.">
             <TextField value={minimumVersion} onChange={(e) => setMinimumVersion(e.target.value)} placeholder="0.3.0" />
           </Label>
-          <Label text="Rollout" hint={describeRamp(rampPresets[rollout as keyof typeof rampPresets])}>
-            <Segmented<string> value={rollout} onChange={setRollout} options={[{ value: "standard", label: "Standard" }, { value: "fast", label: "Fast" }, { value: "now", label: "Immediately" }]} />
+          <Label text="Rollout" hint={rampText(rollout, security)}>
+            <RolloutPicker value={rollout} onChange={setRollout} />
           </Label>
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <p className="text-caption font-semibold">Security release</p>
-              <p className="text-footnote text-muted">Skips the rollout: every device gets it at once.</p>
-            </div>
-            <Toggle label="Security release" checked={security} onChange={setSecurity} />
-          </div>
+          <SecurityToggle checked={security} onChange={setSecurity} />
         </div>
         <div className="mt-6 flex justify-end">
-          <Button variant="primary" size="lg" disabled={!file || !version.trim()} onClick={() => setReviewing(true)}>
+          <Button variant="primary" size="lg" disabled={!file || !version.trim() || !!rolloutProblem(rollout)} onClick={() => setReviewing(true)}>
             Review and publish…
           </Button>
         </div>
@@ -565,6 +639,7 @@ export function Releases() {
             load();
           }}
           run={async () => {
+            await remember(rollout);
             const r = await invoke<RelayResult[]>("release_publish", {
               args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced, rollout, security },
             });
@@ -585,7 +660,7 @@ export function Releases() {
             <dt className="text-muted">Flags</dt>
             <dd>{[mandatory && "mandatory", forced && "forced", minimumVersion.trim() && `minimum ${minimumVersion.trim()}`].filter(Boolean).join(", ") || "none"}</dd>
             <dt className="text-muted">Rollout</dt>
-            <dd>{security ? "security release: everyone at once" : describeRamp(rampPresets[rollout as keyof typeof rampPresets])}</dd>
+            <dd>{rampText(rollout, security)}</dd>
           </dl>
           <p className="mt-3 text-caption text-muted">
             Signed with the update key, then uploaded to each relay (and the CDN, if set up): files first, then the signed release index, the legacy latest.json last. Online devices on the{" "}

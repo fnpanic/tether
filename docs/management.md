@@ -369,9 +369,10 @@ empty roster turns team access off.
 found; the folder is remembered). For each app and platform it shows the newest build in the
 folder and the highest version the relays publish on the channel. **Publish N new builds…**
 signs every newer build, uploads it to every relay (not mandatory, not forced, no minimum
-version) and, on `stable`, then rebuilds the download page with its saved title and text. A
-macOS technician build without its `.dmg` next to it is skipped and marked. Use the form below
-for mandatory, forced or minimum-version releases.
+version) and, on `stable`, then rebuilds the download page with its saved title and text. Its
+review sheet sets the **Rollout** and **Security release** for all of them, as the form below
+does (see "Rollout" there). A macOS technician build without its `.dmg` next to it is skipped
+and marked. Use the form below for mandatory, forced or minimum-version releases.
 
 While it publishes, the sheet shows the build being signed or uploaded, the relay (**Relay 1 of
 2 · host**) and the file, with a progress bar (MB sent and percent), and below it every build ×
@@ -403,6 +404,8 @@ uploads it to every relay. One failing relay does not stop the others; the resul
 | Mandatory | Sessions are blocked on older versions until this one is installed |
 | Minimum version | Versions below it are blocked, whether or not they can update |
 | Forced | Installed without asking after `update.restart-seconds` |
+| Rollout | How fast devices get it, signed into the release index (each device has a stable bucket 0–100 per release and installs once the ramp passes it). **Standard**: 1 % at once → 10 % after 1 h → 50 % after 6 h → 100 % after 24 h. **Fast**: 10 % → 100 % after 1 h. **Immediately**: everyone at once. **Custom**: the share at once (1–100 %), then the hours from publishing until 10 %, 50 % and 100 % (fractions allowed, e.g. 0.5; at most 720 h = 30 days; each step later than the one before; steps the first share already reaches are left out). The last choice is remembered for both forms (`settings.rollout`). **Everyone now** under "Rollout" in the release index list ends a ramp early. |
+| Security release | Skips the rollout: every device gets it at once |
 
 Upload order, so that clients never see a manifest pointing to a missing file:
 

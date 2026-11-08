@@ -64,21 +64,37 @@ export function CleanupSheet({ keepDefault, onClose }: { keepDefault: number; on
   };
 
   return (
-    <Modal onClose={phase === "busy" ? undefined : onClose} width={760}>
-      <h2 className="text-headline font-semibold">Clean up old releases</h2>
-      {phase === "done" ? (
-        <>
-          <p className="mb-3 mt-1 text-callout text-muted">{results.every((r) => r.ok) ? "Cleaned up on every relay." : "Not every relay finished. Run the clean-up again once it answers."}</p>
-          <RelayResults results={results} ok={done} />
-          <div className="mt-6 flex justify-end">
+    <Modal
+      onClose={phase === "busy" ? undefined : onClose}
+      width={760}
+      title={<h2 className="text-headline font-semibold">Clean up old releases</h2>}
+      footer={
+        phase === "done" ? (
+          <div className="flex justify-end">
             <Button variant="primary" onClick={onClose}>
               Done
             </Button>
           </div>
+        ) : (
+          <div className="flex justify-end gap-2">
+            <Button onClick={onClose} disabled={phase === "busy"}>
+              Cancel
+            </Button>
+            <Button variant="danger" disabled={!sel.delete.length || phase === "busy"} onClick={go}>
+              {phase === "busy" ? "Deleting…" : `Delete ${sel.delete.length} version${sel.delete.length === 1 ? "" : "s"}`}
+            </Button>
+          </div>
+        )
+      }
+    >
+      {phase === "done" ? (
+        <>
+          <p className="mb-3 text-callout text-muted">{results.every((r) => r.ok) ? "Cleaned up on every relay." : "Not every relay finished. Run the clean-up again once it answers."}</p>
+          <RelayResults results={results} ok={done} />
         </>
       ) : (
         <>
-          <div className="mt-3 flex flex-wrap items-center gap-3 text-caption">
+          <div className="flex flex-wrap items-center gap-3 text-caption">
             Keep
             <TextField
               className="w-16"
@@ -113,7 +129,7 @@ export function CleanupSheet({ keepDefault, onClose }: { keepDefault: number; on
                   Select none
                 </Button>
               </div>
-              <div className="mt-3 max-h-[45vh] overflow-auto rounded-xl border border-hairline">
+              <div className="mt-3 rounded-xl border border-hairline">
                 {plan.groups.map((g) => {
                   const keys = g.versions.filter((v) => v.offer).map((v) => verKey(g.channel, g.dir, v.version));
                   return (
@@ -162,14 +178,6 @@ export function CleanupSheet({ keepDefault, onClose }: { keepDefault: number; on
               </div>
             </>
           )}
-          <div className="mt-6 flex justify-end gap-2">
-            <Button onClick={onClose} disabled={phase === "busy"}>
-              Cancel
-            </Button>
-            <Button variant="danger" disabled={!sel.delete.length || phase === "busy"} onClick={go}>
-              {phase === "busy" ? "Deleting…" : `Delete ${sel.delete.length} version${sel.delete.length === 1 ? "" : "s"}`}
-            </Button>
-          </div>
         </>
       )}
     </Modal>

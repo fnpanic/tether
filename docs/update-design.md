@@ -364,6 +364,11 @@ B and C it is only the last resort.
   - Preset "Standard": 1 % → 10 % after 1 h → 50 % after 6 h → 100 % after 24 h.
   - Preset "Fast": 10 % → 100 % after 1 h.
   - Preset "Immediately": [[0,100]].
+  - Custom (Tether Manage, `rollout: "custom:<hours>=<percent>,…"`, e.g. `custom:0=5,2=10,12=50,48=100`):
+    starts at 0 h, hours and percents strictly rising, percents 1-100 ending at 100, at most
+    720 h and 16 steps, hours rounded to whole minutes (`release::rollout` in
+    `apps/manage/src-tauri/src/release.rs`). Signed into the index like a preset; clients need
+    nothing new (they accept any 1-16 ascending steps).
   - At 10 % per hour, the TetherQS release in §4.4 needs 78 Mbit/s (32 with gzip).
 - **Policy** `update.rollout` = `default` | `early` (treats b as 0) | `late` (waits for 100 %).
   This is the Chromium enterprise model, for admins who want their own machines first or last.

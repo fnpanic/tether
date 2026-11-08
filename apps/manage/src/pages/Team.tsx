@@ -55,10 +55,27 @@ function AddMember({ members, onAdd, onClose }: { members: Member[]; onAdd: (m: 
   }, [key]);
   const ok = name.trim() && !nameErr && key.trim() && !keyErr;
   return (
-    <Modal onClose={onClose} width={560}>
-      <h2 className="text-headline font-semibold">Add technician</h2>
-      <p className="mt-1 text-caption text-muted">The technician app shows its public key and fingerprint under Team. Paste the key and compare the fingerprint with the one the technician reads out.</p>
-      <div className="mt-5 flex flex-col gap-4">
+    <Modal
+      onClose={onClose}
+      width={560}
+      title={
+        <>
+          <h2 className="text-headline font-semibold">Add technician</h2>
+          <p className="mt-1 text-caption text-muted">
+            The technician app shows its public key and fingerprint under Team. Paste the key and compare the fingerprint with the one the technician reads out.
+          </p>
+        </>
+      }
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" disabled={!ok} onClick={() => onAdd({ name: name.trim(), key: key.replace(/\s+/g, ""), write: false, audit: false })}>
+            Add
+          </Button>
+        </div>
+      }
+    >
+      <div className="flex flex-col gap-4">
         <Label text="Name" hint="Shown to the team as the author of tag changes. 1–64 characters.">
           <TextField autoFocus maxLength={64} value={name} onChange={(e) => setName(e.target.value)} placeholder="Anna Berger" />
         </Label>
@@ -72,12 +89,6 @@ function AddMember({ members, onAdd, onClose }: { members: Member[]; onAdd: (m: 
             Fingerprint <code className="select-text font-mono font-semibold">{fp}</code>
           </p>
         )}
-      </div>
-      <div className="mt-6 flex justify-end gap-2">
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="primary" disabled={!ok} onClick={() => onAdd({ name: name.trim(), key: key.replace(/\s+/g, ""), write: false, audit: false })}>
-          Add
-        </Button>
       </div>
     </Modal>
   );

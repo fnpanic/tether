@@ -6,6 +6,25 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Added
+- **Tether Manage: rollout for "Publish the latest builds"**: its review sheet now has the
+  Rollout (Standard / Fast / Immediately / Custom) and Security release controls of the Sign and
+  publish form, so the one-click publish no longer always uses the Standard ramp.
+- **Tether Manage: custom rollout ramp**: the share of devices at once, then the hours until 10 %,
+  50 % and 100 % (validated: rising, up to 30 days), signed into the release index like the
+  presets; clients follow it unchanged. The last rollout choice is remembered.
+
+### Fixed
+- **Tether Manage: dialogs fit the window**: every sheet is at most the window height; its title
+  and buttons stay visible and the content between them scrolls (the publish sheet with a custom
+  ramp, many relays and the upload progress went past the bottom at 1366 × 768 with 125-150 %
+  scaling).
+- **Tether Manage: "Live: checking…" no longer waits on one slow relay**: the live policy and the
+  relay health checks ask every relay at once with a 10 s limit per request (before, one relay at
+  a time with the 30 min upload timeout, so a relay that accepted the connection but did not
+  answer kept "checking…" up for minutes); a failed check shows "Live: could not check (…)"
+  instead of staying on "checking…".
+
 ## [0.5.26] — 2026-11-08
 Tether / TetherQS 0.5.26 (Windows and macOS), Tether Manage 0.5.9 (built with TETHER_ADMIN_PUB_KEY); relays: tether-api and hbbs (deployed 2026-11-08). Audit fixes (client and relay) and the shortcut ledger.
 

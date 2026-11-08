@@ -108,10 +108,52 @@ pub fn index_key(kind: &str, platform: &str) -> String {
     format!("{kind}/{platform}")
 }
 
-/// The ramp of a new release: a preset (`standard`, the D4 default; `fast`; `now`) from `start`.
+/// The ramp of a new release from `start`: a preset (`standard`, the D4 default; `fast`; `now`) or
+/// `custom:<hours>=<percent>,…` (e.g. `custom:0=5,2=25,12=100`).
 pub fn rollout(preset: &str, start: u64) -> Result<Rollout, String> {
+    if let Some(list) = preset.strip_prefix("custom:") {
+        return Ok(Rollout { start, steps: custom_ramp(list)? });
+    }
     let steps = rel::preset(if preset.is_empty() { "standard" } else { preset }).ok_or_else(|| format!("unknown rollout preset {preset:?}"))?;
     Ok(Rollout { start, steps: steps.to_vec() })
+}
+
+/// Longest custom ramp: 30 days to 100 %.
+const CUSTOM_MAX_HOURS: f64 = 720.0;
+
+/// `<hours>=<percent>,…`: starts at 0 h, hours and percents strictly rising, percent 1-100, ending
+/// at 100 % within [`CUSTOM_MAX_HOURS`]; at most 16 steps (what clients accept). Hours may have a
+/// fraction (whole minutes).
+fn custom_ramp(list: &str) -> Result<Vec<(u64, u8)>, String> {
+    let bad = |why: &str| format!("custom rollout {list:?}: {why}");
+    let mut steps: Vec<(u64, u8)> = Vec::new();
+    for part in list.split(',') {
+        let (h, p) = part.split_once('=').ok_or_else(|| bad("expected hours=percent steps"))?;
+        let h: f64 = h.trim().parse().map_err(|_| bad("hours must be a number"))?;
+        let p: u8 = p.trim().parse().map_err(|_| bad("percent must be a whole number"))?;
+        if !(0.0..=CUSTOM_MAX_HOURS).contains(&h) {
+            return Err(bad("hours must be 0 to 720 (30 days)"));
+        }
+        if !(1..=100).contains(&p) {
+            return Err(bad("percent must be 1 to 100"));
+        }
+        let secs = (h * 60.0).round() as u64 * 60;
+        if let Some(&(s, q)) = steps.last() {
+            if secs <= s || p <= q {
+                return Err(bad("hours and percents must rise from step to step"));
+            }
+        } else if secs != 0 {
+            return Err(bad("the first step starts at 0 hours"));
+        }
+        steps.push((secs, p));
+    }
+    if steps.len() > 16 {
+        return Err(bad("at most 16 steps"));
+    }
+    if steps.last().map(|s| s.1) != Some(100) {
+        return Err(bad("the last step must reach 100 %"));
+    }
+    Ok(steps)
 }
 
 pub fn gzip(data: &[u8]) -> Vec<u8> {
@@ -430,6 +472,25 @@ mod tests {
         assert_eq!(out, b"TetherQS exe");
         assert!(wants_packed("customer", WINDOWS) && !wants_packed("technician", WINDOWS) && !wants_packed("customer", MAC));
         assert!(rollout("bogus", 0).is_err());
+    }
+
+    #[test]
+    fn custom_ramps_are_validated() {
+        let r = rollout("custom:0=5, 1.5=25,12=100", 50).unwrap();
+        assert_eq!((r.start, r.steps.clone()), (50, vec![(0, 5), (5400, 25), (43_200, 100)]));
+        assert_eq!(rollout("custom:0=100", 0).unwrap().steps, [(0, 100)]);
+        assert_eq!(rollout("custom:0=1,0.01=100", 0).unwrap().steps, [(0, 1), (60, 100)], "whole minutes");
+        for bad in ["custom:", "custom:1=10,2=100", "custom:0=0,1=100", "custom:0=10,1=101", "custom:0=10,1=50", "custom:0=10,2=50,1=100", "custom:0=50,1=50,2=100", "custom:0=10,721=100", "custom:0=10,-1=100", "custom:0=10,x=100", "custom:0=10;1=100", "custom:0=10,0.001=100", "custom:0=1.5,1=100"] {
+            assert!(rollout(bad, 0).is_err(), "{bad}");
+        }
+        let many: Vec<String> = (0..17).map(|i| format!("{i}={}", if i == 16 { 100 } else { i + 1 })).collect();
+        assert!(rollout(&format!("custom:{}", many.join(",")), 0).is_err());
+        // What clients accept (tether_trust validates the signed entry).
+        let e = entry("stable", "technician/windows-x86_64", "Tether_0.5.24_x64-setup.exe", b"x", "S", None, None, &manifest("0.5.24"), false, rollout("custom:0=2,3=30,48=100", 0).unwrap());
+        e.validate().unwrap();
+        assert_eq!(e.percent(3 * 3600 - 1), 2);
+        assert_eq!(e.percent(3 * 3600), 30);
+        assert_eq!(e.percent(48 * 3600), 100);
     }
 
     #[test]

@@ -26,7 +26,7 @@ chacha20poly1305 = "0.10"
 zeroize = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "http2", "stream"] }
 # Already in the tree via reqwest; streams release uploads for the progress bar.
-futures-util = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Already in the tree: release index hashes (sha256) and the gzip copy of TetherQS.exe for the CDN.
 sha2 = "0.10"

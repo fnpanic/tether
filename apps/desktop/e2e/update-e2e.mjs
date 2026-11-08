@@ -12,7 +12,8 @@
 //   ReleaseHint in its proto) as host "up-old"; a viewer "up-view" for the running session.
 // Checks: the hbbs push reaches the running client within ~1 min and it fetches and verifies the
 // signed index; the rollout bucket is respected; the update is downloaded, verified and staged;
-// halt and resume; a tampered index, an older serial and a downgraded binary are refused; no
+// halt and resume; a custom ramp (as "Publish the latest builds" sends it) is signed into the index
+// and honoured; a tampered index, an older serial and a downgraded binary are refused; no
 // install while a session runs, install once idle; the old client ignores the hint.
 // A second relay (tether-api on 22140 behind a second proxy, 22141) is in Manage's relay list:
 // when its upload fails it keeps its old index (no index pointing at files it lacks), and the
@@ -393,9 +394,14 @@ async function main() {
   // 6. A downgraded binary: 0.9.25 published, but the relay serves the 0.9.24 installer for it.
   // ... and relay B cannot store the 0.9.25 files: it must keep its old index.
   swapFrom = ["Tether_0.9.25_x64-setup.exe", "Tether_0.9.24_x64-setup.exe"];
+  // ... published as "Publish the latest builds" does, with a custom ramp whose first wave just
+  // covers this client's bucket (the client must honour the signed steps).
+  const b25 = bucket(uuid, "technician", "0.9.25");
+  const first = Math.min(100, Math.floor(b25) + 1);
+  const custom = first < 100 ? `custom:0=${first},0.5=100` : "custom:0=100";
   const bBefore = await indexOf(API_B);
   failB = true;
-  const pub25 = await publish("0.9.25", "now");
+  const pub25 = await publish("0.9.25", custom);
   failB = false;
   const rB = pub25.find((r) => r.server === PROXY_B);
   check("relay B's failed upload is reported, with 'index not updated'", rB && !rB.ok && /index not updated/.test(rB.error ?? ""), rB?.error);
@@ -404,10 +410,14 @@ async function main() {
   check("relay B keeps its old index (same serial, still 0.9.24: no index pointing at files it lacks)", bAfter && bAfter.serial === bBefore.serial && bAfter.releases[KEY]?.version === "0.9.24", `serial ${bBefore?.serial} -> ${bAfter?.serial}, ${bAfter?.releases[KEY]?.version}`);
   const aAfter = await indexOf(API);
   check("relay A's index has 0.9.25 with a higher serial than B's", aAfter.releases[KEY]?.version === "0.9.25" && aAfter.serial > bAfter.serial, `A ${aAfter.serial}, B ${bAfter.serial}`);
+  const steps25 = aAfter.releases[KEY]?.rollout.steps;
+  check(`the signed index carries the custom ramp ${custom}`, JSON.stringify(steps25) === JSON.stringify(first < 100 ? [[0, first], [1800, 100]] : [[0, 100]]), JSON.stringify(steps25));
+  check("Manage refuses a custom ramp that does not end at 100 %", /100 %/.test((await ipcErr(m, "release_publish", { args: { file: art("0.9.25"), kind: "technician", platform: "windows-x86_64", channel: "stable", version: "0.9.25", notes: "", mandatory: false, minimum_version: "", forced: false, rollout: "custom:0=5,1=50", security: false } })) ?? ""));
   const failed = await until("0.9.25 refused", async () => {
     const st = await ipc(h, "update_status");
     return st.version === "0.9.25" && st.phase === "failed" ? st : null;
   }, 120000, 1000).catch(() => null);
+  check(`the client takes 0.9.25 in the first wave of the custom ramp (bucket ${b25.toFixed(2)} < ${first} %)`, failed?.version === "0.9.25", failed?.phase);
   check("a downgraded binary for 0.9.25 is refused (size/sha256 against the signed index)", failed && !existsSync(cfg("up-host", "update-0.9.25.staged")), failed?.phase);
   swapFrom = null;
   await ipc(h, "update_check");

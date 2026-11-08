@@ -105,32 +105,42 @@ export function Diagnostics() {
       </Table>
 
       {created && (
-        <Modal onClose={() => setCreated(null)} width={520}>
+        <Modal
+          onClose={() => setCreated(null)}
+          width={520}
+          footer={
+            <div className="flex justify-end">
+              <Button variant="primary" onClick={() => setCreated(null)}>
+                Done
+              </Button>
+            </div>
+          }
+        >
           <p className="text-callout text-muted">Read this code to the user. They enter it under Diagnostics › Send to support.</p>
           <p className="my-8 select-text text-center font-mono text-[56px] font-semibold leading-none tracking-[0.12em]" aria-label={created.ticket.split("").join(" ")}>
             {created.ticket.slice(0, 4)} {created.ticket.slice(4)}
           </p>
           <p className="text-center text-caption text-muted">Valid until {when(created.expires)}. One upload per code.</p>
-          <div className="mt-6 flex justify-end">
-            <Button variant="primary" onClick={() => setCreated(null)}>
-              Done
-            </Button>
-          </div>
         </Modal>
       )}
 
       {opened && (
-        <Modal onClose={() => setOpened(null)} width={760}>
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h2 className="text-headline font-semibold">Ticket {opened.ticket}</h2>
-              <p className="text-caption text-muted">
-                {opened.files.length} files · {bytes(opened.size)}
-              </p>
+        <Modal
+          onClose={() => setOpened(null)}
+          width={760}
+          title={
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-headline font-semibold">Ticket {opened.ticket}</h2>
+                <p className="text-caption text-muted">
+                  {opened.files.length} files · {bytes(opened.size)}
+                </p>
+              </div>
+              <Button onClick={saveZip}>Save zip…</Button>
             </div>
-            <Button onClick={saveZip}>Save zip…</Button>
-          </div>
-          <ul className="mt-4 max-h-40 overflow-auto rounded-xl bg-parchment px-4 py-2">
+          }
+        >
+          <ul className="max-h-40 overflow-auto rounded-xl bg-parchment px-4 py-2">
             {opened.files.map((f) => (
               <li key={f.name} className="flex justify-between py-0.5 text-footnote">
                 <span className="font-mono">{f.name}</span>

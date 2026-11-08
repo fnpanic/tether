@@ -66,6 +66,7 @@ export function PublishSheet({
   warning,
   progress,
   cdn: withCdn,
+  blocked,
 }: {
   title: string;
   children?: ReactNode;
@@ -79,6 +80,8 @@ export function PublishSheet({
   progress?: ReactNode;
   /** Release uploads: also list the Cloudflare CDN when it is switched on. */
   cdn?: boolean;
+  /** The review content is not publishable yet (it shows why). */
+  blocked?: boolean;
 }) {
   const [check, setCheck] = useState<RelayResult[] | null>(null);
   const [anyway, setAnyway] = useState(false);
@@ -106,12 +109,35 @@ export function PublishSheet({
     }
   };
 
+  const footer =
+    phase !== "done" ? (
+      <>
+        {/* Mounted from the start so it already listens when the first event comes; in the footer
+            so it stays in view. */}
+        {progress && <div hidden={phase !== "busy"}>{progress}</div>}
+        <ErrorText error={error} />
+        <div className="mt-2 flex justify-end gap-2">
+          <Button onClick={onClose} disabled={phase === "busy"}>
+            Cancel
+          </Button>
+          <Button variant="primary" disabled={!check || blocked || phase === "busy" || (down.length > 0 && !anyway)} onClick={go}>
+            {phase === "busy" ? "Publishing…" : `${action} · ${check ? check.length - (anyway ? down.length : 0) : "…"} relay${check?.length === 1 ? "" : "s"}${toCdn ? " + CDN" : ""}`}
+          </Button>
+        </div>
+      </>
+    ) : (
+      <div className="flex justify-end">
+        <Button variant="primary" onClick={onClose}>
+          Done
+        </Button>
+      </div>
+    );
+
   return (
-    <Modal onClose={phase === "busy" ? undefined : onClose} width={640}>
-      <h2 className="text-headline font-semibold">{title}</h2>
+    <Modal onClose={phase === "busy" ? undefined : onClose} width={640} title={<h2 className="text-headline font-semibold">{title}</h2>} footer={footer}>
       {phase !== "done" ? (
         <>
-          <div className="mt-4 max-h-[40vh] overflow-auto">{children}</div>
+          <div>{children}</div>
           {warning && <div className="mt-4">{warning}</div>}
           <h3 className="mb-2 mt-5 text-caption font-semibold">{toCdn ? "Publishes to every relay and the Cloudflare CDN" : "Publishes to every relay"}</h3>
           {!check ? (
@@ -144,32 +170,14 @@ export function PublishSheet({
               </span>
             </label>
           )}
-          {/* Mounted from the start so it already listens when the first event comes. */}
-          {progress && <div hidden={phase !== "busy"}>{progress}</div>}
-          <div className="mt-3">
-            <ErrorText error={error} />
-          </div>
-          <div className="mt-6 flex justify-end gap-2">
-            <Button onClick={onClose} disabled={phase === "busy"}>
-              Cancel
-            </Button>
-            <Button variant="primary" disabled={!check || phase === "busy" || (down.length > 0 && !anyway)} onClick={go}>
-              {phase === "busy" ? "Publishing…" : `${action} · ${check ? check.length - (anyway ? down.length : 0) : "…"} relay${check?.length === 1 ? "" : "s"}${toCdn ? " + CDN" : ""}`}
-            </Button>
-          </div>
         </>
       ) : (
         <>
-          <p className="mb-3 mt-1 text-callout text-muted">
+          <p className="mb-3 text-callout text-muted">
             {results.every((r) => r.ok) ? "Published on every relay." : "Not every relay has it. Fix the relay and publish again, or bring it up to date from the header."}
           </p>
           <RelayResults results={results} />
           {after?.(results)}
-          <div className="mt-6 flex justify-end">
-            <Button variant="primary" onClick={onClose}>
-              Done
-            </Button>
-          </div>
         </>
       )}
     </Modal>

@@ -13,7 +13,7 @@ export function liveCount(live: ReturnType<typeof useApp>["live"]) {
 }
 
 export function PolicyBar() {
-  const { live, changes, dirty, invalid, publish, go, reloadLive } = useApp();
+  const { live, liveError, changes, dirty, invalid, publish, go, reloadLive } = useApp();
   const [synced, setSynced] = useState<RelayResult[] | null>(null);
   const [busy, setBusy] = useState(false);
   const { on, of } = liveCount(live);
@@ -39,8 +39,18 @@ export function PolicyBar() {
       </span>
       <span className="h-4 w-px bg-hairline" aria-hidden />
       <span className="flex items-center gap-2">
-        <StatusDot tone={!live ? "muted" : behind ? "warn" : "ok"} />
-        {!live ? "Live: checking…" : live.serial == null ? "Live: nothing published yet" : `Live: serial ${live.serial} on ${on}/${of} relay${of === 1 ? "" : "s"}`}
+        <StatusDot tone={!live ? (liveError ? "danger" : "muted") : behind ? "warn" : "ok"} />
+        {!live ? (
+          liveError ? (
+            <span title={liveError}>Live: could not check ({liveError})</span>
+          ) : (
+            "Live: checking…"
+          )
+        ) : live.serial == null ? (
+          "Live: nothing published yet"
+        ) : (
+          `Live: serial ${live.serial} on ${on}/${of} relay${of === 1 ? "" : "s"}`
+        )}
       </span>
       {live?.unconfigured.map((h) => (
         <button key={h} onClick={() => go("home")} title="The policy sends devices to this relay, but Tether Manage does not publish to it. Add it on Status and relays.">
@@ -63,15 +73,19 @@ export function PolicyBar() {
         Publish…
       </Button>
       {synced && (
-        <Modal onClose={() => setSynced(null)}>
-          <h2 className="mb-4 text-headline font-semibold">Relays brought up to date</h2>
+        <Modal
+          onClose={() => setSynced(null)}
+          title={<h2 className="text-headline font-semibold">Relays brought up to date</h2>}
+          footer={
+            <div className="flex justify-end">
+              <Button variant="primary" onClick={() => setSynced(null)}>
+                Done
+              </Button>
+            </div>
+          }
+        >
           <RelayResults results={synced.filter((r) => r.server)} />
           {synced.some((r) => !r.server) && <p className="text-caption text-danger">{synced.find((r) => !r.server)?.error}</p>}
-          <div className="mt-6 flex justify-end">
-            <Button variant="primary" onClick={() => setSynced(null)}>
-              Done
-            </Button>
-          </div>
         </Modal>
       )}
     </div>
