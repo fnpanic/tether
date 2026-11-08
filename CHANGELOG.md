@@ -7,7 +7,7 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ## [Unreleased]
 
 ## [0.5.29] — 2026-11-08
-Tether (technician app) 0.5.29, Windows and macOS; TetherQS stays 0.5.27, Tether Manage 0.5.11.
+Tether (technician app) 0.5.29, Windows and macOS (published 2026-11-08, rollout Immediately; index serial 28 on both relays, CDN copies verified); TetherQS stays 0.5.27, Tether Manage 0.5.11.
 
 ### Changed
 - Tether: toasts stay about 60 ms per character, so long messages no longer vanish after 1.8 s; the own-ID refusal reads "That is this device's own ID: it cannot connect to itself." (also fits Advanced, where nothing was typed).
