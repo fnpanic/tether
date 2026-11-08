@@ -7,6 +7,14 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ## [Unreleased]
 
 ### Fixed
+- Tether (technician app): sessions to a host could be silently view-only. A "View only" session
+  (Advanced mode, `--view-only`) switches the core's saved per-peer view-only option on and back
+  off when its window closes; when the app quit or crashed instead, the option stayed on and every
+  later normal session to that host sent `disable_keyboard`, so the host ignored all clicks and keys
+  (file transfer and chat still worked, no "View only" badge). A session now sets the saved option
+  to how it was opened at start, both ways, which also repairs hosts already stuck. Tested against
+  a Mac with a stuck `view_only = true`: 0.5.29 ignored the click, the fix opened the Apple menu
+  and Escape closed it; a View only session still refuses input.
 - macOS host (Tether, TetherQS): a Mac whose Accessibility switch was on, but which macOS did not
   yet let post events (grant from an earlier build, or switched on after the app started), took
   pointer moves but silently dropped every remote click and key press, with no warning on either

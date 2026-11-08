@@ -193,7 +193,10 @@ heartbeat to that relay.
 
 - **No new host surface.** Nothing changes on the side that is being controlled. View only is the
   core's existing per-device option, which makes the host refuse input; the session window also
-  stops sending it.
+  stops sending it. The option is saved per device, so every session sets it at start to how it
+  was opened (on for View only, off otherwise). Up to 0.5.29 only a cleanly closed View only window
+  switched it back off: after the app quit or crashed, later normal sessions to that device stayed
+  view-only without the badge (host ignored all input; fixed 2026-11-08).
 - **Policy.** `connect.outgoing` off disables every connect action (the backend refuses as before)
   and the online query.
 - **Webview boundary.** Store writes are validated (JSON object, size) and atomic; IDs are validated

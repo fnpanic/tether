@@ -112,7 +112,8 @@ export function Session({ sessionKey, peer, conn, viewOnly = false }: { sessionK
 }
 
 /** `viewOnly`: opened as "View only" (Advanced mode, `--view-only`): the core's per-peer view-only
- *  option is switched on for this session (the host then refuses input) and back off when it ends. */
+ *  option is switched on for this session (the host then refuses input) and back off when it ends;
+ *  a normal session switches a left-over saved view-only off at start. */
 function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; peer: string; viewOnly: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -290,9 +291,14 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       if (!alive) return;
       const ch = videoChannel((buf) => pipe.push(buf));
       await invoke("session_start", { key, peer, webcodecs: formats, video: ch });
-      if (viewOnly && !(await invoke<boolean>("session_get_toggle", { key, name: "view-only" }).catch(() => true))) {
+      // The core keeps view-only per peer, saved. A view-only session that did not end cleanly
+      // (app quit, crash) left it on, and every later normal session to that peer was silently
+      // view-only: the host dropped all input (2026-11-08). Tether has no other switch for it, so
+      // the session's mode always wins, both ways.
+      const saved = await invoke<boolean>("session_get_toggle", { key, name: "view-only" }).catch(() => viewOnly);
+      if (saved !== viewOnly) {
         await invoke("session_toggle", { key, name: "view-only" });
-        restoreView.current = true;
+        restoreView.current = viewOnly;
       }
       setImageQuality((await invoke<string>("get_option", { key: "image-quality" }).catch(() => "")) || "balanced");
     })().catch((e) => alive && setPhase({ kind: "error", title: "Could not start the session", text: String(e), retry: false }));
