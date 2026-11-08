@@ -46,7 +46,8 @@ export const mock = {
         state.password = Math.random().toString(36).slice(2, 8);
         return undefined as T;
       case "recent_peers":
-        return state.peers as T;
+        // `?hosts=N` also fills the recent list (Home search shows from 5 devices).
+        return (new URLSearchParams(location.search).has("hosts") ? [...state.peers, ...(await fleet()).peers.slice(0, 40)] : state.peers) as T;
       case "remove_peer":
         state.peers = state.peers.filter((p) => p.id !== a.id);
         return undefined as T;
@@ -152,6 +153,8 @@ export const mock = {
           { ts: t - 86400 * 3, action: "login", id: a.device, peer_id: "402118736", peer_name: "ben", conn_type: "file_transfer", ip: "203.0.113.20" },
         ] as T;
       }
+      case "session_keyboard":
+        return { dir: "pc-mac", shortcuts: true, system_keys: true, alt_tab_remote: false, hook: true } as T;
       case "fs_home_dir":
         return "C:\\Users\\demo" as T;
       case "fs_local_dir":

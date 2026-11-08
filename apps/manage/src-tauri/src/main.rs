@@ -73,17 +73,24 @@ impl App {
     fn admin_key(&self) -> R<SigningKey> {
         self.keys.lock().unwrap().as_ref().map(|k| k.admin.clone()).ok_or_else(|| "Unlock the keys first.".to_owned())
     }
+    /// Reads give up after [`api::QUICK`] (a relay that never answers must not hold up a view);
+    /// writes and diagnostics downloads (a zip may be large) keep the long client timeout.
     async fn call_on(&self, server: &str, method: &str, path: &str, body: Vec<u8>, ct: &str) -> R<Vec<u8>> {
+        if method.eq_ignore_ascii_case("GET") && !path.starts_with("/api/admin/diag/") {
+            return api::admin_quick(server, &self.admin_key()?, path).await;
+        }
         api::admin(server, &self.admin_key()?, method, path, body, ct).await
     }
-    /// Reads go to the first node that answers; writes go to every node (each keeps a full copy of
-    /// policy, releases, download page and tickets), so any node can serve clients alone.
+    /// Reads ask every node at once and take the first in list order that answered; writes go to
+    /// every node (each keeps a full copy of policy, releases, download page and tickets), so any
+    /// node can serve clients alone.
     async fn call(&self, method: &str, path: &str, body: Vec<u8>, ct: &str) -> R<Vec<u8>> {
         let servers = self.servers();
         if method.eq_ignore_ascii_case("GET") {
+            let got = futures_util::future::join_all(servers.iter().map(|sv| self.call_on(sv, method, path, Vec::new(), ct))).await;
             let mut last = String::new();
-            for sv in &servers {
-                match self.call_on(sv, method, path, body.clone(), ct).await {
+            for (sv, r) in servers.iter().zip(got) {
+                match r {
                     Ok(out) => return Ok(out),
                     Err(e) => last = if servers.len() > 1 { format!("{sv}: {e}") } else { e },
                 }
@@ -125,13 +132,11 @@ impl App {
         serde_json::from_slice(&out).map_err(|_| format!("The server sent an unexpected answer: {}", String::from_utf8_lossy(&out).chars().take(200).collect::<String>()))
     }
     /// The same write to every relay, with one result per relay (the publish sheets show them).
+    /// All relays at once: one slow relay does not delay the others.
     async fn fan_out(&self, method: &str, path: &str, body: Vec<u8>, ct: &str) -> Vec<RelayResult> {
-        let mut out = Vec::new();
-        for sv in self.servers() {
-            let r = self.call_on(&sv, method, path, body.clone(), ct).await;
-            out.push(RelayResult::of(&sv, r.map(|_| Value::Null)));
-        }
-        out
+        let servers = self.servers();
+        let got = futures_util::future::join_all(servers.iter().map(|sv| self.call_on(sv, method, path, body.clone(), ct))).await;
+        servers.iter().zip(got).map(|(sv, r)| RelayResult::of(sv, r.map(|_| Value::Null))).collect()
     }
     /// CDN credentials and base URL, when the CDN is on and the keys are unlocked.
     fn cdn_config(&self) -> Option<(cdn::Creds, String)> {
@@ -269,8 +274,10 @@ async fn relays_check(app: State<'_, App>) -> R<Vec<RelayResult>> {
 #[tauri::command]
 async fn devices_all(app: State<'_, App>) -> R<Value> {
     let (mut lists, mut failed) = (Vec::new(), Vec::new());
-    for sv in app.servers() {
-        match app.call_on(&sv, "GET", "/api/admin/devices", Vec::new(), "application/json").await {
+    let servers = app.servers();
+    let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", "/api/admin/devices", Vec::new(), "application/json"))).await;
+    for (sv, r) in servers.iter().zip(got) {
+        match r {
             Ok(b) => lists.push(serde_json::from_slice::<Vec<Value>>(&b).map_err(|_| format!("{sv}: unexpected device list"))?),
             Err(e) => failed.push(format!("{sv}: {e}")),
         }
@@ -286,8 +293,11 @@ async fn devices_all(app: State<'_, App>) -> R<Value> {
 #[tauri::command]
 async fn audit_all(app: State<'_, App>, since: u64, limit: u32) -> R<Value> {
     let (mut events, mut failed, mut answered) = (Vec::new(), Vec::new(), 0);
-    for sv in app.servers() {
-        match app.call_on(&sv, "GET", &format!("/api/admin/audit?since={since}&limit={limit}"), Vec::new(), "application/json").await {
+    let servers = app.servers();
+    let path = format!("/api/admin/audit?since={since}&limit={limit}");
+    let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", &path, Vec::new(), "application/json"))).await;
+    for (sv, r) in servers.iter().zip(got) {
+        match r {
             Ok(b) => {
                 answered += 1;
                 for mut e in serde_json::from_slice::<Vec<Value>>(&b).map_err(|_| format!("{sv}: unexpected audit list"))? {
@@ -1022,12 +1032,18 @@ fn usable_indexes(live: Vec<(String, R<LiveIndex>)>, channel: &str) -> R<Vec<(St
 }
 
 async fn fetch_indexes(app: &App, channel: &str, servers: &[String]) -> R<Vec<(String, R<LiveIndex>)>> {
+    Ok(fetch_indexes_why(app, channel, servers).await?.0)
+}
+
+/// [`fetch_indexes`] plus the read error of each relay that did not answer (its index counts as
+/// none). All relays at once, each bounded by [`api::QUICK`].
+async fn fetch_indexes_why(app: &App, channel: &str, servers: &[String]) -> R<(Vec<(String, R<LiveIndex>)>, BTreeMap<String, String>)> {
     let keys = trusted_admin_keys(app.admin_key()?.verifying_key(), TRUSTED_ADMIN_KEYS.unwrap_or(""));
-    let mut got = Vec::new();
-    for sv in servers {
-        got.push((sv.clone(), api::public(sv, &format!("/download/{channel}/releases.json")).await.ok().flatten()));
-    }
-    Ok(open_indexes(got, &keys, channel))
+    let path = format!("/download/{channel}/releases.json");
+    let raw = futures_util::future::join_all(servers.iter().map(|sv| api::public_quick(sv, &path))).await;
+    let mut errors = BTreeMap::new();
+    let got = servers.iter().zip(raw).map(|(sv, r)| (sv.clone(), r.unwrap_or_else(|e| { errors.insert(sv.clone(), e); None }))).collect();
+    Ok((open_indexes(got, &keys, channel), errors))
 }
 
 /// Every relay's release index for `channel` that a trusted admin key signed: `(server, index, raw)`.
@@ -1039,7 +1055,8 @@ async fn relay_indexes(app: &App, channel: &str, servers: &[String]) -> R<Vec<(S
 /// Sign the next index (the highest verified one on `servers`, changed by `change`) and put it on
 /// the relays in `targets`. Serial: max(relays, this PC's last) + 1. Per target: the outcome.
 async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[String], change: impl FnOnce(&mut BTreeMap<String, tether_trust::release::Entry>)) -> R<BTreeMap<String, R<()>>> {
-    let live = usable_indexes(fetch_indexes(app, channel, servers).await?, channel)?;
+    let (live, unread) = fetch_indexes_why(app, channel, servers).await?;
+    let live = usable_indexes(live, channel)?;
     let local_path = format!("releases/{channel}.serial");
     let local: u64 = fs::read_to_string(app.path(&local_path)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
     let base = live.iter().filter_map(|(_, i)| i.as_ref().map(|i| i.0.clone())).max_by_key(|i| i.serial);
@@ -1050,11 +1067,14 @@ async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[
     // Devices fetch `{relay}` URLs from the relay the index came from: a relay that lacks one of
     // the files keeps its old index.
     let paths = relay_paths(&ix);
+    // Every relay and file at once (each check bounded by api::QUICK): a relay that does not answer
+    // counts as lacking the files instead of holding up the publish.
+    let checks = futures_util::future::join_all(targets.iter().map(|sv| futures_util::future::join_all(paths.iter().map(move |p| api::exists(sv, p))))).await;
     let mut missing = BTreeMap::new();
-    for sv in targets {
+    for (sv, got) in targets.iter().zip(checks) {
         let mut m = Vec::new();
-        for p in &paths {
-            match api::exists(sv, p).await {
+        for (p, r) in paths.iter().zip(got) {
+            match r {
                 Ok(true) => {}
                 Ok(false) => m.push(p.clone()),
                 Err(e) => m.push(format!("{p} (could not check: {e})")),
@@ -1063,10 +1083,15 @@ async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[
         missing.insert(sv.clone(), m);
     }
     let (send, mut out) = index_targets(targets, &missing);
-    for sv in send {
-        let r = app.call_on(&sv, "PUT", &format!("/api/admin/release/{channel}/releases.json"), doc.clone(), "application/json").await.map(|_| ());
-        out.insert(sv, r);
+    // A relay that did not answer the read just now is not written (the write could hang for long).
+    let (send, silent): (Vec<String>, Vec<String>) = send.into_iter().partition(|sv| !unread.contains_key(sv));
+    for sv in silent {
+        let e = format!("not updated: {}", unread[&sv]);
+        out.insert(sv, Err(e));
     }
+    let path = format!("/api/admin/release/{channel}/releases.json");
+    let put = futures_util::future::join_all(send.iter().map(|sv| app.call_on(sv, "PUT", &path, doc.clone(), "application/json"))).await;
+    out.extend(send.into_iter().zip(put).map(|(sv, r)| (sv, r.map(|_| ()))));
     Ok(out)
 }
 
@@ -1101,8 +1126,8 @@ async fn release_index(app: State<'_, App>, channel: String) -> R<Value> {
         return Err("invalid channel".into());
     }
     let servers = app.servers();
-    let live = fetch_indexes(&app, &channel, &servers).await?;
-    let relays: Vec<Value> = live.iter().map(|(s, i)| json!({ "server": s, "serial": i.as_ref().ok().and_then(Option::as_ref).map(|i| i.0.serial), "error": i.as_ref().err() })).collect();
+    let (live, why) = fetch_indexes_why(&app, &channel, &servers).await?;
+    let relays: Vec<Value> = live.iter().map(|(s, i)| json!({ "server": s, "serial": i.as_ref().ok().and_then(Option::as_ref).map(|i| i.0.serial), "error": i.as_ref().err().or(why.get(s)) })).collect();
     let Some(ix) = live.into_iter().filter_map(|(_, i)| i.ok().flatten().map(|i| i.0)).max_by_key(|i| i.serial) else {
         return Ok(json!({ "channel": channel, "serial": null, "relays": relays, "entries": [] }));
     };
@@ -1259,11 +1284,17 @@ async fn release_scan(app: State<'_, App>, folder: String, channel: String) -> R
     let mut files = Vec::new();
     files_below(root, 2, &mut files);
     let mut out = Vec::new();
-    for ((kind, platform), (version, path)) in release::latest_builds(files) {
-        let (dir, _) = release::target(kind, platform, &version)?;
+    let builds = release::latest_builds(files);
+    let servers = app.servers();
+    let dirs = builds.iter().map(|((kind, platform), (version, _))| release::target(kind, platform, version).map(|t| t.0)).collect::<R<Vec<_>>>()?;
+    // Every relay's latest.json of every build at once, each bounded by api::QUICK.
+    let ch = channel.as_str();
+    let urls: Vec<(&str, String)> = dirs.iter().flat_map(|dir| servers.iter().map(move |sv| (sv.as_str(), format!("/download/{ch}/{dir}/latest.json")))).collect();
+    let mut got = futures_util::future::join_all(urls.iter().map(|(sv, p)| api::public_quick(sv, p))).await.into_iter();
+    for ((kind, platform), (version, path)) in builds {
         let mut published: Option<String> = None;
-        for sv in app.servers() {
-            let Ok(Some(b)) = api::public(&sv, &format!("/download/{channel}/{dir}/latest.json")).await else { continue };
+        for _ in &servers {
+            let Some(Ok(Some(b))) = got.next() else { continue };
             let Ok(m) = serde_json::from_slice::<release::Manifest>(&b) else { continue };
             if published.as_ref().map_or(true, |p| tether_trust::version::compare(&m.version, p) == Some(std::cmp::Ordering::Greater)) {
                 published = Some(m.version);
@@ -1284,8 +1315,9 @@ async fn releases_overview(app: State<'_, App>) -> R<Value> {
     let servers = app.servers();
     let mut listings: Vec<Option<Vec<(String, String)>>> = Vec::new();
     let mut errors = Vec::new();
-    for sv in &servers {
-        match app.call_on(sv, "GET", "/api/admin/releases", Vec::new(), "application/json").await {
+    let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", "/api/admin/releases", Vec::new(), "application/json"))).await;
+    for (sv, r) in servers.iter().zip(got) {
+        match r {
             Ok(b) => {
                 let v: Vec<Value> = serde_json::from_slice(&b).unwrap_or_default();
                 listings.push(Some(v.iter().filter_map(|f| Some((f["channel"].as_str()?.to_owned(), f["path"].as_str()?.to_owned()))).collect()));
@@ -1298,11 +1330,14 @@ async fn releases_overview(app: State<'_, App>) -> R<Value> {
     }
     let latest = release::latest_versions(listings.iter().flatten().flatten().map(|(c, p)| (c.as_str(), p.as_str())));
     let mut rows = Vec::new();
-    for ((channel, kind, platform), version) in latest {
-        let (dir, name) = release::target(kind, platform, &version)?;
+    let targets = latest.into_iter().map(|(k, v)| release::target(k.1, k.2, &v).map(|t| (k, v, t))).collect::<R<Vec<_>>>()?;
+    // Every relay's latest.json of every row at once, each bounded by api::QUICK.
+    let urls: Vec<(&str, String)> = targets.iter().flat_map(|((channel, _, _), _, (dir, _))| servers.iter().map(move |sv| (sv.as_str(), format!("/download/{channel}/{dir}/latest.json")))).collect();
+    let mut manifests = futures_util::future::join_all(urls.iter().map(|(sv, p)| api::public_quick(sv, p))).await.into_iter();
+    for ((channel, kind, platform), version, (dir, name)) in targets {
         let mut relays = Vec::new();
         for (sv, listing) in servers.iter().zip(&listings) {
-            let manifest = api::public(sv, &format!("/download/{channel}/{dir}/latest.json")).await;
+            let manifest = manifests.next().expect("one per relay and row");
             let published = match &manifest {
                 Ok(Some(b)) => serde_json::from_slice::<release::Manifest>(b).ok().map(|m| m.version),
                 _ => None,

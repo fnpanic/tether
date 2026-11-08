@@ -25,6 +25,29 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   a time with the 30 min upload timeout, so a relay that accepted the connection but did not
   answer kept "checking…" up for minutes); a failed check shows "Live: could not check (…)"
   instead of staying on "checking…".
+- **Tether Manage: tables fit the window** (900 px minimum and up, no sideways scrolling that cut
+  through buttons): platform and channel sit under the app, version and OS under the profile, IP
+  under the host or last-seen time; Rollouts stacks Halt and Everyone now; "Publish to missing"
+  (full text in its tooltip); a missing release reads "Missing" under its relay's column.
+- **Tether Manage: one relay that never answers no longer stalls Rollouts, Devices, Sessions,
+  Releases or a release-index publish**: every relay read asks all relays at once with the 10 s
+  limit (uploads keep the long one), the publish skips a relay that did not answer, and Rollouts
+  names the relay's error.
+- **Tether Manage: custom ramp checks match the signer**: hours and percent are plain decimal
+  numbers in the form and in Tether Manage's backend (`1e2`, `0x10`, `100.0` were accepted by one
+  and refused by the other); with Security release on, an unfinished Custom ramp no longer blocks
+  publishing (the ramp is not used).
+- **TetherQS: the permission switches are always visible before Accept**: with the update and
+  macOS banners on a small screen the list shrank to nothing; the card keeps its height and the
+  window scrolls.
+- **Tether: the main window fits short screens on every switch**: Simple and Advanced view size
+  their minimum against the screen's work area (without the taskbar) every time, never larger
+  than it (1366 × 768 at 150 % pushed the window past the screen after switching back to Simple);
+  a full-screen or maximized session window is no longer resized at start.
+- **Full names on hover** wherever a name is cut with "…" (technician in TetherQS and the
+  connection window, hosts in Advanced, recent devices, file names); the Advanced search hint is
+  shorter so it fits at 911 px (full hint in its tooltip). Session keyboard menu scrolls in a
+  short window.
 
 ### Added
 - **Tether Manage: rollout for "Publish the latest builds"**: its review sheet now has the

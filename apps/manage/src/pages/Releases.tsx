@@ -9,7 +9,7 @@ import { pageHtml } from "../lib/page-template";
 import { PublishSheet } from "../components/publish";
 import { CleanupSheet } from "../components/cleanup";
 import { customFields, customRollout, defaultCustom, describeRamp, groupReleases, rampSteps, rolloutProblem, rolloutState, type CustomRamp, type IndexView, type ReleaseGroup } from "../lib/releases";
-import { Badge, Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Table, TextArea, TextField, Toggle } from "../components/ui";
+import { Badge, Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Sub, Table, TextArea, TextField, Toggle } from "../components/ui";
 
 interface Release {
   channel: string;
@@ -41,6 +41,13 @@ const fileName = (kind: Kind, platform: Platform, v: string) =>
 
 const APP: Record<Kind, string> = { technician: "Technician app", customer: "Customer module" };
 const OS: Record<Platform, string> = { "windows-x86_64": "Windows", "darwin-universal": "macOS" };
+/** Table cell content: the app, with platform (and channel) below it. */
+const ReleaseCell = ({ kind, platform, channel }: { kind: string; platform: string; channel?: string }) => (
+  <>
+    <p className="whitespace-nowrap">{APP[kind as Kind] ?? kind}</p>
+    <Sub>{[OS[platform as Platform] ?? platform, channel].filter(Boolean).join(" · ")}</Sub>
+  </>
+);
 
 const release = (p: Progress) => {
   const [kind, platform] = p.dir.split("/") as [Kind, Platform];
@@ -175,7 +182,7 @@ function UploadProgress() {
 function Published({ r, latest }: { r: OverviewRow["relays"][number]; latest: string }) {
   if (r.published === latest) return <Badge tone="ok">Published · latest</Badge>;
   if (r.published) return <Badge tone="warn" title={`Devices on this relay get ${r.published}; ${latest} is uploaded${r.has_latest ? " here" : " elsewhere"} but not published here.`}>Older · {r.published}</Badge>;
-  return <Badge tone="danger" title={r.error ?? "No latest.json for this app and platform"}>Missing on {host(r.server)}</Badge>;
+  return <Badge tone="danger" title={`${host(r.server)}: ${r.error ?? "no latest.json for this app and platform"}`}>Missing</Badge>;
 }
 
 function Overview() {
@@ -200,15 +207,15 @@ function Overview() {
       </div>
       <ErrorText error={error} />
       {data?.errors.map((e) => <ErrorText key={e} error={e} />)}
-      <Table head={["Channel", "App", "Platform", "Latest", ...servers.map(host), ""]} empty={data && !data.rows.length ? "No releases yet." : false}>
+      <Table head={["Release", "Latest", ...servers.map(host), ""]} empty={data && !data.rows.length ? "No releases yet." : false}>
         {data?.rows.map((row) => {
           const missing = row.relays.filter((r) => r.published !== row.latest);
           const source = row.relays.some((r) => r.published === row.latest);
           return (
             <tr key={`${row.channel}/${row.kind}/${row.platform}`}>
-              <td>{row.channel}</td>
-              <td>{APP[row.kind]}</td>
-              <td>{OS[row.platform]}</td>
+              <td>
+                <ReleaseCell kind={row.kind} platform={row.platform} channel={row.channel} />
+              </td>
               <td className="font-semibold">{row.latest}</td>
               {row.relays.map((r) => (
                 <td key={r.server}>
@@ -218,11 +225,11 @@ function Overview() {
               <td className="text-right">
                 {missing.length > 0 &&
                   (source ? (
-                    <Button size="sm" variant="secondary" onClick={() => setSync(row)}>
-                      Publish to missing relays
+                    <Button size="sm" variant="secondary" title="Publish to missing relays" aria-label="Publish to missing relays" onClick={() => setSync(row)}>
+                      Publish to missing
                     </Button>
                   ) : (
-                    <span className="text-footnote text-muted">Not published anywhere: use Sign and publish</span>
+                    <span className="block min-w-28 text-footnote text-muted">Not published anywhere: use Sign and publish</span>
                   ))}
               </td>
             </tr>
@@ -282,6 +289,8 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
   const [notes, setNotes] = useState("");
   const [rollout, setRollout] = useState<string>(s.rollout ?? "standard");
   const [security, setSecurity] = useState(false);
+  // A security release skips the ramp (every device at once): the Custom fields neither block nor travel.
+  const ramp = security ? "now" : rollout;
   const [page, setPage] = useState(true);
   const [reviewing, setReviewing] = useState(false);
   const stable = channel.trim() === "stable";
@@ -312,12 +321,12 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
       if (err) per.get(server)!.errs.push(`${what}: ${err}`);
       else per.get(server)!.done.push(what);
     };
-    await remember(rollout);
+    if (!security) await remember(rollout);
     for (const b of todo) {
       const label = `${APP[b.kind]} ${OS[b.platform]} ${b.version}`;
       try {
         const r = await invoke<RelayResult[]>("release_publish", {
-          args: { file: b.file, kind: b.kind, platform: b.platform, channel: channel.trim(), version: b.version, notes, mandatory: false, minimum_version: "", forced: false, rollout, security },
+          args: { file: b.file, kind: b.kind, platform: b.platform, channel: channel.trim(), version: b.version, notes, mandatory: false, minimum_version: "", forced: false, rollout: ramp, security },
         });
         r.forEach((x) => add(x.server, label, x.ok ? undefined : x.error));
       } catch (e: any) {
@@ -398,7 +407,7 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
           action="Sign and publish"
           progress={<UploadProgress />}
           cdn
-          blocked={!!rolloutProblem(rollout)}
+          blocked={!!rolloutProblem(ramp)}
           onClose={() => {
             setReviewing(false);
             scan();
@@ -494,6 +503,8 @@ export function Releases() {
   const [forced, setForced] = useState(false);
   const [rollout, setRollout] = useState<string>(state.settings.rollout ?? "standard");
   const [security, setSecurity] = useState(false);
+  // A security release skips the ramp (every device at once): the Custom fields neither block nor travel.
+  const ramp = security ? "now" : rollout;
   const [reviewing, setReviewing] = useState(false);
   const [list, setList] = useState<Release[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -622,7 +633,7 @@ export function Releases() {
           <SecurityToggle checked={security} onChange={setSecurity} />
         </div>
         <div className="mt-6 flex justify-end">
-          <Button variant="primary" size="lg" disabled={!file || !version.trim() || !!rolloutProblem(rollout)} onClick={() => setReviewing(true)}>
+          <Button variant="primary" size="lg" disabled={!file || !version.trim() || !!rolloutProblem(ramp)} onClick={() => setReviewing(true)}>
             Review and publish…
           </Button>
         </div>
@@ -639,9 +650,9 @@ export function Releases() {
             load();
           }}
           run={async () => {
-            await remember(rollout);
+            if (!security) await remember(rollout);
             const r = await invoke<RelayResult[]>("release_publish", {
-              args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced, rollout, security },
+              args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced, rollout: ramp, security },
             });
             toast(`Released ${version} to ${channel}`);
             setFile("");
@@ -692,7 +703,7 @@ export function Releases() {
       <div className="mb-3">
         <ErrorText error={listError} />
       </div>
-      <Table head={["", "Channel", "App", "Platform", "Version", "Files", "Size", "Modified", ""]} empty={list && !list.length ? "No releases yet." : false}>
+      <Table head={["", "Release", "Version", "Files", "Size", "Modified", ""]} empty={list && !list.length ? "No releases yet." : false}>
         {groupReleases(list ?? []).map((g) => {
           const [kind, platform] = g.dir.split("/") as [Kind, Platform];
           const isOpen = openGroups.has(g.key);
@@ -705,9 +716,9 @@ export function Releases() {
                     <ChevronRight size={15} className={`transition-transform ${isOpen ? "rotate-90" : ""}`} />
                   </button>
                 </td>
-                <td>{g.channel}</td>
-                <td>{APP[kind] ?? kind}</td>
-                <td>{OS[platform] ?? platform}</td>
+                <td>
+                  <ReleaseCell kind={kind} platform={platform} channel={g.channel} />
+                </td>
                 <td className="font-semibold">{g.version ?? <span className="font-normal text-muted">latest.json (what devices get)</span>}</td>
                 <td>{g.files.length}</td>
                 <td>{bytes(g.size)}</td>
@@ -724,7 +735,7 @@ export function Releases() {
                 g.files.map((r) => (
                   <tr key={r.path} className="bg-tile-2/50">
                     <td />
-                    <td colSpan={4} className="select-text pl-6 font-mono text-footnote">
+                    <td colSpan={2} className="select-text break-all pl-6 font-mono text-footnote">
                       {r.path.split("/").pop()}
                     </td>
                     <td />
@@ -777,8 +788,9 @@ function Rollouts() {
           <p className="mt-1 text-caption text-muted">
             The signed release index devices follow. Serial {view?.serial ?? "–"}
             {view?.days_left !== undefined && ` · valid for ${view.days_left} more days`}
-            {view?.relays.map((r) => ` · ${host(r.server)}: ${r.error ? "not verified" : (r.serial ?? "none")}`).join("")}
+            {view?.relays.map((r) => ` · ${host(r.server)}: ${r.error ? "error" : (r.serial ?? "none")}`).join("")}
           </p>
+          {view?.relays.filter((r) => r.error).map((r) => <ErrorText key={r.server} error={`${host(r.server)}: ${r.error}`} />)}
           {view?.stale && <ErrorText error="The release index has expired: devices show 'update information is out of date'. Unlock the keys to re-sign it." />}
           {view?.days_left !== undefined && view.days_left < 7 && !view.stale && <p className="text-caption text-warn">The release index expires in {view.days_left} days; it is re-signed when you unlock the keys.</p>}
         </div>
@@ -790,34 +802,37 @@ function Rollouts() {
         </div>
       </div>
       <ErrorText error={error} />
-      <Table head={["App", "Platform", "Version", "Rollout", "Ramp", ""]} empty={view && !view.entries.length ? "No signed release index on this channel yet: the next publish creates it." : false}>
+      <Table head={["Release", "Version", "Rollout", "Ramp", ""]} empty={view && !view.entries.length ? "No signed release index on this channel yet: the next publish creates it." : false}>
         {view?.entries.map((e) => {
           const [kind, platform] = e.key.split("/") as [Kind, Platform];
           return (
             <tr key={e.key}>
-              <td>{APP[kind] ?? kind}</td>
-              <td>{OS[platform] ?? platform}</td>
+              <td>
+                <ReleaseCell kind={kind} platform={platform} />
+              </td>
               <td className="font-semibold">{e.version}</td>
               <td>
                 <Badge tone={e.halted ? "danger" : e.percent >= 100 || e.security ? "ok" : "warn"}>{rolloutState(e)}</Badge>
                 {e.cdn && <span className="ml-2 text-footnote text-muted">CDN</span>}
               </td>
               <td className="text-footnote text-muted">{e.security ? "–" : `${describeRamp(e.steps)} from ${when(e.start)}`}</td>
-              <td className="whitespace-nowrap text-right">
-                {e.halted ? (
-                  <Button size="sm" disabled={!!busy} onClick={() => control(e.key, "resume")}>
-                    Resume
-                  </Button>
-                ) : (
-                  <Button size="sm" disabled={!!busy} onClick={() => control(e.key, "halt")}>
-                    Halt
-                  </Button>
-                )}{" "}
-                {!e.security && e.percent < 100 && (
-                  <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => control(e.key, "ramp", "now")}>
-                    Everyone now
-                  </Button>
-                )}
+              <td>
+                <div className="flex flex-col items-end gap-1">
+                  {e.halted ? (
+                    <Button size="sm" disabled={!!busy} onClick={() => control(e.key, "resume")}>
+                      Resume
+                    </Button>
+                  ) : (
+                    <Button size="sm" disabled={!!busy} onClick={() => control(e.key, "halt")}>
+                      Halt
+                    </Button>
+                  )}
+                  {!e.security && e.percent < 100 && (
+                    <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => control(e.key, "ramp", "now")}>
+                      Everyone now
+                    </Button>
+                  )}
+                </div>
               </td>
             </tr>
           );

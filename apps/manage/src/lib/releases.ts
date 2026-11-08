@@ -127,9 +127,10 @@ export function rolloutProblem(rollout: string): string | null {
   const steps: [number, number][] = [];
   for (const part of rollout.slice(7).split(",")) {
     const [h, p, extra] = part.split("=");
+    // Plain decimals only, like release.rs (no 1e2, 0x10, 100.0, Infinity).
+    if (extra !== undefined || !/^(\d+\.?\d*|\.\d+)$/.test(h.trim()) || !/^\d+$/.test(p?.trim() ?? "")) return "Each step needs hours and a whole percent.";
     const hours = Number(h),
       percent = Number(p);
-    if (extra !== undefined || !h?.trim() || !p?.trim() || !Number.isFinite(hours) || !Number.isInteger(percent)) return "Each step needs hours and a whole percent.";
     if (hours < 0 || hours > MAX_HOURS) return "Hours must be 0 to 720 (30 days).";
     if (percent < 1 || percent > 100) return "Percent must be 1 to 100.";
     const secs = Math.round(hours * 60) * 60;

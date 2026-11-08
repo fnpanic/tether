@@ -98,7 +98,9 @@ export function Palette({ hosts, commands, onClose, onHost }: { hosts: Host[]; c
                   <span className="text-muted">
                     <PlatformIcon platform={it.h.os} size={15} />
                   </span>
-                  <span className="truncate font-semibold">{label(it.h)}</span>
+                  <span className="truncate font-semibold" title={label(it.h)}>
+                    {label(it.h)}
+                  </span>
                   <span className="font-mono text-footnote text-muted">{formatId(it.h.id)}</span>
                   <OnlineDot s={it.h.online} />
                   <span className="flex-1" />

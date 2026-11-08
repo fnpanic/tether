@@ -8,7 +8,11 @@ Run it again: `node tools/ui-audit.mjs <desktop|quick|manage> <label> [scenario-
 stand-in for the Tauri IPC), takes a screenshot of each state and checks each one in the page:
 elements clipped by a container that does not scroll, elements outside the window, text cut off
 without an ellipsis, interactive elements covered by another element of the same layer, and a
-page that scrolls sideways. Results: `findings.json` next to the screenshots.
+page that scrolls sideways. Since round 2 also: a table or control that only fits by scrolling
+sideways inside its box (`hscroll`), a scroll area squeezed below 60 px (`scroll-tiny`), text cut
+with "…" and no tooltip (`ellipsis-notitle`) and a placeholder wider than its empty field
+(`placeholder-cut`). Results: `findings.json` next to the screenshots. `UIAUDIT_OUT` sets the
+output folder, `CLONE` the checkout to audit, `UIAUDIT_PORT` the Vite port.
 
 ## What was checked
 
@@ -44,3 +48,29 @@ native decorations; Tether and TetherQS draw their own title bar (decorations of
 | Session chat | 640×400 | chat panel covered the toolbar | panel stays below the toolbar |
 | File transfer | 640×400 | long host name wrapped in the pane header | truncates (full name in the tooltip) |
 | Manage Devices, Sessions | 911×512 | IDs wrapped mid-number, group picker squeezed to its arrow | IDs on one line, picker keeps its width; the table scrolls sideways inside its card |
+
+## Round 2 (2026-11-08)
+
+A blind review found what round 1 let through: the tool accepted anything inside a sideways
+scroller, missed a scroll area of 0 px, and five scenarios never reached their state (mock gaps
+and disabled buttons: desktop `home-search-none`, `session-keyboard`; Manage `gate-error`,
+`diag-open`, `releases-publish`). The mocks now cover them (`?hosts=N` fills Recent, a session
+keyboard menu, the passphrase "wrong" fails), the scenarios click enabled buttons, and the four
+checks above were added. "Before" is the new tool on f134d56 with only the test mocks updated.
+
+| Where | Size | What was wrong | Fix |
+| --- | --- | --- | --- |
+| Manage Releases: What devices get | 1093×614, 911×512, 900×600 | 927 px table in an 839 / 646 px box: "Publish to miss…" cut | platform and channel under the app; "Missing" under the relay's column; "Publish to missing" (full text in the tooltip) |
+| Manage Releases: Rollouts, release list | 900×600, 911×512 | Halt and Everyone now cut; list 660 px | app with platform below; buttons stacked |
+| Manage Devices | 900×600, 911×512 | Group column and picker cut (791 px) | version · OS under the profile, IP under last seen: five columns |
+| Manage Sessions | 900×600, 911×512 | 718-786 px table | IP under the host |
+| Manage Status and relays | 900×600, 911×512 | 648 px table | table cells pad 12 px instead of 16 (every table) |
+| TetherQS request with update and macOS banners | 420×512, 420×560 | permission list 0 px / 41 px: switches not visible before Accept | the card keeps its height (the list at least three rows), the window scrolls; Accept stays reachable |
+| Tether session keyboard menu | 640×400 | Force Quit item below the window | menu scrolls |
+| TetherQS, Tether (connection window, Recent, Advanced, file transfer) | 420 px, 911×512 | names cut with "…" and no tooltip | tooltip with the full name |
+| Advanced search | 911×512 | hint cut | shorter hint, full one in the tooltip |
+
+Checked in code and unit tests, not in a browser: Simple/Advanced switches size the main window
+against the screen's work area every time, never with a minimum larger than it (`main_fit`,
+`cargo test`); `fitScreen` leaves full-screen and maximized windows alone. Manage relay reads with
+one relay that never answers: `apps/desktop/e2e/relay-timing.mjs`.

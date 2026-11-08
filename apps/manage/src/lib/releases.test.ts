@@ -117,6 +117,13 @@ test("custom ramps: built from the fields, checked as release::rollout does", ()
     "custom:0=10;1=100",
     "custom:0=10,0.001=100",
     "custom:0=1.5,1=100",
+    "custom:0=5,1e2=100",
+    "custom:0=5,0x10=100",
+    "custom:0=5,2=100.0",
+    "custom:0=5,2=1e2",
+    "custom:0=5,Infinity=100",
+    "custom:0=5,+2=100",
+    "custom:0=5,2=+100",
   ]) {
     assert.ok(rolloutProblem(bad), bad);
     assert.equal(rampSteps(bad), null, bad);

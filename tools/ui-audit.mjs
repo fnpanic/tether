@@ -115,7 +115,7 @@ const APPS = {
     dir: "manage", port: 5233,
     scenarios: [
       ["gate-unlock", "manage", "/", { noUnlock: true }],
-      ["gate-error", "manage", "/", { noUnlock: true, act: async (p) => { await p.locator("form button[type=submit], form button").last().click(); } }],
+      ["gate-error", "manage", "/", { noUnlock: true, act: async (p) => { await p.locator("input[type=password]").first().fill("wrong"); await p.locator("input[type=password]").first().press("Enter"); await p.getByRole("alert").waitFor(); } }],
       ...["Status and relays", "Policy", "Devices", "Sessions", "Team", "Releases", "Download page", "Custom apps", "Diagnostics", "Keys"].map((n) => [`page-${n.split(" ")[0].toLowerCase()}`, "manage", "/", { page: n }]),
       ["page-devices-many", "manage", "/?many", { page: "Devices" }],
       ["page-sessions-many", "manage", "/?many", { page: "Sessions" }],
@@ -123,9 +123,9 @@ const APPS = {
       ["team-add", "manage", "/", { page: "Team", act: (p) => btn(p, "Add technician") }],
       ["custom-new", "manage", "/", { page: "Custom apps", act: (p) => btn(p, "New custom app") }],
       ["diag-created", "manage", "/", { page: "Diagnostics", act: async (p) => { const t = p.locator("main input, main textarea").first(); await t.fill(LONG); await btn(p, "Create ticket"); } }],
-      ["diag-open", "manage", "/", { page: "Diagnostics", act: (p) => btn(p, "Open") }],
+      ["diag-open", "manage", "/", { page: "Diagnostics", act: (p) => p.locator("main button:enabled", { hasText: /^Open$/ }).first().click({ timeout: 4000 }) }],
       ["publish-sheet", "manage", "/", { act: (p) => p.getByRole("button", { name: /^Publish/ }).first().click() }],
-      ["releases-publish", "manage", "/", { page: "Releases", act: (p) => p.getByRole("button", { name: /review|publish/i }).last().click() }],
+      ["releases-publish", "manage", "/", { page: "Releases", act: (p) => p.getByRole("button", { name: /^Publish \d+ new build/ }).click({ timeout: 4000 }) }],
       ["download-review", "manage", "/", { page: "Download page", act: (p) => p.getByRole("button", { name: /review|publish/i }).first().click({ timeout: 4000 }) }],
     ],
   },
@@ -145,6 +145,15 @@ function audit() {
   const els = [...document.querySelectorAll("body *")].filter((el) => !(el.closest("svg") && el.tagName.toLowerCase() !== "svg"));
   const de = document.scrollingElement;
   if (de.scrollWidth > vw + 1) out.push(["page-hscroll", `document scrollWidth ${de.scrollWidth} > ${vw}`]);
+  // Scrollers: a table or a control that only fits by scrolling sideways is cut in view; a scroll area squeezed to (almost) nothing hides its content.
+  for (const el of els) {
+    const s = getComputedStyle(el);
+    const sx = /auto|scroll/.test(s.overflowX) && el.scrollWidth > el.clientWidth + 1;
+    const sy = /auto|scroll/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 1;
+    if ((!sx && !sy) || !shown(el) || el.getBoundingClientRect().width < 2) continue;
+    if (sx && el.clientWidth > 0 && el !== de && el.querySelector(`table,${IA}`)) out.push(["hscroll", `${label(el)} scrolls sideways ${el.clientWidth}/${el.scrollWidth}: content cut at its edge`]);
+    if (sy && el.clientHeight < 60 && el.querySelector(`${IA},p,li,span`)) out.push(["scroll-tiny", `${label(el)} scroll area only ${el.clientHeight}px tall for ${el.scrollHeight}px of content`]);
+  }
   for (const el of els) {
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
@@ -178,9 +187,18 @@ function audit() {
     }
     // text that does not fit its own box
     if (hasText && el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 1 && cs.display !== "inline") {
-      if (cs.textOverflow === "ellipsis") out.push(["ellipsis", `${label(el)} ${el.scrollWidth}>${el.clientWidth}${el.title || el.closest("[title]") ? " (title)" : ""}`]);
+      // Cut with "…" is fine when a tooltip shows the whole text; without one the text is lost.
+      if (cs.textOverflow === "ellipsis") out.push([el.title || el.closest("[title]") ? "ellipsis" : "ellipsis-notitle", `${label(el)} ${el.scrollWidth}>${el.clientWidth}`]);
       else if (cs.overflowX !== "visible") out.push(["text-cut", `${label(el)} ${el.scrollWidth}>${el.clientWidth}`]);
       else out.push(["text-spill", `${label(el)} ${el.scrollWidth}>${el.clientWidth}`]);
+    }
+    // placeholder wider than its empty field
+    if (el.matches("input[placeholder]:placeholder-shown")) {
+      const ps = getComputedStyle(el, "::placeholder");
+      const ctx = (audit.c ??= document.createElement("canvas").getContext("2d"));
+      ctx.font = `${ps.fontStyle} ${ps.fontWeight} ${ps.fontSize} ${ps.fontFamily}`;
+      const room = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      if (ctx.measureText(el.placeholder).width > room + 1) out.push(["placeholder-cut", `${label(el)} placeholder ${Math.round(ctx.measureText(el.placeholder).width)}>${Math.round(room)}`]);
     }
     if (hasText && el.clientHeight > 0 && el.scrollHeight > el.clientHeight + 2 && cs.overflowY !== "visible" && !/auto|scroll/.test(cs.overflowY)) out.push(["text-cut-v", `${label(el)} ${el.scrollHeight}>${el.clientHeight}`]);
     // interactive element covered by something else in the same layer
@@ -198,6 +216,7 @@ function audit() {
 // ---- run
 const cfg = APPS[app];
 const cwd = `${CLONE}/apps/${cfg.dir}`;
+if (process.env.UIAUDIT_PORT) cfg.port = +process.env.UIAUDIT_PORT; // a second run next to another one
 const vite = spawn(process.execPath, [`${cwd}/node_modules/vite/bin/vite.js`, "--port", String(cfg.port), "--strictPort"], { cwd, stdio: ["ignore", "pipe", "pipe"] });
 await new Promise((ok, fail) => { vite.stdout.on("data", (d) => String(d).includes("Local") && ok()); setTimeout(() => fail(new Error("vite timeout")), 60000); });
 const browser = await chromium.launch({ channel: "msedge" });
