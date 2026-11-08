@@ -127,7 +127,8 @@ earlier release, keeps its previous index and is reported as failed with the mis
 ("… use Publish to missing relays"). A relay that does not answer the read or the check is
 reported as **not reachable** instead ("not reachable (…); its release index was not updated. Do
 this again once it answers."): it may well have the files. **Publish to missing relays** copies the release and the newest
-index to it; later publishes reach it again.
+index to it, together with every file of other releases that index names and the relay lacks;
+later publishes reach it again.
 
 ### Server key
 
@@ -386,9 +387,20 @@ does not hold up the others. Below that, every build × relay that has finished,
 their error as soon as they fail. The same progress shows for **Sign and publish** and **Publish
 to missing relays**. The result lists per relay what it now publishes, or every error there.
 
-**Cancel** stays available while publishing (also Escape): it ends the uploads and copies in
-progress at once, publishes nothing (no release index, no `latest.json`; files that already went
-out stay unused until the next publish or a clean-up), and the remaining builds are not started.
+**Cancel** stays available while publishing (also Escape). Until the first relay starts writing
+the signed release index, it stops the publish: the uploads and copies in progress end at once,
+and the steps after them (CDN, index read and check, index write) are not started. Nothing is
+published (no release index, no `latest.json`; files that already went out stay unused until the
+next publish or a clean-up), the result says "Cancelled. Nothing was published", and the remaining
+builds are not started (also when Cancel is pressed just as the next build starts: all builds of
+one press of Publish share a run id). Once an index write has started, the publish is not rolled
+back (an index cannot be taken back: relays only take a higher serial, and a "rollback" would
+itself be a new publish): it finishes the index and `latest.json` on the relays it reached, every
+step bounded as below, then shows **"Cancel came too late"** with a **Cancel** line naming the
+relays where the release is now published. To stop devices installing it, **Halt** it under
+Rollouts. No clean-up runs after a Cancel. Publish to missing relays works the same way per relay:
+a relay whose index write had not started gets "Cancelled. Not published on this relay"; one that
+was already writing finishes and is named in the "Too late to cancel" line.
 
 **A relay that stops answering during a publish** fails on its own, while the others go on:
 
@@ -397,7 +409,7 @@ out stay unused until the next publish or a clean-up), and the remaining builds 
 | First answer of a read or a small write | 10 s | everything except the file transfer itself |
 | Upload stalls | 30 s | the relay takes no data for 30 s while a file goes out |
 | Answer after the upload | 30 s | after the last byte the relay checks the signature over the whole file and stores it; a 200 MB release took 1.0 s on a local relay (`apps/desktop/e2e/hang-e2e.mjs`), so 30 s leaves room for slow disks |
-| Download (copy for Publish to missing relays, CDN re-read) | 10 s to the first byte, then 30 s without data | the next relay that publishes the file is tried |
+| Download (copy for Publish to missing relays, CDN re-read) | 10 s to the first byte, then 30 s without data | the next relay that publishes the file is tried; a relay that failed once is not asked again for the other files of that copy (a 4-file mac release with a stalling first relay: one 30 s stall, not four) |
 | Whole transfer | 30 min | a slow link: about 1 Mbit/s for 200 MB |
 | Cloudflare API (CDN) | 30 s to the answer, uploads as above | |
 
@@ -415,7 +427,19 @@ wait completely.
 
 **Publish to missing relays** copies the release from a relay that publishes it (artifact, `.dmg`,
 signatures; nothing is signed again) to the others, and writes each one its own `latest.json`
-pointing at itself. If no relay publishes the latest version yet, publish it with the form.
+pointing at itself. A relay whose release index is older also gets the newest signed index, but
+only after it has every file that index names: the files of other releases it lacks (for example
+everything published while it was down) are copied to it first (with their signatures), from the
+relays with the newest index. If one of them cannot be copied, that relay gets neither the index
+nor `latest.json` and its result says which file was missing: an index never points devices at a
+file their relay lacks. If no relay publishes the latest version yet, publish it with the form; if
+relays did not answer, the error names each of them ("not reachable (…)") instead of "No relay
+publishes …".
+
+When relays were left out of a publish ("Publish to the others anyway"), they get no request at
+all: not the publish, not the download page that follows it, and not **Clean up after each
+publish**, which is skipped for that publish ("relays were left out …, so nothing was deleted
+anywhere"), as with a relay that does not answer.
 
 **Sign and publish a new release** signs a file with the updater key and, after the review sheet,
 uploads it to every relay. One failing relay does not stop the others; the result shows each one.

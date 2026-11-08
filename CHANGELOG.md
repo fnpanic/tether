@@ -6,6 +6,32 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Fixed
+- **Tether Manage: Publish to missing relays never half-publishes** (round 5 of the blind review).
+  A relay behind on the release index got the newest index without the files of other releases
+  it names (three relays: relay 3 served an index pointing at `TetherQS-0.9.1.exe` it lacked).
+  Now every file the index names that the relay lacks is copied to it first, with its signature;
+  if one cannot be copied the relay gets neither index nor `latest.json`, with the reason.
+- **Copies ask a failing source once**: a relay that stalls or fails is not asked again for the
+  other files of the same copy (Publish to missing relays, CDN re-read). A 4-file mac release
+  with a stalling first source: one 30 s stall instead of 120 s.
+- **Cancel is honoured between every step of a publish**, not only during uploads: after the
+  uploads, after the CDN step (a cancelled CDN upload is no longer treated as a CDN failure while
+  the relays still publish) and before the release index is written. Once an index write has
+  started the publish finishes and says so ("Too late to cancel: … is published on …; halt it
+  under Rollouts") instead of reporting a plain success. A Cancel pressed while Publish the latest
+  builds starts the next build is no longer lost (one run id per press of Publish instead of a
+  reset at the start of each build).
+- **A relay left out of a publish gets no request**: Clean up after each publish is skipped
+  for that publish (it asked the left-out relay for a plan and could have pruned it), and the
+  download page after it is built from the published relays only.
+- **Every relay silent: errors name each relay** ("No relay answered: … not reachable (…)")
+  instead of "customer/windows-x86_64 is not in the release index", "No relay publishes 0.9.1
+  yet" or "No relay serves a policy".
+- **Opening a diagnostics upload without a chosen relay shows every relay's answer**, the ones
+  that answered first ("not on this relay") before a silent relay's timeout (before: only the last
+  error).
+
 ## [0.5.27] — 2026-11-08
 Tether / TetherQS 0.5.27 (Windows and macOS), Tether Manage 0.5.10; relays: tether-api (diagnostics tickets, deployed 2026-11-08). Rollout choice for automatic publishing, dialogs fit the screen, no relay call can hang, layout fixes in all windows, diagnostics from every app (TetherQS Send to support) with close/archive/delete.
 
