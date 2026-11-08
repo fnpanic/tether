@@ -156,7 +156,7 @@ export function Devices() {
           return (
             <tr key={d.uuid}>
               <td>
-                <p className="font-mono">{d.id || "–"}</p>
+                <p className="whitespace-nowrap font-mono">{d.id || "–"}</p>
                 <p className="select-text font-mono text-footnote text-faint">{d.uuid}</p>
               </td>
               <td className="capitalize">{d.profile}</td>
@@ -178,7 +178,7 @@ export function Devices() {
               <td title={new Date(d.last_seen * 1000).toLocaleString()}>{ago(d.last_seen)}</td>
               <td className="font-mono text-footnote">{d.ip}</td>
               <td>
-                <Select className="w-40" aria-label={`Group of ${d.id || d.uuid}`} value={draft.assignments[d.uuid] ?? ""} onChange={(e) => assign(d.uuid, e.target.value)}>
+                <Select className="min-w-40" aria-label={`Group of ${d.id || d.uuid}`} value={draft.assignments[d.uuid] ?? ""} onChange={(e) => assign(d.uuid, e.target.value)}>
                   <option value="">No group</option>
                   {groups.map(([name]) => (
                     <option key={name}>{name}</option>
