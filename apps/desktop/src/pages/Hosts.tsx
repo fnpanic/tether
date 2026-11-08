@@ -508,7 +508,7 @@ export function Hosts() {
           </div>
 
           {sel.length > 0 && (
-            <div role="toolbar" aria-label="Selection" className="animate-fade mx-4 mb-2 flex h-10 shrink-0 items-center gap-2 rounded-xl bg-accent/12 px-3 text-caption">
+            <div role="toolbar" aria-label="Selection" className="animate-fade mx-4 mb-2 flex min-h-10 shrink-0 flex-wrap items-center gap-x-2 rounded-xl py-1 bg-accent/12 px-3 text-caption">
               <span className="font-semibold" data-testid="selection-count">
                 {sel.length.toLocaleString()} selected
               </span>
@@ -567,7 +567,7 @@ export function Hosts() {
             <HostTable rows={rows} cursor={cur} selected={selected} meta={st.store.tags} sort={sort} onSort={setSort} onRow={onRow} onToggle={onToggle} onToggleAll={() => setSelected(rows.every((h) => selected.has(h.id)) ? new Set() : new Set(rows.map((h) => h.id)))} onOpen={onOpen} />
           )}
 
-          <footer className="flex h-8 shrink-0 items-center gap-3 border-t border-hairline px-4 text-footnote text-muted" data-testid="status-bar">
+          <footer className="flex h-8 shrink-0 items-center gap-3 whitespace-nowrap border-t border-hairline px-4 text-footnote text-muted" data-testid="status-bar">
             <span data-testid="result-count">
               {rows.length === hosts.length ? `${hosts.length.toLocaleString()} hosts` : `${rows.length.toLocaleString()} of ${hosts.length.toLocaleString()} hosts`}
             </span>
@@ -576,12 +576,12 @@ export function Hosts() {
             {st.store.team?.enabled && st.team.error && <span className="text-warn">Team: {st.team.error}</span>}
             {st.saveError && <span className="text-danger">{st.saveError}</span>}
             <span className="flex-1" />
-            <span className="tabular-nums text-faint" data-testid="search-ms">
+            <span className="hidden tabular-nums text-faint xl:inline" data-testid="search-ms">
               search {perf.last.toFixed(1)} ms
             </span>
             {!canConnect && <span className="text-warn">Connecting is turned off by your organisation</span>}
             {status?.id && (
-              <button className="font-mono tabular-nums text-muted hover:text-ink" title="This device's ID: click to copy" onClick={() => navigator.clipboard.writeText(status.id).then(() => toast.show("Your ID copied"), () => {})}>
+              <button className="min-w-0 truncate font-mono tabular-nums text-muted hover:text-ink" title="This device's ID: click to copy" onClick={() => navigator.clipboard.writeText(status.id).then(() => toast.show("Your ID copied"), () => {})}>
                 This device {formatId(status.id)}
               </button>
             )}

@@ -16,7 +16,11 @@ export interface Sort {
   desc: boolean;
 }
 
-const COLS = "grid-cols-[32px_16px_minmax(170px,1.3fr)_112px_minmax(150px,1.7fr)_128px_72px_96px]";
+// Columns by the list's own width (window size, detail panel open or not): a column that does
+// not fit is dropped, never cut off. Wide: all; medium: no OS/version/last active; narrow: no tags.
+const COLS =
+  "grid-cols-[32px_16px_minmax(120px,1fr)_112px] @min-[600px]:grid-cols-[32px_16px_minmax(150px,1.3fr)_112px_minmax(120px,1.7fr)] @min-[900px]:grid-cols-[32px_16px_minmax(170px,1.3fr)_112px_minmax(150px,1.7fr)_128px_72px_96px]";
+const WIDE = "hidden @min-[900px]:block";
 
 export function sortHosts(rows: Host[], s: Sort): Host[] {
   if (s.key === "smart") return rows;
@@ -101,18 +105,18 @@ const Row = memo(function Row({
         {formatId(h.id)}
       </span>
       {/* Wrapping chips in a one-line box: a chip that does not fit drops out whole. */}
-      <span role="gridcell" title={tags.map(([t]) => t).join(", ")} className="flex h-[22px] min-w-0 flex-wrap gap-1 overflow-hidden">
+      <span role="gridcell" title={tags.map(([t]) => t).join(", ")} className="hidden h-[22px] min-w-0 flex-wrap gap-1 overflow-hidden @min-[600px]:flex">
         {tags.map(([t, auto]) => (
           <TagChip key={t} tag={t} meta={meta} auto={auto} />
         ))}
       </span>
-      <span role="gridcell" className="truncate text-footnote text-muted" title={h.os}>
+      <span role="gridcell" className={`truncate text-footnote text-muted ${WIDE}`} title={h.os}>
         {h.os ? `${osFamily(h.os)} ${/\d[\d.]*/.exec(h.os)?.[0] ?? ""}`.trim() : "—"}
       </span>
-      <span role="gridcell" className="truncate font-mono text-footnote text-muted">
+      <span role="gridcell" className={`truncate font-mono text-footnote text-muted ${WIDE}`}>
         {h.version || "—"}
       </span>
-      <span role="gridcell" className="truncate text-footnote text-muted" title={h.seen ? `Last heartbeat ${new Date(h.seen * 1000).toLocaleString()}` : undefined}>
+      <span role="gridcell" className={`truncate text-footnote text-muted ${WIDE}`} title={h.seen ? `Last heartbeat ${new Date(h.seen * 1000).toLocaleString()}` : undefined}>
         {ago(Math.max(h.last, h.seen), now)}
       </span>
     </div>
@@ -182,7 +186,7 @@ export function HostTable({
       role="columnheader"
       aria-sort={sort.key === k ? (sort.desc ? "descending" : "ascending") : "none"}
       onClick={() => onSort(sort.key === k ? (sort.desc ? { key: "smart", desc: false } : { key: k, desc: true }) : { key: k, desc: false })}
-      className={`flex items-center gap-1 truncate text-left text-footnote font-semibold text-muted hover:text-ink ${cls}`}
+      className={`${cls || "flex"} items-center gap-1 truncate text-left text-footnote font-semibold text-muted hover:text-ink`}
     >
       {text}
       {sort.key === k && (sort.desc ? <ArrowDown size={11} /> : <ArrowUp size={11} />)}
@@ -190,7 +194,7 @@ export function HostTable({
   );
 
   return (
-    <div role="grid" aria-label="Hosts" aria-rowcount={rows.length + 1} aria-multiselectable className="flex min-h-0 flex-1 flex-col">
+    <div role="grid" aria-label="Hosts" aria-rowcount={rows.length + 1} aria-multiselectable className="@container flex min-h-0 flex-1 flex-col">
       <div role="row" aria-rowindex={1} className={`grid h-8 shrink-0 ${COLS} items-center gap-3 border-b border-hairline px-4`}>
         <span className="grid place-items-center">
           <input type="checkbox" aria-label="Select all shown" checked={all} onChange={onToggleAll} tabIndex={-1} className="h-3.5 w-3.5 accent-[var(--accent)]" />
@@ -198,10 +202,10 @@ export function HostTable({
         <span />
         {head("name", "Name")}
         {head("id", "ID")}
-        <span className="text-footnote font-semibold text-muted">Tags</span>
-        {head("os", "OS")}
-        {head("version", "Version")}
-        {head("last", "Last active")}
+        <span className="hidden text-footnote font-semibold text-muted @min-[600px]:block">Tags</span>
+        {head("os", "OS", "hidden @min-[900px]:flex")}
+        {head("version", "Version", "hidden @min-[900px]:flex")}
+        {head("last", "Last active", "hidden @min-[900px]:flex")}
       </div>
       <div ref={ref} data-testid="host-scroll" onScroll={(e) => setTop(e.currentTarget.scrollTop)} className="relative min-h-0 flex-1 overflow-y-auto px-2 py-1">
         <div style={{ height: rows.length * ROW }} className="relative">

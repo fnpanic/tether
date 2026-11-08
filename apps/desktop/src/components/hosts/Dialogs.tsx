@@ -531,7 +531,8 @@ export function Help({ onClose }: { onClose: () => void }) {
   return (
     <Modal onClose={onClose} width={720}>
       <H>Keyboard and search</H>
-      <div className="mt-5 grid grid-cols-2 gap-8">
+      {/* Scrolls on a short window (1366x768 at 150 %), so Done stays on screen. */}
+      <div className="mt-5 grid max-h-[calc(100vh-200px)] grid-cols-2 gap-8 overflow-y-auto">
         <div>
           <div className="text-footnote font-semibold text-muted">Shortcuts</div>
           <dl className="mt-2 space-y-1.5">

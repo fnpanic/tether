@@ -648,7 +648,8 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
         <div ref={barRef} data-testid="toolbar" className="drag pointer-events-auto mt-2 flex items-center gap-1 glass rounded-full border border-white/10 p-1 shadow-float" data-tauri-drag-region>
           <div className="flex items-center gap-2 pl-2 pr-3" data-tauri-drag-region>
             <span className={`h-2 w-2 rounded-full ${connected ? latencyColor : "bg-warn"}`} />
-            <span className="max-w-[180px] truncate text-caption font-normal">{name}</span>
+            {/* Narrow window: the name gives way so the toolbar fits (the window title has it too). */}
+            <span className="max-w-[180px] truncate text-caption font-normal max-[800px]:hidden">{name}</span>
             {secured && (
               <span title={fingerprint ? `End-to-end encrypted\nPeer fingerprint: ${fingerprint}` : "End-to-end encrypted"} className="text-white/70">
                 <ShieldCheck size={14} />
@@ -939,7 +940,7 @@ function QualityMenu({ value, onChange, sharpen, onSharpen }: { value: string; o
         className="flex h-9 items-center gap-1.5 rounded-full px-3 text-caption text-white/75 transition hover:bg-white/10 hover:text-white"
       >
         <Gauge size={16} />
-        {cur.label}
+        <span className="max-[800px]:hidden">{cur.label}</span>
         <ChevronDown size={14} />
       </button>
       {open && (
@@ -1138,7 +1139,7 @@ function ChatPanel({ msgs, onSend, onClose }: { msgs: { me: boolean; text: strin
     end.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs.length]);
   return (
-    <div className="animate-rise absolute bottom-3 right-3 z-20 flex h-[380px] w-[320px] flex-col overflow-hidden rounded-2xl border border-white/10 glass shadow-float">
+    <div className="animate-rise absolute bottom-3 right-3 z-20 flex h-[min(380px,calc(100%-72px))] w-[320px] flex-col overflow-hidden rounded-2xl border border-white/10 glass shadow-float">
       <div className="flex items-center justify-between border-b border-white/10 px-4 py-2.5">
         <span className="text-caption font-normal">Chat</span>
         <IconButton label="Close chat" onClick={onClose} className="!text-white/60 hover:!bg-white/10">

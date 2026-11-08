@@ -41,7 +41,7 @@ export function TagChip({ tag, meta, auto, onRemove, onClick }: { tag: string; m
 }
 
 export function Kbd({ children }: { children: ReactNode }) {
-  return <kbd className="inline-grid h-[18px] min-w-[18px] place-items-center rounded-sm border border-hairline bg-parchment px-1 font-sans text-[11px] leading-none text-muted">{children}</kbd>;
+  return <kbd className="inline-grid h-[18px] min-w-[18px] place-items-center whitespace-nowrap rounded-sm border border-hairline bg-parchment px-1 font-sans text-[11px] leading-none text-muted">{children}</kbd>;
 }
 
 export function OnlineDot({ s }: { s: Online }) {
