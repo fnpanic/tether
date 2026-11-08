@@ -13,7 +13,12 @@ export function RelayResults({ results, ok = describe }: { results: RelayResult[
         <li key={r.server} className="flex items-start gap-2 text-caption">
           {r.ok ? <Check size={16} className="mt-0.5 shrink-0 text-ok" aria-label="Done" /> : <X size={16} className="mt-0.5 shrink-0 text-danger" aria-label="Failed" />}
           <span className="font-semibold">{target(r.server)}</span>
-          <span className={`min-w-0 flex-1 select-text ${r.ok ? "text-muted" : "text-danger"}`}>{r.ok ? ok(r) : r.error}</span>
+          <span className="min-w-0 flex-1 select-text">
+            {/* A failed row still names what went live there (several builds). */}
+            {(r.ok || !!r.detail?.published?.length) && <span className="block text-muted">{r.ok ? ok(r) : `Live: ${r.detail.published.join(" · ")}`}</span>}
+            {!r.ok && <span className="block whitespace-pre-line text-danger">{r.error}</span>}
+            {r.detail?.warning && <span className="block whitespace-pre-line text-warn">{r.detail.warning}</span>}
+          </span>
         </li>
       ))}
     </ul>
@@ -25,7 +30,18 @@ function describe(r: RelayResult) {
   if (r.detail?.already) return "Already up to date";
   if (r.detail?.published?.length) return r.detail.published.join(" · ");
   if (r.detail?.serial != null) return `Serial ${r.detail.serial} is live`;
+  // A release: files, then the signed index (live), then the legacy latest.json.
+  if (r.detail?.live) return r.detail.url ? "Live (release index) · latest.json updated" : "Live (release index)";
+  if (r.detail?.url) return "Published (latest.json updated)";
   return "Done";
+}
+
+/** The result sheet's summary line for `results` (rows "Cancel" = a too-late Cancel). */
+export function resultSummary(results: RelayResult[]) {
+  if (results.some((r) => r.server === "Cancel")) return "Cancel came too late: the release index was already being written, so it is live where marked done.";
+  if (!results.every((r) => r.ok)) return "Not every relay has it. Fix the relay and publish again, or bring it up to date from the header.";
+  if (results.some((r) => r.detail?.warning)) return "Live on every relay. Some need attention: see the warnings below.";
+  return "Published on every relay.";
 }
 
 /** "Technician profile · Allow clipboard sync   off → on" */
@@ -69,6 +85,7 @@ export function PublishSheet({
   cdn: withCdn,
   blocked,
   cancel,
+  summary = resultSummary,
 }: {
   title: string;
   children?: ReactNode;
@@ -86,6 +103,8 @@ export function PublishSheet({
   blocked?: boolean;
   /** Stops the publish in progress (release uploads); without it the sheet cannot be left while busy. */
   cancel?: () => void;
+  /** The result screen's summary line (default [resultSummary]). */
+  summary?: (results: RelayResult[]) => string;
 }) {
   const [check, setCheck] = useState<RelayResult[] | null>(null);
   const [anyway, setAnyway] = useState(false);
@@ -184,13 +203,7 @@ export function PublishSheet({
         </>
       ) : (
         <>
-          <p className="mb-3 text-callout text-muted">
-            {results.some((r) => r.server === "Cancel")
-              ? "Cancel came too late: the release index was already being written, so it is published where marked done."
-              : results.every((r) => r.ok)
-                ? "Published on every relay."
-                : "Not every relay has it. Fix the relay and publish again, or bring it up to date from the header."}
-          </p>
+          <p className="mb-3 text-callout text-muted">{summary(results)}</p>
           <RelayResults results={results} />
           {after?.(results)}
         </>

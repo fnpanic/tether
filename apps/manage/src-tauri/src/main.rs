@@ -916,9 +916,15 @@ fn cancelled_msg() -> String {
 /// The result line when Cancel came after the first release index write had started on `relays`.
 fn too_late(what: &str, relays: &[String]) -> RelayResult {
     RelayResult::of("Cancel", Err(format!(
-        "Too late to cancel: the release index was already being written, so {what} is published on {}. To stop devices installing it, halt it under Rollouts.",
+        "Too late to cancel: {what} is live on {} (the release index was already being written). To stop devices installing it, halt it under Rollouts.",
         relays.join(", ")
     )))
+}
+
+/// A relay result whose release index was written (the release is live there) but whose legacy
+/// latest.json write failed with `e`: a success with a warning, not a failure.
+fn live_without_manifest(e: &str) -> Value {
+    json!({ "live": true, "warning": format!("legacy latest.json not updated: {e} Older apps (before 0.5.24) do not see this release yet; run Publish to missing relays later.") })
 }
 
 /// The update file the CDN serves for a release: the gzip copy if there is one, else the artifact.
@@ -1006,27 +1012,30 @@ async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, r
             (None, Err(e)) => Err(format!("release index: {e}")),
             (None, Ok(per)) => match per.get(server) {
                 Some(Err(e)) => Err(format!("release index: {e}")),
-                _ => put_manifest(app, ui, server, u).await,
+                // The index is written: the release is live here whatever latest.json does.
+                _ => Ok(match put_manifest(app, ui, server, u).await {
+                    Ok(url) => json!({ "url": url, "live": true }),
+                    Err(e) => live_without_manifest(&e),
+                }),
             },
         };
         emit(ui, Progress { done: true, error: r.as_ref().err().cloned(), ..Progress::new(u, server, "") });
-        RelayResult::of(server, r.map(|url| json!({ "url": url })))
+        RelayResult::of(server, r)
     }))
     .await;
     if let Some(e) = none_ok(&out) {
         return Err(e);
     }
-    let late = api::cancelled();
     let done: Vec<String> = out.iter().filter(|r| r.ok).map(|r| r.server.clone()).collect();
     let left_out = !left.is_empty();
     out.extend(left);
     out.extend(extra);
-    if late {
-        // No clean-up after a Cancel.
+    // Skipped when Cancel came before or during it (it says so).
+    let prune = auto_prune(app, left_out).await;
+    if api::cancelled() {
         out.push(too_late(&format!("{} {}", u.name, u.version), &done));
-    } else {
-        out.extend(auto_prune(app, left_out).await);
     }
+    out.extend(prune);
     Ok(out)
 }
 
@@ -1561,17 +1570,22 @@ async fn release_sync(app: State<'_, App>, ui: AppHandle, channel: String, kind:
                 if let Some((_, raw)) = behind {
                     app.call_on(sv, "PUT", &format!("/api/admin/release/{}/releases.json", u.channel), raw.clone(), "application/json").await?;
                 }
-                put_manifest(app, ui, sv, u).await
+                // With the index written the release is live here whatever latest.json does.
+                Ok(match put_manifest(app, ui, sv, u).await {
+                    Ok(url) => json!({ "url": url, "live": behind.is_some() }),
+                    Err(e) if behind.is_some() => live_without_manifest(&e),
+                    Err(e) => return Err(e),
+                })
             }
             .await
             .map_err(|e| if e == api::CANCELLED { format!("{e} Not published on this relay; files that already went out stay unused until the next publish or Clean up.") } else { e });
             emit(ui, Progress { done: true, error: r.as_ref().err().cloned(), ..Progress::new(u, sv, "") });
-            RelayResult::of(sv, r.map(|url| json!({ "url": url })))
+            RelayResult::of(sv, r)
         }
     }))
     .await;
     let mut out = out;
-    let done: Vec<String> = out.iter().filter(|r| r.ok && r.detail.get("url").is_some()).map(|r| r.server.clone()).collect();
+    let done: Vec<String> = out.iter().filter(|r| r.ok && r.detail.get("already").is_none()).map(|r| r.server.clone()).collect();
     out.extend(left);
     if api::cancelled() && !done.is_empty() {
         out.push(too_late(&format!("{} {}", u.name, u.version), &done));
@@ -1797,12 +1811,20 @@ async fn auto_prune(app: &App, left_out: bool) -> Option<RelayResult> {
     if app.settings()["prune"]["auto"].as_bool() != Some(true) {
         return None;
     }
+    const CANCELLED: &str = "skipped: Cancel was pressed, so no old versions were deleted. The release stays live; use Clean up later.";
+    if api::cancelled() {
+        return Some(RelayResult::of("Cleanup", Err(CANCELLED.into())));
+    }
     if left_out {
         return Some(RelayResult::of("Cleanup", Err("skipped: relays were left out of this publish, so nothing was deleted anywhere. Use Clean up once every relay answers.".into())));
     }
     let keep = prune_keep(app, None);
     let r: R<Value> = async {
-        let (plan, pin) = prune_plan(app, keep).await?;
+        // The plan only reads: a Cancel ends it at once, and nothing is deleted after a Cancel.
+        let (plan, pin) = api::cancellable(prune_plan(app, keep)).await.map_err(|e| if e == api::CANCELLED { CANCELLED.to_owned() } else { e })?;
+        if api::cancelled() {
+            return Err(CANCELLED.into());
+        }
         if let Some(b) = plan["blocked"].as_array().filter(|b| !b.is_empty()) {
             let who: Vec<String> = b.iter().map(|b| format!("{} ({})", b["server"].as_str().unwrap_or(""), b["error"].as_str().unwrap_or(""))).collect();
             return Err(format!("skipped: {} does not answer, so nothing was deleted anywhere", who.join(", ")));
@@ -2132,9 +2154,10 @@ fn add_downloads(base: &mut Value, other: &Value) {
 /// The first relay's list (download counters summed over all relays) merged with the local copies
 /// (logo, colours, settings).
 #[tauri::command]
-async fn custom_list(app: State<'_, App>) -> R<Vec<Value>> {
+/// `skip`: relays left out (a publish's download page render); they get no request.
+async fn custom_list(app: State<'_, App>, skip: Option<Vec<String>>) -> R<Vec<Value>> {
     let first = app.server();
-    let servers = app.servers();
+    let servers = app.chosen(&skip)?.0;
     // Every relay at once, each bounded by api::QUICK.
     let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", "/api/admin/custom", Vec::new(), "application/json"))).await;
     let (mut lists, mut errors) = (Vec::new(), Vec::new());

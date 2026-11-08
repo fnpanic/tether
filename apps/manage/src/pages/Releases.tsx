@@ -8,7 +8,7 @@ import { idle, percent, track, type Progress } from "../lib/progress";
 import { pageHtml } from "../lib/page-template";
 import { PublishSheet } from "../components/publish";
 import { CleanupSheet } from "../components/cleanup";
-import { customFields, customRollout, defaultCustom, describeRamp, groupReleases, rampSteps, rolloutProblem, rolloutState, type CustomRamp, type IndexView, type ReleaseGroup } from "../lib/releases";
+import { customFields, customRollout, defaultCustom, describeRamp, groupReleases, rampSteps, rolloutProblem, rolloutState, releaseToast, Tally, type CustomRamp, type IndexView, type ReleaseGroup } from "../lib/releases";
 import { Badge, Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Sub, Table, TextArea, TextField, Toggle } from "../components/ui";
 
 interface Release {
@@ -325,54 +325,52 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
   const todo = (builds ?? []).filter((b) => b.newer && !b.problem);
   const stop = useRef(false);
 
-  /** Every release, then the page; one result row per relay, failed if anything failed there. */
+  /** The result screen's summary, set by the last publishAll. */
+  const summary = useRef("");
+
+  /** Every release, then the page; one row per relay naming what went live there and what did not. */
   const publishAll = async (skip: string[]): Promise<RelayResult[]> => {
     stop.current = false;
     const id = startRun();
     // A relay that did not answer for one build is left out of the next ones (and the page) too.
-    const out = [...skip];
-    const silent = (e?: string) => /^skipped|No answer from the server|Could not reach the server|stalled|stopped sending/.test(e ?? "");
-    const per = new Map<string, { errs: string[]; done: string[] }>(state.servers.map((sv) => [sv, { errs: [], done: [] }]));
-    const add = (server: string, what: string, err?: string) => {
-      if (!per.has(server)) per.set(server, { errs: [], done: [] });
-      if (err) per.get(server)!.errs.push(`${what}: ${err}`);
-      else per.get(server)!.done.push(what);
-    };
+    const t = new Tally(state.servers, [...skip]);
     if (!security) await remember(rollout);
     for (const b of todo) {
       const label = `${APP[b.kind]} ${OS[b.platform]} ${b.version}`;
       if (stop.current) {
-        state.servers.forEach((sv) => add(sv, label, "cancelled, not published"));
+        t.cancel(label);
+        continue;
+      }
+      if (!t.targets().length) {
+        t.none(label);
         continue;
       }
       try {
         const r = await invoke<RelayResult[]>("release_publish", {
           args: { file: b.file, kind: b.kind, platform: b.platform, channel: channel.trim(), version: b.version, notes, mandatory: false, minimum_version: "", forced: false, rollout: ramp, security },
-          skip: out,
+          skip: t.skip,
           run: id,
         });
-        r.forEach((x) => {
-          add(x.server, label, x.ok ? undefined : x.error);
-          if (!x.ok && silent(x.error) && !out.includes(x.server)) out.push(x.server);
-        });
+        t.results(label, r);
       } catch (e: any) {
-        state.servers.forEach((sv) => add(sv, label, e.message));
+        t.error(label, e.message);
       }
     }
     if (page && stable && !stop.current) {
-      try {
-        // The saved design: Standard (built-in) or the custom template (docs/download-page.md).
-        const html = await pageHtml(s, state.servers, invoke, out.length < state.servers.length ? out : []);
-        const r = await invoke<RelayResult[]>("page_publish", { html, skip: out.length < state.servers.length ? out : [] });
-        r.forEach((x) => add(x.server, "Download page", x.ok ? undefined : x.error));
-      } catch (e: any) {
-        state.servers.forEach((sv) => add(sv, "Download page", e.message));
+      if (!t.targets().length) t.none("Download page");
+      else {
+        try {
+          // The saved design: Standard (built-in) or the custom template (docs/download-page.md).
+          const html = await pageHtml(s, state.servers, invoke, t.skip);
+          t.results("Download page", await invoke<RelayResult[]>("page_publish", { html, skip: t.skip }));
+        } catch (e: any) {
+          t.error("Download page", e.message);
+        }
       }
     }
-    // Failed relays list every error; the others what they now publish.
-    const results = [...per].map(([server, { errs, done }]): RelayResult => ({ server, ok: !errs.length, error: errs.join("; ") || undefined, detail: { published: done } }));
-    if (results.every((r) => r.ok)) toast(`Published ${[...new Set(todo.map((b) => b.version))].join(", ")}`);
-    return results;
+    summary.current = t.summary();
+    toast(t.toast([...new Set(todo.map((b) => b.version))].join(", ")));
+    return t.rows();
   };
 
   return (
@@ -444,6 +442,7 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
             cancelRun();
           }}
           run={publishAll}
+          summary={() => summary.current}
         >
           <ul className="flex flex-col gap-1 text-callout">
             {todo.map((b) => (
@@ -688,7 +687,7 @@ export function Releases() {
               skip,
               run: id,
             });
-            toast(`Released ${version} to ${channel}`);
+            toast(releaseToast(version.trim(), channel.trim(), r));
             setFile("");
             return r;
           }}

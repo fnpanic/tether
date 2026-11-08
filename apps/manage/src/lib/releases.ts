@@ -197,3 +197,147 @@ export function rolloutState(e: IndexEntry): string {
   if (e.percent === 0) return "Not started";
   return `${e.percent} % of devices`;
 }
+
+// ---- "Publish the latest builds": what each relay got, build by build ----
+
+/** One relay's (or "CDN"/"Cleanup"/"Cancel") outcome, as the commands return it (ipc RelayResult). */
+export interface Row {
+  server: string;
+  ok: boolean;
+  error?: string;
+  detail: any;
+}
+
+/** A failed or left-out relay that will not answer the next build either. */
+const SILENT = /^skipped|not reachable|No answer from the server|Could not reach the server|stalled|stopped sending/;
+
+/** `"<relay>: <error>; <relay>: <error>"` (a build that failed on every relay) split per relay;
+ *  null when `msg` is not that (one error for the whole build). */
+export function perRelay(msg: string, servers: string[]): Map<string, string> | null {
+  const at = servers.map((sv) => [sv, msg.indexOf(`${sv}: `)] as const).filter(([, i]) => i >= 0).sort((a, b) => a[1] - b[1]);
+  if (!at.length || at[0][1] !== 0) return null;
+  return new Map(at.map(([sv, i], k) => [sv, msg.slice(i + sv.length + 2, k + 1 < at.length ? at[k + 1][1] - 2 : undefined)]));
+}
+
+interface Got {
+  live: string[];
+  errs: string[];
+  cancelled: string[];
+  warn: string[];
+}
+
+/** Per relay what went live and what did not (and why), over several builds. `skip` grows with
+ *  the relays that went silent: the later builds and the page leave them out. */
+export class Tally {
+  per = new Map<string, Got>();
+  late: string[] = [];
+  labels: string[] = [];
+  cancelled = false;
+  servers: string[];
+  skip: string[];
+  constructor(servers: string[], skip: string[]) {
+    this.servers = servers;
+    this.skip = skip;
+    servers.forEach((sv) => this.at(sv));
+  }
+  private at(sv: string) {
+    if (!this.per.has(sv)) this.per.set(sv, { live: [], errs: [], cancelled: [], warn: [] });
+    return this.per.get(sv)!;
+  }
+  /** The relays the next step goes to. */
+  targets() {
+    return this.servers.filter((sv) => !this.skip.includes(sv));
+  }
+  private fail(sv: string, what: string, e: string) {
+    this.at(sv).errs.push(`${what}: ${e}`);
+    if (this.servers.includes(sv) && SILENT.test(e) && !this.skip.includes(sv)) this.skip.push(sv);
+  }
+  private skipped(what: string) {
+    this.servers.filter((sv) => this.skip.includes(sv)).forEach((sv) => this.at(sv).errs.push(`${what}: skipped (not reachable)`));
+  }
+  /** A step's per-relay results (`what`: "Customer module Windows 0.9.3", "Download page"). */
+  results(what: string, rows: Row[]) {
+    if (!this.labels.includes(what)) this.labels.push(what);
+    for (const x of rows) {
+      if (x.server === "Cancel") this.late.push(`${what}: ${x.error}`);
+      else if (x.ok) {
+        this.at(x.server).live.push(what);
+        if (x.detail?.warning) this.at(x.server).warn.push(`${what}: ${x.detail.warning}`);
+      } else this.fail(x.server, what, x.error ?? "failed");
+    }
+  }
+  /** A step that failed as a whole: its error split per relay when it names them. */
+  error(what: string, msg: string) {
+    if (!this.labels.includes(what)) this.labels.push(what);
+    if (msg.startsWith("Cancelled.")) return this.cancel(what);
+    const to = this.targets();
+    const own = perRelay(msg, to);
+    this.skipped(what);
+    // A whole-build error that names no relay is not a relay's silence: do not skip on it.
+    to.forEach((sv) => (own ? this.fail(sv, what, own.get(sv) ?? msg) : this.at(sv).errs.push(`${what}: ${msg}`)));
+  }
+  /** Not started: Cancel came first, or every relay is left out. */
+  cancel(what: string) {
+    if (!this.labels.includes(what)) this.labels.push(what);
+    this.cancelled = true;
+    this.servers.forEach((sv) => this.at(sv).cancelled.push(what));
+  }
+  none(what: string) {
+    if (!this.labels.includes(what)) this.labels.push(what);
+    this.skipped(what);
+  }
+  /** One row per relay: what is live there, what is not (with why); "Cancel" for a too-late Cancel. */
+  rows(): Row[] {
+    const out: Row[] = [...this.per].map(([server, g]) => {
+      // Cancelled builds are no failure where something went live; where nothing did, they are the result.
+      const errs = g.live.length ? g.errs : [...g.errs, ...g.cancelled.map((c) => `${c}: cancelled, not published`)];
+      const warn = [...g.warn, ...(g.live.length && g.cancelled.length ? [`Not published (cancelled): ${g.cancelled.join(", ")}`] : [])];
+      // One line per build.
+      return { server, ok: !errs.length, error: errs.join("\n") || undefined, detail: { published: g.live, warning: warn.join("\n") || undefined } };
+    });
+    if (this.late.length) out.push({ server: "Cancel", ok: false, error: this.late.join("; "), detail: null });
+    return out;
+  }
+  /** Where each step is live: "X is live on every relay" / "on a, b" / nothing for none. */
+  live(): string[] {
+    const host = (u: string) => u.replace(/^https?:\/\//, "");
+    return this.labels.flatMap((l) => {
+      const on = this.servers.filter((sv) => this.per.get(sv)!.live.includes(l));
+      return on.length ? [`${l} is live on ${on.length === this.servers.length ? "every relay" : on.map(host).join(", ")}`] : [];
+    });
+  }
+  /** The last step that went live on some relay. */
+  lastLive() {
+    return [...this.labels].reverse().find((l) => this.servers.some((sv) => this.per.get(sv)!.live.includes(l)));
+  }
+  /** The result sheet's summary line. */
+  summary(): string {
+    const live = this.live();
+    const rows = this.rows().filter((r) => this.servers.includes(r.server));
+    if (this.cancelled) {
+      const last = this.lastLive();
+      if (!last) return "Cancelled. Nothing was published; files that already went out stay unused until the next publish or Clean up.";
+      return `Cancelled after ${last}${this.late.length ? " (too late to stop it: its release index was already being written)" : ""}; ${live.join("; ")}. The builds after it were not published.`;
+    }
+    if (this.late.length) return `Cancel came too late: the release index was already being written. ${live.join("; ")}.`;
+    if (rows.every((r) => r.ok)) return rows.some((r) => r.detail?.warning) ? "Live on every relay. Some need attention: see the warnings below." : "Published on every relay.";
+    return `Not every relay has it. ${live.length ? `${live.join("; ")}. ` : "Nothing went live. "}Fix the relay and publish again, or bring it up to date from the header.`;
+  }
+  /** The toast: never a plain success after a Cancel or a failure. */
+  toast(versions: string): string {
+    if (this.cancelled) return this.lastLive() ? `Cancelled after ${this.lastLive()}` : "Cancelled. Nothing was published";
+    if (this.late.length) return "Cancel came too late: it is live where marked done";
+    const rows = this.rows().filter((r) => this.servers.includes(r.server));
+    return rows.every((r) => r.ok) ? `Published ${versions}` : `Published ${versions} on some relays only: see the results`;
+  }
+}
+
+/** The toast after one release (`version` to `channel`): matches the result, not just "released". */
+export function releaseToast(version: string, channel: string, rows: Row[]): string {
+  const relays = rows.filter((r) => !["Cancel", "CDN", "Cleanup"].includes(r.server));
+  const live = relays.filter((r) => r.ok).length;
+  if (rows.some((r) => r.server === "Cancel")) return `Too late to cancel: ${version} is live on ${live} of ${relays.length} relays`;
+  if (live < relays.length) return `Released ${version} to ${channel} on ${live} of ${relays.length} relays only`;
+  if (relays.some((r) => r.detail?.warning)) return `Released ${version} to ${channel}; some relays need attention`;
+  return `Released ${version} to ${channel}`;
+}

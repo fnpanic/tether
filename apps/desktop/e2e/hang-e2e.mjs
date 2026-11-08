@@ -12,6 +12,11 @@
 // once per copy, not once per file), Cancel before / during the index write and during
 // latest.json, Cancel between two builds (run id), the left-out relay gets no request (clean-up,
 // page), and every relay silent / one 404 + one silent named per relay.
+// Judge 5 (K1-K10): index written but latest.json stalls (one relay, every relay, and Cancel then)
+// is reported as live with a warning, never as not published; Cancel during the automatic clean-up;
+// "Publish the latest builds" Cancel at a build boundary names the build that is live; a custom
+// download-page template sends no request to a left-out relay; relays that go silent on a whole
+// build are skipped for the rest, each relay row with only its own error.
 // The CDN deploy with a silent Cloudflare and the re-read of older files from a silent relay are
 // covered by cargo tests (cdn::tests::deploy_against_a_silent_api_fails_quickly,
 // tests::fetch_file_moves_on_from_a_silent_relay): the Cloudflare API address is fixed in the app.
@@ -35,7 +40,7 @@ const PASS = readFileSync(join(VAULT, "test-passphrase.txt"), "utf8").trim();
 const ADMIN_PUB = readFileSync(join(VAULT, "env.txt"), "utf8").trim().split(/\s+/)[0];
 const BASE = 23600 + 6 * Math.floor(Math.random() * 100);
 // `rule(req, path)`: a mode for one request (null: `mode`); `hits`: requests seen.
-const RELAYS = [0, 1, 2].map((i) => ({ api: BASE + 2 * i, proxy: BASE + 2 * i + 1, mode: "ok", rule: () => null, hits: 0 }));
+const RELAYS = [0, 1, 2].map((i) => ({ api: BASE + 2 * i, proxy: BASE + 2 * i + 1, mode: "ok", rule: () => null, hits: 0, reqs: [], fin: [] }));
 const [R1, R2, R3] = RELAYS.map((r) => `http://127.0.0.1:${r.proxy}`);
 const QS = "stable/customer/windows-x86_64", TECH = "stable/technician/windows-x86_64", MACT = "stable/technician/darwin-universal";
 const work = mkdtempSync(join(tmpdir(), "hang-e2e-")), vault = join(work, "vault");
@@ -62,6 +67,7 @@ for (const [i, r] of RELAYS.entries()) {
   r.proc = p;
   r.server = createServer(async (req, res) => {
     r.hits++;
+    r.reqs.push(`${req.method} ${req.url.split("?")[0]}`);
     held.push(req.socket);
     const upload = req.method === "PUT" && req.url.startsWith("/api/admin/release/") && !/\/(releases|latest)\.json$/.test(req.url);
     const u = req.url.split("?")[0];
@@ -90,6 +96,8 @@ for (const [i, r] of RELAYS.entries()) {
       if (upload) timing.push({ relay: i + 1, path: u, bytes: n, answer_ms: Date.now() - end });
       res.writeHead(ur.statusCode, ur.headers);
       ur.pipe(res);
+      // When tether-api finished a write (K7 waits for build 1's latest.json on every relay).
+      if (req.method === "PUT") ur.on("end", () => r.fin.push(u));
     });
     up.on("error", (e) => res.headersSent || res.writeHead(502).end(String(e)));
     req.on("data", (d) => (n += d.length));
@@ -417,6 +425,120 @@ try {
   r = await timed(() => M.invoke("diag_open", { ticket: "ABCDEFGH", relay: null }));
   const i2 = String(r.v).indexOf(`${R2}: not on this relay`), i1 = String(r.v).indexOf(`${R1}: not reachable`);
   check("J8 diag_open, one 404 and one silent relay: both shown, the 404 first", r.ok === false && i2 >= 0 && i1 > i2 && r.s < 15, `${r.s} s: ${short(r.v)}`);
+  reset();
+
+  // ---- judge 5 ----
+  const QSK = "customer/windows-x86_64";
+  const legacy = (x) => x?.ok && /legacy latest\.json not updated/.test(x.detail?.warning ?? "") && x.detail?.live;
+  // K1: relay 1 takes the index write, never answers its latest.json PUT.
+  RELAYS[0].rule = (req, u) => (req.method === "PUT" && u.endsWith("/latest.json") ? "hang" : null);
+  r = await timed(() => M.invoke("release_publish", rel("customer", "0.9.30", file("TetherQS-0.9.30.exe", 300 * 1024, 30))));
+  check("K1 index written, latest.json stalls on relay 1: within 60 s, relay 1 live with the legacy latest.json warning, relay 2 ok", r.ok && r.s < 60 && (await indexHas(RELAYS[0], QSK, "0.9.30")) && legacy(relay(r.v, R1)) && relay(r.v, R2)?.ok && !relay(r.v, R2)?.detail?.warning, `${r.s} s ${short(relay(r.v, R1))}`);
+  check("K1 consistent", !halfPublished().length, halfPublished().join("; "));
+  reset();
+  // K1b: every relay takes the index write and stalls latest.json: success with warnings, not an error.
+  RELAYS.forEach((x) => (x.rule = (req, u) => (req.method === "PUT" && u.endsWith("/latest.json") ? "hang" : null)));
+  r = await timed(() => M.invoke("release_publish", rel("customer", "0.9.31", file("TetherQS-0.9.31.exe", 300 * 1024, 31))));
+  check("K1b latest.json stalls everywhere after the index: a result (not an error), every relay live with the warning", r.ok && r.s < 60 && legacy(relay(r.v, R1)) && legacy(relay(r.v, R2)) && (await indexHas(RELAYS[0], QSK, "0.9.31")) && (await indexHas(RELAYS[1], QSK, "0.9.31")), `${r.s} s ${short(r.v)}`);
+  reset();
+  // K1c: the same, Cancel while latest.json stalls everywhere: "Too late to cancel … is live on" both.
+  seen = false;
+  RELAYS.forEach((x) => (x.rule = (req, u) => (req.method === "PUT" && u.endsWith("/latest.json") ? ((seen = true), "hang") : null)));
+  r = await cancelAt(() => M.invoke("release_publish", rel("customer", "0.9.32", file("TetherQS-0.9.32.exe", 300 * 1024, 32))), () => seen);
+  const k1c = late(r.v)?.error ?? "";
+  check("K1c Cancel after the index write, latest.json stalls: 'Too late to cancel: … is live on' every relay", r.valid && r.ok && /Too late to cancel: \S+ 0\.9\.32 is live on/.test(k1c) && k1c.includes(R1) && k1c.includes(R2) && legacy(relay(r.v, R1)), `${r.after} s after Cancel: ${short(r.v)}`);
+  reset();
+  // K6c: Cancel during the automatic clean-up: skipped and said so, release live (too-late line).
+  settings([R1, R2], { prune: { keep: 0, auto: true } });
+  seen = false;
+  RELAYS.forEach((x) => (x.rule = (req, u) => (u === "/api/admin/releases/prune" ? ((seen = true), "hang") : null)));
+  r = await cancelAt(() => M.invoke("release_publish", rel("customer", "0.9.33", file("TetherQS-0.9.33.exe", 300 * 1024, 33))), () => seen);
+  const cl = Array.isArray(r.v) ? r.v.find((x) => x.server === "Cleanup") : null;
+  check("K6c Cancel during the automatic clean-up: clean-up skipped and says so, the release is live (too late)", r.valid && r.ok && r.after < 5 && /Cancel was pressed.*stays live/.test(cl?.error ?? "") && /Too late to cancel/.test(late(r.v)?.error ?? "") && (await indexHas(RELAYS[1], QSK, "0.9.33")), `${r.after} s after Cancel: ${short(cl)}`);
+  settings([R1, R2]);
+  reset();
+
+  // UI cases: two builds (customer, technician Windows) in the build folder.
+  const putBuilds = (v, n) => {
+    writeFileSync(join(builds, "quick", `TetherQS-${v}.exe`), Buffer.alloc(300 * 1024, n));
+    writeFileSync(join(builds, "windows", `Tether_${v}_x64-setup.exe`), randomBytes(3 << 20));
+  };
+  const openSheet = async () => {
+    await M.page.reload();
+    await sleep(2000);
+    await nav();
+    await M.page.getByRole("button", { name: /^Publish 2 new builds/ }).click({ timeout: 40000 });
+    await dlg.getByText(/Reachable|does not answer|do not answer/).first().waitFor({ timeout: 30000 });
+    await sleep(500);
+  };
+  const toastText = () => M.page.evaluate(() => [...document.querySelectorAll('[role="status"],[aria-live]')].map((e) => e.innerText).join(" | ")).catch(() => "");
+  // K7: Cancel right after build 1 is on every relay (index and latest.json).
+  putBuilds("0.9.40", 40);
+  try {
+    await openSheet();
+    reset();
+    RELAYS.forEach((x) => (x.fin = []));
+    await dlg.getByRole("button", { name: /^Sign and publish · 2 relays/ }).click({ timeout: 30000 });
+    const t0 = Date.now();
+    let first = null;
+    while (Date.now() - t0 < 60000 && !first) {
+      const d = RELAYS[0].fin.find((f) => f.endsWith("/latest.json"));
+      if (d && RELAYS[1].fin.includes(d)) first = d;
+      else await sleep(10);
+    }
+    await dlg.getByRole("button", { name: "Cancel" }).click();
+    const s = await untilDone(60000);
+    const text = (await dlg.innerText()).replace(/\s+/g, " ");
+    const toast = await toastText();
+    await shot(M.page, "hang-ui-cancel-boundary");
+    const liveQs = (await indexHas(RELAYS[0], QSK, "0.9.40")) && (await indexHas(RELAYS[1], QSK, "0.9.40"));
+    const liveTech = (await indexHas(RELAYS[0], "technician/windows-x86_64", "0.9.40")) || (await indexHas(RELAYS[1], "technician/windows-x86_64", "0.9.40"));
+    check("K7 UI Cancel at the build boundary: 'Cancelled after <build>; <build> is live on every relay', each row lists it, no 'Not every relay'", first && s !== null && liveQs && !liveTech && /Cancelled after Customer module Windows 0\.9\.40[^;]*; Customer module Windows 0\.9\.40 is live on every relay/.test(text) && !/Not every relay has it/.test(text) && (text.match(/Customer module Windows 0\.9\.40/g) ?? []).length >= 4, `${first} ${s} s: ${text.slice(0, 500)}`);
+    check("K7 UI no plain success toast after Cancel", !/Published 0\.9\.40/.test(toast), toast.slice(0, 200));
+    check("K7 consistent", !halfPublished().length, halfPublished().join("; "));
+    await dlg.getByRole("button", { name: "Done" }).click();
+  } catch (e) {
+    check("K7 UI", false, e.message.split("\n")[0]);
+  }
+  reset();
+  // K9: "Publish to the others anyway" with a custom page template that shows custom apps.
+  mkdirSync(join(vault, "page-templates"), { recursive: true });
+  copyFileSync(join(import.meta.dirname, "..", "..", "..", "docs", "examples", "download-template.html"), join(vault, "page-templates", "k9.html"));
+  settings([R1, R2], { page_design: "custom", page_template: "k9.html", prune: { keep: 2, auto: true } });
+  putBuilds("0.9.41", 41);
+  RELAYS[0].mode = "hang";
+  try {
+    await openSheet();
+    await dlg.getByRole("checkbox").check({ timeout: 30000 });
+    RELAYS[0].reqs = [];
+    await dlg.getByRole("button", { name: /^Sign and publish · 1 relay/ }).click({ timeout: 30000 });
+    const s = await untilDone(120000);
+    const text = (await dlg.innerText()).replace(/\s+/g, " ");
+    check("K9 left-out relay gets no request (custom template page with custom apps, auto clean-up)", s !== null && RELAYS[0].reqs.length === 0 && /Download page/.test(text) && onDisk(RELAYS[1], `${QS}/TetherQS-0.9.41.exe`), `${s} s, relay 1 got: ${RELAYS[0].reqs.join(", ")}; ${text.slice(0, 300)}`);
+    await dlg.getByRole("button", { name: "Done" }).click();
+  } catch (e) {
+    check("K9 UI", false, e.message.split("\n")[0]);
+  }
+  settings([R1, R2]);
+  reset();
+  // K10: both relays answer the check, then take uploads and never answer: build 1 fails on both
+  // (one stall), build 2 and the page leave them out; each row names only its own relay.
+  putBuilds("0.9.42", 42);
+  try {
+    await openSheet();
+    RELAYS[0].mode = RELAYS[1].mode = "hangput";
+    await dlg.getByRole("button", { name: /^Sign and publish · 2 relays/ }).click({ timeout: 30000 });
+    const s = await untilDone(150000);
+    const text = (await dlg.innerText()).replace(/\s+/g, " ");
+    await shot(M.page, "hang-ui-all-silent");
+    const i1 = text.indexOf(`127.0.0.1:${RELAYS[0].proxy}`), i2 = text.indexOf(`127.0.0.1:${RELAYS[1].proxy}`, i1 + 1);
+    const row1 = text.slice(i1, i2);
+    check("K10 every relay silent on uploads: one wait, not one per build (< 75 s)", s !== null && s < 75, `${s} s`);
+    check("K10 later build and the page skipped, relay 1's row has no relay 2 error", /Technician app Windows 0\.9\.42: skipped \(not reachable\)/.test(row1) && /Download page: skipped \(not reachable\)/.test(row1) && !row1.includes(R2), row1.slice(0, 400));
+    await dlg.getByRole("button", { name: "Done" }).click();
+  } catch (e) {
+    check("K10 UI", false, e.message.split("\n")[0]);
+  }
   reset();
 } catch (e) {
   check("run", false, e.stack ?? String(e));
