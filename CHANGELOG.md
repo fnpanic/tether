@@ -6,6 +6,27 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Fixed
+- **Diagnostics could not be sent with two relays.** The apps sent the upload only to the relay
+  they had used last (after an update check: the last one of the list) and stopped at its `404`,
+  and Tether Manage listed the tickets of its first relay only: the upload went to relay 2 and
+  stayed "Waiting", or a code that one relay did not know was "not valid". The technician app and
+  TetherQS now try every relay in turn (on to the next after `404` or `503`), and Manage merges the
+  ticket lists of all relays and shows where the upload is.
+
+### Added
+- **TetherQS: Send to support** in the Help view (Windows and macOS, policy `diagnostics.upload`):
+  the ticket code from Tether Manage uploads TetherQS's diagnostics (its logs of the last 24 h and
+  its config with passwords, keys and tokens redacted; same zip and 2 MiB limit as the technician
+  app, shared code). `TetherQS --diagnostics <out.zip>` writes the same archive.
+- **Diagnostics tickets: close, archive, delete** (tether-api `POST /api/admin/diag/<ticket>/close`,
+  `DELETE /api/admin/diag/<ticket>`, `GET /api/admin/diag?archived=1`, a `state` per ticket:
+  open, uploaded, expired, closed). Tether Manage: **Close** (no more uploads, kept 90 days with
+  the upload under **Archived**) and **Delete** (after a question, for good) on every relay, with a
+  result per relay.
+- Upload messages for expired and closed codes, and "server busy" when every relay is at its
+  upload limit.
+
 ## [0.5.26] — 2026-11-08
 Tether / TetherQS 0.5.26 (Windows and macOS), Tether Manage 0.5.9 (built with TETHER_ADMIN_PUB_KEY); relays: tether-api and hbbs (deployed 2026-11-08). Audit fixes (client and relay) and the shortcut ledger.
 

@@ -4,6 +4,7 @@ mod app;
 mod cli;
 mod commands;
 mod diag;
+mod diag_bundle;
 mod fluxrt;
 mod hosts;
 mod keys;

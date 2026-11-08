@@ -72,9 +72,26 @@ Clients send it after each policy check.
 
 ### `POST /api/diag/<ticket>`
 Upload a diagnostics zip for a ticket an admin opened. `<ticket>` is 8 characters `[A-HJ-NP-Z2-9]`
-(no ambiguous letters). Body `application/zip`, ≤ 2 MiB. `204` if the ticket is open and
-unused, else `404` (answered before the body is read). One upload per ticket. Stored 7 days.
-Upload limits as for release uploads ("Limits" below).
+(no ambiguous letters). Body `application/zip`, ≤ 2 MiB. `204` if the ticket is open (state
+`open`, below) on this relay, else `404` (unknown, already used, expired or closed; answered before
+the body is read). One upload per ticket. Upload limits as for release uploads ("Limits" below):
+`503` with `Retry-After: 30` while 4 uploads run, `413` over 2 MiB, `408` below the minimum rate.
+
+Tickets are per relay: Tether Manage opens the same code on every relay it knows, and an app
+uploads to the relay it reaches. The apps (0.5.27 and later) try every relay in turn and go on
+after a `404` or `503`; Manage lists the tickets of all relays merged and finds the upload.
+
+**Ticket states** (`state` in the admin listing):
+
+| State | Meaning | Uploads | Kept |
+| --- | --- | --- | --- |
+| `open` | created, no upload yet, younger than 24 h | accepted (one) | – |
+| `uploaded` | the zip is there | `404` | 7 days after the upload |
+| `expired` | 24 h passed without an upload | `404` | listed until 7 days after creation |
+| `closed` | closed by an admin (archived), with its zip if there was one | `404` | 90 days after closing |
+
+`open → uploaded → closed`, `open → expired → closed`. After its keep time a ticket and its zip
+are removed (checked every minute). `DELETE` removes one at once, in any state.
 
 ### `POST /api/audit/conn`, `POST /api/audit/file`, `POST /api/audit/alarm` (session audit log)
 The host side of every Tether app (`vendor/rustdesk/src/server/connection.rs`, `post_conn_audit` /
@@ -131,8 +148,10 @@ Failure: `401` with a short reason. Bodies over the limits: `413`.
 | `GET /api/admin/policy-history/<serial>` | – | the signed document exactly as published (`404` if not kept) |
 | `GET /api/admin/devices` | – | `[{uuid,id,profile,version,os,serial,server_keys_serial,ip,last_seen}]` |
 | `POST /api/admin/diag-ticket` | `{"note":"…"}` (≤ 256 chars) | `{"ticket":"K7Q2M9XD","expires":unix}` (open 24 h) |
-| `GET /api/admin/diag` | – | `[{ticket,note,created,uploaded,size}]` |
-| `GET /api/admin/diag/<ticket>` | – | the zip (`application/zip`) or `404` |
+| `GET /api/admin/diag[?archived=1]` | – | `[{ticket,note,created,uploaded,size,state}]`: tickets not closed (`open`, `uploaded`, `expired`); with `?archived=1` the closed ones, each with `closed` (unix). Other parameters: `400`. Relays before 0.5.27 ignore the query and send all, without `state`. |
+| `GET /api/admin/diag/<ticket>` | – | the zip (`application/zip`, also of a closed ticket) or `404` |
+| `POST /api/admin/diag/<ticket>/close` | – | `204`: the ticket is closed (archived), uploads get `404`, kept 90 days with its zip. Closing again: `204`, no change. Unknown: `404`. Journal line `diag ticket <code> closed`. |
+| `DELETE /api/admin/diag/<ticket>` | – | `204`: ticket and zip removed for good, in any state. Unknown (or deleted already): `404`. Journal line `diag ticket <code> deleted`. |
 | `PUT /api/admin/release/<channel>/<path>` | file bytes (≤ 200 MiB) | `204`. Writes `download/<channel>/<path>` atomically. `<channel>` `[a-z0-9-]{1,32}`; `<path>` segments `[A-Za-z0-9._-]`, no `..`. Upload artifacts first, `latest.json` last. Refused before the body is read: admin API off (`503`), bad path (`400`), no `Tether-Sig` or its `ts` outside ±300 s (`401`); the signature itself is checked after the body arrived. At most 4 release and diagnostics uploads at once (`503`, `Retry-After: 30`). |
 | `DELETE /api/admin/release/<channel>/<path>[?force=1]` | – | `204`; `404` if missing. `409 "published release: …"` for `releases.json`, any `latest.json`, and every file of the version the channel's release index or the folder's `latest.json` publishes, unless `?force=1` (part of the signed URL). Forced deletes are logged (`release-prune.jsonl`, journal). |
 | `POST /api/admin/releases/prune` | JSON (≤ 64 KiB, below) | Release clean-up: the plan (`dry_run: true`) or the deletion of the listed versions (below). |

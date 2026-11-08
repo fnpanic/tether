@@ -36,6 +36,8 @@ export interface State {
     approve_mode: string;
     consent_text: string;
     diagnostics: boolean;
+    /** Help › Send to support (policy diagnostics.upload). */
+    diagnostics_upload: boolean;
     perms: Perm[];
     /** Custom app name (signed profile in this exe), null for plain TetherQS. */
     custom_app: string | null;
@@ -77,6 +79,8 @@ export const api = {
   installUpdate: () => invoke("update_install"),
   diagnostics: () => invoke<Diagnostics>("diagnostics"),
   diagnosticsProbe: (server: string) => invoke<Probe>("diagnostics_probe", { server }),
+  /** Upload the diagnostics bundle for a support ticket code; rejects with the message to show. */
+  diagUpload: (ticket: string) => invoke("diag_upload", { ticket }),
 };
 
 /** Connection-manager events: add_connection, remove_connection, refused, policy, record_consent_request. */

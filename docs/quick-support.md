@@ -64,7 +64,9 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
 server it registers with (compiled-in and policy `servers.list`), the proxy in use, admin-access
 state and the policy serial at once, also without a network. Whether each server is reachable (and
 latency) is checked separately, at most 5 s each, with **Retry**; a broken network shows its error
-there instead of hiding the page.
+there instead of hiding the page. **Send to support** below it (policy `diagnostics.upload`) takes
+the 8-character ticket code from Tether Manage and uploads the diagnostics bundle (TetherQS's logs
+and settings, no passwords; [troubleshooting.md](troubleshooting.md#send-to-support)).
 
 ## Process model
 

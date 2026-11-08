@@ -2,6 +2,7 @@
 
 mod api;
 mod cdn;
+mod diag;
 mod keys;
 mod live;
 mod private;
@@ -1921,9 +1922,10 @@ struct DiagFile {
 
 #[tauri::command]
 async fn diag_open(app: State<'_, App>, ticket: String) -> R<Value> {
-    if ticket.len() != 8 || !ticket.bytes().all(|b| b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(&b)) {
+    if !diag::valid_ticket(&ticket) {
         return Err("invalid ticket".into());
     }
+    // The first relay that has the upload (call() tries the next one on a 404).
     let zip = app.call("GET", &format!("/api/admin/diag/{ticket}"), vec![], "").await?;
     let mut ar = zip::ZipArchive::new(Cursor::new(&zip)).map_err(|e| format!("The upload is not a valid zip: {e}"))?;
     let mut files = vec![];
@@ -1941,6 +1943,53 @@ async fn diag_open(app: State<'_, App>, ticket: String) -> R<Value> {
     let size = zip.len();
     *app.diag.lock().unwrap() = Some(zip);
     Ok(json!({"files": files, "diagnostics": diagnostics, "size": size}))
+}
+
+/// Tickets of every relay, merged by code (`diag::merge`): active ones, or with `archived` the
+/// closed ones. `failed`: relays that did not answer.
+#[tauri::command]
+async fn diag_list(app: State<'_, App>, archived: bool) -> R<Value> {
+    let path = if archived { "/api/admin/diag?archived=1" } else { "/api/admin/diag" };
+    let (mut lists, mut failed) = (Vec::new(), Vec::new());
+    for sv in app.servers() {
+        match app.call_on(&sv, "GET", path, Vec::new(), "application/json").await {
+            Ok(b) => lists.push((sv.clone(), serde_json::from_slice::<Vec<Value>>(&b).map_err(|_| format!("{sv}: unexpected ticket list"))?)),
+            Err(e) => failed.push(format!("{sv}: {e}")),
+        }
+    }
+    if lists.is_empty() {
+        return Err(failed.join("; "));
+    }
+    Ok(json!({ "tickets": diag::merge(lists, archived, api::now()), "failed": failed }))
+}
+
+/// Close (`close`: archive, no more uploads) or delete (for good, with the zip) a ticket on every
+/// relay; one result per relay. A relay without the ticket counts as done.
+async fn diag_change(app: &App, ticket: &str, close: bool) -> R<Vec<RelayResult>> {
+    if !diag::valid_ticket(ticket) {
+        return Err("invalid ticket".into());
+    }
+    let (method, path) = if close { ("POST", format!("/api/admin/diag/{ticket}/close")) } else { ("DELETE", format!("/api/admin/diag/{ticket}")) };
+    let mut out = app.fan_out(method, &path, Vec::new(), "application/json").await;
+    for r in &mut out {
+        if r.error.as_deref().is_some_and(|e| e.contains("(HTTP 404")) {
+            *r = RelayResult::of(&r.server, Ok(json!("not on this relay")));
+        }
+    }
+    if let Some(e) = none_ok(&out) {
+        return Err(e);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+async fn diag_close(app: State<'_, App>, ticket: String) -> R<Vec<RelayResult>> {
+    diag_change(&app, &ticket, true).await
+}
+
+#[tauri::command]
+async fn diag_delete(app: State<'_, App>, ticket: String) -> R<Vec<RelayResult>> {
+    diag_change(&app, &ticket, false).await
 }
 
 #[tauri::command]
@@ -2016,6 +2065,9 @@ fn main() {
             team_load,
             team_publish,
             diag_open,
+            diag_list,
+            diag_close,
+            diag_delete,
             diag_save
         ])
         .run(tauri::generate_context!())

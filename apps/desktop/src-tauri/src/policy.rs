@@ -374,18 +374,28 @@ pub(crate) fn api(
     api_via(&api_hosts(), build)
 }
 
-/// Debug builds only: tests point the API at a local stand-in (`TETHER_DEV_API=http://127.0.0.1:<port>`).
-fn dev_api() -> Option<String> {
+/// Debug builds only: tests point the API at local stand-ins (`TETHER_DEV_API=http://127.0.0.1:<port>`;
+/// several, comma-separated, stand for several relays).
+fn dev_apis() -> Vec<String> {
     #[cfg(debug_assertions)]
-    if let Ok(base) = std::env::var("TETHER_DEV_API") {
-        return Some(base.trim_end_matches('/').to_owned());
+    if let Ok(v) = std::env::var("TETHER_DEV_API") {
+        return v.split(',').map(|b| b.trim().trim_end_matches('/').to_owned()).filter(|b| !b.is_empty()).collect();
     }
-    None
+    Vec::new()
+}
+
+fn dev_api() -> Option<String> {
+    dev_apis().into_iter().next()
 }
 
 /// Relays to ask one by one (update checks ask every relay, the highest release wins), with the
-/// base URL `{relay}` stands for in the release index. A debug build's dev API is the only one.
+/// base URL `{relay}` stands for in the release index. A debug build's dev APIs are the only ones
+/// (several: each named by its base URL).
 pub(crate) fn relay_bases() -> Vec<(String, String)> {
+    let dev = dev_apis();
+    if dev.len() > 1 {
+        return dev.into_iter().map(|b| (b.clone(), b)).collect();
+    }
     match dev_api() {
         Some(b) => vec![(server_host(b.trim_start_matches("http://")).to_owned(), b)],
         None => api_hosts().into_iter().map(|h| (h.clone(), format!("https://{h}"))).collect(),
@@ -397,7 +407,8 @@ pub(crate) fn api_via(
     hosts: &[String],
     build: impl Fn(&reqwest::blocking::Client, &str) -> reqwest::blocking::RequestBuilder,
 ) -> Result<reqwest::blocking::Response, String> {
-    if let Some(base) = dev_api() {
+    if let Some(first) = dev_api() {
+        let base = dev_apis().into_iter().find(|b| hosts.contains(b)).unwrap_or(first);
         let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
         return build(&client, &base).send().map_err(|e| format!("offline: {e}"));
     }
@@ -439,7 +450,7 @@ pub(crate) fn api_via(
 /// GET of any https URL (release downloads, also on a CDN): through the proxy first (if any),
 /// then direct; TLS verified against the OS trust store. `http://` only for a debug build's dev API.
 pub(crate) fn fetch(url: &str, timeout: Duration) -> Result<reqwest::blocking::Response, String> {
-    if !url.starts_with("https://") && !dev_api().is_some_and(|b| url.starts_with(&b)) {
+    if !url.starts_with("https://") && !dev_apis().iter().any(|b| url.starts_with(b.as_str())) {
         return Err(format!("not an https URL: {url}"));
     }
     let proxy = proxy_url();

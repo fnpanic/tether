@@ -96,8 +96,8 @@ const admin: Record<string, unknown> = {
     { channel: "stable", path: "customer/windows-x86_64/TetherQS-0.4.0.exe", size: 9_800_000, modified: now - 86400 * 3 },
   ],
   "/api/admin/diag": [
-    { ticket: "K7Q2M9XD", note: "Black screen after login, Dr. Weber", created: now - 3600, uploaded: now - 3000, size: 182_000 },
-    { ticket: "P4RT8ZNA", note: "Audio missing", created: now - 600, uploaded: null, size: null },
+    { ticket: "K7Q2M9XD", note: "Black screen after login, Dr. Weber", created: now - 3600, uploaded: now - 3000, size: 182_000, state: "uploaded" },
+    { ticket: "P4RT8ZNA", note: "Audio missing", created: now - 600, uploaded: null, size: null, state: "open" },
   ],
   "/api/admin/diag-ticket": { ticket: "W3HX9QEL", expires: now + 86400 },
 };
@@ -326,6 +326,19 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
     },
     team_publish: () => {
       servers.forEach((s) => (team[s] = a.roster));
+      return servers.map((s) => ok(s));
+    },
+    diag_list: () => {
+      const all = admin["/api/admin/diag"] as { state: string }[];
+      return { tickets: all.filter((t) => (t.state === "closed") === !!a.archived).map((t) => ({ ...t, relays: servers })), failed: [] };
+    },
+    diag_close: () => {
+      const t = (admin["/api/admin/diag"] as { ticket: string; state: string; closed?: number }[]).find((x) => x.ticket === a.ticket);
+      if (t) Object.assign(t, { state: "closed", closed: now });
+      return servers.map((s) => ok(s));
+    },
+    diag_delete: () => {
+      admin["/api/admin/diag"] = (admin["/api/admin/diag"] as { ticket: string }[]).filter((x) => x.ticket !== a.ticket);
       return servers.map((s) => ok(s));
     },
     diag_open: () => ({

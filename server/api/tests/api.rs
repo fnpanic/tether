@@ -322,6 +322,99 @@ fn diag_ticket_flow() {
     assert_eq!(s.req("POST", "/api/diag/K7Q2M9XD", &[("Content-Type", "application/zip")], &zip).status, 204);
 }
 
+/// Close (archive) and delete: states, uploads refused after close, archived listing, the zip
+/// removed by delete, idempotency, auth and replay.
+#[test]
+fn diag_close_archive_delete() {
+    let (s, k) = admin_server();
+    let zip = b"PK fake zip".to_vec();
+    let up = |t: &str| s.req("POST", &format!("/api/diag/{t}"), &[("Content-Type", "application/zip")], &zip).status;
+    let open = |note: &str| s.admin(&k, "POST", "/api/admin/diag-ticket", format!(r#"{{"note":"{note}"}}"#).as_bytes()).json()["ticket"].as_str().unwrap().to_owned();
+    let (a, b, c) = (open("uploaded then closed"), open("closed before upload"), open("deleted"));
+    assert_eq!(up(&a), 204);
+    assert_eq!(up(&c), 204);
+    let zip_of = |t: &str| s.dir.join("diag").join(format!("{t}.zip"));
+    assert!(zip_of(&a).exists() && zip_of(&c).exists());
+
+    let state = |list: &serde_json::Value, t: &str| list.as_array().unwrap().iter().find(|x| x["ticket"] == t).map(|x| x["state"].as_str().unwrap().to_owned());
+    let active = s.admin(&k, "GET", "/api/admin/diag", b"").json();
+    assert_eq!(state(&active, &a).as_deref(), Some("uploaded"));
+    assert_eq!(state(&active, &b).as_deref(), Some("open"));
+
+    // Unsigned, wrong key and replayed closes are refused and change nothing.
+    let path = format!("/api/admin/diag/{b}/close");
+    assert_eq!(s.req("POST", &path, &[], b"").status, 401);
+    assert_eq!(s.admin(&generate_key(), "POST", &path, b"").status, 401);
+    let sig = reqauth::sign_request(&k, "POST", &path, b"", now());
+    assert_eq!(s.req("POST", &path, &[(reqauth::HEADER, &sig)], b"").status, 204);
+    assert_eq!(s.req("POST", &path, &[(reqauth::HEADER, &sig)], b"").status, 401, "replay");
+    // Closed: no upload (404 like an expired code), closing again is a no-op.
+    assert_eq!(up(&b), 404);
+    assert_eq!(s.admin(&k, "POST", &path, b"").status, 204);
+    assert_eq!(s.admin(&k, "POST", &format!("/api/admin/diag/{a}/close"), b"").status, 204);
+    assert_eq!(s.admin(&k, "POST", "/api/admin/diag/ZZZZZZZZ/close", b"").status, 404);
+
+    let active = s.admin(&k, "GET", "/api/admin/diag", b"").json();
+    assert_eq!(state(&active, &a), None);
+    assert_eq!(state(&active, &c).as_deref(), Some("uploaded"));
+    let archived = s.admin(&k, "GET", "/api/admin/diag?archived=1", b"").json();
+    assert_eq!(archived.as_array().unwrap().len(), 2);
+    assert_eq!(state(&archived, &a).as_deref(), Some("closed"));
+    let ea = archived.as_array().unwrap().iter().find(|x| x["ticket"] == a.as_str()).unwrap();
+    assert_eq!(ea["note"], "uploaded then closed");
+    assert_eq!(ea["size"], zip.len());
+    assert!(ea["closed"].as_u64().is_some());
+    assert_eq!(s.admin(&k, "GET", "/api/admin/diag?x=1", b"").status, 400);
+    // An archived upload stays downloadable.
+    assert_eq!(s.admin(&k, "GET", &format!("/api/admin/diag/{a}"), b"").body, zip);
+
+    // Delete: entry and zip gone for good, in any state; again 404.
+    for t in [&a, &b, &c] {
+        assert_eq!(s.admin(&k, "DELETE", &format!("/api/admin/diag/{t}"), b"").status, 204);
+        assert_eq!(s.admin(&k, "DELETE", &format!("/api/admin/diag/{t}"), b"").status, 404);
+        assert!(!zip_of(t).exists());
+        assert_eq!(s.admin(&k, "GET", &format!("/api/admin/diag/{t}"), b"").status, 404);
+    }
+    assert_eq!(s.req("DELETE", "/api/admin/diag/ZZZZZZZZ", &[], b"").status, 401);
+    assert_eq!(s.admin(&k, "DELETE", "/api/admin/diag/..%2Ftickets.json", b"").status, 404);
+    assert!(s.dir.join("diag/tickets.json").exists());
+    assert_eq!(s.admin(&k, "GET", "/api/admin/diag", b"").json(), serde_json::json!([]));
+    assert_eq!(s.admin(&k, "GET", "/api/admin/diag?archived=1", b"").json(), serde_json::json!([]));
+}
+
+/// Expiry: an unused ticket expires after 24 h (no upload, still listed until 7 days); a closed
+/// ticket is kept 90 days after closing, its zip too; tickets past their keep time are removed.
+#[test]
+fn diag_expiry_and_retention() {
+    let k = generate_key();
+    let t = now();
+    let d = 86_400;
+    let tickets = serde_json::json!([
+        {"ticket": "AAAAAAAA", "note": "", "created": t - 2 * d, "uploaded": null, "size": null},
+        {"ticket": "BBBBBBBB", "note": "", "created": t - 8 * d, "uploaded": null, "size": null},
+        {"ticket": "CCCCCCCC", "note": "", "created": t - 30 * d, "uploaded": t - 30 * d, "size": 2, "closed": t - 20 * d},
+        {"ticket": "DDDDDDDD", "note": "", "created": t - 100 * d, "uploaded": t - 100 * d, "size": 2, "closed": t - 91 * d},
+        {"ticket": "EEEEEEEE", "note": "", "created": t - 9 * d, "uploaded": t - 8 * d, "size": 2}
+    ]);
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[], |dir| {
+        std::fs::create_dir_all(dir.join("diag")).unwrap();
+        std::fs::write(dir.join("diag/tickets.json"), tickets.to_string()).unwrap();
+        for z in ["CCCCCCCC", "DDDDDDDD", "EEEEEEEE"] {
+            std::fs::write(dir.join(format!("diag/{z}.zip")), b"PK").unwrap();
+        }
+    });
+    let zip = b"PK".to_vec();
+    assert_eq!(s.req("POST", "/api/diag/AAAAAAAA", &[("Content-Type", "application/zip")], &zip).status, 404, "expired");
+    // Retention runs before the server listens.
+    let ids = |v: serde_json::Value| v.as_array().unwrap().iter().map(|x| format!("{}:{}", x["ticket"].as_str().unwrap(), x["state"].as_str().unwrap())).collect::<Vec<_>>();
+    assert_eq!(ids(s.admin(&k, "GET", "/api/admin/diag", b"").json()), ["AAAAAAAA:expired"]);
+    assert_eq!(ids(s.admin(&k, "GET", "/api/admin/diag?archived=1", b"").json()), ["CCCCCCCC:closed"]);
+    assert!(s.dir.join("diag/CCCCCCCC.zip").exists());
+    assert!(!s.dir.join("diag/DDDDDDDD.zip").exists());
+    assert!(!s.dir.join("diag/EEEEEEEE.zip").exists());
+    assert_eq!(s.admin(&k, "GET", "/api/admin/diag/CCCCCCCC", b"").body, zip);
+}
+
 #[test]
 fn releases() {
     let (s, k) = admin_server();

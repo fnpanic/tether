@@ -4,7 +4,8 @@
 # Builds both UIs here (npm is blocked on the Mac) under the PC's build lock, packs src.tgz, and
 # sends build.sh + swap.sh with keys.env and the signing p12 as per-job secrets (deleted on the Mac
 # after the job). Prints the job id; then: python tools/macbuild/macbuild.py wait --user tether <id>
-# Env: TETHER_KEYS_ENV (default C:/vms/mac59/keys.env), MACSIGN (default C:/vms/macsign).
+# Env: TETHER_KEYS_ENV (default C:/vms/mac59/keys.env), MACSIGN (default C:/vms/macsign),
+# TETHER_DIAG_CHECK=1 (also run diagcheck.sh: both apps' diagnostics zip, checked for secrets).
 set -euo pipefail
 R=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 J=$R/tools/macbuild/jobs/tether
@@ -27,7 +28,7 @@ fi
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/work/prebuilt"
-cp "$J/build.sh" "$J/swap.sh" "$W/work/"
+cp "$J/build.sh" "$J/swap.sh" "$J/diagcheck.sh" "$W/work/"
 # git archive keeps LF and file modes; the prebuilt UIs are appended under prebuilt/.
 git -C "$R" -c core.autocrlf=false archive --format=tar -o "$W/src.tar" HEAD
 cp -r "$R/apps/desktop/dist" "$W/work/prebuilt/desktop-dist"
@@ -40,4 +41,4 @@ echo "src.tgz: $(du -h "$W/work/src.tgz" | cut -f1) of $(git -C "$R" rev-parse -
 w() { cygpath -w "$1"; }
 python "$(w "$R/tools/macbuild/macbuild.py")" submit --user tether --work "$(w "$W/work")" \
   --secret "$(w "$KEYS")=keys.env" --secret "$(w "$SIGN/cs.p12")=cs.p12" --secret "$(w "$SIGN/p12.pass")=p12.pass" \
-  --env TETHER_SWAP=$SWAP --timeout 14400 --artifact 'out/*' "${EXTRA[@]}" -- bash build.sh
+  --env TETHER_SWAP=$SWAP --env TETHER_DIAG_CHECK=${TETHER_DIAG_CHECK:-0} --timeout 14400 --artifact 'out/*' "${EXTRA[@]}" -- bash build.sh

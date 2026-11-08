@@ -41,6 +41,8 @@ struct Branding {
     approve_mode: String,
     consent_text: String,
     diagnostics: bool,
+    /// "Send to support" in the Help view (policy `diagnostics.upload`).
+    diagnostics_upload: bool,
     perms: Vec<Perm>,
     /// Custom app name (docs/api.md "Custom apps"), None for plain TetherQS.
     custom_app: Option<String>,
@@ -95,6 +97,7 @@ fn branding() -> Branding {
         approve_mode: e.get("security.approve-mode").to_owned(),
         consent_text: e.get("recording.consent-text").to_owned(),
         diagnostics: e.on("diagnostics.page"),
+        diagnostics_upload: e.on("diagnostics.upload"),
         perms: PERMS
             .iter()
             .filter(|(_, f, _)| !e.hidden.contains(*f))
@@ -249,7 +252,7 @@ fn update_install() {
 
 /// Everything known locally: shown at once, also without a network.
 #[derive(Serialize)]
-struct Diagnostics {
+pub(crate) struct Diagnostics {
     version: &'static str,
     id: String,
     /// Every server this app registers with (compiled-in, then policy `servers.list`).
@@ -261,17 +264,35 @@ struct Diagnostics {
 }
 
 #[tauri::command]
-fn diagnostics() -> Diagnostics {
+pub(crate) fn diagnostics() -> Diagnostics {
     let e = policy::current();
     Diagnostics {
         version: update::VERSION,
         id: api::get_id(),
         servers: policy::base_urls(),
-        proxy: hbb_common::config::DEFAULT_SETTINGS.read().unwrap().get("proxy-url").cloned().unwrap_or_else(|| "none (direct)".into()),
+        proxy: hbb_common::config::DEFAULT_SETTINGS.read().unwrap().get("proxy-url").map(|p| without_credentials(p)).unwrap_or_else(|| "none (direct)".into()),
         elevated: elevated(),
         policy_serial: e.serial,
         policy_group: e.group,
     }
+}
+
+/// A proxy URL as shown (Help view, diagnostics bundle): no user name or password.
+fn without_credentials(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut u) => {
+            let _ = u.set_password(None);
+            let _ = u.set_username("");
+            u.to_string()
+        }
+        Err(_) => "(not a URL)".into(),
+    }
+}
+
+/// Help view › Send to support: the diagnostics bundle for a ticket code.
+#[tauri::command]
+async fn diag_upload(ticket: String) -> R<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::diag::upload(&ticket)).await.map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
@@ -327,6 +348,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         update_install,
         diagnostics,
         diagnostics_probe,
+        diag_upload,
         mac_fix,
     ]
 }
