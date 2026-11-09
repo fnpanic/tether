@@ -14,6 +14,11 @@ verified (keys open with their passwords; installers embed the matching cert):
   `Trust Tether.mobileconfig` (macOS), `tether-codesign.cer`, `tether-codesign-macos.cer`.
 - `secret/` (gitignored, your backup — never commit): the `.pfx`/`.p12`, their base64, and passwords.
 
+Both certs are codesign/signtool-verified: the Windows cert signs a binary locally, and the macOS
+cert was verified on the build Mac on 2026-11-09 (job via `tools/macbuild`): `codesign -s "Tether Code
+Signing"` signs, and the designated requirement names the certificate (the criterion `smoke-macos.sh`
+checks) — `designated => identifier ... and certificate leaf = H"d21ea174..."`.
+
 **One step left — activate CI signing** (writing repo secrets is intentionally not automated; run it
 yourself, e.g. prefix with `!` in Claude Code). Setting the macOS ones replaces the prior self-signed
 cert; the next macOS CI run's smoke test verifies codesign accepts the new one:
