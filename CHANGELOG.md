@@ -24,6 +24,12 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   Mac builds: TetherQS zip 27.2 MiB, Tether .app.tar.gz 36.3 MiB) failed to publish at all. It now goes
   to the relays only (index entry with the relay URL alone, as without a CDN), with a CDN warning in the
   result. `dist/manage/Tether Manage 0.5.13.exe` (built with the production admin key).
+  Tether Manage 0.5.14: that CDN line is a neutral note ("27.2 MiB, over the CDN's 25 MiB per file:
+  devices get it from the relays") and no longer lists those builds as live on the CDN. Mac 0.5.30/0.5.32
+  were published that way (relays only). Universal Mac files are two full binaries (Intel + Apple silicon,
+  85 and 69 MiB unpacked: the RustDesk core with aom, FFmpeg and libvpx linked in statically); xz would
+  bring them under 25 MiB, but any new field or encoding in the release index makes every installed app
+  reject the whole index (`deny_unknown_fields`, `packed.encoding` must be gzip), so the format stays.
 - macOS releases were arm64-only: the runner job forced `MAC_ARCH=arm64`, and its output was
   published as `…-universal` (TetherQS 0.5.29, Tether 0.5.31: one Mach-O slice, CPU type ARM64),
   which the relays also offer to `darwin-x86_64`, so Intel Macs got an app they cannot run. The

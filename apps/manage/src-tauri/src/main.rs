@@ -927,6 +927,12 @@ fn live_without_manifest(e: &str) -> Value {
     json!({ "live": true, "warning": format!("release index written, so it is live here; legacy latest.json not updated: {e} Older apps (before 0.5.24) do not see this release yet; run Publish to missing relays later.") })
 }
 
+/// "27.2 MiB, over the CDN's 25 MiB per file: devices get it from the relays" from the size error.
+fn cdn_too_big_note(e: &str) -> String {
+    let size = e.split(" is ").nth(1).and_then(|s| s.split(';').next()).unwrap_or("over 25 MiB");
+    format!("{size}, over the CDN's 25 MiB per file: devices get it from the relays")
+}
+
 /// The update file the CDN serves for a release: the gzip copy if there is one, else the artifact.
 fn cdn_file(u: &Upload) -> (String, &[u8]) {
     match &u.packed {
@@ -967,7 +973,7 @@ async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, r
     let mut extra = Vec::new();
     let cdn_base = match &too_big {
         Some(e) => {
-            extra.push(RelayResult::of("CDN", Ok(json!({ "warning": format!("Not on the CDN, relays only: {e}") }))));
+            extra.push(RelayResult::of("CDN", Ok(json!({ "relaysOnly": true, "note": cdn_too_big_note(e) }))));
             Ok(None)
         }
         None => cdn_publish(app, ui, u, &servers).await,
@@ -2507,6 +2513,12 @@ mod tests {
         })
         .unwrap();
         serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&ix).unwrap(), key)).unwrap()
+    }
+
+    #[test]
+    fn cdn_note_names_the_size() {
+        let e = cdn::check_size("/stable/customer/darwin-universal/TetherQS-0.5.30-universal.zip", 28_514_378).unwrap_err();
+        assert_eq!(cdn_too_big_note(&e), "27.2 MiB, over the CDN's 25 MiB per file: devices get it from the relays");
     }
 
     #[test]

@@ -182,3 +182,15 @@ test("toasts after a Cancel name what happened, not a plain success", () => {
   n.cancel("QS");
   assert.equal(n.toast("1.0"), "Cancelled. Nothing was published");
 });
+
+test("a build left to the relays (CDN size limit) is a note on the CDN row, not live there and no warning", () => {
+  const t = new Tally([A], []);
+  t.results("Mac 0.5.32", [ok(A, { live: true }), ok("CDN", { relaysOnly: true, note: "36.3 MiB, over the CDN's 25 MiB per file: devices get it from the relays" })]);
+  t.results("Win 0.5.31", [ok(A, { live: true }), ok("CDN", { base: "https://dl.example" })]);
+  const cdn = t.rows().find((r) => r.server === "CDN")!;
+  assert.ok(cdn.ok);
+  assert.deepEqual(cdn.detail.published, ["Win 0.5.31"]);
+  assert.equal(cdn.detail.warning, undefined);
+  assert.match(cdn.detail.note, /^Mac 0\.5\.32: 36\.3 MiB/);
+  assert.equal(t.summary(), "Published on every relay.");
+});

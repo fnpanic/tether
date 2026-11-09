@@ -224,6 +224,8 @@ interface Got {
   errs: string[];
   cancelled: string[];
   warn: string[];
+  /** Builds this target left to the relays (CDN: file over its size limit). */
+  notes: string[];
 }
 
 /** Per relay what went live and what did not (and why), over several builds. `skip` grows with
@@ -241,7 +243,7 @@ export class Tally {
     servers.forEach((sv) => this.at(sv));
   }
   private at(sv: string) {
-    if (!this.per.has(sv)) this.per.set(sv, { live: [], errs: [], cancelled: [], warn: [] });
+    if (!this.per.has(sv)) this.per.set(sv, { live: [], errs: [], cancelled: [], warn: [], notes: [] });
     return this.per.get(sv)!;
   }
   /** The relays the next step goes to. */
@@ -260,6 +262,7 @@ export class Tally {
     if (!this.labels.includes(what)) this.labels.push(what);
     for (const x of rows) {
       if (x.server === "Cancel") this.late.push(`${what}: ${x.error}`);
+      else if (x.ok && x.detail?.relaysOnly) this.at(x.server).notes.push(`${what}: ${x.detail.note}`);
       else if (x.ok) {
         this.at(x.server).live.push(what);
         if (x.detail?.warning) this.at(x.server).warn.push(`${what}: ${x.detail.warning}`);
@@ -293,7 +296,7 @@ export class Tally {
       const errs = g.live.length ? g.errs : [...g.errs, ...g.cancelled.map((c) => `${c}: cancelled, not published`)];
       const warn = [...g.warn, ...(g.live.length && g.cancelled.length ? [`Not published (cancelled): ${g.cancelled.join(", ")}`] : [])];
       // One line per build.
-      return { server, ok: !errs.length, error: errs.join("\n") || undefined, detail: { published: g.live, warning: warn.join("\n") || undefined } };
+      return { server, ok: !errs.length, error: errs.join("\n") || undefined, detail: { published: g.live, warning: warn.join("\n") || undefined, note: g.notes.join("\n") || undefined } };
     });
     if (this.late.length) out.push({ server: "Cancel", ok: false, error: this.late.join("; "), detail: null });
     return out;

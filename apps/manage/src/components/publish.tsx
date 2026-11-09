@@ -17,6 +17,7 @@ export function RelayResults({ results, ok = describe }: { results: RelayResult[
             {/* A failed row still names what went live there (several builds). */}
             {(r.ok || !!r.detail?.published?.length) && <span className="block text-muted">{r.ok ? ok(r) : `Live: ${r.detail.published.join(" · ")}`}</span>}
             {!r.ok && <span className="block whitespace-pre-line text-danger">{r.error}</span>}
+            {r.detail?.note && <span className="block whitespace-pre-line text-muted">{r.detail.note}</span>}
             {r.detail?.warning && <span className="block whitespace-pre-line text-warn">{r.detail.warning}</span>}
           </span>
         </li>
@@ -27,6 +28,7 @@ export function RelayResults({ results, ok = describe }: { results: RelayResult[
 
 function describe(r: RelayResult) {
   if (r.detail?.base) return `Update files live on ${host(r.detail.base)}`;
+  if (r.detail?.note && !r.detail?.published?.length) return "Relays only for these builds";
   if (r.detail?.already) return "Already up to date";
   if (r.detail?.published?.length) return r.detail.published.join(" · ");
   if (r.detail?.serial != null) return `Serial ${r.detail.serial} is live`;
