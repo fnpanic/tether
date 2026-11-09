@@ -265,3 +265,16 @@ the Standard ramp left it waiting (bucket 34.65 > 1 %); "Everyone now" made it d
 stage the update; a running session blocked the automatic install; halt (re-checked before install)
 and resume; a tampered index, a replayed older index and a downgraded binary were refused; once the
 session ended the update installed; the 0.5.23 client stayed online through the hints.
+
+Re-verified 2026-11-09 at d1b9275 (technician app 0.5.30 code, debug build against the local relay):
+35/35, the hbbs push reached the running client in 30 s (`RELEASE_HINT_SPREAD=10`), it fetched and
+verified the index and, after "Everyone now", downloaded, verified and staged the update.
+
+**In production, TetherQS** (2026-11-09, publish of 0.5.28, rollout Immediately): a TetherQS
+running in the test VM got hbbs's release hint about 1 s after each relay's index changed and
+showed "Version 0.5.28 is available" 35 s after the final publish, without a restart; the
+update then installed from the app. Where the time goes: the publish raised the generation twice
+(00:45:46 and 00:46:21); the first check ran before the new index was complete ("up to date"),
+the per-relay limit of one check a minute held the second hint until 00:46:47, and the random
+spread (0-60 s, `RELEASE_HINT_SPREAD`) added the rest. Worst case after a publish is therefore about
+two minutes; this is the intended thundering-herd protection, not a fault.
