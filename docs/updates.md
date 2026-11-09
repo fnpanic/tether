@@ -292,8 +292,14 @@ Test-channel builds are not linked from the download page, which always uses `st
   `tether`) reads it as a member of group `tether-api` (`server/install.sh`; restart hbbs after the
   group change). Override with `RELEASE_GENERATION_FILE`; hint spread `RELEASE_HINT_SPREAD`
   (default 60 s, at most 900; raise it on small nodes).
-- Caddy routes `GET /download/<channel>/releases.json` to tether-api and serves the files as
+- Caddy routes `GET /download/<channel>/releases.json` and `releases-v2.json` to tether-api
+  (`@index path_regexp ^/download/[a-z0-9-]+/releases(-v2)?\.json$`) and serves the files as
   they are (no `precompressed`, see above); with nginx use `proxy_pass` and no `gzip_static`.
+  Without that route Caddy serves both index files from disk, which works the same for clients
+  (Caddy's own ETag, 404 when absent); only tether-api's index-fetch counter and the serial ETag
+  are missing. On 2026-11-09 relay 1's Caddyfile had no `@index` route at all and relay 2's still
+  the releases.json-only pattern (`scripts/caddy-index-v2.sh`, run on the relay, updates it, validated
+  before the reload).
 - Order: tether-api (+ Caddyfile) first, then hbbs; clients and Manage after. Each step works
   without the next ones; old clients ignore `ReleaseHint` and the heartbeat body.
 
@@ -327,3 +333,30 @@ build (the published one, own profile, on a hidden desktop) started; its first c
 at 07:34:25.5, 0.5.30 was downloaded and verified at 07:34:49.9 and the home page showed "Update
 available. Version 0.5.30 is ready to install. You have 0.5.29." at 07:34:50.8, 25 s after the
 resume, without a restart.
+
+### Two index files (`apps/desktop/e2e/index-v2-e2e.mjs`)
+
+`node e2e/index-v2-e2e.mjs`: two tether-api relays in WSL behind proxies that log every request,
+Tether Manage of this checkout with a copy of the test vault, a debug TetherQS (test keys,
+`TETHER_DEV_API`, its own `TETHER_PROFILE`), and `tether-trust` as it was before releases-v2.json
+(176c62c, `examples/index_check.rs` in a worktree) standing in for every installed app. Verified
+2026-11-09, 28/28:
+
+- Manage publishes TetherQS for Windows and macOS and Tether for macOS; on both relays v1 and v2
+  have the same serial, v1 is gzip only, v2 has the xz copies: TetherQS.exe 35 → 9.0 MiB, the
+  TetherQS zip's stored twin 69.2 → 17.0 MiB, the Tether .app.tar.gz's stored twin 85.3 → 22.2 MiB.
+  Python checks that each .xz unpacks to exactly the twin whose sha256 the index names, and that
+  the twin holds the same tar / the same zip entries (names, CRCs, sizes, modes) as the original.
+- The old release-index code takes releases.json and refuses releases-v2.json (`packed: gzip, …`).
+- TetherQS fetches releases-v2.json, downloads `TetherQS-0.9.31.exe.xz` (not .gz, not the exe) and
+  stages exactly the published exe.
+- With Manage switched to releases.json only (marker file), 0.9.32 goes into v1 only: v1 is one
+  serial ahead of the stale v2, TetherQS takes v1 and the .gz copy.
+- `scripts/release-index-v1.sh` against these relays deletes releases-v2.json on both (404 at
+  once), TetherQS updates to 0.9.33 from releases.json; `--on` and the next publish write v2 again
+  (same serial) and TetherQS takes the xz copy of 0.9.34.
+
+On the build Mac (macbuild job, 2026-11-09) the two .xz copies from this run were unpacked with
+Python's lzma, the TetherQS twin extracted with `ditto -x -k`, the Tether twin with `tar -xzf`:
+`codesign --verify --deep --strict` passes for both, the designated requirement is the one of the
+regular builds (`certificate root = H"bcf53642…"`), both are `x86_64 arm64`, and TetherQS starts.
