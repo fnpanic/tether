@@ -2737,7 +2737,7 @@ index 0ec190a..ad44169 100644
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..e2868d4 100644
+index dff45eb..3eac3de 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,14 @@ use std::{
@@ -2756,7 +2756,7 @@ index dff45eb..e2868d4 100644
  type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
  type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
  enum Sink {
-@@ -57,17 +61,85 @@ enum Sink {
+@@ -57,17 +61,87 @@ enum Sink {
  type Sender = mpsc::UnboundedSender<Data>;
  type Receiver = mpsc::UnboundedReceiver<Data>;
  static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
@@ -2796,6 +2796,8 @@ index dff45eb..e2868d4 100644
 +type TcpPeerTx = mpsc::Sender<RendezvousMessage>;
 +const PEER_QUEUE: usize = 64;
 +const PEER_SEND_TIMEOUT_MS: u64 = 5_000;
++/// At most this often a host is asked to take back an id whose path is a closed connection.
++const RECLAIM_EVERY: Duration = Duration::from_secs(30);
 +static TCP_PEERS: Lazy<TokioMutex<HashMap<SocketAddr, (TcpPeerTx, String)>>> =
 +    Lazy::new(|| TokioMutex::new(HashMap::new()));
 +
@@ -2843,7 +2845,7 @@ index dff45eb..e2868d4 100644
  
  #[derive(Clone)]
  struct Inner {
-@@ -84,7 +156,7 @@ pub struct RendezvousServer {
+@@ -84,7 +158,7 @@ pub struct RendezvousServer {
      tcp_punch: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
      pm: PeerMap,
      tx: Sender,
@@ -2852,7 +2854,7 @@ index dff45eb..e2868d4 100644
      relay_servers0: Arc<RelayServers>,
      rendezvous_servers: Arc<Vec<String>>,
      inner: Arc<Inner>,
-@@ -101,6 +173,10 @@ impl RendezvousServer {
+@@ -101,6 +175,10 @@ impl RendezvousServer {
      #[tokio::main(flavor = "multi_thread")]
      pub async fn start(port: i32, serial: i32, key: &str, rmem: usize) -> ResultType<()> {
          let (key, sk) = Self::get_server_sk(key);
@@ -2863,7 +2865,7 @@ index dff45eb..e2868d4 100644
          let nat_port = port - 1;
          let ws_port = port + 2;
          let pm = PeerMap::new().await?;
-@@ -108,8 +184,15 @@ impl RendezvousServer {
+@@ -108,8 +186,15 @@ impl RendezvousServer {
          let rendezvous_servers = get_servers(&get_arg("rendezvous-servers"), "rendezvous-servers");
          log::info!("Listening on tcp/udp :{}", port);
          log::info!("Listening on tcp :{}, extra port for NAT test", nat_port);
@@ -2880,7 +2882,7 @@ index dff45eb..e2868d4 100644
          let (tx, mut rx) = mpsc::unbounded_channel::<Data>();
          let software_url = get_arg("software-url");
          let version = hbb_common::get_version_from_url(&software_url);
-@@ -147,9 +230,10 @@ impl RendezvousServer {
+@@ -147,9 +232,10 @@ impl RendezvousServer {
          log::info!("local-ip: {:?}", rs.inner.local_ip);
          std::env::set_var("PORT_FOR_API", port.to_string());
          rs.parse_relay_servers(&get_arg("relay-servers"));
@@ -2892,7 +2894,7 @@ index dff45eb..e2868d4 100644
          let test_addr = std::env::var("TEST_HBBS").unwrap_or_default();
          if std::env::var("ALWAYS_USE_RELAY")
              .unwrap_or_default()
-@@ -216,12 +300,20 @@ impl RendezvousServer {
+@@ -216,12 +302,20 @@ impl RendezvousServer {
                      }
                      LoopFailure::Listener3 => {
                          drop(listener3);
@@ -2915,7 +2917,7 @@ index dff45eb..e2868d4 100644
          tokio::select!(
              res = main_task => res,
              res = listen_signal => res,
-@@ -237,6 +329,9 @@ impl RendezvousServer {
+@@ -237,6 +331,9 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> LoopFailure {
@@ -2925,7 +2927,7 @@ index dff45eb..e2868d4 100644
          let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
          loop {
              tokio::select! {
-@@ -251,9 +346,25 @@ impl RendezvousServer {
+@@ -251,9 +348,25 @@ impl RendezvousServer {
                  }
                  Some(data) = rx.recv() => {
                      match data {
@@ -2953,7 +2955,7 @@ index dff45eb..e2868d4 100644
                      }
                  }
                  res = socket.next() => {
-@@ -321,10 +432,21 @@ impl RendezvousServer {
+@@ -321,10 +434,21 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> ResultType<()> {
@@ -2975,13 +2977,15 @@ index dff45eb..e2868d4 100644
                      if !rp.id.is_empty() {
                          log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
                          self.update_addr(rp.id, addr, socket).await?;
-@@ -340,89 +462,9 @@ impl RendezvousServer {
+@@ -340,89 +464,9 @@ impl RendezvousServer {
                      }
                  }
                  Some(rendezvous_message::Union::RegisterPk(rk)) => {
 -                    if rk.uuid.is_empty() || rk.pk.is_empty() {
 -                        return Ok(());
--                    }
++                    if let Some(msg_out) = self.register_pk(rk, addr).await {
++                        socket.send(&msg_out, addr).await?
+                     }
 -                    let id = rk.id;
 -                    let ip = addr.ip().to_string();
 -                    if id.len() < 6 {
@@ -3052,9 +3056,7 @@ index dff45eb..e2868d4 100644
 -                                (Instant::now(), HashMap::from([(ip.clone(), 1)])),
 -                            );
 -                        }
-+                    if let Some(msg_out) = self.register_pk(rk, addr).await {
-+                        socket.send(&msg_out, addr).await?
-                     }
+-                    }
 -                    if changed {
 -                        self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
 -                    }
@@ -3067,7 +3069,7 @@ index dff45eb..e2868d4 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // UDP PunchHoleRequest is intentionally unsupported.
-@@ -479,9 +521,34 @@ impl RendezvousServer {
+@@ -479,9 +523,34 @@ impl RendezvousServer {
          addr: SocketAddr,
          key: &str,
          ws: bool,
@@ -3102,7 +3104,7 @@ index dff45eb..e2868d4 100644
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // there maybe several attempt, so sink can be none
                      if let Some(sink) = sink.take() {
-@@ -521,8 +588,18 @@ impl RendezvousServer {
+@@ -521,8 +590,18 @@ impl RendezvousServer {
                              rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
                          }
                      }
@@ -3122,7 +3124,7 @@ index dff45eb..e2868d4 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
                      allow_err!(self.handle_hole_sent(phs, addr, None).await);
-@@ -545,14 +622,31 @@ impl RendezvousServer {
+@@ -545,14 +624,31 @@ impl RendezvousServer {
                      msg_out.set_test_nat_response(res);
                      Self::send_to_sink(sink, msg_out).await;
                  }
@@ -3162,7 +3164,7 @@ index dff45eb..e2868d4 100644
                  }
                  _ => {}
              }
-@@ -567,6 +661,12 @@ impl RendezvousServer {
+@@ -567,6 +663,12 @@ impl RendezvousServer {
          socket_addr: SocketAddr,
          socket: &mut FramedSocket,
      ) -> ResultType<()> {
@@ -3175,7 +3177,7 @@ index dff45eb..e2868d4 100644
          let (request_pk, ip_change) = if let Some(old) = self.pm.get_in_memory(&id).await {
              let mut old = old.write().await;
              let ip = socket_addr.ip();
-@@ -601,7 +701,113 @@ impl RendezvousServer {
+@@ -601,7 +703,122 @@ impl RendezvousServer {
              request_pk,
              ..Default::default()
          });
@@ -3186,13 +3188,22 @@ index dff45eb..e2868d4 100644
 +    /// A TCP/WebSocket host is online while its connection lives: refresh what the UDP path
 +    /// refreshes on every RegisterPeer. Only the connection that is the host's current path does:
 +    /// moving the path takes an accepted RegisterPeer or RegisterPk.
-+    async fn touch_tcp_peer(pm: &PeerMap, id: &str, addr: SocketAddr) {
-+        if let Some(peer) = pm.get_in_memory(id).await {
++    /// True when another connection took the path and is gone since (a second app on the host's
++    /// machine registered the same id, then quit): this one should re-register (request_pk), or
++    /// its id stays unreachable with the other app's key until it reconnects.
++    async fn touch_tcp_peer(pm: &PeerMap, id: &str, addr: SocketAddr) -> bool {
++        let Some(peer) = pm.get_in_memory(id).await else {
++            return false;
++        };
++        let path = {
 +            let mut peer = peer.write().await;
 +            if peer.socket_addr == addr {
 +                peer.last_reg_time = Instant::now();
++                return false;
 +            }
-+        }
++            peer.socket_addr
++        };
++        !TCP_PEERS.lock().await.contains_key(&try_into_v4(path))
 +    }
 +
 +    /// RegisterPk handling shared by UDP and TCP/WebSocket clients. None = ignore the request.
@@ -3290,7 +3301,7 @@ index dff45eb..e2868d4 100644
      }
  
      #[inline]
-@@ -620,17 +826,25 @@ impl RendezvousServer {
+@@ -620,17 +837,25 @@ impl RendezvousServer {
              &addr
          );
          let mut msg_out = RendezvousMessage::new();
@@ -3317,7 +3328,7 @@ index dff45eb..e2868d4 100644
              socket.send(&msg_out, addr_a).await?;
          } else {
              self.send_to_tcp(msg_out, addr_a).await;
-@@ -658,6 +872,7 @@ impl RendezvousServer {
+@@ -658,6 +883,7 @@ impl RendezvousServer {
              socket_addr: la.local_addr.clone(),
              pk: self.get_pk(&la.version, la.id).await,
              relay_server: la.relay_server,
@@ -3325,7 +3336,7 @@ index dff45eb..e2868d4 100644
              ..Default::default()
          };
          p.set_is_local(true);
-@@ -679,8 +894,9 @@ impl RendezvousServer {
+@@ -679,8 +905,9 @@ impl RendezvousServer {
          ws: bool,
      ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
          let mut ph = ph;
@@ -3336,7 +3347,7 @@ index dff45eb..e2868d4 100644
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
                  failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
-@@ -700,6 +916,7 @@ impl RendezvousServer {
+@@ -700,6 +927,7 @@ impl RendezvousServer {
                  (r.last_reg_time.elapsed().as_millis() as i64, r.socket_addr)
              };
              if elapsed >= REG_TIMEOUT {
@@ -3344,7 +3355,7 @@ index dff45eb..e2868d4 100644
                  let mut msg_out = RendezvousMessage::new();
                  msg_out.set_punch_hole_response(PunchHoleResponse {
                      failure: punch_hole_response::Failure::OFFLINE.into(),
-@@ -721,7 +938,12 @@ impl RendezvousServer {
+@@ -721,7 +949,12 @@ impl RendezvousServer {
                          break;
                      }
                  }
@@ -3358,7 +3369,7 @@ index dff45eb..e2868d4 100644
              }
  
              let mut msg_out = RendezvousMessage::new();
-@@ -744,6 +966,7 @@ impl RendezvousServer {
+@@ -744,6 +977,7 @@ impl RendezvousServer {
                      }
                  });
              let socket_addr = AddrMangle::encode(addr).into();
@@ -3366,7 +3377,7 @@ index dff45eb..e2868d4 100644
              if same_intranet {
                  log::debug!(
                      "Fetch local addr {:?} {:?} request from {:?}",
-@@ -754,6 +977,7 @@ impl RendezvousServer {
+@@ -754,6 +988,7 @@ impl RendezvousServer {
                  msg_out.set_fetch_local_addr(FetchLocalAddr {
                      socket_addr,
                      relay_server,
@@ -3374,7 +3385,7 @@ index dff45eb..e2868d4 100644
                      ..Default::default()
                  });
              } else {
-@@ -763,15 +987,29 @@ impl RendezvousServer {
+@@ -763,15 +998,29 @@ impl RendezvousServer {
                      peer_addr,
                      addr
                  );
@@ -3404,7 +3415,7 @@ index dff45eb..e2868d4 100644
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
                  failure: punch_hole_response::Failure::ID_NOT_EXIST.into(),
-@@ -787,6 +1025,13 @@ impl RendezvousServer {
+@@ -787,6 +1036,13 @@ impl RendezvousServer {
          stream: &mut FramedStream,
          peers: Vec<String>,
      ) -> ResultType<()> {
@@ -3418,7 +3429,7 @@ index dff45eb..e2868d4 100644
          let mut states = BytesMut::zeroed((peers.len() + 7) / 8);
          for (i, peer_id) in peers.iter().enumerate() {
              if let Some(peer) = self.pm.get_in_memory(peer_id).await {
-@@ -805,9 +1050,7 @@ impl RendezvousServer {
+@@ -805,9 +1061,7 @@ impl RendezvousServer {
              states: states.into(),
              ..Default::default()
          });
@@ -3429,7 +3440,7 @@ index dff45eb..e2868d4 100644
      }
  
      #[inline]
-@@ -821,19 +1064,57 @@ impl RendezvousServer {
+@@ -821,19 +1075,57 @@ impl RendezvousServer {
      #[inline]
      async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) {
          if let Some(sink) = sink.as_mut() {
@@ -3450,14 +3461,14 @@ index dff45eb..e2868d4 100644
 +            match sink {
 +                Sink::TcpStream(s) => {
 +                    allow_err!(s.send(Bytes::from(bytes)).await);
-                 }
++                }
 +                Sink::Ws(ws) => {
 +                    allow_err!(ws.send(tungstenite::Message::Binary(bytes)).await);
-+                }
-+            }
-+        }
-+    }
-+
+                 }
+             }
+         }
+     }
+ 
 +    /// Send to the controller's punch socket and keep it for later messages (ICE candidates);
 +    /// it is dropped when that connection closes.
 +    /// The lock is held while sending so a candidate racing this message is not lost; a peer that
@@ -3468,10 +3479,10 @@ index dff45eb..e2868d4 100644
 +        if let Some(sink) = punch.get_mut(&key) {
 +            if timeout(500, Self::send_sink(sink, msg)).await.is_err() {
 +                punch.remove(&key);
-             }
-         }
-     }
- 
++            }
++        }
++    }
++
 +    /// Tether: WebRTC trickle ICE between the two peers. From the host (on its own connection)
 +    /// `socket_addr` names the controller's punch socket; from the controller `id` names the
 +    /// host, reached over its registration. Candidates are opaque here: the peers check the
@@ -3495,7 +3506,7 @@ index dff45eb..e2868d4 100644
      #[inline]
      async fn send_to_tcp_sync(
          &mut self,
-@@ -880,6 +1161,17 @@ impl RendezvousServer {
+@@ -880,6 +1172,17 @@ impl RendezvousServer {
          Ok(())
      }
  
@@ -3513,7 +3524,7 @@ index dff45eb..e2868d4 100644
      async fn check_ip_blocker(&self, ip: &str, id: &str) -> bool {
          let mut lock = IP_BLOCKER.lock().await;
          let now = Instant::now();
-@@ -887,7 +1179,8 @@ impl RendezvousServer {
+@@ -887,7 +1190,8 @@ impl RendezvousServer {
              let counter = &mut old.0;
              if counter.1.elapsed().as_secs() > IP_BLOCK_DUR {
                  counter.0 = 0;
@@ -3523,7 +3534,7 @@ index dff45eb..e2868d4 100644
                  return false;
              }
              counter.0 += 1;
-@@ -897,7 +1190,10 @@ impl RendezvousServer {
+@@ -897,7 +1201,10 @@ impl RendezvousServer {
              let is_new = counter.0.get(id).is_none();
              if counter.1.elapsed().as_secs() > DAY_SECONDS {
                  counter.0.clear();
@@ -3535,7 +3546,7 @@ index dff45eb..e2868d4 100644
                  return !is_new;
              }
              if is_new {
-@@ -911,19 +1207,28 @@ impl RendezvousServer {
+@@ -911,19 +1218,28 @@ impl RendezvousServer {
      }
  
      fn parse_relay_servers(&mut self, relay_servers: &str) {
@@ -3573,7 +3584,7 @@ index dff45eb..e2868d4 100644
      }
  
      async fn check_cmd(&self, cmd: &str) -> String {
-@@ -948,8 +1253,9 @@ impl RendezvousServer {
+@@ -948,8 +1264,9 @@ impl RendezvousServer {
                  if let Some(rs) = fds.next() {
                      self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                  } else {
@@ -3585,7 +3596,7 @@ index dff45eb..e2868d4 100644
                      }
                  }
              }
-@@ -1148,20 +1454,22 @@ impl RendezvousServer {
+@@ -1148,20 +1465,22 @@ impl RendezvousServer {
          key: &str,
          ws: bool,
      ) -> ResultType<()> {
@@ -3616,7 +3627,7 @@ index dff45eb..e2868d4 100644
                      }
                  }
                  Ok(response)
-@@ -1169,22 +1477,95 @@ impl RendezvousServer {
+@@ -1169,22 +1488,106 @@ impl RendezvousServer {
              let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
              let (a, mut b) = ws_stream.split();
              sink = Some(Sink::Ws(a));
@@ -3633,6 +3644,7 @@ index dff45eb..e2868d4 100644
 +            // every frame: clients ping every second, and the global lock per ping was the
 +            // hottest lock in hbbs (docs/scaling.md).
 +            let mut registered: Option<String> = None;
++            let mut last_reclaim: Option<Instant> = None;
 +            let mut release = RELEASE.subscribe();
 +            loop {
 +                let idle_ms = if registered.is_some() { 120_000 } else { 30_000 };
@@ -3655,7 +3667,17 @@ index dff45eb..e2868d4 100644
 +                    r = timeout(idle_ms, b.next()) => match r {
 +                        Ok(Some(Ok(tungstenite::Message::Binary(bytes)))) if bytes.is_empty() => {
 +                            if let Some(id) = &registered {
-+                                Self::touch_tcp_peer(&self.pm, id, addr).await;
++                                if Self::touch_tcp_peer(&self.pm, id, addr).await
++                                    && last_reclaim.map_or(true, |t| t.elapsed() > RECLAIM_EVERY)
++                                {
++                                    last_reclaim = Some(Instant::now());
++                                    log::info!("{} takes back its orphaned path for {}", addr, id);
++                                    let mut m = RendezvousMessage::new();
++                                    m.set_register_peer_response(RegisterPeerResponse { request_pk: true, ..Default::default() });
++                                    if timeout(PEER_SEND_TIMEOUT_MS, Self::send_to_sink(&mut sink, m)).await.is_err() {
++                                        break;
++                                    }
++                                }
 +                            }
 +                        }
 +                        Ok(Some(Ok(tungstenite::Message::Binary(bytes)))) => {
@@ -3719,7 +3741,7 @@ index dff45eb..e2868d4 100644
          if sink.is_none() {
              self.tcp_punch.lock().await.remove(&try_into_v4(addr));
          }
-@@ -1268,24 +1649,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
+@@ -1268,24 +1671,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
      let mut futs = Vec::new();
      let rs = Arc::new(Mutex::new(Vec::new()));
      for x in rs0.iter() {
@@ -3777,7 +3799,7 @@ index dff45eb..e2868d4 100644
      if !rs.is_empty() {
          tx.send(Data::RelayServers(rs)).ok();
      }
-@@ -1330,17 +1738,14 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+@@ -1330,17 +1760,14 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
  }
  
  #[inline]
@@ -3798,7 +3820,7 @@ index dff45eb..e2868d4 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1766,472 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1788,483 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
@@ -4027,8 +4049,19 @@ index dff45eb..e2868d4 100644
 +            rs.handle_tcp(&register_peer(id), &mut None, host2, "", true, &host2_tx).await;
 +            assert!(is_signalling_path(host2).await);
 +            assert_eq!(path(&rs, id).await, host2);
-+            RendezvousServer::touch_tcp_peer(&rs.pm, id, host).await;
++            assert!(!RendezvousServer::touch_tcp_peer(&rs.pm, id, host).await, "path is live");
 +            assert_eq!(path(&rs, id).await, host2, "stale connection took the path back");
++            // Another app on the host's machine (same uuid and IP, own key) takes the id, then quits:
++            // the host's live connection is told to re-register; its RegisterPk takes the id back.
++            assert!(rs.handle_tcp(&register_pk(id, b"host-uuid", b"other-app-pk"), &mut None, host2, "", true, &host2_tx).await);
++            assert_eq!(path(&rs, id).await, host2);
++            TCP_PEERS.lock().await.remove(&host2);
++            assert!(RendezvousServer::touch_tcp_peer(&rs.pm, id, host).await, "orphaned path not reported");
++            assert_eq!(path(&rs, id).await, host2, "a heartbeat alone must not move the path");
++            assert!(rs.handle_tcp(&register_pk(id, b"host-uuid", b"host-pk"), &mut None, host, "", true, &host_tx).await);
++            assert_eq!(path(&rs, id).await, host);
++            assert_eq!(rs.pm.get_in_memory(id).await.unwrap().read().await.pk.to_vec(), b"host-pk".to_vec());
++            assert!(!RendezvousServer::touch_tcp_peer(&rs.pm, id, host).await);
 +            let _ = std::fs::remove_file(&db);
 +        });
 +    }

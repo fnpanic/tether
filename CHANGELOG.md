@@ -12,6 +12,17 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   own ID: it cannot connect to itself.": in the running Tether, or in a Tether started for it when
   none runs (Windows, macOS); the command still prints it and exits 2 (docs/cli.md).
 
+- TetherQS 0.5.29: its own ID. Up to 0.5.28 TetherQS and the technician app on the same PC got the
+  same MAC-derived ID (with different keys); the relays let the last registration win, so a
+  connection reached either app at random and the password did not match. A new TetherQS now
+  starts with a salted MAC-derived ID. Only PCs that also run Tether with the same ID change their
+  TetherQS ID, once, at a plain start (not on an update or admin-access restart, which keep the ID
+  the customer gave out); every other TetherQS keeps its ID, and the technician app's ID never
+  changes. docs/quick-support.md#id.
+- hbbs: a host whose ID was taken by another connection that has since closed is asked to register
+  again (`request_pk`, at most every 30 s), so the technician app is reachable with its own key
+  again shortly after an old TetherQS that shared its ID quits or moves.
+
 ### Added
 - Tether: video watchdog in the session window. When frames arrive but no picture is drawn for
   about 3 s (a decoder failing silently), the session switches to native decoding; if that draws

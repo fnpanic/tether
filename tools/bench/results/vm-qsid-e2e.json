@@ -1,0 +1,183 @@
+{
+ "at": "2026-11-09T10:12:25.667Z",
+ "viewer": "C:\\cargo-target\\tether-rel\\release\\tether.exe",
+ "old_qs": "C:\\cargo-target\\tether-rel\\release\\TetherQS.exe",
+ "new_qs": "C:\\cargo-target\\qsid\\release\\TetherQS.exe",
+ "ok": true,
+ "steps": [
+  {
+   "name": "old TetherQS shows the technician app's ID (the bug)",
+   "ok": true,
+   "qs_id": "490209544",
+   "tech_id": "490209544"
+  },
+  {
+   "name": "new TetherQS moved to its own ID",
+   "ok": true,
+   "qs_id": "475766598",
+   "expected": "475766598",
+   "log": [
+    "[2026-11-09 11:13:37.324628 +01:00] INFO [src\\main.rs:108] id 490209544 is the technician app's on this machine, moved to 475766598"
+   ]
+  },
+  {
+   "name": "technician app reachable with its own password after the move",
+   "ok": true,
+   "seconds_after_qs_start": 22
+  },
+  {
+   "name": "TetherQS keeps its new ID across restarts",
+   "ok": true,
+   "ids": [
+    "475766598",
+    "475766598"
+   ]
+  },
+  {
+   "name": "5x each: every connection lands on the app it dials",
+   "ok": 10,
+   "of": 10
+  },
+  {
+   "name": "technician app's ID unchanged",
+   "ok": true,
+   "before": "490209544",
+   "after": "490209544"
+  }
+ ],
+ "vm_mac": "00:15:5d:38:01:08",
+ "expected": {
+  "technician": "490209544",
+  "tetherqs": "475766598"
+ },
+ "technician_id_is_plain_mac_id": true,
+ "bug_demo": {
+  "dial": "490209544",
+  "with": "technician permanent password",
+  "ok": true,
+  "qs_status": "Ready"
+ },
+ "rounds": [
+  {
+   "round": 1,
+   "dial": "tetherqs",
+   "id": "475766598",
+   "ok": true,
+   "ms": 4731,
+   "qs_session_active": true
+  },
+  {
+   "round": 1,
+   "dial": "technician",
+   "id": "490209544",
+   "ok": true,
+   "ms": 4695,
+   "qs_status_during": "Ready"
+  },
+  {
+   "round": 2,
+   "dial": "tetherqs",
+   "id": "475766598",
+   "ok": true,
+   "ms": 4729,
+   "qs_session_active": true
+  },
+  {
+   "round": 2,
+   "dial": "technician",
+   "id": "490209544",
+   "ok": true,
+   "ms": 4715,
+   "qs_status_during": "Ready"
+  },
+  {
+   "round": 3,
+   "dial": "tetherqs",
+   "id": "475766598",
+   "ok": true,
+   "ms": 4728,
+   "qs_session_active": true
+  },
+  {
+   "round": 3,
+   "dial": "technician",
+   "id": "490209544",
+   "ok": true,
+   "ms": 4722,
+   "qs_status_during": "Ready"
+  },
+  {
+   "round": 4,
+   "dial": "tetherqs",
+   "id": "475766598",
+   "ok": true,
+   "ms": 4839,
+   "qs_session_active": true
+  },
+  {
+   "round": 4,
+   "dial": "technician",
+   "id": "490209544",
+   "ok": true,
+   "ms": 4711,
+   "qs_status_during": "Ready"
+  },
+  {
+   "round": 5,
+   "dial": "tetherqs",
+   "id": "475766598",
+   "ok": true,
+   "ms": 4703,
+   "qs_session_active": true
+  },
+  {
+   "round": 5,
+   "dial": "technician",
+   "id": "490209544",
+   "ok": true,
+   "ms": 4697,
+   "qs_status_during": "Ready"
+  }
+ ],
+ "host_logs": [
+  "==== C:\\Users\\customer\\AppData\\Roaming\\Tether-QS\\log\\check-hwcodec-config\\TetherQS_rCURRENT.log",
+  "==== C:\\Users\\customer\\AppData\\Roaming\\Tether-QS\\log\\TetherQS_rCURRENT.log",
+  "[2026-11-09 11:14:23.729940 +01:00] DEBUG [C:\\install\\.claude\\clones\\qsid2\\vendor\\rustdesk\\src\\server\\connection.rs:1548] #1149 Connection opened from 91.41.2.18:56854.",
+  "[2026-11-09 11:14:23.818614 +01:00] DEBUG [C:\\install\\.claude\\clones\\qsid2\\vendor\\rustdesk\\src\\ui_cm_interface.rs:868] Got new connection",
+  "[2026-11-09 11:14:38.073921 +01:00] DEBUG [C:\\install\\.claude\\clones\\qsid2\\vendor\\rustdesk\\src\\server\\connection.rs:1548] #1150 Connection opened from 91.41.2.18:35184.",
+  "[2026-11-09 11:14:38.149483 +01:00] DEBUG [C:\\install\\.claude\\clones\\qsid2\\vendor\\rustdesk\\src\\ui_cm_interface.rs:868] Got new connection",
+  "[2026-11-09 11:14:52.593079 +01:00] DEBUG [C:\\install\\.claude\\clones\\qsid2\\vendor\\rustdesk\\src\\server\\connection.rs:1548] #1151 Connection opened from 91.41.2.18:35800.",
+  "[2026-11-09 11:14:52.676951 +01:00] DEBUG [C:\\install\\.claude\\clones\\qsid2\\vendor\\rustdesk\\src\\ui_cm_interface.rs:868] Got new connection",
+  "[2026-11-09 11:15:07.141960 +01:00] DEBUG [C:\\install\\.claude\\clones\\qsid2\\vendor\\rustdesk\\src\\server\\connection.rs:1548] #1152 Connection opened from 91.41.2.18:40106.",
+  "[2026-11-09 11:15:07.233812 +01:00] DEBUG [C:\\install\\.claude\\clones\\qsid2\\vendor\\rustdesk\\src\\ui_cm_interface.rs:868] Got new connection",
+  "[2026-11-09 11:15:21.574834 +01:00] DEBUG [C:\\install\\.claude\\clones\\qsid2\\vendor\\rustdesk\\src\\server\\connection.rs:1548] #1153 Connection opened from 91.41.2.18:37268.",
+  "[2026-11-09 11:15:21.652177 +01:00] DEBUG [C:\\install\\.claude\\clones\\qsid2\\vendor\\rustdesk\\src\\ui_cm_interface.rs:868] Got new connection",
+  "==== C:\\Users\\customer\\AppData\\Roaming\\Tether\\log\\cm\\tether_rCURRENT.log",
+  "[2026-11-09 11:13:50.994074 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\ui_cm_interface.rs:868] Got new connection",
+  "[2026-11-09 11:14:30.165661 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\ui_cm_interface.rs:868] Got new connection",
+  "[2026-11-09 11:14:44.719080 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\ui_cm_interface.rs:868] Got new connection",
+  "[2026-11-09 11:14:59.168936 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\ui_cm_interface.rs:868] Got new connection",
+  "[2026-11-09 11:15:13.806645 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\ui_cm_interface.rs:868] Got new connection",
+  "[2026-11-09 11:15:28.194378 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\ui_cm_interface.rs:868] Got new connection",
+  "==== C:\\Users\\customer\\AppData\\Roaming\\Tether\\log\\tether_rCURRENT.log",
+  "[2026-11-09 11:13:50.568864 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\server\\connection.rs:1546] #1437 Connection opened from 91.41.2.18:55986.",
+  "[2026-11-09 11:14:30.081490 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\server\\connection.rs:1546] #1438 Connection opened from 91.41.2.18:56882.",
+  "[2026-11-09 11:14:44.636730 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\server\\connection.rs:1546] #1439 Connection opened from 91.41.2.18:35762.",
+  "[2026-11-09 11:14:59.080324 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\server\\connection.rs:1546] #1440 Connection opened from 91.41.2.18:54068.",
+  "[2026-11-09 11:15:13.725695 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\server\\connection.rs:1546] #1441 Connection opened from 91.41.2.18:37226.",
+  "[2026-11-09 11:15:28.116040 +01:00] DEBUG [C:\\install\\remote-support\\vendor\\rustdesk\\src\\server\\connection.rs:1546] #1442 Connection opened from 91.41.2.18:34772.",
+  "==== C:\\Windows\\ServiceProfiles\\LocalService\\AppData\\Roaming\\Tether\\log\\server\\Tether_rCURRENT.log",
+  "==== C:\\Windows\\ServiceProfiles\\LocalService\\AppData\\Roaming\\Tether\\log\\service\\Tether_rCURRENT.log"
+ ],
+ "state_end": [
+  "qs exe: C:\\Users\\Public\\Downloads\\TetherQS.exe 0.5.29",
+  "tech exe: not installed",
+  "id C:\\Users\\customer\\AppData\\Roaming\\Tether-QS\\config\\Tether-QS.toml = ",
+  "id C:\\Users\\customer\\AppData\\Roaming\\Tether\\config\\Tether.toml = ",
+  "id C:\\Windows\\ServiceProfiles\\LocalService\\AppData\\Roaming\\Tether\\config\\Tether.toml = ",
+  "id C:\\Users\\bench\\AppData\\Roaming\\Tether\\config\\Tether.toml = "
+ ],
+ "restore": [
+  "restored"
+ ]
+}

@@ -29,6 +29,8 @@ const ORG: &str = "app.tether";
 const HANDOFF: &str = "handoff.json";
 /// Read by the core at startup: start the elevated portable service (UAC prompt).
 const PRE_ELEVATE: &str = "pre-elevate-service";
+/// Mixed into the MAC-derived ID (hbb_common `Config::auto_id_from_mac`); never change it.
+const ID_SALT: u64 = u64::from_le_bytes(*b"TetherQS");
 
 fn main() -> ExitCode {
     *hbb_common::config::APP_NAME.write().unwrap() = APP_NAME.to_owned();
@@ -41,6 +43,12 @@ fn main() -> ExitCode {
     {
         *hbb_common::config::ORG.write().unwrap() = ORG.to_owned();
     }
+    // Its own ID: the technician app on the same machine derives the same one from the MAC address,
+    // and two apps registering one ID take it from each other (docs/quick-support.md).
+    hbb_common::config::AUTO_ID_SALT.store(ID_SALT, std::sync::atomic::Ordering::Relaxed);
+    // Not on a relaunch (update, admin access): that one promises the ID the customer already gave
+    // out, and the old process may still write the config. The next plain start moves it.
+    let moved_from = if Config::path(HANDOFF).exists() { None } else { Config::separate_auto_id() };
     custom::load();
     if std::env::args().nth(1).as_deref() == Some("--print-custom-profile") {
         return if custom::print_status() { ExitCode::SUCCESS } else { ExitCode::FAILURE };
@@ -96,6 +104,9 @@ fn main() -> ExitCode {
 
     let code = match core_main() {
         Some(CoreMainAction::StartUi(args)) => {
+            if let Some(old) = moved_from {
+                hbb_common::log::info!("id {old} is the technician app's on this machine, moved to {}", Config::get_id());
+            }
             // The core has read it; a later normal start must not prompt for UAC again.
             if LocalConfig::get_option(PRE_ELEVATE) == "Y" {
                 LocalConfig::set_option(PRE_ELEVATE.into(), String::new());

@@ -47,10 +47,21 @@ index 54ec24b..b82f006 100644
    }
  }
 diff --git a/src/config.rs b/src/config.rs
-index 9ee5cac..5c529d3 100644
+index 9ee5cac..6870b2d 100644
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -113,8 +113,55 @@ const CHARS: &[char] = &[
+@@ -60,6 +60,10 @@ lazy_static::lazy_static! {
+ type Size = (i32, i32, i32, i32);
+ type KeyPair = (Vec<u8>, Vec<u8>);
+ 
++/// Tether: non-zero in TetherQS (set by apps/quick before the config is read) so its MAC-derived id
++/// differs from the technician app's on the same machine: two apps registering one id fight over it.
++pub static AUTO_ID_SALT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
+ lazy_static::lazy_static! {
+     static ref CONFIG: RwLock<Config> = RwLock::new(Config::load());
+     static ref CONFIG2: RwLock<Config2> = RwLock::new(Config2::load());
+@@ -113,8 +117,55 @@ const CHARS: &[char] = &[
      'm', 'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
  ];
  
@@ -108,7 +119,7 @@ index 9ee5cac..5c529d3 100644
  
  pub const RENDEZVOUS_PORT: i32 = 21116;
  pub const RELAY_PORT: i32 = 21117;
-@@ -1093,7 +1140,7 @@ impl Config {
+@@ -1093,7 +1144,7 @@ impl Config {
                  return ss;
              }
          }
@@ -117,10 +128,137 @@ index 9ee5cac..5c529d3 100644
      }
  
      pub fn reset_online() {
-@@ -3039,6 +3086,22 @@ impl Status {
+@@ -1194,12 +1245,8 @@ impl Config {
+ 
+         #[cfg(not(any(target_os = "android", target_os = "ios")))]
+         {
+-            let mut id = 0u32;
+             if let Ok(Some(ma)) = mac_address::get_mac_address() {
+-                for x in &ma.bytes()[2..] {
+-                    id = (id << 8) | (*x as u32);
+-                }
+-                id &= 0x1FFFFFFF;
++                let id = Self::auto_id_from_mac(&ma.bytes(), AUTO_ID_SALT.load(std::sync::atomic::Ordering::Relaxed));
+                 log::info!("Generated id {}", id);
+                 Some(id.to_string())
+             } else {
+@@ -1208,6 +1255,87 @@ impl Config {
+         }
+     }
+ 
++    /// Tether: the MAC-derived id. Salt 0 is upstream's derivation (the technician app's, kept so
++    /// saved unattended IDs stay valid); any other salt gives a 9-digit id from FNV-1a over salt and
++    /// MAC (fixed algorithm, stable across Rust versions) that is never the unsalted one.
++    pub fn auto_id_from_mac(mac: &[u8; 6], salt: u64) -> u32 {
++        let mut id = 0u32;
++        for x in &mac[2..] {
++            id = (id << 8) | (*x as u32);
++        }
++        id &= 0x1FFFFFFF;
++        if salt == 0 {
++            return id;
++        }
++        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
++        for b in salt.to_le_bytes().iter().chain(mac) {
++            h = (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3);
++        }
++        let s = 100_000_000 + (h % 900_000_000) as u32;
++        match s {
++            _ if s != id => s,
++            999_999_999 => 100_000_000,
++            _ => s + 1,
++        }
++    }
++
++    /// Tether: the id an app with `salt` (TetherQS) moves to when the technician app on this machine
++    /// stores the same id (`technician_ids`); None: keep it. A fresh install never moves: its first id
++    /// is already the salted one (`get_auto_id`).
++    pub fn separated_id(stored: &str, technician_ids: &[String], mac: &[u8; 6], salt: u64) -> Option<String> {
++        (salt != 0 && technician_ids.iter().any(|t| t == stored))
++            .then(|| Self::auto_id_from_mac(mac, salt).to_string())
++            .filter(|id| id != stored)
++    }
++
++    /// Tether: the ids the technician app ("Tether") stores on this machine: this user's config and
++    /// the installed service's. Missing or unreadable files are skipped.
++    #[cfg(not(any(target_os = "android", target_os = "ios")))]
++    fn technician_ids() -> Vec<String> {
++        #[cfg(not(target_os = "macos"))]
++        let org = String::new();
++        #[cfg(target_os = "macos")]
++        let org = ORG.read().unwrap().clone();
++        let mut files: Vec<PathBuf> = directories_next::ProjectDirs::from("", &org, "Tether")
++            .map(|p| patch(p.config_dir().to_path_buf()).join("Tether.toml"))
++            .into_iter()
++            .collect();
++        #[cfg(windows)]
++        files.push(
++            ["ServiceProfiles", "LocalService", "AppData", "Roaming", "Tether", "config", "Tether.toml"]
++                .iter()
++                .fold(PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())), |p, x| p.join(x)),
++        );
++        #[cfg(target_os = "macos")]
++        files.push(format!("/var/root/Library/Preferences/{org}.Tether/Tether.toml").into());
++        files
++            .into_iter()
++            .filter(|f| f.exists()) // load_path must not create one
++            .map(|f| {
++                let c: Config = load_path(f);
++                match decrypt_str_or_original(&c.enc_id, PASSWORD_ENC_VERSION) {
++                    (id, true, _) => id,
++                    _ => c.id,
++                }
++            })
++            .filter(|id| !id.is_empty())
++            .collect()
++    }
++
++    /// Tether: one-time switch for an app with an `AUTO_ID_SALT` (TetherQS), called at start before
++    /// the rendezvous mediator runs: the next registration then is a RegisterPk for the new id with
++    /// the unchanged key pair. Some(old id) when the id changed (runs before logging is set up).
++    #[cfg(not(any(target_os = "android", target_os = "ios")))]
++    pub fn separate_auto_id() -> Option<String> {
++        let salt = AUTO_ID_SALT.load(std::sync::atomic::Ordering::Relaxed);
++        let ma = mac_address::get_mac_address().ok().flatten().filter(|_| salt != 0)?;
++        let stored = CONFIG.read().unwrap().id.clone();
++        let id = Self::separated_id(&stored, &Self::technician_ids(), &ma.bytes(), salt)?;
++        Config::set_key_confirmed(false);
++        Config::set_id(&id);
++        Some(stored)
++    }
++
+     pub fn get_auto_password(length: usize) -> String {
+         Self::get_auto_password_with_chars(length, CHARS)
+     }
+@@ -3039,6 +3167,47 @@ impl Status {
  mod tests {
      use super::{permanent_password::PERMANENT_PASSWORD_ENC_VERSION, *};
  
++    // Tether: TetherQS's id (salted) differs from the technician app's (plain) on the same machine.
++    #[test]
++    fn tether_salted_auto_id() {
++        let salt = 0x5445_5448_4552_5153; // any non-zero
++        let macs = [[0x00, 0x1c, 0x42, 0x9a, 0x3b, 0x7f], [0xa4, 0x83, 0xe7, 0x12, 0x34, 0x56], [0; 6], [0xff; 6]];
++        for mac in macs {
++            let plain = Config::auto_id_from_mac(&mac, 0);
++            let qs = Config::auto_id_from_mac(&mac, salt);
++            assert_eq!(qs, Config::auto_id_from_mac(&mac, salt), "stable");
++            assert_ne!(qs, plain);
++            assert_eq!(qs.to_string().len(), 9);
++            let (plain, qs) = (plain.to_string(), qs.to_string());
++            let tether = [plain.clone()];
++            assert_eq!(Config::separated_id(&qs, &tether, &mac, salt), None, "fresh: salted from the start");
++            assert_eq!(Config::separated_id(&plain, &[], &mac, salt), None, "no technician app: keeps its id");
++            assert_eq!(Config::separated_id(&plain, &["987654321".into()], &mac, salt), None, "other id: keeps");
++            assert_eq!(Config::separated_id(&plain, &tether, &mac, salt), Some(qs.clone()), "same id: moves");
++            assert_eq!(Config::separated_id("1234567890", &["1234567890".into()], &mac, salt), Some(qs), "any shared id");
++            assert_eq!(Config::separated_id(&plain, &tether, &mac, 0), None, "technician app never moves");
++        }
++        // Upstream derivation unchanged: last 4 bytes, 29 bits.
++        assert_eq!(Config::auto_id_from_mac(&macs[0], 0), 0x029a3b7f);
++        assert_ne!(Config::auto_id_from_mac(&macs[0], salt), Config::auto_id_from_mac(&macs[1], salt));
++    }
++
 +    #[test]
 +    fn server_key_follows_the_signed_list() {
 +        let (a, b) = ("A".repeat(43) + "=", "B".repeat(43) + "=");
