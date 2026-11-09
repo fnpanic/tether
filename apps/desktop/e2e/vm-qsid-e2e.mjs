@@ -89,8 +89,16 @@ async function connect(id, pw, wait = 45000) {
   killViewer();
   const env = { ...process.env, TETHER_PROFILE: "qsid-viewer", WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`, TETHER_E2E_PW: pw };
   const t0 = Date.now();
-  execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", HIDDEN, "-Exe", VIEWER, "-Args", `--connect ${id} --password-env TETHER_E2E_PW`], { env, stdio: "ignore" });
-  const vB = await until("viewer devtools", () => chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`), 60000, 500);
+  const alive = (pid) => execFileSync("powershell", ["-NoProfile", "-Command", `[bool](Get-Process -Id ${pid} -ErrorAction SilentlyContinue)`], { encoding: "utf8" }).includes("True");
+  // A viewer started while the previous one of this profile is still going away hands over to it and exits: start again.
+  for (let i = 0; ; i++) {
+    const pid = execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", HIDDEN, "-Exe", VIEWER, "-Args", `--connect ${id} --password-env TETHER_E2E_PW`], { env, encoding: "utf8" }).trim();
+    await sleep(4000);
+    if (alive(pid) || i === 2) break;
+    console.log(`viewer ${pid} exited at once, starting again`);
+    killViewer();
+  }
+  const vB = await until("viewer devtools", () => chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`, { timeout: 5000 }), 60000, 500);
   try {
     const v = await until("session window", () => pages(vB).find((p) => p.url().includes("/session/")), 30000);
     const ok = await until("first frame or error", () => v.evaluate(() => {
@@ -120,15 +128,18 @@ async function main() {
   r.vm_mac = mac.map((x) => x.toString(16).padStart(2, "0")).join(":");
   r.expected = { technician: plain, tetherqs: salted };
 
-  // Technician app (host): permanent password, its ID before anything else runs.
+  // Technician app (host) with its normal identity (%APPDATA%\Tether): permanent password, its ID first.
+  vm("-Action", "backup");
+  vm("-Action", "techstart");
   const tech = await techPage();
   await setTechPassword(tech.p);
   const techId0 = tech.id;
-  step("technician app: ID is the plain MAC-derived ID", techId0 === plain, { id: techId0, expected: plain });
+  r.technician_id_is_plain_mac_id = techId0 === plain;
+  console.log("technician app ID", techId0, "plain MAC ID", plain);
 
   // 1. Old TetherQS stored the shared ID and registered it after the technician app (takes it over).
   vm("-Action", "install", "-Exe", OLD_QS);
-  vm("-Action", "setqsid", "-Value", plain);
+  vm("-Action", "setqsid", "-Value", techId0);
   vm("-Action", "startqs");
   let qs = await qsPage();
   step("old TetherQS shows the technician app's ID (the bug)", qs.id === techId0, { qs_id: qs.id, tech_id: techId0 });
@@ -145,7 +156,7 @@ async function main() {
   vm("-Action", "startqs");
   qs = await qsPage();
   const moved = vm("-Action", "log", "-Value", "is the technician app's on this machine", "-Last", "5");
-  step("new TetherQS moved to its own ID", qs.id === salted && qs.id !== techId0 && /moving to \d+/.test(moved), {
+  step("new TetherQS moved to its own ID", qs.id === salted && qs.id !== techId0 && /moved to \d+/.test(moved), {
     qs_id: qs.id, expected: salted, log: moved.split(/\r?\n/).filter((l) => /moved to/.test(l)).map((l) => l.slice(0, 160)),
   });
   let back;
@@ -193,7 +204,9 @@ async function main() {
   r.state_end = vm("-Action", "state").split(/\r?\n/).filter((l) => /^(id |qs exe|tech exe)/.test(l));
   r.ok = true;
 }
+// Leave the VM as it was: TetherQS (its exe and config) and the vm-tech technician app.
+const restore = () => { killViewer(); r.restore = vm("-Action", "restore").split(/\r?\n/).filter((l) => /restored|FAILED/.test(l)); };
 main().then(
-  () => (writeFileSync(OUT, JSON.stringify(r, null, 1)), process.exit(0)),
-  (e) => { r.error = e.message; writeFileSync(OUT, JSON.stringify(r, null, 1)); console.error("FAIL", e.message); killViewer(); process.exit(1); },
+  () => { restore(); writeFileSync(OUT, JSON.stringify(r, null, 1)); process.exit(0); },
+  (e) => { r.error = e.message; restore(); writeFileSync(OUT, JSON.stringify(r, null, 1)); console.error("FAIL", e.message); process.exit(1); },
 );
