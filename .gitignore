@@ -19,3 +19,6 @@ backup-keys/
 *.pfx
 *.p12
 /secret/
+
+# Local corporate-proxy connection log (written by a debugging tool, not part of the project).
+corp_proxy_log.jsonl
