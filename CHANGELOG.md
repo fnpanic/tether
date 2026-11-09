@@ -6,6 +6,9 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+## [0.5.31] — 2026-11-09
+Tether (technician app) 0.5.31 and TetherQS 0.5.29, Windows; hbbs on both relays (re-register request, deployed 2026-11-09); Tether Manage 0.5.12.
+
 ### Fixed
 - Tether: `tether --connect <this device's own ID>` (and a `tether://connect/` link to it) was
   refused without any visible message. The main window now comes up with "That is this device's
