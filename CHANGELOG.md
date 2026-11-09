@@ -20,6 +20,10 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   Valid + DigiCert timestamp; a custom app made from it is Valid too). Published with Tether Manage the same evening (`latest.json` 0.5.30 on both relays, pub_date 19:51Z); the exe downloaded from both relays is identical to dist by SHA-256 (`26e57746…58ad55`) and `Valid`. The deployed tether-api binary makes a custom app from that exact file that is `Valid` as well (manage-e2e against local relays; the branding checks fail there by design, test admin key).
 
 ### Fixed
+- Tether Manage 0.5.13: a release whose update file is over the CDN's 25 MiB limit (the universal
+  Mac builds: TetherQS zip 27.2 MiB, Tether .app.tar.gz 36.3 MiB) failed to publish at all. It now goes
+  to the relays only (index entry with the relay URL alone, as without a CDN), with a CDN warning in the
+  result. `dist/manage/Tether Manage 0.5.13.exe` (built with the production admin key).
 - macOS releases were arm64-only: the runner job forced `MAC_ARCH=arm64`, and its output was
   published as `…-universal` (TetherQS 0.5.29, Tether 0.5.31: one Mach-O slice, CPU type ARM64),
   which the relays also offer to `darwin-x86_64`, so Intel Macs got an app they cannot run. The

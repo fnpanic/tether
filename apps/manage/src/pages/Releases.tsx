@@ -904,7 +904,7 @@ function CdnSettings() {
         <div>
           <p className="text-caption font-semibold">Download CDN (Cloudflare Workers, free plan)</p>
           <p className="text-footnote text-muted">
-            Each publish deploys the update files (max. 25 MiB each; TetherQS as .gz) as a new version of the Worker. Devices verify every byte and fall back to the relays. Credentials:{" "}
+            Each publish deploys the update files (max. 25 MiB each; TetherQS as .gz; larger files, such as the universal Mac builds, go to the relays only) as a new version of the Worker. Devices verify every byte and fall back to the relays. Credentials:{" "}
             {s.credentials ? `account ${s.credentials.slice(0, 6)}…` : "not stored"}
           </p>
         </div>

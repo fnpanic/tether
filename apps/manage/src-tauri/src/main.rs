@@ -939,11 +939,12 @@ fn cdn_file(u: &Upload) -> (String, &[u8]) {
 /// the CDN, then the signed release index, then the legacy `latest.json`. One result per relay
 /// (+ "CDN"; the relays left out get theirs from `targets`).
 async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, rollout: tether_trust::release::Rollout, targets: (Vec<String>, Vec<RelayResult>)) -> R<Vec<RelayResult>> {
-    let cdn_conf = app.cdn_config();
-    if cdn_conf.is_some() {
+    // A file over the CDN limit (universal mac builds) is published to the relays only: its index
+    // entry then lists the relay URL alone, as when the CDN is not set up.
+    let too_big = app.cdn_config().and_then(|_| {
         let (f, bytes) = cdn_file(u);
-        cdn::check_size(&f, bytes.len() as u64)?;
-    }
+        cdn::check_size(&f, bytes.len() as u64).err()
+    });
     let (servers, left) = targets;
     // Every relay at once, each bounded by api::STALL / api::ANSWER: a silent relay fails on its
     // own (shown at once) and does not hold up the others.
@@ -964,7 +965,14 @@ async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, r
         return Err(servers.iter().zip(&errs).map(|(s, e)| format!("{s}: {}", e.as_deref().unwrap_or(""))).collect::<Vec<_>>().join("; "));
     }
     let mut extra = Vec::new();
-    let cdn_base = match cdn_publish(app, ui, u, &servers).await {
+    let cdn_base = match &too_big {
+        Some(e) => {
+            extra.push(RelayResult::of("CDN", Ok(json!({ "warning": format!("Not on the CDN, relays only: {e}") }))));
+            Ok(None)
+        }
+        None => cdn_publish(app, ui, u, &servers).await,
+    };
+    let cdn_base = match cdn_base {
         Ok(b) => {
             if let Some(b) = &b {
                 extra.push(RelayResult::of("CDN", Ok(json!({ "base": b }))));
