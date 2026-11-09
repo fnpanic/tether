@@ -207,7 +207,9 @@ in 6 min (debug builds incremental), both apps PASS on macOS 15.7.4 (833 and 991
 (`C:\vms\mac59\keys.env`) and `cs.p12`/`p12.pass` (`C:\vms\macsign`) as secrets. On the Mac
 [`build.sh`](../tools/macbuild/jobs/tether/build.sh) is the former `~/tether-build/run.sh` with
 `$JOB_CACHE` as its folder (incremental: `src/`, `.tools/`, Cargo's `target/` stay; the first build
-is a cold one): temporary keychain, codesign probe, `scripts/build-macos.sh` with `CI=true`,
+is a cold one): temporary keychain, codesign probe, `scripts/build-macos.sh` with `CI=true` and
+`MAC_ARCH` from the job (`MAC_ARCH=universal bash tools/macbuild/jobs/tether/submit.sh` for a
+**release**: Intel + Apple silicon; the default `arm64` is for test builds only),
 designated-requirement check against `/Applications/Tether.app`, TetherQS check, keychain deleted,
 artifacts `out/*` (dmg, updater `.app.tar.gz`, TetherQS zip). It copies the app into `work/` and
 requests the swap through `$JOB_ON_UNLOCK`; [`swap.sh`](../tools/macbuild/jobs/tether/swap.sh) runs

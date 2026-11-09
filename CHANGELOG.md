@@ -20,6 +20,15 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   Valid + DigiCert timestamp; a custom app made from it is Valid too). Published with Tether Manage the same evening (`latest.json` 0.5.30 on both relays, pub_date 19:51Z); the exe downloaded from both relays is identical to dist by SHA-256 (`26e57746…58ad55`) and `Valid`. The deployed tether-api binary makes a custom app from that exact file that is `Valid` as well (manage-e2e against local relays; the branding checks fail there by design, test admin key).
 
 ### Fixed
+- macOS releases were arm64-only: the runner job forced `MAC_ARCH=arm64`, and its output was
+  published as `…-universal` (TetherQS 0.5.29, Tether 0.5.31: one Mach-O slice, CPU type ARM64),
+  which the relays also offer to `darwin-x86_64`, so Intel Macs got an app they cannot run. The
+  job now takes `MAC_ARCH` (`MAC_ARCH=universal` in `submit.sh` for releases); TetherQS 0.5.30 and
+  Tether 0.5.32 for macOS are built universal (job `20261109T201929Z-8ab674a9`, 1 h 18 min with the
+  first x86_64 build): both binaries x86_64 + arm64, signed with the unchanged requirement
+  (`certificate root = H"bcf53642…"`, so installed Macs keep their permissions); on the build Mac
+  `codesign --verify --deep --strict` passes for both, TetherQS starts natively and as x86_64 under
+  Rosetta, and a renamed custom-app bundle still verifies. Files in `dist/macos/`, to be published with Tether Manage.
 - macOS host: a remote drag (e.g. the screenshot-tool selection, Finder rubber-band) only registered
   a single point. `NSEvent.pressedMouseButtons` reflects physical, not injected, button state, so the
   injected moves went out as `MouseMoved` instead of `…MouseDragged`. The macOS input backend now
