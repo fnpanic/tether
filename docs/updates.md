@@ -24,9 +24,11 @@ https://tether-dl.thomas-schend.workers.dev/<channel>/<app>/<platform>/<file>   
 
 `<channel>` comes from policy `update.channel` (default `stable`; anything that is not 1–32
 lowercase letters, digits or dashes falls back to `stable`). Windows and macOS releases are
-independent entries. `TetherQS-<version>.exe.gz` is the gzip copy (35 → 15 MB): the relays send it
-gzip-encoded to clients that accept it (Caddy `precompressed`, nginx `gzip_static`), and it is the
-only TetherQS.exe file on the CDN (25 MiB per file limit).
+independent entries. `TetherQS-<version>.exe.gz` is the gzip copy (35 → 15 MB): the TetherQS updater
+fetches it by its own URL and unpacks it itself, and it is the only TetherQS.exe file on the CDN
+(25 MiB per file limit). The relays serve the plain exe as it is: until 2026-11-09 Caddy's
+`precompressed gzip` sent browsers the exe gzip-encoded with a 206 to a plain GET, and Zscaler's
+download sandbox never finished analysing it ("Wir überprüfen diese Datei…").
 
 ## How a release reaches devices
 
@@ -250,8 +252,8 @@ Test-channel builds are not linked from the download page, which always uses `st
   `tether`) reads it as a member of group `tether-api` (`server/install.sh`; restart hbbs after the
   group change). Override with `RELEASE_GENERATION_FILE`; hint spread `RELEASE_HINT_SPREAD`
   (default 60 s, at most 900; raise it on small nodes).
-- Caddy routes `GET /download/<channel>/releases.json` to tether-api and serves `.exe.gz` with
-  `precompressed gzip`; nginx does the same (`proxy_pass`, `gzip_static on`).
+- Caddy routes `GET /download/<channel>/releases.json` to tether-api and serves the files as
+  they are (no `precompressed`, see above); with nginx use `proxy_pass` and no `gzip_static`.
 - Order: tether-api (+ Caddyfile) first, then hbbs; clients and Manage after. Each step works
   without the next ones; old clients ignore `ReleaseHint` and the heartbeat body.
 

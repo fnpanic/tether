@@ -98,11 +98,11 @@ http://:21125 {
 			root * /var/lib/tether-api
 			@manifest path */latest.json
 			header @manifest Cache-Control "no-cache"
-			file_server {
-				# TetherQS-<v>.exe.gz beside the exe (Tether Manage uploads it): sent gzip-encoded
-				# to clients that accept it, 35 -> 15 MB (docs/update-design.md).
-				precompressed gzip
-			}
+			# No `precompressed gzip`: it sent browsers the TetherQS exe gzip-encoded with a 206 status
+			# to a plain GET, and download scanners (Zscaler's sandbox) never finished analysing it
+			# (2026-11-09). The TetherQS updater fetches TetherQS-<v>.exe.gz by its own URL and unpacks
+			# it itself (apps/quick update.rs), so it keeps the 35 -> 15 MB saving.
+			file_server
 		}
 	}
 
