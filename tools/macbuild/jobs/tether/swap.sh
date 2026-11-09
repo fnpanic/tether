@@ -33,6 +33,14 @@ up() {
   log "no rendezvous start within 60 s"; return 1
 }
 log "swap start: $NEW"
+# The unattended service runs as root (LaunchDaemon). This script runs as the user and cannot stop it:
+# swapping anyway would leave the previous build's root service running beside the new app: two hosts with
+# one ID that push each other out at the relay. Leave such Macs to a manual install.
+if pgrep -U 0 -f "$PAT" >/dev/null; then
+  log "SKIP: a root-owned Tether service is running (unattended access installed); this user cannot stop it,"
+  log "so an automatic swap would leave the old service beside the new app. Install the new build by hand (dmg)."
+  exit 1
+fi
 codesign --verify --deep --strict "$NEW" || { log "FAIL new app signature"; exit 1; }
 new=$(codesign -d -r- "$NEW" 2>&1 | grep designated)
 old=$(codesign -d -r- "$A" 2>&1 | grep designated)
@@ -47,6 +55,7 @@ mv "$STAGE" "$A" || { log "FAIL rename new app; restoring"; mv "$PREV" "$A"; exi
 stop # the old process still runs from $PREV
 if up; then
   rm -rf "$PREV"
+  if pgrep -U 0 -f "$PAT" >/dev/null; then log "RESTART REQUIRED: a root-owned Tether process appeared next to the new build"; exit 1; fi
   log "SWAP OK: new build running"
   exit 0
 fi
