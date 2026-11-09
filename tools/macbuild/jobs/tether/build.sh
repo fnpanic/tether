@@ -57,19 +57,21 @@ brew install cmake ninja pkg-config || fail "brew"
 rm -f "$S/keys.env"
 # CI=true: Tauri's dmg step skips its Finder AppleScript (needs Automation consent, fails without a GUI).
 export CI=true PREBUILT_FRONTEND="$B/src/prebuilt/desktop-dist" PREBUILT_QS_FRONTEND="$B/src/prebuilt/quick-dist" \
-  MAC_ARCH=arm64 APPLE_SIGNING_IDENTITY="Tether Code Signing" OUT="$JOB_WORK/out"
+  MAC_ARCH=${MAC_ARCH:-arm64} APPLE_SIGNING_IDENTITY="Tether Code Signing" OUT="$JOB_WORK/out"
+# MAC_ARCH=universal for releases (Intel + Apple silicon); arm64 halves the time for test builds.
+T=$([ "$MAC_ARCH" = arm64 ] && echo aarch64-apple-darwin || echo universal-apple-darwin)
 rm -rf "$OUT"
 log "build"
 (cd "$B/src" && bash scripts/build-macos.sh) || fail "build"
 
-APP="$B/src/apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Tether.app"
+APP="$B/src/apps/desktop/src-tauri/target/$T/release/bundle/macos/Tether.app"
 new=$(codesign -d -r- "$APP" 2>&1 | grep designated)
 old=$(codesign -d -r- /Applications/Tether.app 2>&1 | grep designated)
 log "requirement new: $new"
 log "requirement old: $old"
 [ -n "$new" ] && [ "$new" = "$old" ] || fail "requirement differs"
 codesign --verify --deep --strict "$APP" || fail "codesign verify"
-QAPP="$B/src/apps/quick/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/TetherQS.app"
+QAPP="$B/src/apps/quick/src-tauri/target/$T/release/bundle/macos/TetherQS.app"
 qs=$(codesign -d -r- "$QAPP" 2>&1 | grep designated)
 log "requirement QS: $qs"
 echo "$qs" | grep -q 'certificate root = H"bcf53642c6c9f74356a3d12ae740bcc0eb59fb33"' &&

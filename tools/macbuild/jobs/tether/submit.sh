@@ -5,6 +5,7 @@
 # sends build.sh + swap.sh with keys.env and the signing p12 as per-job secrets (deleted on the Mac
 # after the job). Prints the job id; then: python tools/macbuild/macbuild.py wait --user tether <id>
 # Env: TETHER_KEYS_ENV (default C:/vms/mac59/keys.env), MACSIGN (default C:/vms/macsign),
+# MAC_ARCH=universal (release build: Intel + Apple silicon; default arm64 for test builds),
 # TETHER_DIAG_CHECK=1 (also run diagcheck.sh: both apps' diagnostics zip, checked for secrets).
 # --diag-upload: instead of the build, diagupload.sh (debug builds of both apps upload diagnostics
 # to a local test relay with a throw-away admin key; keys.env only, no signing secrets).
@@ -49,4 +50,4 @@ if [ $JOB = diagupload ]; then
 fi
 python "$(w "$R/tools/macbuild/macbuild.py")" submit --user tether --work "$(w "$W/work")" \
   --secret "$(w "$KEYS")=keys.env" --secret "$(w "$SIGN/cs.p12")=cs.p12" --secret "$(w "$SIGN/p12.pass")=p12.pass" \
-  --env TETHER_SWAP=$SWAP --env TETHER_DIAG_CHECK=${TETHER_DIAG_CHECK:-0} --timeout 14400 --artifact 'out/*' "${EXTRA[@]}" -- bash build.sh
+  --env TETHER_SWAP=$SWAP --env TETHER_DIAG_CHECK=${TETHER_DIAG_CHECK:-0} --env MAC_ARCH=${MAC_ARCH:-arm64} --timeout 14400 --artifact 'out/*' "${EXTRA[@]}" -- bash build.sh
