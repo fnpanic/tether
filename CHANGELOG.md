@@ -6,6 +6,14 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+## [Manage 0.5.12] — 2026-11-09
+Tether Manage 0.5.12 (Windows); Tether stays 0.5.30, TetherQS 0.5.28.
+
+### Changed
+- Policy page: `customer.elevate` reads "Admin access for UAC prompts (Elevate button, technician
+  requests)", matching TetherQS 0.5.28, where turning it off also refuses the technician's
+  Request admin access.
+
 ## [TetherQS 0.5.28] — 2026-11-09
 TetherQS 0.5.28, Windows and macOS (published 2026-11-09; index serial 32 on both relays, files
 identical to dist/ by SHA-256 on both relays and the CDN, the plain .exe on the relays only as
