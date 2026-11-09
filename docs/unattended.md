@@ -130,7 +130,7 @@ runs (step 6: back 13 s after the restart command).
   this run). A CM that aborts on a WebView2 init error is fragile; worth a graceful error.
 - TetherQS and the Tether service on the same machine report the **same ID** (490209544 here) and both register
   it on the relays; which one a technician reaches is a race. Don't run both on one PC (the test VM is restored
-  without the service for this reason).
+  without the service for this reason). Fixed in TetherQS 0.5.29: it has its own ID ([quick-support.md](quick-support.md#id)).
 
 ## Reproduce
 

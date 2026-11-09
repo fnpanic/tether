@@ -46,7 +46,11 @@ fn main() -> ExitCode {
     // Its own ID: the technician app on the same machine derives the same one from the MAC address,
     // and two apps registering one ID take it from each other (docs/quick-support.md).
     hbb_common::config::AUTO_ID_SALT.store(ID_SALT, std::sync::atomic::Ordering::Relaxed);
-    Config::separate_auto_id();
+    // Not on a relaunch (update, admin access): that one promises the ID the customer already gave
+    // out, and the old process may still write the config. The next plain start moves it.
+    if !Config::path(HANDOFF).exists() {
+        Config::separate_auto_id();
+    }
     custom::load();
     if std::env::args().nth(1).as_deref() == Some("--print-custom-profile") {
         return if custom::print_status() { ExitCode::SUCCESS } else { ExitCode::FAILURE };

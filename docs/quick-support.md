@@ -83,6 +83,23 @@ Networking is the technician app's 443-only policy (copied `netpolicy.rs`): WebS
 relay only, no UDP, system proxy (env, WinHTTP static/PAC/WPAD) detected and refreshed every
 minute. Policy, heartbeat and update requests use the same proxy and the Windows trust store.
 
+## ID
+
+TetherQS derives its ID from the MAC address like the technician app, but salted (`ID_SALT`
+"TetherQS" in `apps/quick/src-tauri/src/main.rs`, hbb_common `Config::auto_id_from_mac`): a 9-digit
+ID that is never the technician app's. Up to 0.5.28 both apps on one PC got the **same ID** (and the
+same machine UUID, but different keys); hbbs accepts that and lets the last registration win, so a
+technician dialling that ID reached either app at random, with a password that did not match.
+
+From 0.5.29 a TetherQS whose stored ID is the plain MAC-derived one (the technician app's) moves once
+to its own ID at start (`Config::separate_auto_id`, log line "id … is the technician app's on this
+machine, moving to …") and keeps it; key pair and password stay. Not on a relaunch with hand-over
+(update, admin access): that restart keeps the ID the customer already gave out, and the next plain
+start moves it. The technician app's ID never changes (customers and Manage know it). The old ID's
+record on the relays still holds TetherQS's key after the move; hbbs asks the technician app's live
+connection to register again (see [corporate-networks.md](corporate-networks.md)), so it is reachable
+with its own key within about a minute.
+
 ## Admin access (UAC)
 
 A normal-user process cannot see or click UAC prompts or the secure desktop. **Allow admin
@@ -164,7 +181,7 @@ use **Check for updates** or restart it. If the version is newer:
   compiled-in `TETHER_UPDATER_PUB_KEY` (Tauri format: `signature` is base64 of the `.sig` file text;
   the key is base64 of the minisign public key file, a bare `RW…` key also works).
 - It is written to `TetherQS.exe.new` next to the running exe; the running exe is renamed to
-  `TetherQS.exe.old` and the new one takes its name; then TetherQS restarts (same ID and password)
+  `TetherQS.exe.old` and the new one takes its name; then TetherQS restarts (same ID and password; see [ID](#id) for the one-time move from 0.5.29)
   and deletes `.old` on the next start. If the folder is not writable the new exe goes to
   `%LOCALAPPDATA%\Tether-QS\TetherQS.exe` and is started from there.
 - `mandatory` (with a newer version), `minimumVersion` or policy `update.minimum-version` above the

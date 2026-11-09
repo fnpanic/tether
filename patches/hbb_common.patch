@@ -47,7 +47,7 @@ index 54ec24b..b82f006 100644
    }
  }
 diff --git a/src/config.rs b/src/config.rs
-index 9ee5cac..6e15298 100644
+index 9ee5cac..38ed304 100644
 --- a/src/config.rs
 +++ b/src/config.rs
 @@ -60,6 +60,10 @@ lazy_static::lazy_static! {
@@ -171,7 +171,7 @@ index 9ee5cac..6e15298 100644
 +    }
 +
 +    /// Tether: the id an app with `salt` moves to when it stored the unsalted MAC id, i.e. the one the
-+    /// technician app on this machine has (TetherQS up to 0.5.29). None: keep the stored id.
++    /// technician app on this machine has (TetherQS up to 0.5.28). None: keep the stored id.
 +    pub fn separated_id(stored: &str, mac: &[u8; 6], salt: u64) -> Option<String> {
 +        (salt != 0 && stored == Self::auto_id_from_mac(mac, 0).to_string())
 +            .then(|| Self::auto_id_from_mac(mac, salt).to_string())
