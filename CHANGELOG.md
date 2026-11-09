@@ -6,6 +6,13 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Fixed
+- macOS host: a remote drag (e.g. the screenshot-tool selection, Finder rubber-band) only registered
+  a single point. `NSEvent.pressedMouseButtons` reflects physical, not injected, button state, so the
+  injected moves went out as `MouseMoved` instead of `…MouseDragged`. The macOS input backend now
+  tracks the buttons the remote is holding and emits the drag events (patches/rustdesk.patch,
+  libs/enigo macos_impl.rs).
+
 ## [0.5.31] — 2026-11-09
 Tether (technician app) 0.5.31 (Windows) and TetherQS 0.5.29 (Windows, macOS), published 2026-11-09:
 index serial 37 on both relays, files identical to dist/ by SHA-256 on both relays and the CDN (the
