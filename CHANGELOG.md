@@ -14,6 +14,10 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   the download NotSigned. The copy is prepared file to file (no 35 MB in memory under `MemoryMax=64M`).
   TetherQS 0.5.30 self-update attaches its profile the same way, so a branded app stays signed
   after updating. macOS custom apps already kept the signature (only the bundle folder is renamed).
+  **Deployed 2026-11-09:** `tether-api` on both relays (relay 2 first, SHA-256 `b9469ff0…83ee87`,
+  previous binary kept as `/usr/local/bin/tether-api.bak-0.5`; service active, `/q/` answers).
+  TetherQS 0.5.30 for Windows built with the production keys and signed (`dist/quick/TetherQS-0.5.30.exe`,
+  Valid + DigiCert timestamp; a custom app made from it is Valid too); publishing it with Tether Manage is the admin's step.
 
 ### Fixed
 - macOS host: a remote drag (e.g. the screenshot-tool selection, Finder rubber-band) only registered
