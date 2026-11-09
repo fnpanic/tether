@@ -1,0 +1,163 @@
+<!doctype html>
+<!-- Example Tether download page template (docs/download-page.md). Uses every placeholder.
+     Tether Manage fills the double-brace placeholders at publish time; values are HTML-escaped. -->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{tether.title}}</title>
+<style>
+:root{--canvas:#fff;--parchment:#f5f5f7;--tile:#fff;--ink:#1d1d1f;--muted:#6e6e73;--hairline:rgba(0,0,0,.08);--accent:#0066cc;--focus:#0071e3}
+@media (prefers-color-scheme:dark){:root{--canvas:#000;--parchment:#1c1c1e;--tile:#272729;--ink:#f5f5f7;--muted:#98989d;--hairline:rgba(255,255,255,.1);--accent:#2997ff;--focus:#2997ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--ink);font-family:-apple-system,"Segoe UI Variable","Segoe UI",system-ui,sans-serif}
+main{max-width:980px;margin:0 auto;padding:80px 32px}
+h1{font-size:40px;line-height:1.1;font-weight:600;margin:0 0 16px}
+p.intro{font-size:17px;line-height:1.47;color:var(--muted);margin:0 0 12px;max-width:640px;white-space:pre-line}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:24px;margin-top:24px}
+.card{display:flex;flex-direction:column;gap:8px;padding:24px;border:1px solid var(--hairline);border-radius:18px;background:var(--tile)}
+.card.off{opacity:.6}
+.label{font-size:21px;font-weight:600}
+.detail{font-size:14px;color:var(--muted);margin-bottom:8px}
+.cta{align-self:flex-start;background:var(--accent);color:#fff;border-radius:9999px;padding:10px 22px;font-size:15px;text-decoration:none}
+.trust{align-self:flex-start;margin-top:8px;font-size:13px;color:var(--accent);text-decoration:none}
+.trust:hover{text-decoration:underline}
+.copy{display:none;align-self:flex-start;margin-top:8px;background:none;border:1px solid var(--accent);color:var(--accent);border-radius:9999px;padding:7px 16px;font:inherit;font-size:13px;cursor:pointer}
+.cmd{display:none;margin-top:8px;padding:9px 11px;border-radius:9px;background:var(--parchment,rgba(127,127,127,.12));font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.4;overflow-x:auto;white-space:pre;user-select:all;-webkit-user-select:all}
+a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+details{font-size:13px;color:var(--muted)}
+dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px} dd{margin:0;overflow-wrap:anywhere}
+.notes{white-space:pre-line}
+.switch{display:inline-flex;gap:4px;margin-top:32px;padding:4px;border-radius:9999px;background:var(--parchment)}
+.switch a{padding:8px 18px;border-radius:9999px;color:var(--ink);text-decoration:none;font-size:15px}
+.os{margin-top:48px}
+html[data-os] .os{display:none}
+html[data-os=windows] #windows,html[data-os=macos] #macos{display:block}
+html[data-os=windows] .switch a[data-os=windows],html[data-os=macos] .switch a[data-os=macos]{background:var(--ink);color:var(--canvas)}
+h2{font-size:28px;font-weight:600;margin:0;display:flex;align-items:center;gap:12px}
+.mine{display:none;font-size:12px;color:var(--accent);border:1px solid currentColor;border-radius:9999px;padding:2px 10px}
+html[data-mine=windows] #windows .mine,html[data-mine=macos] #macos .mine{display:inline-block}
+footer{margin-top:80px;font-size:12px;color:var(--muted)}
+</style></head>
+<body><main>
+  <h1>{{tether.title}}</h1>
+  <p class="intro">{{tether.intro}}</p>
+  <nav class="switch" aria-label="Operating system"><a href="#windows" data-os="windows">Windows</a><a href="#macos" data-os="macos">macOS</a></nav>
+    <section class="os" id="windows">
+      <h2>Windows<span class="mine">Your computer</span></h2>
+      <div class="grid">
+      {{#tether.technician.windows}}
+      <div class="card">
+        <span class="label">Tether for technicians</span>
+        <span class="detail">Windows installer · version {{tether.technician.windows.version}} · {{tether.technician.windows.size}} · {{tether.technician.windows.date}}</span>
+        <a class="cta" href="{{tether.technician.windows.url}}" data-version="{{tether.technician.windows.version}}">Download</a>
+        <a class="trust" href="data:application/octet-stream;base64,QGVjaG8gb2ZmDQpyZW0gSW5zdGFsbHMgdGhlIFRldGhlciBjb2RlLXNpZ25pbmcgY2VydGlmaWNhdGUgc28gV2luZG93cyB0cnVzdHMgVGV0aGVyLiBEb3VibGUtY2xpY2sgaXQuDQpuZXQgc2Vzc2lvbiA+bnVsIDI+JjEgfHwgKHBvd2Vyc2hlbGwgLU5vUHJvZmlsZSAtQ29tbWFuZCAiU3RhcnQtUHJvY2VzcyAtVmVyYiBSdW5BcyAtRmlsZVBhdGggJyV+ZjAnIiAmIGV4aXQgL2IpDQpzZXQgIkM9JVRFTVAlXHRldGhlci1jb2Rlc2lnbi5jZXIiDQo+IiVDJSIgZWNobyAtLS0tLUJFR0lOIENFUlRJRklDQVRFLS0tLS0NCj4+IiVDJSIgZWNobyBNSUlFRERDQ0FuU2dBd0lCQWdJUVEzZ1EvU3pLZnE1SVJGdmFkSjZUempBTkJna3Foa2lHOXcwQkFRc0ZBREFlDQo+PiIlQyUiIGVjaG8gTVJ3d0dnWURWUVFEREJOVVpYUm9aWElnUTI5a1pTQlRhV2R1YVc1bk1CNFhEVEkyTVRFd09URTFNREV3TVZvWA0KPj4iJUMlIiBlY2hvIERUTTJNVEV3T1RFMU1URXdNRm93SGpFY01Cb0dBMVVFQXd3VFZHVjBhR1Z5SUVOdlpHVWdVMmxuYm1sdVp6Q0MNCj4+IiVDJSIgZWNobyBBYUl3RFFZSktvWklodmNOQVFFQkJRQURnZ0dQQURDQ0FZb0NnZ0dCQUw4eTdYTGgyRU5sUzBKTVVTQ05MMlV6DQo+PiIlQyUiIGVjaG8gUkxmdTN1WWt0enJGZ0Q1MlpRM2ZkcnFRc0ZuL01tZG9lRmVGWkNtR0VZWGJLSmVIVUtDRytpSHBDRVJGVXJETw0KPj4iJUMlIiBlY2hvIEVSTEd5YzYzMXVEbmlOUStUbW9hRXlLZnY4b2tqMmpvelc4Q0lTNjNoN25kOWJkdERZZGNlRHVGbVF6cE5xWTkNCj4+IiVDJSIgZWNobyBGdER1SjZLTGVTZjhQb2RsSnhNRzVNRGZzN3FEMTJobWwzdnVlQ3ZFUUZXdnl2RXhvUDVNYUIrbGUxRS9wVzkzDQo+PiIlQyUiIGVjaG8gVlp6cGl6WmZ6V2J2WnRIbjVmOFZaV1NsWHBoRXVWSUxNUGd5WU5keWFQaTFURzhjUjBTZVI4amF3SDBmd051cw0KPj4iJUMlIiBlY2hvIDRXNVpaWkdkUUdQdjVSeG41dkJMNnlqVFFDL21jVGJKdytNa2p3TGczK1NsbGlEMHlzbzRtd2QxeC9GMVh3Q1YNCj4+IiVDJSIgZWNobyBCaFB3czk3MElOaTRvWTdXSWx4VDhvQ3NvUmFndW8yR3QwNzM5RllDMGFpN1VPUXJqVUxGamVjcG1nVmd3UWNIDQo+PiIlQyUiIGVjaG8gVWRDdHdBaWlIeFR1SC9JQlkvRjR0R0UwQ2lPWlgrNEIzc1ZHcFE3MmlPYmd2WW9MQzJlRmRhdUl0Y0h0SnhKWQ0KPj4iJUMlIiBlY2hvIGVBQUY2YnRRZDc1NU54emJuSnhHR3duMEZCOUgvSmZoRnVhYXZiVVNWUUlEQVFBQm8wWXdSREFPQmdOVkhROEINCj4+IiVDJSIgZWNobyBBZjhFQkFNQ0I0QXdFd1lEVlIwbEJBd3dDZ1lJS3dZQkJRVUhBd013SFFZRFZSME9CQllFRkNtdXZzUjR6MW9VDQo+PiIlQyUiIGVjaG8gSm5ScW8rT2EwSWlTM1hMb01BMEdDU3FHU0liM0RRRUJDd1VBQTRJQmdRQTVzaHpMWW5jemNsRHEreEtIZUUrYw0KPj4iJUMlIiBlY2hvIFN3dzdKY3A1bGttV3NhZXNrdHpJd0dpVDJDTlFDYjlOU3NoUUxkU05ZYWRXQ1NQaUtPSXB3M05neW5uQkJ4SEsNCj4+IiVDJSIgZWNobyAzN2xoU2gyQVArSjViR0NmeTBjTVd0RnAwS2s4aTB6WHBxNnI2NVlwNG40YTFaV3pENkFYb242UGQ5ckRZcXNhDQo+PiIlQyUiIGVjaG8gVFV2NXZPVFNtWGV5ajFTdEU5Wi9PdmVUYWViL0U2RHRzcVNXYXd3VnRuU0dEbWw1Ny9sMGdidmRvdEZESXFBUA0KPj4iJUMlIiBlY2hvIG5sSTJBUHdPUVpRNEZtdlZmZU5XWHFkYXVhWGpTTHljRGFtTVlkSHQrcDNzSkU4K2hOUk1oSDc1RVBlN0VOWnMNCj4+IiVDJSIgZWNobyBQNzYxQ2JzcUlpUWQ4dzFjOWFwSG1aY3gyYW9ZemZ2OFFiNGdWLzBZd0R1cW1GRElCOHlDSFlmczVZUGdlZXNiDQo+PiIlQyUiIGVjaG8gYU84OGhLN3pYSXZRMHFaYUJzNytTajBMZ1Q5ems3WVRwbHdrRzREOU9lRU9ZOThsRmo1bE5lZG9wTU5GbWJmSA0KPj4iJUMlIiBlY2hvIENBZzVQRG4xdlRnNmRDWElDNGNiRmU0QUd5QTJYQUM5VFpyNG0xME5oNUtQWFZHT0d3OHhpZDhVenhjQUhCK2sNCj4+IiVDJSIgZWNobyB5VHpMMWFPWTV0VTN2cVFpa3p4UFhySGkzNlp2bEdGMWtObEtMdmVaazljPQ0KPj4iJUMlIiBlY2hvIC0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0NCmNlcnR1dGlsIC1hZGRzdG9yZSAtZiBSb290ICIlQyUiID5udWwgJiYgY2VydHV0aWwgLWFkZHN0b3JlIC1mIFRydXN0ZWRQdWJsaXNoZXIgIiVDJSIgPm51bCAmJiAoZWNobyBUZXRoZXIgY2VydGlmaWNhdGUgaW5zdGFsbGVkLikgfHwgKGVjaG8gSW5zdGFsbCBGQUlMRUQuKQ0KZGVsICIlQyUiID5udWwgMj4mMQ0KZWNoby4NCnBhdXNlDQo=" download="Install Tether certificate.cmd">First, trust the certificate (removes the "Unknown publisher" prompt)</a>
+        <button class="copy" type="button" data-exe="{{tether.technician.windows.url}}">Copy install command (no security prompt)</button>
+        <code class="cmd"></code>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.technician.windows.file}}</code> ({{tether.technician.windows.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.technician.windows.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.technician.windows.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.technician.windows.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.technician.windows.notes}}</dd>
+          </dl>
+        </details>
+      </div>
+      {{/tether.technician.windows}}
+      {{^tether.technician.windows}}
+      <div class="card off"><span class="label">Tether for technicians</span><span class="detail">Not available yet</span></div>
+      {{/tether.technician.windows}}
+      {{#tether.customer.windows}}
+      <div class="card">
+        <span class="label">Tether Quick Support</span>
+        <span class="detail">Windows · no installation needed · version {{tether.customer.windows.version}} · {{tether.customer.windows.size}} · {{tether.customer.windows.date}}</span>
+        <a class="cta" href="{{tether.customer.windows.url}}" data-version="{{tether.customer.windows.version}}">Download</a>
+        <a class="trust" href="data:application/octet-stream;base64,QGVjaG8gb2ZmDQpyZW0gSW5zdGFsbHMgdGhlIFRldGhlciBjb2RlLXNpZ25pbmcgY2VydGlmaWNhdGUgc28gV2luZG93cyB0cnVzdHMgVGV0aGVyLiBEb3VibGUtY2xpY2sgaXQuDQpuZXQgc2Vzc2lvbiA+bnVsIDI+JjEgfHwgKHBvd2Vyc2hlbGwgLU5vUHJvZmlsZSAtQ29tbWFuZCAiU3RhcnQtUHJvY2VzcyAtVmVyYiBSdW5BcyAtRmlsZVBhdGggJyV+ZjAnIiAmIGV4aXQgL2IpDQpzZXQgIkM9JVRFTVAlXHRldGhlci1jb2Rlc2lnbi5jZXIiDQo+IiVDJSIgZWNobyAtLS0tLUJFR0lOIENFUlRJRklDQVRFLS0tLS0NCj4+IiVDJSIgZWNobyBNSUlFRERDQ0FuU2dBd0lCQWdJUVEzZ1EvU3pLZnE1SVJGdmFkSjZUempBTkJna3Foa2lHOXcwQkFRc0ZBREFlDQo+PiIlQyUiIGVjaG8gTVJ3d0dnWURWUVFEREJOVVpYUm9aWElnUTI5a1pTQlRhV2R1YVc1bk1CNFhEVEkyTVRFd09URTFNREV3TVZvWA0KPj4iJUMlIiBlY2hvIERUTTJNVEV3T1RFMU1URXdNRm93SGpFY01Cb0dBMVVFQXd3VFZHVjBhR1Z5SUVOdlpHVWdVMmxuYm1sdVp6Q0MNCj4+IiVDJSIgZWNobyBBYUl3RFFZSktvWklodmNOQVFFQkJRQURnZ0dQQURDQ0FZb0NnZ0dCQUw4eTdYTGgyRU5sUzBKTVVTQ05MMlV6DQo+PiIlQyUiIGVjaG8gUkxmdTN1WWt0enJGZ0Q1MlpRM2ZkcnFRc0ZuL01tZG9lRmVGWkNtR0VZWGJLSmVIVUtDRytpSHBDRVJGVXJETw0KPj4iJUMlIiBlY2hvIEVSTEd5YzYzMXVEbmlOUStUbW9hRXlLZnY4b2tqMmpvelc4Q0lTNjNoN25kOWJkdERZZGNlRHVGbVF6cE5xWTkNCj4+IiVDJSIgZWNobyBGdER1SjZLTGVTZjhQb2RsSnhNRzVNRGZzN3FEMTJobWwzdnVlQ3ZFUUZXdnl2RXhvUDVNYUIrbGUxRS9wVzkzDQo+PiIlQyUiIGVjaG8gVlp6cGl6WmZ6V2J2WnRIbjVmOFZaV1NsWHBoRXVWSUxNUGd5WU5keWFQaTFURzhjUjBTZVI4amF3SDBmd051cw0KPj4iJUMlIiBlY2hvIDRXNVpaWkdkUUdQdjVSeG41dkJMNnlqVFFDL21jVGJKdytNa2p3TGczK1NsbGlEMHlzbzRtd2QxeC9GMVh3Q1YNCj4+IiVDJSIgZWNobyBCaFB3czk3MElOaTRvWTdXSWx4VDhvQ3NvUmFndW8yR3QwNzM5RllDMGFpN1VPUXJqVUxGamVjcG1nVmd3UWNIDQo+PiIlQyUiIGVjaG8gVWRDdHdBaWlIeFR1SC9JQlkvRjR0R0UwQ2lPWlgrNEIzc1ZHcFE3MmlPYmd2WW9MQzJlRmRhdUl0Y0h0SnhKWQ0KPj4iJUMlIiBlY2hvIGVBQUY2YnRRZDc1NU54emJuSnhHR3duMEZCOUgvSmZoRnVhYXZiVVNWUUlEQVFBQm8wWXdSREFPQmdOVkhROEINCj4+IiVDJSIgZWNobyBBZjhFQkFNQ0I0QXdFd1lEVlIwbEJBd3dDZ1lJS3dZQkJRVUhBd013SFFZRFZSME9CQllFRkNtdXZzUjR6MW9VDQo+PiIlQyUiIGVjaG8gSm5ScW8rT2EwSWlTM1hMb01BMEdDU3FHU0liM0RRRUJDd1VBQTRJQmdRQTVzaHpMWW5jemNsRHEreEtIZUUrYw0KPj4iJUMlIiBlY2hvIFN3dzdKY3A1bGttV3NhZXNrdHpJd0dpVDJDTlFDYjlOU3NoUUxkU05ZYWRXQ1NQaUtPSXB3M05neW5uQkJ4SEsNCj4+IiVDJSIgZWNobyAzN2xoU2gyQVArSjViR0NmeTBjTVd0RnAwS2s4aTB6WHBxNnI2NVlwNG40YTFaV3pENkFYb242UGQ5ckRZcXNhDQo+PiIlQyUiIGVjaG8gVFV2NXZPVFNtWGV5ajFTdEU5Wi9PdmVUYWViL0U2RHRzcVNXYXd3VnRuU0dEbWw1Ny9sMGdidmRvdEZESXFBUA0KPj4iJUMlIiBlY2hvIG5sSTJBUHdPUVpRNEZtdlZmZU5XWHFkYXVhWGpTTHljRGFtTVlkSHQrcDNzSkU4K2hOUk1oSDc1RVBlN0VOWnMNCj4+IiVDJSIgZWNobyBQNzYxQ2JzcUlpUWQ4dzFjOWFwSG1aY3gyYW9ZemZ2OFFiNGdWLzBZd0R1cW1GRElCOHlDSFlmczVZUGdlZXNiDQo+PiIlQyUiIGVjaG8gYU84OGhLN3pYSXZRMHFaYUJzNytTajBMZ1Q5ems3WVRwbHdrRzREOU9lRU9ZOThsRmo1bE5lZG9wTU5GbWJmSA0KPj4iJUMlIiBlY2hvIENBZzVQRG4xdlRnNmRDWElDNGNiRmU0QUd5QTJYQUM5VFpyNG0xME5oNUtQWFZHT0d3OHhpZDhVenhjQUhCK2sNCj4+IiVDJSIgZWNobyB5VHpMMWFPWTV0VTN2cVFpa3p4UFhySGkzNlp2bEdGMWtObEtMdmVaazljPQ0KPj4iJUMlIiBlY2hvIC0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0NCmNlcnR1dGlsIC1hZGRzdG9yZSAtZiBSb290ICIlQyUiID5udWwgJiYgY2VydHV0aWwgLWFkZHN0b3JlIC1mIFRydXN0ZWRQdWJsaXNoZXIgIiVDJSIgPm51bCAmJiAoZWNobyBUZXRoZXIgY2VydGlmaWNhdGUgaW5zdGFsbGVkLikgfHwgKGVjaG8gSW5zdGFsbCBGQUlMRUQuKQ0KZGVsICIlQyUiID5udWwgMj4mMQ0KZWNoby4NCnBhdXNlDQo=" download="Install Tether certificate.cmd">First, trust the certificate (removes the "Unknown publisher" prompt)</a>
+        <button class="copy" type="button" data-exe="{{tether.customer.windows.url}}">Copy install command (no security prompt)</button>
+        <code class="cmd"></code>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.customer.windows.file}}</code> ({{tether.customer.windows.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.customer.windows.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.customer.windows.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.customer.windows.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.customer.windows.notes}}</dd>
+          </dl>
+        </details>
+      </div>
+      {{/tether.customer.windows}}
+      {{^tether.customer.windows}}
+      <div class="card off"><span class="label">Tether Quick Support</span><span class="detail">Not available yet</span></div>
+      {{/tether.customer.windows}}
+      </div>
+    </section>
+    <section class="os" id="macos">
+      <h2>macOS<span class="mine">Your computer</span></h2>
+      <div class="grid">
+      {{#tether.technician.macos}}
+      <div class="card">
+        <span class="label">Tether for technicians</span>
+        <span class="detail">Disk image for Apple silicon and Intel · version {{tether.technician.macos.version}} · {{tether.technician.macos.size}} · {{tether.technician.macos.date}}</span>
+        <a class="cta" href="{{tether.technician.macos.url}}" data-version="{{tether.technician.macos.version}}">Download</a>
+        <a class="trust" href="data:application/x-apple-aspen-config;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPCFET0NUWVBFIHBsaXN0IFBVQkxJQyAiLS8vQXBwbGUvL0RURCBQTElTVCAxLjAvL0VOIiAiaHR0cDovL3d3dy5hcHBsZS5jb20vRFREcy9Qcm9wZXJ0eUxpc3QtMS4wLmR0ZCI+CjxwbGlzdCB2ZXJzaW9uPSIxLjAiPjxkaWN0PgogIDxrZXk+UGF5bG9hZENvbnRlbnQ8L2tleT4KICA8YXJyYXk+PGRpY3Q+CiAgICA8a2V5PlBheWxvYWRUeXBlPC9rZXk+PHN0cmluZz5jb20uYXBwbGUuc2VjdXJpdHkucm9vdDwvc3RyaW5nPgogICAgPGtleT5QYXlsb2FkQ29udGVudDwva2V5PjxkYXRhPk1JSUVRakNDQXFxZ0F3SUJBZ0lVRTBEYWRlMUU1aEh0VUppcjlvV2FiMWR2Tm1Fd0RRWUpLb1pJaHZjTkFRRUxCUUF3SGpFY01Cb0dBMVVFQXd3VFZHVjBhR1Z5SUVOdlpHVWdVMmxuYm1sdVp6QWVGdzB5TmpFeE1Ea3hOVEV5TlRaYUZ3MHpOakV4TURZeE5URXlOVFphTUI0eEhEQWFCZ05WQkFNTUUxUmxkR2hsY2lCRGIyUmxJRk5wWjI1cGJtY3dnZ0dpTUEwR0NTcUdTSWIzRFFFQkFRVUFBNElCandBd2dnR0tBb0lCZ1FEa1FUczFIZkxLYUJlQWxmYTVsYWx4U0lhV2YwY1BwZGo0eC9qRFJHb05GM0JLU1JlVTdnRlBNK2xQSG9vREJEdVdDbEF6QlBielZ4TWI3MDFEZEhRRWxyeFZScUY0Q3NzU1JGaHQ4bjhHeU1tMmRpN2t2V3JGNzhlakpPdG5NT1Bka2krdWFmVzQ2NG9CVlZ4bENTZGx1b0V4RThTaXpYQVlHTit2Smd4bnJ4Wmdwam16Y3c5QTloYVlPZE1WaFAwSDBDVmFvQWV5VkVlMW4rL2VMTlQvVTAvVUgvTG5NaEJJY1F1MDB2NXFIc2FWSDVEaGVyZXZmazU0OEkxcURTcjB4aTZTNFBkRm1GUmJwWlVTRHdBOHpmN1F0UWJJVjNkVVlsK1o4Zm1zTTNYWFNxeVc5aXJjVUxoWjVzU240bExhNlkvQURDeFBSYnNBSGVoL2UrMFV3SFVyOXdjVGpwYVhSWlgzU1JnZDFyaGlZTTQ3U1YxWjZQTnZjYk1YNDlDaUJCdVo2NnBraVBUTTdBS3RiOUc2MmdBYXVoZytBd0EwZ3NraFJnMkZSODQ5TFRKblp6alBMM3IvMzZPWVpkZE5tMktFU01iTExNd0QxZWhkMThaVG5mUVg5MkpnMVpoekFNQjhnOE00Umt3eGVTV1dKVFo5T0tVMXU2ci8vNUVDQXdFQUFhTjRNSFl3SFFZRFZSME9CQllFRk9qZ0VsMGpQQkgyTmVKeHhiRU1VMndSbVp0N01COEdBMVVkSXdRWU1CYUFGT2pnRWwwalBCSDJOZUp4eGJFTVUyd1JtWnQ3TUE0R0ExVWREd0VCL3dRRUF3SUhnREFXQmdOVkhTVUJBZjhFRERBS0JnZ3JCZ0VGQlFjREF6QU1CZ05WSFJNQkFmOEVBakFBTUEwR0NTcUdTSWIzRFFFQkN3VUFBNElCZ1FCNUN6UHdwN0xVb2tvc0pLMFQ2N1JkWDljR2lhalRqOEZOZDZJbklpek5WT1ZaVmw2RTYwTjgrSXJxTEhGbURsWGFJb1dMaC9zVGZrOHR2UjBTcFVPVmsyUC9pOHVmVndhS29GMEpLVmxSSGJPcTRLVzJHYlhndGRQMlFXVldpV0VuWGg3MFlWRWExaGcvMStVaGdvOFB0Z01WSHp6dEl1SnBRVWJOdEszWHRNOFIzV0RiRU13d0wyOTIxN3dEbjlZNG1LbHRvY3g5NnZvZmhaMTRnZXJ0SkUxbGRBWEJuZVVlQmRtTllGZjltM2xKWmhKaTNkZ3VYVU0vdHNqQUtpVlAyTC83L3NnTDVPcGt2RFN4MUIrL0ViMDkrbWZhTHNUOTUxVkhtMDJ3endkZ3VwMm40TFU3OWtCUWJSY0pwYUVVT1FtK09PaTJ0Vm96M2RkVUZuWXZXRGVncmNuU2R6L21qaHlQWWRuZnArSno1a0tJd1pmMm1WdVhHTS9aWGRrcm1aOWtHcFRTYkhCc3R2a1FNdlhxWnhWVFFScktwTzU2TDg4b0JVT0lTdWh5bjhqU0I4cFRkNDRFQjZKOTM0ZHdpcE5SV0RTOXZjaHdpMVdZSGFHcUtoRnZZaml1Qmd6L2VTNGlJc3NHRVNXRzlubUVZNmVoTkRpRjlJeHkwRlU9PC9kYXRhPgogICAgPGtleT5QYXlsb2FkSWRlbnRpZmllcjwva2V5PjxzdHJpbmc+bmV0LnRldGhlci5jZXJ0LjI0NmE3OTk3LTM4MDgtZDFhMS1hYjc0LTMyMmU5ODA4OTMxMzwvc3RyaW5nPgogICAgPGtleT5QYXlsb2FkVVVJRDwva2V5PjxzdHJpbmc+MjQ2YTc5OTctMzgwOC1kMWExLWFiNzQtMzIyZTk4MDg5MzEzPC9zdHJpbmc+CiAgICA8a2V5PlBheWxvYWRWZXJzaW9uPC9rZXk+PGludGVnZXI+MTwvaW50ZWdlcj4KICAgIDxrZXk+UGF5bG9hZERpc3BsYXlOYW1lPC9rZXk+PHN0cmluZz5UZXRoZXIgQ29kZSBTaWduaW5nPC9zdHJpbmc+CiAgPC9kaWN0PjwvYXJyYXk+CiAgPGtleT5QYXlsb2FkRGlzcGxheU5hbWU8L2tleT48c3RyaW5nPlRydXN0IFRldGhlcjwvc3RyaW5nPgogIDxrZXk+UGF5bG9hZERlc2NyaXB0aW9uPC9rZXk+PHN0cmluZz5UcnVzdHMgVGV0aGVyJ3MgY29kZS1zaWduaW5nIGNlcnRpZmljYXRlIG9uIHRoaXMgTWFjLjwvc3RyaW5nPgogIDxrZXk+UGF5bG9hZElkZW50aWZpZXI8L2tleT48c3RyaW5nPm5ldC50ZXRoZXIudHJ1c3QuZjU0YWVlMjEtMTlhMC03ZTZhLTVmMTgtNmE2ZTZiM2UyMWFiPC9zdHJpbmc+CiAgPGtleT5QYXlsb2FkVHlwZTwva2V5PjxzdHJpbmc+Q29uZmlndXJhdGlvbjwvc3RyaW5nPgogIDxrZXk+UGF5bG9hZFVVSUQ8L2tleT48c3RyaW5nPmY1NGFlZTIxLTE5YTAtN2U2YS01ZjE4LTZhNmU2YjNlMjFhYjwvc3RyaW5nPgogIDxrZXk+UGF5bG9hZFZlcnNpb248L2tleT48aW50ZWdlcj4xPC9pbnRlZ2VyPgo8L2RpY3Q+PC9wbGlzdD4K" download="Trust Tether.mobileconfig">First, trust the certificate (double-click, Install in System Settings)</a>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.technician.macos.file}}</code> ({{tether.technician.macos.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.technician.macos.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.technician.macos.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.technician.macos.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.technician.macos.notes}}</dd>
+          </dl>
+        </details>
+      </div>
+      {{/tether.technician.macos}}
+      {{^tether.technician.macos}}
+      <div class="card off"><span class="label">Tether for technicians</span><span class="detail">Not available yet</span></div>
+      {{/tether.technician.macos}}
+      {{#tether.customer.macos}}
+      <div class="card">
+        <span class="label">Tether Quick Support</span>
+        <span class="detail">Mac · unzip and open it · version {{tether.customer.macos.version}} · {{tether.customer.macos.size}} · {{tether.customer.macos.date}}</span>
+        <a class="cta" href="{{tether.customer.macos.url}}" data-version="{{tether.customer.macos.version}}">Download</a>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.customer.macos.file}}</code> ({{tether.customer.macos.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.customer.macos.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.customer.macos.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.customer.macos.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.customer.macos.notes}}</dd>
+          </dl>
+        </details>
+      </div>
+      {{/tether.customer.macos}}
+      {{^tether.customer.macos}}
+      <div class="card off"><span class="label">Tether Quick Support</span><span class="detail">Not available yet</span></div>
+      {{/tether.customer.macos}}
+      </div>
+    </section>
+
+  {{#tether.custom.acme}}
+  <section class="os-all">
+    <h2>For {{tether.custom.acme.name}}</h2>
+    <p><a class="cta" href="{{tether.custom.acme.url}}">Download {{tether.custom.acme.name}} support</a> (link valid until {{tether.custom.acme.expires}})</p>
+  </section>
+  {{/tether.custom.acme}}
+  <footer>Served by {{tether.relay}} · page published {{tether.published}} · downloads are signed and served over HTTPS.</footer>
+</main>
+<script>(function(){var d=document.documentElement,u=navigator.userAgentData,p=(u&&u.platform)||navigator.platform||navigator.userAgent||"";
+var mine=/mac/i.test(p)?"macos":/win/i.test(p)?"windows":"";
+var tabs=document.querySelectorAll(".switch a");
+function pick(os){d.setAttribute("data-os",os);for(var i=0;i<tabs.length;i++){tabs[i].setAttribute("aria-current",tabs[i].getAttribute("data-os")===os?"true":"false")}}
+for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){e.preventDefault();pick(this.getAttribute("data-os"))})}
+if(mine){d.setAttribute("data-mine",mine);pick(mine)}
+var btns=document.querySelectorAll(".copy");
+for(var k=0;k<btns.length;k++){(function(b){
+var rel=b.getAttribute("data-exe");var abs=rel.charAt(0)==="/"?location.origin+rel:rel;
+var cmd="powershell -NoProfile -Command \"$o=Join-Path $env:TEMP 'tether-setup.exe'; iwr '"+abs+"' -OutFile $o; & $o\"";
+var code=b.nextElementSibling;if(code){code.textContent=cmd;code.style.display="block"}
+b.style.display="inline-block";
+b.addEventListener("click",function(){var done=function(){var t=b.textContent;b.textContent="Copied";setTimeout(function(){b.textContent=t},1500)};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(cmd).then(done,done)}else{done()}})})(btns[k])}
+})();</script>
+</body></html>
