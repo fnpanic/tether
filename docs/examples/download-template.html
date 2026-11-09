@@ -17,6 +17,10 @@ p.intro{font-size:17px;line-height:1.47;color:var(--muted);margin:0 0 12px;max-w
 .label{font-size:21px;font-weight:600}
 .detail{font-size:14px;color:var(--muted);margin-bottom:8px}
 .cta{align-self:flex-start;background:var(--accent);color:#fff;border-radius:9999px;padding:10px 22px;font-size:15px;text-decoration:none}
+.trust{align-self:flex-start;margin-top:8px;font-size:13px;color:var(--accent);text-decoration:none}
+.trust:hover{text-decoration:underline}
+.copy{display:none;align-self:flex-start;margin-top:8px;background:none;border:1px solid var(--accent);color:var(--accent);border-radius:9999px;padding:7px 16px;font:inherit;font-size:13px;cursor:pointer}
+.cmd{display:none;margin-top:8px;padding:9px 11px;border-radius:9px;background:var(--parchment,rgba(127,127,127,.12));font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.4;overflow-x:auto;white-space:pre;user-select:all;-webkit-user-select:all}
 a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 details{font-size:13px;color:var(--muted)}
 dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px} dd{margin:0;overflow-wrap:anywhere}
@@ -44,6 +48,9 @@ footer{margin-top:80px;font-size:12px;color:var(--muted)}
         <span class="label">Tether for technicians</span>
         <span class="detail">Windows installer · version {{tether.technician.windows.version}} · {{tether.technician.windows.size}} · {{tether.technician.windows.date}}</span>
         <a class="cta" href="{{tether.technician.windows.url}}" data-version="{{tether.technician.windows.version}}">Download</a>
+        <a class="trust" href="/download/Install%20Tether%20certificate.cmd">First, trust the certificate (removes the "Unknown publisher" prompt)</a>
+        <button class="copy" type="button" data-exe="{{tether.technician.windows.url}}">Copy install command (no security prompt)</button>
+        <code class="cmd"></code>
         <details>
           <summary>Details</summary>
           <dl>
@@ -64,6 +71,9 @@ footer{margin-top:80px;font-size:12px;color:var(--muted)}
         <span class="label">Tether Quick Support</span>
         <span class="detail">Windows · no installation needed · version {{tether.customer.windows.version}} · {{tether.customer.windows.size}} · {{tether.customer.windows.date}}</span>
         <a class="cta" href="{{tether.customer.windows.url}}" data-version="{{tether.customer.windows.version}}">Download</a>
+        <a class="trust" href="/download/Install%20Tether%20certificate.cmd">First, trust the certificate (removes the "Unknown publisher" prompt)</a>
+        <button class="copy" type="button" data-exe="{{tether.customer.windows.url}}">Copy install command (no security prompt)</button>
+        <code class="cmd"></code>
         <details>
           <summary>Details</summary>
           <dl>
@@ -140,5 +150,13 @@ var mine=/mac/i.test(p)?"macos":/win/i.test(p)?"windows":"";
 var tabs=document.querySelectorAll(".switch a");
 function pick(os){d.setAttribute("data-os",os);for(var i=0;i<tabs.length;i++){tabs[i].setAttribute("aria-current",tabs[i].getAttribute("data-os")===os?"true":"false")}}
 for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){e.preventDefault();pick(this.getAttribute("data-os"))})}
-if(mine){d.setAttribute("data-mine",mine);pick(mine)}})();</script>
+if(mine){d.setAttribute("data-mine",mine);pick(mine)}
+var btns=document.querySelectorAll(".copy");
+for(var k=0;k<btns.length;k++){(function(b){
+var rel=b.getAttribute("data-exe");var abs=rel.charAt(0)==="/"?location.origin+rel:rel;
+var cmd="powershell -NoProfile -Command \"$o=Join-Path $env:TEMP 'tether-setup.exe'; iwr '"+abs+"' -OutFile $o; & $o\"";
+var code=b.nextElementSibling;if(code){code.textContent=cmd;code.style.display="block"}
+b.style.display="inline-block";
+b.addEventListener("click",function(){var done=function(){var t=b.textContent;b.textContent="Copied";setTimeout(function(){b.textContent=t},1500)};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(cmd).then(done,done)}else{done()}})})(btns[k])}
+})();</script>
 </body></html>
