@@ -146,7 +146,7 @@ async function main() {
   qs = await qsPage();
   const moved = vm("-Action", "log", "-Value", "is the technician app's on this machine", "-Last", "5");
   step("new TetherQS moved to its own ID", qs.id === salted && qs.id !== techId0 && /moving to \d+/.test(moved), {
-    qs_id: qs.id, expected: salted, log: moved.split(/\r?\n/).filter((l) => /moving to/.test(l)).map((l) => l.slice(0, 160)),
+    qs_id: qs.id, expected: salted, log: moved.split(/\r?\n/).filter((l) => /moved to/.test(l)).map((l) => l.slice(0, 160)),
   });
   let back;
   for (let i = 0; i < 8 && !(back = await connect(techId0, TECH_PW, 25000)).ok; i++) await sleep(5000);

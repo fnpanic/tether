@@ -93,7 +93,7 @@ technician dialling that ID reached either app at random, with a password that d
 
 From 0.5.29 a TetherQS whose stored ID is the plain MAC-derived one (the technician app's) moves once
 to its own ID at start (`Config::separate_auto_id`, log line "id … is the technician app's on this
-machine, moving to …") and keeps it; key pair and password stay. Not on a relaunch with hand-over
+machine, moved to …") and keeps it; key pair and password stay. Not on a relaunch with hand-over
 (update, admin access): that restart keeps the ID the customer already gave out, and the next plain
 start moves it. The technician app's ID never changes (customers and Manage know it). The old ID's
 record on the relays still holds TetherQS's key after the move; hbbs asks the technician app's live
