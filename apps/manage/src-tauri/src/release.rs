@@ -266,19 +266,36 @@ var mine=/mac/i.test(p)?"macos":/win/i.test(p)?"windows":"";
 var tabs=document.querySelectorAll(".switch a");
 function pick(os){d.setAttribute("data-os",os);for(var i=0;i<tabs.length;i++){tabs[i].setAttribute("aria-current",tabs[i].getAttribute("data-os")===os?"true":"false")}}
 for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){e.preventDefault();pick(this.getAttribute("data-os"))})}
-if(mine&&document.getElementById(mine)){d.setAttribute("data-mine",mine);pick(mine)}})();"#;
+if(mine&&document.getElementById(mine)){d.setAttribute("data-mine",mine);pick(mine)}
+// Build the PowerShell install line from this relay's origin and show the Copy button (needs JS).
+var btns=document.querySelectorAll(".copy");
+for(var k=0;k<btns.length;k++){(function(b){
+var rel=b.getAttribute("data-exe");var abs=rel.charAt(0)==="/"?location.origin+rel:rel;
+var cmd="powershell -NoProfile -Command \"$o=Join-Path $env:TEMP 'tether-setup.exe'; iwr '"+abs+"' -OutFile $o; & $o\"";
+var code=b.nextElementSibling;if(code){code.textContent=cmd;code.style.display="block"}
+b.style.display="inline-block";
+b.addEventListener("click",function(){var done=function(){var t=b.textContent;b.textContent="Copied";setTimeout(function(){b.textContent=t},1500)};
+if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(cmd).then(done,done)}else{done()}})})(btns[k])}
+})();"#;
 
 /// Self-contained page in the DESIGN.md look: no external resources, light and dark. One section
 /// per OS; the inline script shows the visitor's and marks it, the switch shows the other.
 pub fn download_page(title: &str, intro: &str, sections: &[OsSection]) -> String {
     // One card per app with one download; signatures and updater archives are for the updater
     // (Tether Manage lists them under Releases), not for visitors.
-    let card = |o: &Offer| match &o.href {
+    // On Windows an installer downloaded by the browser gets the Mark of the Web, so SmartScreen
+    // warns on our unsigned setup. A copy-paste PowerShell line fetches it with Invoke-WebRequest,
+    // which sets no Mark of the Web (docs/code-signing.md), so no warning. The command's absolute
+    // URL is built in the browser from the relative href and this relay's origin (the page is
+    // served by several relays), so the generated HTML stays origin-free; without JS the Download
+    // button is the fallback.
+    let card = |o: &Offer, win: bool| match &o.href {
         Some(href) => format!(
-            "<div class=\"card\"><span class=\"label\">{}</span><span class=\"detail\">{}</span><a class=\"cta\" href=\"{}\">Download</a></div>",
+            "<div class=\"card\"><span class=\"label\">{}</span><span class=\"detail\">{}</span><a class=\"cta\" href=\"{}\">Download</a>{}</div>",
             esc(o.label),
             esc(&o.detail),
-            esc(href)
+            esc(href),
+            if win { format!("<button class=\"copy\" type=\"button\" data-exe=\"{}\">Copy install command (no security prompt)</button><code class=\"cmd\"></code>", esc(href)) } else { String::new() },
         ),
         None => format!("<div class=\"card off\"><span class=\"label\">{}</span><span class=\"detail\">Not available yet</span></div>", esc(o.label)),
     };
@@ -286,7 +303,8 @@ pub fn download_page(title: &str, intro: &str, sections: &[OsSection]) -> String
     let body: String = sections
         .iter()
         .map(|s| {
-            let cards: String = s.offers.iter().map(card).collect();
+            let win = s.id == "windows";
+            let cards: String = s.offers.iter().map(|o| card(o, win)).collect();
             format!("<section class=\"os\" id=\"{}\"><h2>{}<span class=\"mine\">Your computer</span></h2><div class=\"grid\">{cards}</div></section>", s.id, esc(s.name))
         })
         .collect();
@@ -322,6 +340,9 @@ a:focus-visible{{outline:2px solid var(--focus);outline-offset:2px}}
 .detail{{margin-bottom:16px}}
 .cta{{align-self:flex-start;margin-top:auto;background:var(--accent);color:#fff;border-radius:9999px;padding:10px 22px;font-size:15px;text-decoration:none}}
 .cta:hover{{filter:brightness(1.1)}}
+.copy{{display:none;align-self:flex-start;margin-top:12px;background:none;border:1px solid var(--accent);color:var(--accent);border-radius:9999px;padding:8px 18px;font:inherit;font-size:14px;cursor:pointer}}
+.copy:hover{{background:var(--parchment)}}
+.cmd{{display:none;margin-top:10px;padding:10px 12px;border-radius:10px;background:var(--parchment);color:var(--ink);font-family:ui-monospace,"SF Mono","Cascadia Code",Consolas,monospace;font-size:12px;line-height:1.45;overflow-x:auto;white-space:pre;user-select:all;-webkit-user-select:all}}
 .switch{{display:inline-flex;gap:4px;margin-top:32px;padding:4px;border-radius:9999px;background:var(--parchment)}}
 .switch a{{padding:8px 18px;border-radius:9999px;color:var(--ink);text-decoration:none;font-size:15px}}
 .switch a[aria-current=true]{{font-weight:600}}
@@ -452,6 +473,20 @@ mod tests {
         assert!(!html.contains(".sig") && !html.contains("<details"));
         // Cards stretch to the row height; the button sits at the bottom of each.
         assert!(html.contains(".cta{align-self:flex-start;margin-top:auto;"));
+    }
+
+    #[test]
+    fn windows_cards_offer_a_mark_of_the_web_free_install_command() {
+        let html = download_page("T", "", &sections(Some("/download/stable/technician/darwin-universal/Tether_0.3.1_universal.dmg")));
+        // A copy button per released Windows app (two), carrying the relative exe href; none on macOS.
+        let win = &html[html.find("id=\"windows\"").unwrap()..html.find("id=\"macos\"").unwrap()];
+        assert_eq!(win.matches("class=\"copy\"").count(), 2);
+        assert!(win.contains("data-exe=\"/w.exe\"") && win.contains("<code class=\"cmd\">"));
+        assert!(!html[html.find("id=\"macos\"").unwrap()..].contains("class=\"copy\""));
+        // The command is assembled in the browser from this relay's origin: no absolute URL baked in,
+        // and it fetches with Invoke-WebRequest (no Mark of the Web) rather than a browser download.
+        assert!(!html.contains("https://") && !html.contains("http://"));
+        assert!(html.contains("location.origin+rel") && html.contains("iwr '") && html.contains("-OutFile $o; & $o"));
     }
 
     fn manifest(v: &str) -> Manifest {

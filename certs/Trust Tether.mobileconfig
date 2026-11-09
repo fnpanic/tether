@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>PayloadContent</key>
+  <array><dict>
+    <key>PayloadType</key><string>com.apple.security.root</string>
+    <key>PayloadContent</key><data>MIIEQjCCAqqgAwIBAgIUE0Dade1E5hHtUJir9oWab1dvNmEwDQYJKoZIhvcNAQELBQAwHjEcMBoGA1UEAwwTVGV0aGVyIENvZGUgU2lnbmluZzAeFw0yNjExMDkxNTEyNTZaFw0zNjExMDYxNTEyNTZaMB4xHDAaBgNVBAMME1RldGhlciBDb2RlIFNpZ25pbmcwggGiMA0GCSqGSIb3DQEBAQUAA4IBjwAwggGKAoIBgQDkQTs1HfLKaBeAlfa5lalxSIaWf0cPpdj4x/jDRGoNF3BKSReU7gFPM+lPHooDBDuWClAzBPbzVxMb701DdHQElrxVRqF4CssSRFht8n8GyMm2di7kvWrF78ejJOtnMOPdki+uafW464oBVVxlCSdluoExE8SizXAYGN+vJgxnrxZgpjmzcw9A9haYOdMVhP0H0CVaoAeyVEe1n+/eLNT/U0/UH/LnMhBIcQu00v5qHsaVH5Dherevfk548I1qDSr0xi6S4PdFmFRbpZUSDwA8zf7QtQbIV3dUYl+Z8fmsM3XXSqyW9ircULhZ5sSn4lLa6Y/ADCxPRbsAHeh/e+0UwHUr9wcTjpaXRZX3SRgd1rhiYM47SV1Z6PNvcbMX49CiBBuZ66pkiPTM7AKtb9G62gAauhg+AwA0gskhRg2FR849LTJnZzjPL3r/36OYZddNm2KESMbLLMwD1ehd18ZTnfQX92Jg1ZhzAMB8g8M4RkwxeSWWJTZ9OKU1u6r//5ECAwEAAaN4MHYwHQYDVR0OBBYEFOjgEl0jPBH2NeJxxbEMU2wRmZt7MB8GA1UdIwQYMBaAFOjgEl0jPBH2NeJxxbEMU2wRmZt7MA4GA1UdDwEB/wQEAwIHgDAWBgNVHSUBAf8EDDAKBggrBgEFBQcDAzAMBgNVHRMBAf8EAjAAMA0GCSqGSIb3DQEBCwUAA4IBgQB5CzPwp7LUokosJK0T67RdX9cGiajTj8FNd6InIizNVOVZVl6E60N8+IrqLHFmDlXaIoWLh/sTfk8tvR0SpUOVk2P/i8ufVwaKoF0JKVlRHbOq4KW2GbXgtdP2QWVWiWEnXh70YVEa1hg/1+Uhgo8PtgMVHzztIuJpQUbNtK3XtM8R3WDbEMwwL29217wDn9Y4mKltocx96vofhZ14gertJE1ldAXBneUeBdmNYFf9m3lJZhJi3dguXUM/tsjAKiVP2L/7/sgL5OpkvDSx1B+/Eb09+mfaLsT951VHm02wzwdgup2n4LU79kBQbRcJpaEUOQm+OOi2tVoz3ddUFnYvWDegrcnSdz/mjhyPYdnfp+Jz5kKIwZf2mVuXGM/ZXdkrmZ9kGpTSbHBstvkQMvXqZxVTQRrKpO56L88oBUOISuhyn8jSB8pTd44EB6J934dwipNRWDS9vchwi1WYHaGqKhFvYjiuBgz/eS4iIssGESWG9nmEY6ehNDiF9Ixy0FU=</data>
+    <key>PayloadIdentifier</key><string>net.tether.cert.246a7997-3808-d1a1-ab74-322e98089313</string>
+    <key>PayloadUUID</key><string>246a7997-3808-d1a1-ab74-322e98089313</string>
+    <key>PayloadVersion</key><integer>1</integer>
+    <key>PayloadDisplayName</key><string>Tether Code Signing</string>
+  </dict></array>
+  <key>PayloadDisplayName</key><string>Trust Tether</string>
+  <key>PayloadDescription</key><string>Trusts Tether's code-signing certificate on this Mac.</string>
+  <key>PayloadIdentifier</key><string>net.tether.trust.f54aee21-19a0-7e6a-5f18-6a6e6b3e21ab</string>
+  <key>PayloadType</key><string>Configuration</string>
+  <key>PayloadUUID</key><string>f54aee21-19a0-7e6a-5f18-6a6e6b3e21ab</string>
+  <key>PayloadVersion</key><integer>1</integer>
+</dict></plist>
