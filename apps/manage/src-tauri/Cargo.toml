@@ -1,6 +1,6 @@
 [package]
 name = "tether-manage"
-version = "0.5.14"
+version = "0.5.15"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Tether Manage: keys, policy, releases and diagnostics for a Tether relay"
@@ -33,6 +33,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Already in the tree: release index hashes (sha256) and the gzip copy of TetherQS.exe for the CDN.
 sha2 = "0.10"
 flate2 = "1"
+xz2 = { version = "0.1", features = ["static"] }
 
 # Already in the tree (0.61 via tauri); the private server key file gets a user-only DACL.
 [target.'cfg(windows)'.dependencies]
@@ -41,6 +42,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [dev-dependencies]
 # What tauri-plugin-updater 2.x verifies with.
 minisign-verify = "0.3"
+# The decoder the apps unpack xz copies with (round trip in release.rs).
+lzma-rs = "0.3"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

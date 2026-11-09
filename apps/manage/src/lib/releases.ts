@@ -266,6 +266,7 @@ export class Tally {
       else if (x.ok) {
         this.at(x.server).live.push(what);
         if (x.detail?.warning) this.at(x.server).warn.push(`${what}: ${x.detail.warning}`);
+        if (x.detail?.note) this.at(x.server).notes.push(`${what}: ${x.detail.note}`);
       } else this.fail(x.server, what, x.error ?? "failed");
     }
   }

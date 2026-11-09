@@ -194,3 +194,11 @@ test("a build left to the relays (CDN size limit) is a note on the CDN row, not 
   assert.match(cdn.detail.note, /^Mac 0\.5\.32: 36\.3 MiB/);
   assert.equal(t.summary(), "Published on every relay.");
 });
+
+test("a build whose xz copy is on the CDN is live there, with the note", () => {
+  const t = new Tally([A], []);
+  t.results("Mac 0.5.33", [ok(A, { live: true }), ok("CDN", { base: "https://dl.example", note: "36.3 MiB, over the CDN's 25 MiB per file: devices get it from the relays; app versions that read releases-v2.json take its 21.8 MiB xz copy from the CDN" })]);
+  const cdn = t.rows().find((r) => r.server === "CDN")!;
+  assert.deepEqual(cdn.detail.published, ["Mac 0.5.33"]);
+  assert.match(cdn.detail.note, /xz copy from the CDN/);
+});

@@ -1,6 +1,6 @@
 [package]
 name = "tether"
-version = "0.5.32"
+version = "0.5.33"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Tether remote desktop"
@@ -28,6 +28,7 @@ tauri-plugin-deep-link = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "socks", "json", "native-tls", "rustls-tls", "rustls-tls-native-roots", "gzip", "zstd"] }
 # Already in the tree (reqwest gzip): unpacks the gzip copy of a release (CDN).
 flate2 = "1"
+lzma-rs = "0.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 url = "2"
 tauri-plugin-single-instance = "2"

@@ -274,14 +274,20 @@ fn index_cache(channel: &str) -> PathBuf {
 /// floor), else (no floor yet, D2) the highest legacy manifest.
 fn find_release(relays: &[(String, String)], channel: &str, keys: &[tether_trust::VerifyingKey]) -> Result<Option<Candidate>, String> {
     let cache = index_cache(channel);
-    let ipath = format!("/download/{channel}/releases.json");
     let mut docs = Vec::new();
     let mut errors = Vec::new();
-    for (host, base) in relays {
-        match fetch_doc(host, &ipath, release::MAX_INDEX) {
-            Ok(Some(raw)) => docs.push((base.clone(), raw)),
-            Ok(None) => {}
-            Err(e) => errors.push(e),
+    // releases-v2.json first (xz copies; `choose` keeps the first of equal serials), then
+    // releases.json; the highest serial over both wins, so a stale or missing v2 does no harm.
+    for name in [release::INDEX_V2_FILE, release::INDEX_FILE] {
+        let ipath = format!("/download/{channel}/{name}");
+        for (host, base) in relays {
+            match fetch_doc(host, &ipath, release::MAX_INDEX) {
+                Ok(Some(raw)) => docs.push((base.clone(), raw)),
+                Ok(None) => {}
+                // Reachability is judged by releases.json, which every relay has.
+                Err(e) if name == release::INDEX_FILE => errors.push(e),
+                Err(e) => log::info!("{name}: {e}"),
+            }
         }
     }
     let key = format!("technician/{}", target());
@@ -337,20 +343,28 @@ pub fn check() -> Result<Value, String> {
 
 // ----------------------------------------------------------------------------- download / install
 
-fn gunzip(data: &[u8], max: u64) -> Result<Vec<u8>, String> {
+/// A packed copy (`release::PACKED_ENCODINGS`) → the artifact, at most `max` bytes. Its size and
+/// sha256 were checked against the signed index first, so only an admin-signed file gets here.
+fn unpack(encoding: &str, data: &[u8], max: u64) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(flate2::read::GzDecoder::new(data), max + 1), &mut out).map_err(|e| format!("bad gzip copy: {e}"))?;
+    match encoding {
+        "gzip" => {
+            std::io::Read::read_to_end(&mut std::io::Read::take(flate2::read::GzDecoder::new(data), max + 1), &mut out).map_err(|e| format!("bad gzip copy: {e}"))?;
+        }
+        "xz" => lzma_rs::xz_decompress(&mut std::io::BufReader::new(data), &mut out).map_err(|e| format!("bad xz copy: {e}"))?,
+        e => return Err(format!("unknown packed encoding {e}")),
+    }
     if out.len() as u64 > max {
-        return Err("the gzip copy unpacks larger than announced".into());
+        return Err(format!("the {encoding} copy unpacks larger than announced"));
     }
     Ok(out)
 }
 
-/// Every source in turn (the gzip copy first), then the verified bytes.
+/// Every source in turn (the packed copy first), then the verified bytes.
 fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
     let mut last = String::from("no download URL");
     for (url, packed) in c.sources() {
-        match download_one(&url, c, packed).and_then(|b| c.accept(b, packed, key, gunzip)) {
+        match download_one(&url, c, packed).and_then(|b| c.accept(b, packed, key, unpack)) {
             Ok(b) => return Ok(b),
             Err(e) => {
                 log::warn!("update download {url}: {e}");
@@ -521,6 +535,23 @@ pub fn start() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn unpack_gzip_and_xz_with_limit() {
+        let plain: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let mut xz = Vec::new();
+        lzma_rs::xz_compress(&mut std::io::BufReader::new(&plain[..]), &mut xz).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, &plain).unwrap();
+        let gz = gz.finish().unwrap();
+        let n = plain.len() as u64;
+        assert_eq!(unpack("xz", &xz, n).unwrap(), plain);
+        assert_eq!(unpack("gzip", &gz, n).unwrap(), plain);
+        assert!(unpack("xz", &xz, n - 1).unwrap_err().contains("larger than announced"));
+        assert!(unpack("gzip", &gz, n - 1).is_err());
+        assert!(unpack("xz", &gz, n).unwrap_err().contains("bad xz copy"));
+        assert!(unpack("zstd", &xz, n).unwrap_err().contains("unknown packed encoding"));
+    }
     use super::*;
 
     fn m(version: &str, mandatory: bool, minimum: &str) -> Manifest {

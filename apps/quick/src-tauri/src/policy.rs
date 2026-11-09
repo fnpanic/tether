@@ -48,8 +48,21 @@ pub fn base_url() -> Option<String> {
     base_urls().into_iter().next()
 }
 
+/// Debug builds only: `TETHER_DEV_API` (comma-separated `http://` stand-ins) replaces the servers,
+/// for the end-to-end tests (as in the technician app). Always `None` in release builds.
+pub fn dev_apis() -> Option<Vec<String>> {
+    #[cfg(debug_assertions)]
+    if let Ok(v) = std::env::var("TETHER_DEV_API") {
+        return Some(v.split(',').map(|b| b.trim().trim_end_matches('/').to_owned()).filter(|b| !b.is_empty()).collect());
+    }
+    None
+}
+
 /// `https://<host>` of every server (compiled-in, then policy `servers.list`), last good first.
 pub fn base_urls() -> Vec<String> {
+    if let Some(v) = dev_apis() {
+        return v;
+    }
     if SERVER.is_none() {
         return Vec::new(); // never the upstream public servers
     }
@@ -88,7 +101,7 @@ pub fn http() -> Result<reqwest::blocking::Client, String> {
     let target = base_url().unwrap_or_else(|| "https://example.com".into());
     let mut b = reqwest::blocking::Client::builder()
         .use_native_tls() // Windows trust store: corporate TLS-inspection roots work.
-        .https_only(true)
+        .https_only(dev_apis().is_none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .user_agent(concat!("TetherQS/", env!("CARGO_PKG_VERSION")));

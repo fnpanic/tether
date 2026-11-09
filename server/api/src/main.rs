@@ -336,14 +336,20 @@ struct App {
     release_gen: u64,
     /// Per channel: serial and expiry of the stored `releases.json`.
     indexes: HashMap<String, (u64, u64)>,
+    /// The same for `releases-v2.json` (release::INDEX_V2_FILE: with xz copies, for new builds).
+    indexes_v2: HashMap<String, (u64, u64)>,
     /// Devices that reported a newly staged update, by (profile, version), since start.
     downloads: std::collections::BTreeMap<(String, String), u64>,
 }
 
-/// `/download/<channel>/releases.json` → the channel.
-fn release_index_channel(p: &str) -> Option<&str> {
+/// `/download/<channel>/releases.json` (or `releases-v2.json`) → (channel, file name).
+fn release_index_channel(p: &str) -> Option<(&str, &str)> {
     let (ch, rest) = p.strip_prefix("/download/")?.split_once('/')?;
-    (rest == "releases.json" && valid_channel(ch)).then_some(ch)
+    (is_index_file(rest) && valid_channel(ch)).then_some((ch, rest))
+}
+
+fn is_index_file(name: &str) -> bool {
+    name == release::INDEX_FILE || name == release::INDEX_V2_FILE
 }
 
 /// Distinct (profile, version) series in the download counter; heartbeats are unauthenticated.
@@ -739,11 +745,14 @@ impl App {
         let policy_serial = fs::read(data.join("policy.json")).ok().and_then(|b| stored_meta(&b)).map(|m| m.serial);
         let server_keys_serial = fs::read(data.join("server-keys.json")).ok().and_then(|b| stored_meta(&b)).map(|m| m.serial);
         let release_gen = fs::read_to_string(data.join("release-generation")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-        let mut indexes = HashMap::new();
+        let (mut indexes, mut indexes_v2) = (HashMap::new(), HashMap::new());
         for e in fs::read_dir(data.join("download"))?.flatten() {
             let ch = e.file_name().to_string_lossy().into_owned();
-            if let Some(m) = fs::read(e.path().join("releases.json")).ok().and_then(|b| index_meta(&b)) {
-                indexes.insert(ch, m);
+            if let Some(m) = fs::read(e.path().join(release::INDEX_FILE)).ok().and_then(|b| index_meta(&b)) {
+                indexes.insert(ch.clone(), m);
+            }
+            if let Some(m) = fs::read(e.path().join(release::INDEX_V2_FILE)).ok().and_then(|b| index_meta(&b)) {
+                indexes_v2.insert(ch, m);
             }
         }
         let mut custom: Vec<CustomMeta> = Vec::new();
@@ -773,6 +782,7 @@ impl App {
             server_keys_serial,
             release_gen,
             indexes,
+            indexes_v2,
             downloads: Default::default(),
             started: now(),
             keys,
@@ -880,8 +890,9 @@ impl App {
             ("GET", "/api/policy") => self.get_signed(rq, self.policy_serial, "policy.json", "no policy published"),
             ("GET", "/api/server-keys") => self.get_signed(rq, self.server_keys_serial, "server-keys.json", "no server key list published"),
             ("GET", p) if release_index_channel(p).is_some() => {
-                let ch = release_index_channel(p).unwrap_or_default();
-                let r = self.get_signed(rq, self.indexes.get(ch).map(|m| m.0), &format!("download/{ch}/releases.json"), "no release index published")?;
+                let (ch, name) = release_index_channel(p).unwrap_or_default();
+                let serial = self.index_map(name).get(ch).map(|m| m.0);
+                let r = self.get_signed(rq, serial, &format!("download/{ch}/{name}"), "no release index published")?;
                 Ok(r.with_header(hdr("Cache-Control", "no-cache")))
             }
             ("POST", "/api/heartbeat") => self.heartbeat(rq, body),
@@ -899,6 +910,11 @@ impl App {
     /// A stored signed document (policy, server key list) with `ETag: "<serial>"`.
     fn get_signed(&self, rq: &Request, serial: Option<u64>, file: &str, missing: &str) -> Result<Resp, Resp> {
         let serial = serial.ok_or_else(|| text(404, missing))?;
+        // Deleted on disk (scripts/release-index-v1.sh removes releases-v2.json): gone at once,
+        // whatever the serial cached at start says.
+        if !self.data.join(file).is_file() {
+            return Err(text(404, missing));
+        }
         let etag = format!("\"{serial}\"");
         if let Some(inm) = header(rq, "If-None-Match") {
             if inm.split(',').map(|t| t.trim().trim_start_matches("W/")).any(|t| t == etag || t == "*") {
@@ -1348,8 +1364,8 @@ impl App {
             if raw.len() > release::MAX_INDEX {
                 return Err(too_large());
             }
-            let ix = release::Index::open(&raw, &self.keys, ch).map_err(|e| text(400, &e))?;
-            if let Some((cur, _)) = self.indexes.get(ch) {
+            let ix = release::Index::open(&raw, &self.keys, &ch.0).map_err(|e| text(400, &e))?;
+            if let Some((cur, _)) = self.index_map(&ch.1).get(&ch.0) {
                 if ix.serial < *cur || (ix.serial == *cur && fs::read(dest).ok().as_deref() != Some(&raw[..])) {
                     return Err(text(409, "serial must be greater than the current release index's"));
                 }
@@ -1359,25 +1375,34 @@ impl App {
         mkdirs(dest.parent().expect("under download/"), 0o750).map_err(internal)?;
         fs::rename(tmp, dest).map_err(internal)?;
         // Only now: after a failed rename the old index is still what is served.
-        if let Some((ch, m)) = new_index {
-            self.indexes.insert(ch, m);
+        if let Some(((ch, name), m)) = new_index {
+            self.index_map_mut(&name).insert(ch, m);
         }
         self.bump_generation(dest);
         Ok(empty(204))
     }
 
-    /// `download/<channel>/releases.json` → its channel.
-    fn index_channel(&self, dest: &Path) -> Option<String> {
+    fn index_map(&self, name: &str) -> &HashMap<String, (u64, u64)> {
+        if name == release::INDEX_V2_FILE { &self.indexes_v2 } else { &self.indexes }
+    }
+
+    fn index_map_mut(&mut self, name: &str) -> &mut HashMap<String, (u64, u64)> {
+        if name == release::INDEX_V2_FILE { &mut self.indexes_v2 } else { &mut self.indexes }
+    }
+
+    /// `download/<channel>/releases.json` (or `releases-v2.json`) → (channel, file name).
+    fn index_channel(&self, dest: &Path) -> Option<(String, String)> {
         let rel = dest.strip_prefix(self.data.join("download")).ok()?;
         let mut it = rel.iter();
         let ch = it.next()?.to_str()?.to_owned();
-        (it.next()? == "releases.json" && it.next().is_none()).then_some(ch)
+        let name = it.next()?.to_str()?.to_owned();
+        (is_index_file(&name) && it.next().is_none()).then_some((ch, name))
     }
 
     /// Every change of an index or a `latest.json` bumps G, written for hbbs (`release-generation`,
     /// group-readable: hbbs's user is in group tether-api, see install.sh).
     fn bump_generation(&mut self, dest: &Path) {
-        if !dest.file_name().is_some_and(|n| n == "releases.json" || n == "latest.json") {
+        if !dest.file_name().and_then(|n| n.to_str()).is_some_and(|n| is_index_file(n) || n == "latest.json") {
             return;
         }
         self.release_gen += 1;
@@ -1392,8 +1417,8 @@ impl App {
             return Err(not_found());
         }
         fs::remove_file(dest).map_err(internal)?;
-        if let Some(ch) = self.index_channel(dest) {
-            self.indexes.remove(&ch);
+        if let Some((ch, name)) = self.index_channel(dest) {
+            self.index_map_mut(&name).remove(&ch);
         }
         self.bump_generation(dest);
         self.remove_empty_dirs(dest.parent().expect("under download/"));

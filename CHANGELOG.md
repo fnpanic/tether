@@ -7,6 +7,22 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ## [Unreleased]
 
 ### Added
+- **Second release index `releases-v2.json` with xz copies** (Tether 0.5.33, TetherQS 0.5.31,
+  Tether Manage 0.5.15, tether-api; docs/updates.md "Two index files", docs/api.md). The universal
+  Mac files (36 and 27 MiB) are over the CDN's 25 MiB, and every build before these rejects the
+  whole `releases.json` when an entry has a packed encoding other than gzip, so `releases.json` stays
+  as it was and Manage writes the same index (same serial) as `releases-v2.json` too, with xz copies:
+  TetherQS.exe (35 → 9 MiB) and, for macOS, an uncompressed twin of each artifact in the same
+  container (`…-stored.zip`, `…_universal-stored.app.tar.gz`, stored zip entries / stored gzip
+  blocks, signed on its own, installed exactly like the original) whose xz copy fits the CDN
+  (TetherQS 17.0 MiB, Tether 22.2). New builds read both files from every relay and take the
+  highest serial (v2 on a tie), unpack gzip and xz (`lzma-rs`) and skip encodings they do not know,
+  so a stale or missing v2 costs nothing. tether-api serves `releases-v2.json` like the index
+  (ETag, 404 at once when deleted on disk); Caddy routes both names to it.
+  `scripts/release-index-v1.sh` goes back to the single `releases.json` (Manage marker file, v2
+  deleted on the relays, 404 checked), `--on` switches v2 on again. TetherQS debug builds honour
+  `TETHER_DEV_API` for updates (as the technician app) for the new e2e
+  `apps/desktop/e2e/index-v2-e2e.mjs`.
 - Code signing (self-signed `Tether Code Signing`, docs/code-signing.md): `scripts/sign-windows.ps1`
   signs the Windows release files before Tether Manage publishes them. **Custom TetherQS apps stay
   signed**: the relay (`tether-api`) now places a custom app's profile at the end of the exe's

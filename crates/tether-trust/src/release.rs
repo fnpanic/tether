@@ -8,9 +8,10 @@
 //! - [`Candidate`]: what a client may install, from the index or from a legacy `latest.json`; its
 //!   bytes are bound to it by size, sha256, minisign signature and the signed trusted comment
 //!   (`file:` and `version:`), so a download host (relay, CDN) is never trusted.
-//! - [`Packed`]: an optional gzip copy of an artifact (TetherQS.exe on the CDN, whose files may
-//!   not exceed [`CDN_MAX_FILE`]); its own size and sha256 are checked before it is unpacked, the
-//!   unpacked bytes then like any other.
+//! - [`Packed`]: an optional compressed copy of an artifact (the CDN's files may not exceed
+//!   [`CDN_MAX_FILE`]): gzip for TetherQS.exe in both indexes, xz for TetherQS.exe and the macOS
+//!   apps in [`INDEX_V2_FILE`] only; its own size and sha256 are checked before it is unpacked,
+//!   the unpacked bytes then like any other.
 //! - Staged rollout: a stable per-device [`bucket`] per release and a signed ramp of steps.
 //! - [`jitter`] for poll intervals and hint spreads, [`parse_hints`] for the hbbs push hint.
 
@@ -23,6 +24,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const INDEX_TYPE: &str = "tether-releases/1";
+/// The index every build reads (gzip copies only).
+pub const INDEX_FILE: &str = "releases.json";
+/// The same index (same serial) with xz copies too, read first by TetherQS 0.5.31 and Tether
+/// 0.5.33 on: builds before them reject an unknown encoding and with it the whole document, so
+/// the xz copies cannot go into [`INDEX_FILE`] while such builds are around. Clients take the
+/// highest serial over both files (this one on a tie), so a stale or missing one does no harm.
+pub const INDEX_V2_FILE: &str = "releases-v2.json";
+/// Packed encodings this build unpacks.
+pub const PACKED_ENCODINGS: &[&str] = &["gzip", "xz"];
 /// Largest index document a client reads.
 pub const MAX_INDEX: usize = 64 * 1024;
 /// Largest artifact a client downloads (also the relay's upload limit).
@@ -106,7 +116,7 @@ pub struct Entry {
     /// A halted rollout: devices that did not install it yet do not install it.
     #[serde(default)]
     pub halted: bool,
-    /// A gzip copy, tried before `urls`.
+    /// A compressed copy, tried before `urls`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packed: Option<Packed>,
 }
@@ -114,7 +124,9 @@ pub struct Entry {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Packed {
-    /// Only `gzip`.
+    /// `gzip` (both indexes) or `xz` ([`INDEX_V2_FILE`] only: builds before 0.5.31/0.5.33 reject
+    /// any encoding but gzip, and with it the whole index). Clients skip encodings they do not
+    /// know (not in [`PACKED_ENCODINGS`]) and use `urls`.
     pub encoding: String,
     pub size: u64,
     pub sha256: String,
@@ -184,8 +196,10 @@ impl Entry {
             return Err("sha256 must be 64 lowercase hex digits".into());
         }
         if let Some(p) = &self.packed {
-            if p.encoding != "gzip" || p.size == 0 || p.size > MAX_ARTIFACT || !valid_sha(&p.sha256) || !valid_urls(&p.urls) {
-                return Err("packed: gzip, size, sha256 and 1-8 https:// URLs".into());
+            // Any short encoding name: one this build does not know is skipped, not an error.
+            let enc_ok = !p.encoding.is_empty() && p.encoding.len() <= 16 && p.encoding.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+            if !enc_ok || p.size == 0 || p.size > MAX_ARTIFACT || !valid_sha(&p.sha256) || !valid_urls(&p.urls) {
+                return Err("packed: encoding, size, sha256 and 1-8 https:// URLs".into());
             }
         }
         if self.signature.is_empty() || self.signature.len() > 4096 {
@@ -457,7 +471,7 @@ impl Candidate {
             serial: ix.serial,
             expires: ix.expires,
             rollout: e.rollout.clone(),
-            packed: e.packed.as_ref().map(|p| Packed { urls: subst(&p.urls, relay_base), ..p.clone() }),
+            packed: e.packed.as_ref().filter(|p| PACKED_ENCODINGS.contains(&p.encoding.as_str())).map(|p| Packed { urls: subst(&p.urls, relay_base), ..p.clone() }),
         }
     }
 
@@ -478,11 +492,11 @@ impl Candidate {
     }
 
     /// Downloaded bytes → the verified artifact. From a packed source, bytes matching the packed
-    /// size and sha256 are unpacked with `gunzip(bytes, max_out)`; anything else (a proxy or CDN
-    /// that decoded the transfer) is taken as the artifact itself. Then [`Self::verify`].
-    pub fn accept(&self, data: Vec<u8>, packed: bool, pubkey: &str, gunzip: impl Fn(&[u8], u64) -> Result<Vec<u8>, String>) -> Result<Vec<u8>, String> {
+    /// size and sha256 are unpacked with `unpack(encoding, bytes, max_out)`; anything else (a proxy
+    /// or CDN that decoded the transfer) is taken as the artifact itself. Then [`Self::verify`].
+    pub fn accept(&self, data: Vec<u8>, packed: bool, pubkey: &str, unpack: impl Fn(&str, &[u8], u64) -> Result<Vec<u8>, String>) -> Result<Vec<u8>, String> {
         let plain = match &self.packed {
-            Some(p) if packed && data.len() as u64 == p.size && sha256_hex(&data) == p.sha256 => gunzip(&data, if self.size > 0 { self.size } else { MAX_ARTIFACT })?,
+            Some(p) if packed && data.len() as u64 == p.size && sha256_hex(&data) == p.sha256 => unpack(&p.encoding, &data, if self.size > 0 { self.size } else { MAX_ARTIFACT })?,
             _ => data,
         };
         self.verify(&plain, pubkey)?;
@@ -563,17 +577,46 @@ pub fn dmg_name(version: &str) -> String {
     format!("Tether_{version}_universal.dmg")
 }
 
-/// The gzip copy `<artifact>.gz` exists only for TetherQS.exe (CDN file size limit).
+/// The gzip copy `<artifact>.gz` (in both indexes) exists only for TetherQS.exe.
 pub fn wants_packed(app: &str, platform: &str) -> bool {
     (app, platform) == ("customer", WINDOWS)
+}
+
+/// The xz copy `<artifact>.xz` ([`INDEX_V2_FILE`] only): TetherQS.exe and both macOS apps, whose
+/// universal files are over the CDN's [`CDN_MAX_FILE`] (36 and 27 MiB).
+pub fn wants_xz(app: &str, platform: &str) -> bool {
+    wants_packed(app, platform) || platform == MAC
+}
+
+/// The macOS artifacts are compressed already (gzip, zip), so xz cannot shrink them. In
+/// [`INDEX_V2_FILE`] their entry names an uncompressed twin in the same container instead (gzip
+/// and zip with stored data, installed exactly like the original), signed on its own, whose xz
+/// copy is small (85 → 22, 69 → 17 MiB): `Tether_<v>_universal.app.tar.gz` →
+/// `Tether_<v>_universal-stored.app.tar.gz`, `TetherQS-<v>-universal.zip` →
+/// `TetherQS-<v>-universal-stored.zip`. `None` for other files.
+pub fn stored_name(file: &str) -> Option<String> {
+    let (_, platform, _) = build_of(file)?;
+    (platform == MAC).then(|| file.replacen("_universal.app.tar.gz", "_universal-stored.app.tar.gz", 1).replacen("-universal.zip", "-universal-stored.zip", 1))
+}
+
+/// The artifact a [`stored_name`] twin stands for.
+fn unstored(file: &str) -> Option<String> {
+    let f = file.replacen("_universal-stored.app.tar.gz", "_universal.app.tar.gz", 1).replacen("-universal-stored.zip", "-universal.zip", 1);
+    (f != file && stored_name(&f).as_deref() == Some(file)).then_some(f)
 }
 
 /// The version a file in `<app>/<platform>/` belongs to: the artifact, `<artifact>.sig`,
 /// `<artifact>.gz` (customer Windows), and for the mac technician app `<dmg>` and `<dmg>.sig`.
 /// `None` for `latest.json` and anything else.
 pub fn file_version(app: &str, platform: &str, file: &str) -> Option<String> {
-    let base = file.strip_suffix(".sig").or_else(|| file.strip_suffix(".gz").filter(|_| wants_packed(app, platform))).unwrap_or(file);
-    if (app, platform) == ("technician", MAC) && !file.ends_with(".gz") {
+    let base = file
+        .strip_suffix(".sig")
+        .or_else(|| file.strip_suffix(".gz").filter(|_| wants_packed(app, platform)))
+        .or_else(|| file.strip_suffix(".xz").filter(|_| wants_xz(app, platform)))
+        .unwrap_or(file);
+    let twin = unstored(base);
+    let base = twin.as_deref().unwrap_or(base);
+    if (app, platform) == ("technician", MAC) && !file.ends_with(".gz") && !file.ends_with(".xz") {
         if let Some(v) = base.strip_prefix("Tether_").and_then(|r| r.strip_suffix("_universal.dmg")).filter(|v| valid_version(v)) {
             return Some(v.to_owned());
         }
@@ -986,7 +1029,8 @@ mod tests {
             out.push(n as u8);
             out
         };
-        let gunzip = |d: &[u8], max: u64| {
+        let gunzip = |enc: &str, d: &[u8], max: u64| {
+            assert_eq!(enc, "gzip");
             let (n, body) = d.split_last().unwrap();
             let mut out = body.to_vec();
             out.resize(body.len() + *n as usize, 0);
@@ -1013,9 +1057,29 @@ mod tests {
         assert!(c.accept(bad, true, &pk, gunzip).is_err());
         // From a plain URL, packed bytes are never unpacked.
         assert!(c.accept(packed, false, &pk, gunzip).is_err());
+        // xz (index v2): passed to the unpacker with its encoding.
         let mut e2 = e.clone();
         e2.packed.as_mut().unwrap().encoding = "xz".into();
-        assert!(e2.validate().is_err());
+        e2.validate().unwrap();
+        let c2 = Candidate::from_entry(&e2, "https://r1", &ix);
+        assert_eq!(c2.sources().len(), 2);
+        let seen = std::cell::RefCell::new(String::new());
+        let unxz = |enc: &str, d: &[u8], max: u64| {
+            *seen.borrow_mut() = enc.to_owned();
+            gunzip("gzip", d, max)
+        };
+        assert_eq!(c2.accept(pack(&exe), true, &pk, unxz).unwrap(), exe);
+        assert_eq!(seen.borrow().as_str(), "xz");
+        // An encoding this build does not know: the index stays valid, the copy is skipped.
+        let mut e4 = e.clone();
+        e4.packed.as_mut().unwrap().encoding = "brotli2".into();
+        e4.validate().unwrap();
+        let c4 = Candidate::from_entry(&e4, "https://r1", &ix);
+        assert_eq!(c4.sources(), [("https://r1/download/stable/customer/windows-x86_64/TetherQS-0.5.24.exe".into(), false)]);
+        assert_eq!(c4.accept(exe.clone(), false, &pk, |_: &str, _: &[u8], _| panic!("nothing to unpack")).unwrap(), exe);
+        // Not a name: still refused.
+        e4.packed.as_mut().unwrap().encoding = "X Z".into();
+        assert!(e4.validate().is_err());
         // Old index readers: an entry without `packed` still parses, and serializes without it.
         let mut e3 = e.clone();
         e3.packed = None;
@@ -1030,7 +1094,22 @@ mod tests {
         assert_eq!(fv("customer", WINDOWS, "TetherQS-0.5.24.exe.gz").as_deref(), Some("0.5.24"));
         assert_eq!(fv("customer", WINDOWS, "TetherQS-0.5.4-qa.exe.sig").as_deref(), Some("0.5.4-qa"));
         assert_eq!(fv("customer", MAC, "TetherQS-0.5.24-universal.zip").as_deref(), Some("0.5.24"));
-        for f in ["Tether_0.5.24_universal.app.tar.gz", "Tether_0.5.24_universal.app.tar.gz.sig", "Tether_0.5.24_universal.dmg", "Tether_0.5.24_universal.dmg.sig"] {
+        assert_eq!(fv("customer", MAC, "TetherQS-0.5.24-universal.zip.xz").as_deref(), Some("0.5.24"));
+        assert_eq!(fv("customer", WINDOWS, "TetherQS-0.5.24.exe.xz").as_deref(), Some("0.5.24"));
+        assert_eq!(fv("customer", MAC, "TetherQS-0.5.24-universal-stored.zip.xz").as_deref(), Some("0.5.24"));
+        assert_eq!(fv("customer", MAC, "TetherQS-0.5.24-universal-stored.zip.sig").as_deref(), Some("0.5.24"));
+        assert_eq!(stored_name("TetherQS-0.5.24-universal.zip").as_deref(), Some("TetherQS-0.5.24-universal-stored.zip"));
+        assert_eq!(stored_name("Tether_0.5.24_universal.app.tar.gz").as_deref(), Some("Tether_0.5.24_universal-stored.app.tar.gz"));
+        assert_eq!(stored_name("TetherQS-0.5.24.exe"), None);
+        for f in [
+            "Tether_0.5.24_universal.app.tar.gz",
+            "Tether_0.5.24_universal.app.tar.gz.sig",
+            "Tether_0.5.24_universal-stored.app.tar.gz",
+            "Tether_0.5.24_universal-stored.app.tar.gz.sig",
+            "Tether_0.5.24_universal-stored.app.tar.gz.xz",
+            "Tether_0.5.24_universal.dmg",
+            "Tether_0.5.24_universal.dmg.sig",
+        ] {
             assert_eq!(fv("technician", MAC, f).as_deref(), Some("0.5.24"), "{f}");
         }
         for (a, p, f) in [
@@ -1041,6 +1120,8 @@ mod tests {
             ("technician", WINDOWS, "TetherQS-0.5.24.exe"),
             ("customer", MAC, "Tether_0.5.24_universal.dmg"),
             ("technician", MAC, "Tether_0.5.24_universal.dmg.gz"),
+            ("technician", MAC, "Tether_0.5.24_universal.dmg.xz"),
+            ("technician", WINDOWS, "Tether_0.5.24_x64-setup.exe.xz"),
             ("technician", WINDOWS, "notes.txt"),
         ] {
             assert_eq!(fv(a, p, f), None, "{a}/{p}/{f}");

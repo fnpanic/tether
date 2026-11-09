@@ -212,7 +212,7 @@ impl App {
     fn published_file(&self, download: &Path, rel: &str) -> Option<String> {
         let parts: Vec<&str> = rel.split('/').collect();
         let name = *parts.last()?;
-        if name == "releases.json" || name == "latest.json" {
+        if name == release::INDEX_FILE || name == release::INDEX_V2_FILE || name == "latest.json" {
             return Some(format!("{rel} is what devices read"));
         }
         let [channel, app, platform, file] = parts[..] else { return None };

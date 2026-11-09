@@ -10,15 +10,16 @@ Wire formats: [api.md](api.md#download-layout-and-update-manifests).
 
 ```
 https://<relay>/download/<channel>/releases.json                                   signed index (all apps)
+https://<relay>/download/<channel>/releases-v2.json                                same + xz copies (new builds)
 https://<relay>/download/<channel>/technician/windows-x86_64/latest.json           legacy, ≤ 0.5.23
 https://<relay>/download/<channel>/technician/windows-x86_64/Tether_<version>_x64-setup.exe(.sig)
 https://<relay>/download/<channel>/customer/windows-x86_64/latest.json
-https://<relay>/download/<channel>/customer/windows-x86_64/TetherQS-<version>.exe(.sig, .gz)
+https://<relay>/download/<channel>/customer/windows-x86_64/TetherQS-<version>.exe(.sig, .gz, .xz)
 https://<relay>/download/<channel>/technician/darwin-universal/latest.json
-https://<relay>/download/<channel>/technician/darwin-universal/Tether_<version>_universal.app.tar.gz(.sig)
+https://<relay>/download/<channel>/technician/darwin-universal/Tether_<version>_universal.app.tar.gz(.sig, .xz)
 https://<relay>/download/<channel>/technician/darwin-universal/Tether_<version>_universal.dmg(.sig)
 https://<relay>/download/<channel>/customer/darwin-universal/latest.json
-https://<relay>/download/<channel>/customer/darwin-universal/TetherQS-<version>-universal.zip(.sig)
+https://<relay>/download/<channel>/customer/darwin-universal/TetherQS-<version>-universal.zip(.sig, .xz)
 https://tether-dl.thomas-schend.workers.dev/<channel>/<app>/<platform>/<file>        CDN copy (optional)
 ```
 
@@ -152,8 +153,8 @@ update ([macos.md](macos.md#permissions)).
 TetherQS has no installer. It checks like the technician app (also after policy changes and
 hints) and on **Help → Check for updates**. If the device is eligible for a newer version:
 
-1. Download (HTTPS only, at most 200 MiB): the gzip copy first (CDN, then relay), else the exe;
-   the gzip copy's own size and sha256 are checked before it is unpacked.
+1. Download (HTTPS only, at most 200 MiB): the packed copy first (CDN, then relay; xz from
+   releases-v2.json, else gzip), else the exe; its own size and sha256 are checked before it is unpacked.
 2. Verify size, sha256, the minisign signature and the signed version against the index (legacy
    relays: signature and signed version only) with the compiled-in `TETHER_UPDATER_PUB_KEY`.
 3. Write it as `TetherQS.exe.new` next to the running exe, rename the running exe to
@@ -188,9 +189,45 @@ Optional; without it the relays serve every download. Free plan, no billing and 
 asset requests are free and unlimited and never run the Worker script. Limits: 25 MiB per file,
 20 000 files per version. Each publish deploys a **new Worker version** whose assets are the update
 files of the current and the previous release of each channel/app/platform (technician installer,
-mac archives, `TetherQS-<v>.exe.gz`; the plain TetherQS.exe and the .dmg stay on the relays).
-Manage refuses to publish when a CDN file is over 25 MiB. The CDN is untrusted (see above): if it
-is blocked or serves something else, clients use the relay URL.
+`TetherQS-<v>.exe.gz`, and the `.xz` copies of releases-v2.json; the plain TetherQS.exe, the .dmg
+and the universal mac archives, 27-36 MiB, stay on the relays). A file over 25 MiB is left to the
+relays (a grey note on the CDN line of the publish result); its xz copy goes to the CDN when it
+fits (mac: 17 and 22 MiB). The CDN is untrusted (see above): if it is blocked or serves something
+else, clients use the relay URL.
+
+## Two index files (releases.json and releases-v2.json)
+
+The universal macOS apps are two complete binaries (Intel + Apple silicon, the RustDesk core with
+aom, FFmpeg and libvpx linked in): 85 and 69 MiB, 36 and 27 MiB packed, over the CDN's 25 MiB. xz
+gets them to 21.8 and 17.0 MiB (zstd only to 24.1 for Tether, too close to the limit). But every
+build before TetherQS 0.5.31 / Tether 0.5.33 rejects the whole `releases.json` when one entry has a
+packed encoding other than gzip (or any new field), and devices that are switched off for weeks or
+portable TetherQS copies started once in a while cannot be counted out. So:
+
+- `releases.json` stays as it was (gzip only, mac files from the relays): every build reads it.
+- `releases-v2.json` is the same index, **same serial**, plus xz copies (`<artifact>.xz`) for
+  TetherQS.exe and both macOS apps, on the CDN and the relays. Manage writes it right after
+  `releases.json` on every publish, halt/resume and re-sign; the xz copies of releases that did not
+  change are carried over from the relays' current v2.
+- TetherQS 0.5.31 / Tether 0.5.33 and later read both from every relay and take the highest serial
+  (v2 on a tie). A v2 that is stale (published with it off) or missing costs nothing: they use
+  `releases.json`, like older builds. They also skip packed encodings they do not know, so the next
+  change needs no third file.
+
+**Back to the single releases.json** (from the PC, Git Bash, in the repository):
+
+```sh
+bash scripts/release-index-v1.sh          # Manage writes releases.json only; v2 deleted on every relay
+bash scripts/release-index-v1.sh --on     # write releases-v2.json again from the next publish
+```
+
+The first sets the marker `release-index-v1-only` in the Manage folder (`%APPDATA%\tether-manage`),
+deletes `download/<channel>/releases-v2.json` on both relays over SSH (tether-api answers 404 at
+once, no restart) and checks over HTTPS that both relays answer 404. Nothing else changes: new
+builds fall back to `releases.json`, macOS updates come from the relays again, the `.xz` files stay
+until Clean up removes their version. After `--on` only releases published from then on get an xz
+copy. Tested end to end with `apps/desktop/e2e/index-v2-e2e.mjs` (local relays, Manage, debug
+TetherQS; see "End-to-end test").
 
 Set up once:
 

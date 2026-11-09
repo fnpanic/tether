@@ -957,14 +957,38 @@ fn release_generation_heartbeat_hint_and_index() {
     let status = s.admin(&k, "GET", "/api/admin/status", b"").json();
     assert_eq!((status["release_generation"].as_u64(), status["release_indexes"]["stable"]["serial"].as_u64()), (Some(4), Some(6)));
 
+    // releases-v2.json (xz copies, new builds): the same rules, its own serial, v1 untouched.
+    let p2 = "/api/admin/release/stable/releases-v2.json";
+    assert_eq!(s.req("GET", "/download/stable/releases-v2.json", &[], b"").status, 404);
+    assert_eq!(s.admin(&k, "PUT", p2, &index_doc(&generate_key(), "stable", 6)).status, 400, "foreign key");
+    let doc6 = index_doc(&k, "stable", 6);
+    assert_eq!(s.admin(&k, "PUT", p2, &doc6).status, 204);
+    assert_eq!(s.admin(&k, "PUT", p2, &index_doc(&k, "stable", 5)).status, 409);
+    let r = s.req("GET", "/download/stable/releases-v2.json", &[], b"");
+    assert_eq!((r.status, r.header("ETag"), r.body.clone()), (200, Some("\"6\""), doc6));
+    assert_eq!(s.req("GET", "/download/stable/releases.json", &[], b"").header("ETag"), Some("\"6\""));
+    assert_eq!(generation(&s, "gen-0007"), 5, "v2 bumps G too");
+    // Deleted on disk behind tether-api's back (scripts/release-index-v1.sh): 404 at once, also
+    // for a client that sends the old ETag.
+    let f2 = s.dir.join("download/stable/releases-v2.json");
+    std::fs::rename(&f2, s.dir.join("v2.bak")).unwrap();
+    assert_eq!(s.req("GET", "/download/stable/releases-v2.json", &[("If-None-Match", "\"6\"")], b"").status, 404);
+    std::fs::rename(s.dir.join("v2.bak"), &f2).unwrap();
+    assert_eq!(s.req("GET", "/download/stable/releases-v2.json", &[("If-None-Match", "\"6\"")], b"").status, 304);
+    assert_eq!(s.admin(&k, "DELETE", p2, b"").status, 409, "v2 only with force");
+    assert_eq!(s.admin(&k, "DELETE", &format!("{p2}?force=1"), b"").status, 204);
+    assert_eq!(s.req("GET", "/download/stable/releases-v2.json", &[], b"").status, 404);
+    assert_eq!(s.req("GET", "/download/stable/releases.json", &[], b"").status, 200, "v1 stays");
+    assert_eq!(generation(&s, "gen-0008"), 6);
+
     // Deleting the index bumps G and stops serving it.
     assert_eq!(s.admin(&k, "DELETE", p, b"").status, 409, "the index only with force");
     assert_eq!(s.admin(&k, "DELETE", &format!("{p}?force=1"), b"").status, 204);
     assert_eq!(s.req("GET", "/download/stable/releases.json", &[], b"").status, 404);
-    assert_eq!(generation(&s, "gen-0006"), 5);
+    assert_eq!(generation(&s, "gen-0009"), 7);
     let m = s.req("GET", "/metrics", &[], b"");
     let text = String::from_utf8_lossy(&m.body);
-    assert!(text.contains("tether_api_release_generation 5"), "{text}");
+    assert!(text.contains("tether_api_release_generation 7"), "{text}");
     assert!(text.contains("tether_api_requests_total{endpoint=\"release_index\",code=\"304\"} 1"));
 }
 

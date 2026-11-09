@@ -764,6 +764,25 @@ struct Upload {
     pub_date: String,
     /// The gzip copy (TetherQS.exe), also in `files` as `<name>.gz`.
     packed: Option<Vec<u8>>,
+    /// What releases-v2.json names (TetherQS.exe, macOS apps); its files are in `files` too.
+    v2: Option<V2Art>,
+}
+
+/// The releases-v2.json artifact of a release: the artifact itself (TetherQS.exe) or its stored
+/// twin (macOS, `release::stored_name`, signed on its own), and its xz copy `<name>.xz`.
+struct V2Art {
+    name: String,
+    data: Vec<u8>,
+    sig: String,
+    xz: Vec<u8>,
+}
+
+/// Marker file in the Manage folder: write releases.json only (scripts/release-index-v1.sh).
+const INDEX_V1_ONLY: &str = "release-index-v1-only";
+
+/// Whether publishes also write releases-v2.json with xz copies (docs/updates.md).
+fn index_v2_on(app: &App) -> bool {
+    !app.path(INDEX_V1_ONLY).exists()
 }
 
 /// Event `release-progress` for the publish sheet: one release (`dir`, `version`) going to one
@@ -881,6 +900,32 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs, 
     if let Some(p) = &packed {
         files.push((format!("{name}.gz"), p.clone()));
     }
+    let v2 = if index_v2_on(&app) && release::wants_xz(&a.kind, &a.platform) {
+        // macOS: the stored twin, signed on its own; then the xz copy. Up to a minute for a
+        // universal mac app: off the async runtime; the sheet shows the step.
+        let name2 = tether_trust::release::stored_name(&name).unwrap_or_else(|| name.clone());
+        emit(&ui, Progress { dir: dir.clone(), version: a.version.clone(), server: String::new(), file: format!("{name2}.xz"), sent: 0, total: files[0].1.len() as u64, done: false, error: None });
+        let (data, from, to) = (files[0].1.clone(), name.clone(), name2.clone());
+        let (art, x) = tauri::async_runtime::spawn_blocking(move || -> R<(Vec<u8>, Vec<u8>)> {
+            let art = if to != from { release::stored_copy(&from, &data)? } else { data };
+            let x = release::xz(&art);
+            Ok((art, x))
+        })
+        .await
+        .map_err(err)??;
+        let sig2 = if name2 != name {
+            let s = sign(&art, &name2)?;
+            files.push((name2.clone(), art.clone()));
+            files.push((format!("{name2}.sig"), s.clone().into_bytes()));
+            s
+        } else {
+            sig.clone()
+        };
+        files.push((format!("{name2}.xz"), x.clone()));
+        Some(V2Art { name: name2, data: art, sig: sig2, xz: x })
+    } else {
+        None
+    };
     let security = a.security;
     let u = Upload {
         channel: a.channel,
@@ -896,6 +941,7 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs, 
         forced: a.forced,
         pub_date: release::rfc3339(api::now()),
         packed,
+        v2,
     };
     publish_upload(&app, &ui, &u, security, rollout, targets).await
 }
@@ -933,7 +979,8 @@ fn cdn_too_big_note(e: &str) -> String {
     format!("{size}, over the CDN's 25 MiB per file: devices get it from the relays")
 }
 
-/// The update file the CDN serves for a release: the gzip copy if there is one, else the artifact.
+/// The update file the CDN serves for a release in releases.json: the gzip copy if there is one,
+/// else the artifact.
 fn cdn_file(u: &Upload) -> (String, &[u8]) {
     match &u.packed {
         Some(p) => (format!("{}.gz", u.name), p.as_slice()),
@@ -941,16 +988,25 @@ fn cdn_file(u: &Upload) -> (String, &[u8]) {
     }
 }
 
+/// The xz copy (releases-v2.json), if this release has one.
+fn cdn_xz(u: &Upload) -> Option<(String, &[u8])> {
+    u.v2.as_ref().map(|v| (format!("{}.xz", v.name), v.xz.as_slice()))
+}
+
 /// Upload order (docs/update-design.md §5.9): files to the relays in `targets` (all at once) and
 /// the CDN, then the signed release index, then the legacy `latest.json`. One result per relay
 /// (+ "CDN"; the relays left out get theirs from `targets`).
 async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, rollout: tether_trust::release::Rollout, targets: (Vec<String>, Vec<RelayResult>)) -> R<Vec<RelayResult>> {
-    // A file over the CDN limit (universal mac builds) is published to the relays only: its index
-    // entry then lists the relay URL alone, as when the CDN is not set up.
-    let too_big = app.cdn_config().and_then(|_| {
-        let (f, bytes) = cdn_file(u);
-        cdn::check_size(&f, bytes.len() as u64).err()
-    });
+    // A file over the CDN limit (universal mac builds) is not put there: its index entry then
+    // lists the relay URL alone, as when the CDN is not set up. Its xz copy (releases-v2.json)
+    // usually fits and goes to the CDN for the builds that read v2.
+    let fits = |(f, b): &(String, &[u8])| cdn::check_size(f, b.len() as u64).is_ok();
+    let (v1_file, xz_file) = (cdn_file(u), cdn_xz(u));
+    let cdn_on = app.cdn_config().is_some();
+    let v1_on_cdn = cdn_on && fits(&v1_file);
+    let xz_on_cdn = cdn_on && xz_file.as_ref().is_some_and(fits);
+    let to_cdn: Vec<(String, &[u8])> = [v1_on_cdn.then(|| v1_file.clone()), xz_file.clone().filter(|_| xz_on_cdn)].into_iter().flatten().collect();
+    let too_big = (cdn_on && !v1_on_cdn).then(|| cdn::check_size(&v1_file.0, v1_file.1.len() as u64).err().unwrap_or_default());
     let (servers, left) = targets;
     // Every relay at once, each bounded by api::STALL / api::ANSWER: a silent relay fails on its
     // own (shown at once) and does not hold up the others.
@@ -971,17 +1027,22 @@ async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, r
         return Err(servers.iter().zip(&errs).map(|(s, e)| format!("{s}: {}", e.as_deref().unwrap_or(""))).collect::<Vec<_>>().join("; "));
     }
     let mut extra = Vec::new();
-    let cdn_base = match &too_big {
-        Some(e) => {
-            extra.push(RelayResult::of("CDN", Ok(json!({ "relaysOnly": true, "note": cdn_too_big_note(e) }))));
-            Ok(None)
+    let note = too_big.as_deref().map(|e| match &xz_file {
+        Some((_, x)) if xz_on_cdn => format!("{}; app versions that read releases-v2.json take its {:.1} MiB xz copy from the CDN", cdn_too_big_note(e), x.len() as f64 / (1 << 20) as f64),
+        _ => cdn_too_big_note(e),
+    });
+    let cdn_base = if to_cdn.is_empty() {
+        if let Some(n) = &note {
+            extra.push(RelayResult::of("CDN", Ok(json!({ "relaysOnly": true, "note": n }))));
         }
-        None => cdn_publish(app, ui, u, &servers).await,
+        Ok(None)
+    } else {
+        cdn_publish(app, ui, u, &servers, &to_cdn).await
     };
     let cdn_base = match cdn_base {
         Ok(b) => {
             if let Some(b) = &b {
-                extra.push(RelayResult::of("CDN", Ok(json!({ "base": b }))));
+                extra.push(RelayResult::of("CDN", Ok(json!({ "base": b, "note": note }))));
             }
             b
         }
@@ -1005,13 +1066,15 @@ async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, r
         minimum_version: u.minimum_version.clone(),
         forced: u.forced,
     };
-    let e = release::entry(&u.channel, &u.dir, &u.name, data, &u.sig, u.packed.as_deref(), cdn_base.as_deref(), &m, security, rollout);
+    let e = release::entry(&u.channel, &u.dir, &u.name, data, &u.sig, u.packed.as_deref(), cdn_base.as_deref().filter(|_| v1_on_cdn), &m, security, rollout);
+    let e2 = u.v2.as_ref().map(|v| release::entry_v2(&e, &u.channel, &u.dir, &v.name, &v.data, &v.sig, &v.xz, cdn_base.as_deref().filter(|_| xz_on_cdn)));
     let key = u.dir.clone();
     // Only relays that hold the files get the new index: clients fetch `{relay}` URLs from the
     // relay the index came from, so a relay without the files keeps its old index (devices there
     // stay on the old release; those that see both relays take the higher serial).
     let uploaded: Vec<String> = servers.iter().zip(&errs).filter(|(_, e)| e.is_none()).map(|(s, _)| s.clone()).collect();
-    let index = publish_index(app, &u.channel, &servers, &uploaded, true, move |r| {
+    let v2 = e2.map(|e2| (key.clone(), e2));
+    let index = publish_index(app, &u.channel, &servers, &uploaded, true, v2, move |r| {
         r.insert(key, e);
     })
     .await;
@@ -1055,28 +1118,27 @@ async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, r
 
 /// The CDN's next version: the release's update file plus what the CDN already holds. `Ok(None)`:
 /// no CDN configured.
-async fn cdn_publish(app: &App, ui: &AppHandle, u: &Upload, relays: &[String]) -> R<Option<String>> {
+async fn cdn_publish(app: &App, ui: &AppHandle, u: &Upload, relays: &[String], files: &[(String, &[u8])]) -> R<Option<String>> {
     let Some((creds, base)) = app.cdn_config() else { return Ok(None) };
-    let r = cdn_deploy(app, ui, u, creds, relays).await;
+    let r = cdn_deploy(app, ui, u, creds, relays, files).await;
     // Same events as a relay, target "CDN": the progress view and its finished list show it.
     emit(ui, Progress { done: true, error: r.as_ref().err().cloned(), ..Progress::new(u, "CDN", "") });
     r.map(|()| Some(base))
 }
 
-async fn cdn_deploy(app: &App, ui: &AppHandle, u: &Upload, creds: cdn::Creds, relays: &[String]) -> R<()> {
-    let (file, bytes) = cdn_file(u);
-    let path = format!("/{}/{}/{}", u.channel, u.dir, file);
+async fn cdn_deploy(app: &App, ui: &AppHandle, u: &Upload, creds: cdn::Creds, relays: &[String], files: &[(String, &[u8])]) -> R<()> {
+    let files: Vec<(String, &[u8])> = files.iter().map(|(f, b)| (format!("/{}/{}/{}", u.channel, u.dir, f), *b)).collect();
     let current: cdn::Assets = fs::read(app.path("cdn-assets.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    let next = cdn::next_assets(&current, &format!("{}/{}", u.channel, u.dir), &u.version, &[(path.clone(), bytes)])?;
-    let new = std::sync::Arc::new((path, bytes.to_vec()));
+    let next = cdn::next_assets(&current, &format!("{}/{}", u.channel, u.dir), &u.version, &files)?;
+    let new: std::sync::Arc<BTreeMap<String, Vec<u8>>> = std::sync::Arc::new(files.iter().map(|(p, b)| (p.clone(), b.to_vec())).collect());
     let relays = std::sync::Arc::new((relays.to_vec(), Dead::default()));
     let (ui2, base) = (ui.clone(), Progress::new(u, "CDN", ""));
     let on: cdn::OnProgress = std::sync::Arc::new(move |step: &str, sent, total| emit(&ui2, Progress { file: step.to_owned(), sent, total, ..base.clone() }));
     cdn::deploy(api::shared(), cdn::API, &creds, &next, move |p: String| {
         let (new, relays) = (new.clone(), relays.clone());
         async move {
-            if p == new.0 {
-                return Ok(new.1.clone());
+            if let Some(b) = new.get(&p) {
+                return Ok(b.clone());
             }
             // An older file Cloudflare no longer has: the relays keep every release file.
             fetch_file(&relays.0, &relays.1, &format!("/download{p}")).await?.ok_or_else(|| format!("{p} is missing on every relay"))
@@ -1147,8 +1209,13 @@ async fn fetch_indexes(app: &App, channel: &str, servers: &[String]) -> R<Vec<(S
 /// [`fetch_indexes`] plus the read error of each relay that did not answer (its index counts as
 /// none). All relays at once, each bounded by [`api::QUICK`].
 async fn fetch_indexes_why(app: &App, channel: &str, servers: &[String]) -> R<(Vec<(String, R<LiveIndex>)>, BTreeMap<String, String>)> {
+    fetch_named_indexes(app, channel, servers, tether_trust::release::INDEX_FILE).await
+}
+
+/// [`fetch_indexes_why`] for the index file `name` (releases.json or releases-v2.json).
+async fn fetch_named_indexes(app: &App, channel: &str, servers: &[String], name: &str) -> R<(Vec<(String, R<LiveIndex>)>, BTreeMap<String, String>)> {
     let keys = trusted_admin_keys(app.admin_key()?.verifying_key(), TRUSTED_ADMIN_KEYS.unwrap_or(""));
-    let path = format!("/download/{channel}/releases.json");
+    let path = format!("/download/{channel}/{name}");
     let raw = futures_util::future::join_all(servers.iter().map(|sv| api::public_quick(sv, &path))).await;
     let mut errors = BTreeMap::new();
     let got = servers.iter().zip(raw).map(|(sv, r)| (sv.clone(), r.unwrap_or_else(|e| { errors.insert(sv.clone(), e); None }))).collect();
@@ -1164,8 +1231,10 @@ async fn relay_indexes(app: &App, channel: &str, servers: &[String]) -> R<Vec<(S
 /// Sign the next index (the highest verified one on `servers`, changed by `change`) and put it on
 /// the relays in `targets`. Serial: max(relays, this PC's last) + 1. Per target: the outcome.
 /// `can_cancel`: a release publish, which stops here with [`api::CANCELLED`] when cancelled: the
-/// last point before a relay publishes anything.
-async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[String], can_cancel: bool, change: impl FnOnce(&mut BTreeMap<String, tether_trust::release::Entry>)) -> R<BTreeMap<String, R<()>>> {
+/// last point before a relay publishes anything. Unless switched off ([`INDEX_V1_ONLY`]) the same
+/// index with xz copies goes out as releases-v2.json too (same serial, after releases.json): `v2`
+/// is the new release's v2 entry, the others are carried over from the relays' current v2.
+async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[String], can_cancel: bool, v2: Option<(String, tether_trust::release::Entry)>, change: impl FnOnce(&mut BTreeMap<String, tether_trust::release::Entry>)) -> R<BTreeMap<String, R<()>>> {
     let (live, unread) = fetch_indexes_why(app, channel, servers).await?;
     let live = usable_indexes(live, channel)?;
     let local_path = format!("releases/{channel}.serial");
@@ -1174,10 +1243,26 @@ async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[
     let serial = next_serial(live.iter().filter_map(|(_, i)| i.as_ref().map(|i| i.0.serial)).chain([local]), "release index")?;
     let ix = release::next_index(base, channel, serial, api::now(), change)?;
     let doc = serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&ix).unwrap(), &app.admin_key()?)).unwrap();
+    let ix2 = if index_v2_on(app) {
+        let (live2, _) = fetch_named_indexes(app, channel, servers, tether_trust::release::INDEX_V2_FILE).await?;
+        let base2 = live2.into_iter().filter_map(|(_, i)| i.ok().flatten()).map(|i| i.0).max_by_key(|i| i.serial);
+        let ix2 = release::index_v2(&ix, base2.as_ref(), v2.as_ref().map(|(k, e)| (k.as_str(), e)));
+        ix2.validate()?;
+        Some(ix2)
+    } else {
+        None
+    };
+    let key = app.admin_key()?;
+    let doc2 = ix2.as_ref().map(|i| serde_json::to_vec(&envelope::sign(&serde_json::to_vec(i).unwrap(), &key)).unwrap());
     app.write(&local_path, serial.to_string().as_bytes())?;
     // Devices fetch `{relay}` URLs from the relay the index came from: a relay that lacks one of
     // the files keeps its old index.
-    let paths = relay_paths(&ix);
+    let mut paths = relay_paths(&ix);
+    if let Some(i) = &ix2 {
+        paths.extend(relay_paths(i));
+        paths.sort();
+        paths.dedup();
+    }
     // A relay that did not answer the read just now is not checked or written.
     let (reached, silent): (Vec<String>, Vec<String>) = targets.iter().cloned().partition(|sv| !unread.contains_key(sv));
     // Every relay and file at once (each check bounded by api::QUICK).
@@ -1206,8 +1291,24 @@ async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[
         return Err(api::CANCELLED.into());
     }
     let path = format!("/api/admin/release/{channel}/releases.json");
-    let put = futures_util::future::join_all(send.iter().map(|sv| app.call_on(sv, "PUT", &path, doc.clone(), "application/json"))).await;
-    out.extend(send.into_iter().zip(put).map(|(sv, r)| (sv, r.map(|_| ()))));
+    let path2 = format!("/api/admin/release/{channel}/releases-v2.json");
+    let (doc, doc2) = (&doc, &doc2);
+    let put = futures_util::future::join_all(send.iter().map(|sv| {
+        let (path, path2) = (&path, &path2);
+        async move {
+            app.call_on(sv, "PUT", path, doc.clone(), "application/json").await?;
+            // releases.json is live: a v2 that failed is stale there, and readers then take v1
+            // (higher serial). Not an error of the release.
+            if let Some(d2) = doc2 {
+                if let Err(e) = app.call_on(sv, "PUT", path2, d2.clone(), "application/json").await {
+                    eprintln!("{sv}: releases-v2.json not updated: {e}");
+                }
+            }
+            Ok::<_, String>(())
+        }
+    }))
+    .await;
+    out.extend(send.into_iter().zip(put));
     Ok(out)
 }
 
@@ -1285,7 +1386,7 @@ async fn release_control(app: State<'_, App>, channel: String, key: String, acti
     let preset = preset.unwrap_or_default();
     let ramp = if action == "ramp" { Some(release::rollout(&preset, api::now())?) } else { None };
     let mut missing = false;
-    let per = publish_index(&app, &channel, &servers, &servers, false, |r| match r.get_mut(&key) {
+    let per = publish_index(&app, &channel, &servers, &servers, false, None, |r| match r.get_mut(&key) {
         None => missing = true,
         Some(e) => match action.as_str() {
             "halt" => e.halted = true,
@@ -1336,7 +1437,7 @@ async fn release_index_refresh(app: State<'_, App>) -> R<Vec<Value>> {
         if expires > api::now() + 15 * 86_400 {
             continue;
         }
-        let per = publish_index(&app, &ch, &servers, &servers, false, |_| {}).await?;
+        let per = publish_index(&app, &ch, &servers, &servers, false, None, |_| {}).await?;
         out.push(json!({ "channel": ch, "ok": per.values().all(Result::is_ok) }));
     }
     Ok(out)
@@ -1531,7 +1632,8 @@ async fn release_sync(app: State<'_, App>, ui: AppHandle, channel: String, kind:
         // From the first relay that publishes it and answers (one that failed is not asked again).
         match fetch_file(&sources, &dead, &format!("/download/{channel}/{dir}/{f}")).await? {
             Some(bytes) => files.push((f, bytes)),
-            // Releases from before the release index have no gzip copy.
+            // Releases from before the release index have no gzip copy. (The releases-v2.json
+            // files come along with its index, copy_index_files below.)
             None if f.ends_with(".gz") => {}
             None => return Err(format!("{src} publishes {version} but has no {f}")),
         }
@@ -1552,11 +1654,16 @@ async fn release_sync(app: State<'_, App>, ui: AppHandle, channel: String, kind:
         forced: m.forced,
         pub_date: m.pub_date,
         packed,
+        v2: None,
     };
     // The newest signed release index goes to the relays that lack it (the same document: relays
     // accept an identical copy), before their latest.json.
     let live = relay_indexes(&app, &u.channel, &servers).await?;
     let best = live.iter().filter_map(|(_, i)| i.as_ref()).max_by_key(|i| i.0.serial);
+    // Its releases-v2.json twin (same serial), copied along when a relay has it.
+    let live2 = fetch_named_indexes(&app, &u.channel, &servers, tether_trust::release::INDEX_V2_FILE).await?.0;
+    let best2 = best.and_then(|b| live2.into_iter().filter_map(|(_, i)| i.ok().flatten()).find(|i| i.0.serial == b.0.serial));
+    let best2 = &best2;
     let serial = |sv: &String| live.iter().find(|(s, _)| s == sv).and_then(|(_, i)| i.as_ref()).map(|i| i.0.serial);
     // Where the index's other files come from: relays with the newest index first.
     let mut order: Vec<String> = servers.clone();
@@ -1573,9 +1680,11 @@ async fn release_sync(app: State<'_, App>, ui: AppHandle, channel: String, kind:
                 upload_files(app, ui, sv, u).await?;
                 if let Some((ix, _)) = behind {
                     let others: Vec<String> = order.iter().filter(|s| *s != sv).cloned().collect();
-                    copy_index_files(app, ui, sv, u, ix, &others, dead).await.map_err(|e| {
-                        if e == api::CANCELLED { e } else { format!("the newest release index names files this relay lacks, and they could not be copied ({e}); not published on this relay") }
-                    })?;
+                    for ix in std::iter::once(ix).chain(best2.as_ref().map(|b| &b.0)) {
+                        copy_index_files(app, ui, sv, u, ix, &others, dead).await.map_err(|e| {
+                            if e == api::CANCELLED { e } else { format!("the newest release index names files this relay lacks, and they could not be copied ({e}); not published on this relay") }
+                        })?;
+                    }
                 }
                 // The last point to stop: with the index written this relay publishes the release.
                 if api::cancelled() {
@@ -1583,6 +1692,11 @@ async fn release_sync(app: State<'_, App>, ui: AppHandle, channel: String, kind:
                 }
                 if let Some((_, raw)) = behind {
                     app.call_on(sv, "PUT", &format!("/api/admin/release/{}/releases.json", u.channel), raw.clone(), "application/json").await?;
+                    if let Some((_, raw2)) = best2 {
+                        if let Err(e) = app.call_on(sv, "PUT", &format!("/api/admin/release/{}/releases-v2.json", u.channel), raw2.clone(), "application/json").await {
+                            eprintln!("{sv}: releases-v2.json not copied: {e}");
+                        }
+                    }
                 }
                 // With the index written the release is live here whatever latest.json does.
                 Ok(match put_manifest(app, ui, sv, u).await {

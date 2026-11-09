@@ -32,7 +32,8 @@ fi
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/work/prebuilt"
-cp "$J/build.sh" "$J/swap.sh" "$J/diagcheck.sh" "$J/diagupload.sh" "$W/work/"
+# LF whatever the Windows checkout has (a CRLF swap.sh failed on the Mac with "set: -\r", 2026-11-09).
+for f in build.sh swap.sh diagcheck.sh diagupload.sh; do tr -d '\r' <"$J/$f" >"$W/work/$f"; done
 # git archive keeps LF and file modes; the prebuilt UIs are appended under prebuilt/.
 git -C "$R" -c core.autocrlf=false archive --format=tar -o "$W/src.tar" HEAD
 cp -r "$R/apps/desktop/dist" "$W/work/prebuilt/desktop-dist"

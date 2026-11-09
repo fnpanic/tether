@@ -441,29 +441,30 @@ fn check_inner() -> Result<String, String> {
     Ok(text)
 }
 
-/// Per relay base: ETag and document of the last 200 answer for the release index.
+/// Per index URL: ETag and document of the last 200 answer.
 static INDEX_ETAGS: Mutex<Option<HashMap<String, (String, Vec<u8>)>>> = Mutex::new(None);
 
 fn index_path(channel: &str) -> PathBuf {
     hbb_common::config::Config::path(format!("releases-{channel}.json"))
 }
 
-/// The release index of one relay (`Ok(None)`: none published there).
-fn get_index(client: &reqwest::blocking::Client, base: &str, channel: &str) -> Result<Option<Vec<u8>>, String> {
-    let etag = INDEX_ETAGS.lock().unwrap().as_ref().and_then(|m| m.get(base)).map(|e| e.0.clone());
-    let mut rq = client.get(format!("{base}/download/{channel}/releases.json"));
+/// The release index `name` of one relay (`Ok(None)`: none published there).
+fn get_index(client: &reqwest::blocking::Client, base: &str, channel: &str, name: &str) -> Result<Option<Vec<u8>>, String> {
+    let url = format!("{base}/download/{channel}/{name}");
+    let etag = INDEX_ETAGS.lock().unwrap().as_ref().and_then(|m| m.get(&url)).map(|e| e.0.clone());
+    let mut rq = client.get(&url);
     if let Some(t) = &etag {
         rq = rq.header("If-None-Match", t);
     }
     let resp = rq.send().map_err(|e| crate::commands::with_causes(&e))?;
     match resp.status().as_u16() {
-        304 => Ok(INDEX_ETAGS.lock().unwrap().as_ref().and_then(|m| m.get(base)).map(|e| e.1.clone())),
+        304 => Ok(INDEX_ETAGS.lock().unwrap().as_ref().and_then(|m| m.get(&url)).map(|e| e.1.clone())),
         404 => Ok(None),
         200 => {
             let tag = resp.headers().get("ETag").and_then(|v| v.to_str().ok()).map(str::to_owned);
             let raw = tether_trust::read_limited(resp, release::MAX_INDEX).map_err(|e| format!("release index: {e}"))?;
             if let Some(t) = tag {
-                INDEX_ETAGS.lock().unwrap().get_or_insert_with(HashMap::new).insert(base.to_owned(), (t, raw.clone()));
+                INDEX_ETAGS.lock().unwrap().get_or_insert_with(HashMap::new).insert(url.clone(), (t, raw.clone()));
             }
             Ok(Some(raw))
         }
@@ -478,11 +479,17 @@ fn find_release(client: &reqwest::blocking::Client, bases: &[String], channel: &
     let path = index_path(channel);
     let mut docs = Vec::new();
     let mut errors = Vec::new();
-    for b in bases {
-        match get_index(client, b, channel) {
-            Ok(Some(raw)) => docs.push((b.clone(), raw)),
-            Ok(None) => {}
-            Err(e) => errors.push(format!("{}: {e}", b.trim_start_matches("https://"))),
+    // releases-v2.json first (xz copies; `choose` keeps the first of equal serials), then
+    // releases.json; the highest serial over both wins, so a stale or missing v2 does no harm.
+    for name in [release::INDEX_V2_FILE, release::INDEX_FILE] {
+        for b in bases {
+            match get_index(client, b, channel, name) {
+                Ok(Some(raw)) => docs.push((b.clone(), raw)),
+                Ok(None) => {}
+                // Reachability is judged by releases.json, which every relay has.
+                Err(e) if name == release::INDEX_FILE => errors.push(format!("{}: {e}", b.trim_start_matches("https://"))),
+                Err(e) => hbb_common::log::info!("{name}: {e}"),
+            }
         }
     }
     let chosen = if keys.is_empty() { Ok(None) } else { release::choose(&path, &docs, &keys, channel) };
@@ -621,12 +628,12 @@ pub fn install() -> Result<(), String> {
     r
 }
 
-/// Each source in turn (the gzip copy first, https only), then the verified bytes.
+/// Each source in turn (the packed copy first, https only), then the verified bytes.
 fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
     let mut last = String::from("no download URL");
     for (url, packed) in c.sources() {
         let url = &url;
-        match download_one(url, c, packed).and_then(|b| c.accept(b, packed, key, gunzip)) {
+        match download_one(url, c, packed).and_then(|b| c.accept(b, packed, key, unpack)) {
             Ok(b) => return Ok(b),
             Err(e) => {
                 hbb_common::log::warn!("update download {url}: {e}");
@@ -637,17 +644,25 @@ fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
     Err(last)
 }
 
-fn gunzip(data: &[u8], max: u64) -> Result<Vec<u8>, String> {
+/// A packed copy (`release::PACKED_ENCODINGS`) → the artifact, at most `max` bytes. Its size and
+/// sha256 were checked against the signed index first, so only an admin-signed file gets here.
+fn unpack(encoding: &str, data: &[u8], max: u64) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    io::Read::read_to_end(&mut io::Read::take(flate2::read::GzDecoder::new(data), max + 1), &mut out).map_err(|e| format!("bad gzip copy: {e}"))?;
+    match encoding {
+        "gzip" => {
+            std::io::Read::read_to_end(&mut std::io::Read::take(flate2::read::GzDecoder::new(data), max + 1), &mut out).map_err(|e| format!("bad gzip copy: {e}"))?;
+        }
+        "xz" => lzma_rs::xz_decompress(&mut std::io::BufReader::new(data), &mut out).map_err(|e| format!("bad xz copy: {e}"))?,
+        e => return Err(format!("unknown packed encoding {e}")),
+    }
     if out.len() as u64 > max {
-        return Err("the gzip copy unpacks larger than announced".into());
+        return Err(format!("the {encoding} copy unpacks larger than announced"));
     }
     Ok(out)
 }
 
 fn download_one(url: &str, c: &Candidate, packed: bool) -> Result<Vec<u8>, String> {
-    if !url.starts_with("https://") {
+    if !url.starts_with("https://") && policy::dev_apis().is_none() {
         return Err("update URL must be https".to_owned());
     }
     let mut resp = policy::http()?
@@ -710,6 +725,23 @@ pub fn spawn() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn unpack_gzip_and_xz_with_limit() {
+        let plain: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let mut xz = Vec::new();
+        lzma_rs::xz_compress(&mut std::io::BufReader::new(&plain[..]), &mut xz).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, &plain).unwrap();
+        let gz = gz.finish().unwrap();
+        let n = plain.len() as u64;
+        assert_eq!(unpack("xz", &xz, n).unwrap(), plain);
+        assert_eq!(unpack("gzip", &gz, n).unwrap(), plain);
+        assert!(unpack("xz", &xz, n - 1).unwrap_err().contains("larger than announced"));
+        assert!(unpack("gzip", &gz, n - 1).is_err());
+        assert!(unpack("xz", &gz, n).unwrap_err().contains("bad xz copy"));
+        assert!(unpack("zstd", &xz, n).unwrap_err().contains("unknown packed encoding"));
+    }
     use super::*;
     use std::io::Cursor;
 

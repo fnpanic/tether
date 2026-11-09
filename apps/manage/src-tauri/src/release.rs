@@ -5,7 +5,99 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tether_trust::release::{self as rel, Entry, Index, Packed, Rollout, NAMES};
 // The name table is shared with tether-api (prune): tether_trust::release.
-pub use tether_trust::release::{build_of, dmg_name, wants_packed, MAC, WINDOWS};
+pub use tether_trust::release::{build_of, dmg_name, wants_packed, wants_xz, MAC, WINDOWS};
+
+/// The xz copy for `releases-v2.json` (preset 9 extreme; the universal Tether.app's stored twin
+/// 85 MiB → 21.8, TetherQS.exe 35 → about 11; 40 s at most).
+pub fn xz(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = xz2::write::XzEncoder::new(Vec::new(), 9 | 0x8000_0000 /* LZMA_PRESET_EXTREME */);
+    e.write_all(data).expect("in memory");
+    e.finish().expect("in memory")
+}
+
+/// The uncompressed twin of a macOS artifact (`rel::stored_name`): the .app.tar.gz as gzip with
+/// stored blocks, the zip with stored entries (names, modes, times kept). Installed exactly like
+/// the original (Tauri's updater, ditto), and xz then finds what the original compression hid.
+pub fn stored_copy(name: &str, data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Write};
+    if name.ends_with(".tar.gz") {
+        let mut tar = Vec::new();
+        flate2::read::GzDecoder::new(data).read_to_end(&mut tar).map_err(|e| format!("{name}: {e}"))?;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none());
+        e.write_all(&tar).map_err(|e| e.to_string())?;
+        return e.finish().map_err(|e| e.to_string());
+    }
+    let mut zin = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("{name}: {e}"))?;
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for i in 0..zin.len() {
+        let mut f = zin.by_index(i).map_err(|e| e.to_string())?;
+        let mode = f.unix_mode().unwrap_or(0o644);
+        let mut opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).unix_permissions(mode & 0o7777);
+        if let Some(t) = f.last_modified() {
+            opts = opts.last_modified_time(t);
+        }
+        let entry = f.name().to_owned();
+        if f.is_dir() {
+            out.add_directory(entry, opts).map_err(|e| e.to_string())?;
+        } else if mode & 0o170000 == 0o120000 {
+            let mut target = String::new();
+            f.read_to_string(&mut target).map_err(|e| e.to_string())?;
+            out.add_symlink(entry, target, opts).map_err(|e| e.to_string())?;
+        } else {
+            out.start_file(entry, opts).map_err(|e| e.to_string())?;
+            std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(out.finish().map_err(|e| e.to_string())?.into_inner())
+}
+
+/// The xz copy of `name` as an index entry's `packed` (CDN first when it is there, then the relay).
+pub fn xz_packed(channel: &str, dir: &str, name: &str, xz: &[u8], cdn: Option<&str>) -> Packed {
+    let f = format!("{name}.xz");
+    let cdn_url = cdn.map(|b| format!("{}/{channel}/{dir}/{f}", b.trim_end_matches('/')));
+    Packed {
+        encoding: "xz".into(),
+        size: xz.len() as u64,
+        sha256: rel::sha256_hex(xz),
+        urls: cdn_url.into_iter().chain([format!("https://{{relay}}/download/{channel}/{dir}/{f}")]).collect(),
+    }
+}
+
+/// The `releases-v2.json` entry of a release whose `releases.json` entry is `v1`: the artifact
+/// `name` (the stored twin on macOS, else the same file) with its signature and xz copy. Download
+/// URL of the artifact itself: the relay only (TetherQS.exe and the twins are over the CDN limit).
+#[allow(clippy::too_many_arguments)]
+pub fn entry_v2(v1: &Entry, channel: &str, dir: &str, name: &str, data: &[u8], signature: &str, xz: &[u8], cdn: Option<&str>) -> Entry {
+    Entry {
+        file: name.to_owned(),
+        size: data.len() as u64,
+        sha256: rel::sha256_hex(data),
+        signature: signature.to_owned(),
+        urls: vec![format!("https://{{relay}}/download/{channel}/{dir}/{name}")],
+        packed: Some(xz_packed(channel, dir, name, xz, cdn)),
+        ..v1.clone()
+    }
+}
+
+/// `releases-v2.json` for `v1` (same serial, keys and release settings): the entry `new.0` becomes
+/// `new.1`; every other entry keeps the artifact fields of the relays' current v2 entry (`live`)
+/// for the same version (twin, signature, xz copy), with halt, ramp and the other settings from
+/// `v1`. Entries with no v2 counterpart are v1's (gzip copies only).
+pub fn index_v2(v1: &Index, live: Option<&Index>, new: Option<(&str, &Entry)>) -> Index {
+    let mut ix = v1.clone();
+    for (k, e) in ix.releases.iter_mut() {
+        if let Some((_, n)) = new.filter(|(nk, _)| nk == k) {
+            *e = n.clone();
+            continue;
+        }
+        let same_build = |o: &&Entry| o.version == e.version && o.packed.as_ref().is_some_and(|p| p.encoding == "xz") && (o.file == e.file || rel::stored_name(&e.file).as_deref() == Some(o.file.as_str()));
+        if let Some(o) = live.and_then(|l| l.releases.get(k)).filter(same_build) {
+            *e = Entry { file: o.file.clone(), size: o.size, sha256: o.sha256.clone(), signature: o.signature.clone(), urls: o.urls.clone(), packed: o.packed.clone(), ..e.clone() };
+        }
+    }
+    ix
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Platform {
@@ -516,6 +608,75 @@ mod tests {
         assert_eq!(out, b"TetherQS exe");
         assert!(wants_packed("customer", WINDOWS) && !wants_packed("technician", WINDOWS) && !wants_packed("customer", MAC));
         assert!(rollout("bogus", 0).is_err());
+    }
+
+    #[test]
+    fn index_v2_adds_and_carries_xz_copies() {
+        let ix = |entries: Vec<(&str, Entry)>, serial| Index { kind: rel::INDEX_TYPE.into(), channel: "stable".into(), serial, issued: 1, expires: 2, releases: entries.into_iter().map(|(k, e)| (k.to_owned(), e)).collect() };
+        let dir = "technician/darwin-universal";
+        let mac = |v: &str, data: &[u8]| entry("stable", dir, &format!("Tether_{v}_universal.app.tar.gz"), data, "SIG", None, None, &manifest(v), false, rollout("now", 0).unwrap());
+        let gz = gzip(b"qs");
+        let qs = entry("stable", "customer/windows-x86_64", "TetherQS-0.5.31.exe", b"qs", "SIG", Some(&gz), Some("https://cdn"), &manifest("0.5.31"), false, rollout("now", 0).unwrap());
+        // The mac twin: gzip with stored blocks, the same tar inside; its xz copy is small.
+        let tar: Vec<u8> = (0..400_000u32).map(|i| (i % 97) as u8).collect();
+        let tgz = gzip(&tar);
+        let twin = stored_copy("Tether_0.5.33_universal.app.tar.gz", &tgz).unwrap();
+        let mut back = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&twin[..]), &mut back).unwrap();
+        assert_eq!(back, tar);
+        assert!(twin.len() > tar.len() && xz(&twin).len() < tgz.len());
+        let x = xz(&twin);
+        let name2 = rel::stored_name("Tether_0.5.33_universal.app.tar.gz").unwrap();
+        let e1 = mac("0.5.33", &tgz);
+        let e2 = entry_v2(&e1, "stable", dir, &name2, &twin, "SIG2", &x, Some("https://cdn/"));
+        assert_eq!(e2.urls, ["https://{relay}/download/stable/technician/darwin-universal/Tether_0.5.33_universal-stored.app.tar.gz"]);
+        assert_eq!(e2.packed.as_ref().unwrap().urls[0], "https://cdn/stable/technician/darwin-universal/Tether_0.5.33_universal-stored.app.tar.gz.xz");
+        assert_eq!((e2.size, e2.signature.as_str(), e2.version.as_str()), (twin.len() as u64, "SIG2", "0.5.33"));
+        // Publish of mac 0.5.33: v1 stays gzip-only (old builds), v2 names the twin.
+        let v1 = ix(vec![(dir, e1.clone()), ("customer/windows-x86_64", qs.clone())], 7);
+        let v2 = index_v2(&v1, None, Some((dir, &e2)));
+        assert_eq!((v2.serial, v1.releases[dir].packed.is_none()), (7, true));
+        assert_eq!(v2.releases[dir], e2);
+        assert_eq!(v2.releases["customer/windows-x86_64"], qs, "no xz copy yet: the v1 entry");
+        v2.validate().unwrap();
+        // A later index change (halt of the mac release, re-signed): the twin is carried, the halt applies.
+        let mut v1b = v1.clone();
+        v1b.serial = 8;
+        v1b.releases.get_mut(dir).unwrap().halted = true;
+        let v2b = index_v2(&v1b, Some(&v2), None);
+        assert_eq!((v2b.releases[dir].file.as_str(), v2b.releases[dir].halted), (name2.as_str(), true));
+        assert_eq!(v2b.releases[dir].packed, e2.packed);
+        // A new mac version: the old twin is not carried (v1's entry, no xz copy).
+        let v1c = ix(vec![(dir, mac("0.5.34", b"mac app 0.5.34"))], 9);
+        assert_eq!(index_v2(&v1c, Some(&v2b), None).releases[dir], v1c.releases[dir]);
+        // xz round trip with the decoder the apps use.
+        let mut back = Vec::new();
+        lzma_rs::xz_decompress(&mut std::io::BufReader::new(&x[..]), &mut back).unwrap();
+        assert_eq!(back, twin);
+    }
+
+    #[test]
+    fn stored_zip_keeps_entries_modes_and_content() {
+        use std::io::{Read, Write};
+        let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let o = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        z.add_directory("TetherQS.app/Contents/MacOS/", o.unix_permissions(0o755)).unwrap();
+        z.start_file("TetherQS.app/Contents/MacOS/TetherQS", o.unix_permissions(0o755)).unwrap();
+        z.write_all(&vec![7u8; 100_000]).unwrap();
+        z.add_symlink("TetherQS.app/Contents/link", "MacOS/TetherQS", o.unix_permissions(0o755)).unwrap();
+        let zipped = z.finish().unwrap().into_inner();
+        let twin = stored_copy("TetherQS-0.5.31-universal.zip", &zipped).unwrap();
+        assert!(twin.len() > 100_000);
+        let mut a = zip::ZipArchive::new(std::io::Cursor::new(&twin[..])).unwrap();
+        assert_eq!(a.len(), 3);
+        let mut exe = a.by_name("TetherQS.app/Contents/MacOS/TetherQS").unwrap();
+        assert_eq!((exe.compression(), exe.unix_mode().unwrap() & 0o777), (zip::CompressionMethod::Stored, 0o755));
+        let mut body = Vec::new();
+        exe.read_to_end(&mut body).unwrap();
+        assert_eq!(body, vec![7u8; 100_000]);
+        drop(exe);
+        let link = a.by_name("TetherQS.app/Contents/link").unwrap();
+        assert_eq!(link.unix_mode().unwrap() & 0o170000, 0o120000);
     }
 
     #[test]

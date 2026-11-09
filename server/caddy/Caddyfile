@@ -89,8 +89,9 @@ http://:21125 {
 	# reads them through membership in group tether-api; see install.sh.
 	handle /download/* {
 		# The signed release index: tether-api serves it with ETag "<serial>" (equal on every
-		# relay, so If-None-Match works across relays) and counts the fetches.
-		@index path_regexp ^/download/[a-z0-9-]+/releases\.json$
+		# relay, so If-None-Match works across relays) and counts the fetches. releases-v2.json:
+		# the same index with xz copies, read by TetherQS 0.5.31 / Tether 0.5.33 on.
+		@index path_regexp ^/download/[a-z0-9-]+/releases(-v2)?\.json$
 		handle @index {
 			reverse_proxy 127.0.0.1:21120
 		}

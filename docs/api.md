@@ -298,7 +298,7 @@ Payload (≤ 64 KiB):
   fields are rejected (`deny_unknown_fields`).
 - `https://{relay}` stands for the relay the index came from: one document is valid on every relay.
 - Clients ask every relay; the highest valid serial wins and becomes the floor. Downloads are tried
-  `packed.urls` first (gzip; its own size and sha256 checked before unpacking), then `urls`; the
+  `packed.urls` first (gzip or xz; its own size and sha256 checked before unpacking), then `urls`; the
   result must match `size`, `sha256`, the minisign signature and the signed trusted comment
   (`file:`, `version:`). https only (except the `{relay}` base a debug build chooses).
 - Rollout: a device is eligible when its bucket `u16(SHA-256("tether-rollout"‖0‖uuid‖0‖app‖0‖version‖0)[0..2]) / 655.36`
@@ -306,6 +306,24 @@ Payload (≤ 64 KiB):
   step, `late` waits for 100 %. `security` skips the ramp; `halted` stops devices that did not
   install it (they re-check right before installing).
 - `expires` (Manage: issued + 30 days): afterwards clients keep using it and report `stale`.
+
+### Release index v2 (`download/<channel>/releases-v2.json`)
+
+The same document (type, channel, **serial**, entries) with `packed` copies in **xz**
+(`"encoding":"xz"`, files `<artifact>.xz` on the relays and the CDN) for TetherQS.exe and both
+macOS apps; it replaces the gzip copy of TetherQS.exe there. It is a separate file because every
+build before TetherQS 0.5.31 / Tether 0.5.33 rejects a `packed.encoding` other than `gzip` and with
+it the whole index (`deny_unknown_fields` applies to new fields too), so `releases.json` keeps the
+old format for them.
+
+- Written by Manage right after `releases.json` (`PUT …/releases-v2.json`, same checks: trusted
+  admin key, channel, serial above the stored v2 serial); served by tether-api the same way
+  (Caddy's `@index` matcher covers both names). Deleted on disk: `404` at once.
+- TetherQS 0.5.31 / Tether 0.5.33 and later ask every relay for both files, v2 first, and take the
+  highest serial over all of them (v2 on a tie). A stale v2 (published with it switched off, see
+  docs/updates.md "Two index files") or a missing one costs nothing: `releases.json` wins.
+- These builds skip a `packed` copy whose encoding they do not know (the index stays valid), so a
+  later encoding needs no third file.
 
 ## Custom apps (branded TetherQS downloads)
 
