@@ -6,7 +6,8 @@
 Per file: look the SHA-256 up on VirusTotal; if unknown, upload it (files over 32 MB through an
 upload URL) and wait for the analysis. The full report is saved as
 tools/release/virustotal/<file name>/<sha256 prefix>.json plus a line in summary.md there.
-Exit 1 when any engine reports the file as malicious or suspicious (names printed), 2 on errors.
+Exit 1 when a file is FLAGGED (a Microsoft detection, or two or more engines); a single detection by
+another engine is WARN (reported, exit 0). 2 on errors.
 
 API key: env VT_API_KEY, else the file C:\\vms\\virustotal\\api-key.txt (never printed or saved).
 Uploading shares the file with VirusTotal's partners; release files are public anyway.
@@ -74,9 +75,16 @@ def upload(path: Path, k: str) -> str:
     return call("POST", url, k, body, f"multipart/form-data; boundary={b}")["data"]["id"]
 
 
-def verdict(stats: dict) -> str:
+def verdict(stats: dict, engines: list[str] | None = None) -> str:
+    """CLEAN; WARN for a single detection by an engine other than Microsoft (ML guesses of small
+    engines are common for unsigned remote-access tools); FLAGGED for a Microsoft detection (Defender
+    blocks downloads with it) or two or more engines."""
     bad = stats.get("malicious", 0) + stats.get("suspicious", 0)
-    return "CLEAN" if bad == 0 else "FLAGGED"
+    if bad == 0:
+        return "CLEAN"
+    if bad == 1 and not any(e.lower() == "microsoft" for e in (engines or [])):
+        return "WARN"
+    return "FLAGGED"
 
 
 def scan(path: Path, k: str) -> tuple[str, dict]:
@@ -118,7 +126,7 @@ def main(files: list[str]) -> int:
         d = OUT / p.name
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{sha[:16]}.json").write_text(json.dumps(rep, indent=1, sort_keys=True), encoding="utf-8")
-        v = verdict(stats)
+        v = verdict(stats, [h.split(":")[0] for h in hits])
         line = (f"| {time.strftime('%Y-%m-%d %H:%M')} | {p.name} | `{sha[:16]}` | {v} | "
                 f"{stats.get('malicious', 0)} malicious, {stats.get('suspicious', 0)} suspicious, "
                 f"{stats.get('undetected', 0)} undetected | {'; '.join(hits) or '-'} |")
@@ -130,7 +138,7 @@ def main(files: list[str]) -> int:
             s.write(line + "\n")
         print(f"{v} {p.name} {sha[:16]} {stats}" + (f"\n  " + "\n  ".join(hits) if hits else ""))
         print(f"  https://www.virustotal.com/gui/file/{sha}")
-        if v != "CLEAN":
+        if v == "FLAGGED":
             worst = max(worst, 1)
     return worst
 

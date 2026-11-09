@@ -15,8 +15,9 @@ bash scripts/release-checks.sh dist/windows/Tether_<v>_x64-setup.exe dist/quick/
    to `tools/release/virustotal/<file>/<sha256 prefix>.json` and one line per check to
    `tools/release/virustotal/summary.md`; commit both with the release.
 
-Exit code: 0 all clean, 1 something flagged (engine and detection name printed), 2 error. A
-flagged file is not published until the detection is understood and, for a false positive,
+Verdicts: CLEAN; WARN for a single detection by an engine other than Microsoft (printed and kept in
+the report, exit 0); FLAGGED for any Microsoft detection or two or more engines (exit 1). Exit code
+2 is an error. A flagged file is not published until the detection is understood and, for a false positive,
 reported to the vendor (Microsoft: <https://www.microsoft.com/wdsi/filesubmission>, "Software
 developer", "Incorrectly detected as malware").
 
