@@ -278,3 +278,10 @@ update then installed from the app. Where the time goes: the publish raised the 
 the per-relay limit of one check a minute held the second hint until 00:46:47, and the random
 spread (0-60 s, `RELEASE_HINT_SPREAD`) added the rest. Worst case after a publish is therefore about
 two minutes; this is the intended thundering-herd protection, not a fault.
+
+**In production, technician app** (2026-11-09): the 0.5.30 rollout halted in Manage, a 0.5.29
+build (the published one, own profile, on a hidden desktop) started; its first check reported
+"halted". Rollout resumed at 07:34:25 (index serial 34): the release hint reached the running app
+at 07:34:25.5, 0.5.30 was downloaded and verified at 07:34:49.9 and the home page showed "Update
+available. Version 0.5.30 is ready to install. You have 0.5.29." at 07:34:50.8, 25 s after the
+resume, without a restart.
