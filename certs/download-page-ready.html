@@ -1,0 +1,179 @@
+<!doctype html>
+<!-- Example Tether download page template (docs/download-page.md). Uses every placeholder.
+     Tether Manage fills the double-brace placeholders at publish time; values are HTML-escaped. -->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{tether.title}}</title>
+<style>
+:root{--canvas:#fff;--parchment:#f5f5f7;--tile:#fff;--ink:#1d1d1f;--muted:#6e6e73;--hairline:rgba(0,0,0,.08);--accent:#0066cc;--focus:#0071e3;--warn:#8a6d00;--warnbg:#fff8e1}
+@media (prefers-color-scheme:dark){:root{--canvas:#000;--parchment:#1c1c1e;--tile:#272729;--ink:#f5f5f7;--muted:#98989d;--hairline:rgba(255,255,255,.1);--accent:#2997ff;--focus:#2997ff;--warn:#e6c200;--warnbg:#2a2410}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--ink);font-family:-apple-system,"Segoe UI Variable","Segoe UI",system-ui,sans-serif}
+main{max-width:980px;margin:0 auto;padding:72px 24px}
+h1{font-size:40px;line-height:1.1;font-weight:600;margin:0 0 12px}
+p.intro{font-size:17px;line-height:1.47;color:var(--muted);margin:0 0 8px;max-width:640px;white-space:pre-line}
+.howto{font-size:16px;line-height:1.5;color:var(--ink);margin:18px 0 0;max-width:660px}
+.howto b{font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:20px;margin-top:20px}
+.card{display:flex;flex-direction:column;gap:6px;padding:24px;border:1px solid var(--hairline);border-radius:18px;background:var(--tile)}
+.card.off{opacity:.55}
+.label{font-size:21px;font-weight:600}
+.detail{font-size:14px;color:var(--muted);margin-bottom:10px}
+.cta{align-self:flex-start;background:var(--accent);color:#fff;border-radius:9999px;padding:11px 26px;font-size:16px;font-weight:500;text-decoration:none}
+.cta:hover{filter:brightness(1.08)}
+.hint{font-size:13px;color:var(--muted);margin-top:8px}
+a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+details{margin-top:10px;font-size:13px;color:var(--muted)}
+details summary{cursor:pointer}
+dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px}dd{margin:0;overflow-wrap:anywhere}
+.notes{white-space:pre-line}
+.trustline{margin-top:8px;font-size:13px}
+.warn{margin-top:28px;border:1px solid var(--hairline);border-radius:14px;background:var(--warnbg);padding:4px 18px}
+.warn summary{font-size:14px;font-weight:600;color:var(--warn);padding:12px 0}
+.warn ul{margin:0 0 12px;padding-left:18px;font-size:14px;line-height:1.6;color:var(--ink)}
+.warn li{margin:6px 0}
+.switch{display:inline-flex;gap:4px;margin-top:28px;padding:4px;border-radius:9999px;background:var(--parchment)}
+.switch a{padding:8px 18px;border-radius:9999px;color:var(--ink);text-decoration:none;font-size:15px}
+.os{margin-top:40px}
+html[data-os] .os{display:none}
+html[data-os=windows] #windows,html[data-os=macos] #macos{display:block}
+html[data-os=windows] .switch a[data-os=windows],html[data-os=macos] .switch a[data-os=macos]{background:var(--ink);color:var(--canvas)}
+h2{font-size:28px;font-weight:600;margin:0;display:flex;align-items:center;gap:12px}
+.mine{display:none;font-size:12px;color:var(--accent);border:1px solid currentColor;border-radius:9999px;padding:2px 10px}
+html[data-mine=windows] #windows .mine,html[data-mine=macos] #macos .mine{display:inline-block}
+footer{margin-top:72px;font-size:12px;color:var(--muted)}
+</style></head>
+<body><main>
+  <h1>{{tether.title}}</h1>
+  <p class="intro">{{tether.intro}}</p>
+  <nav class="switch" aria-label="Operating system"><a href="#windows" data-os="windows">Windows</a><a href="#macos" data-os="macos">macOS</a></nav>
+
+    <section class="os" id="windows">
+      <h2>Windows<span class="mine">Your computer</span></h2>
+      <p class="howto"><b>Someone is helping you right now?</b> Download <b>Tether Quick Support</b> &mdash; nothing to install.<br><b>Setting up your own PC for unattended support?</b> Download the installer (<b>Tether for technicians</b>).</p>
+      <div class="grid">
+      {{#tether.technician.windows}}
+      <div class="card">
+        <span class="label">Tether for technicians</span>
+        <span class="detail">Windows installer &middot; version {{tether.technician.windows.version}} &middot; {{tether.technician.windows.size}} &middot; {{tether.technician.windows.date}}</span>
+        <a class="cta" href="{{tether.technician.windows.url}}" data-version="{{tether.technician.windows.version}}">Download</a>
+        <span class="hint">Open the file to install. If Windows shows a blue <b>"Windows protected your PC"</b> box, click <b>More info</b> &rarr; <b>Run anyway</b> &mdash; that's normal for a new app.</span>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.technician.windows.file}}</code> ({{tether.technician.windows.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.technician.windows.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.technician.windows.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.technician.windows.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.technician.windows.notes}}</dd>
+          </dl>
+          <p class="trustline">Optional: to remove the "Unknown publisher" prompt on this PC, run our <a href="data:application/octet-stream;base64,QGVjaG8gb2ZmDQpyZW0gSW5zdGFsbHMgdGhlIFRldGhlciBjb2RlLXNpZ25pbmcgY2VydGlmaWNhdGUgc28gV2luZG93cyB0cnVzdHMgVGV0aGVyLiBEb3VibGUtY2xpY2sgaXQuDQpuZXQgc2Vzc2lvbiA+bnVsIDI+JjEgfHwgKHBvd2Vyc2hlbGwgLU5vUHJvZmlsZSAtQ29tbWFuZCAiU3RhcnQtUHJvY2VzcyAtVmVyYiBSdW5BcyAtRmlsZVBhdGggJyV+ZjAnIiAmIGV4aXQgL2IpDQpzZXQgIkM9JVRFTVAlXHRldGhlci1jb2Rlc2lnbi5jZXIiDQo+IiVDJSIgZWNobyAtLS0tLUJFR0lOIENFUlRJRklDQVRFLS0tLS0NCj4+IiVDJSIgZWNobyBNSUlFRERDQ0FuU2dBd0lCQWdJUVEzZ1EvU3pLZnE1SVJGdmFkSjZUempBTkJna3Foa2lHOXcwQkFRc0ZBREFlDQo+PiIlQyUiIGVjaG8gTVJ3d0dnWURWUVFEREJOVVpYUm9aWElnUTI5a1pTQlRhV2R1YVc1bk1CNFhEVEkyTVRFd09URTFNREV3TVZvWA0KPj4iJUMlIiBlY2hvIERUTTJNVEV3T1RFMU1URXdNRm93SGpFY01Cb0dBMVVFQXd3VFZHVjBhR1Z5SUVOdlpHVWdVMmxuYm1sdVp6Q0MNCj4+IiVDJSIgZWNobyBBYUl3RFFZSktvWklodmNOQVFFQkJRQURnZ0dQQURDQ0FZb0NnZ0dCQUw4eTdYTGgyRU5sUzBKTVVTQ05MMlV6DQo+PiIlQyUiIGVjaG8gUkxmdTN1WWt0enJGZ0Q1MlpRM2ZkcnFRc0ZuL01tZG9lRmVGWkNtR0VZWGJLSmVIVUtDRytpSHBDRVJGVXJETw0KPj4iJUMlIiBlY2hvIEVSTEd5YzYzMXVEbmlOUStUbW9hRXlLZnY4b2tqMmpvelc4Q0lTNjNoN25kOWJkdERZZGNlRHVGbVF6cE5xWTkNCj4+IiVDJSIgZWNobyBGdER1SjZLTGVTZjhQb2RsSnhNRzVNRGZzN3FEMTJobWwzdnVlQ3ZFUUZXdnl2RXhvUDVNYUIrbGUxRS9wVzkzDQo+PiIlQyUiIGVjaG8gVlp6cGl6WmZ6V2J2WnRIbjVmOFZaV1NsWHBoRXVWSUxNUGd5WU5keWFQaTFURzhjUjBTZVI4amF3SDBmd051cw0KPj4iJUMlIiBlY2hvIDRXNVpaWkdkUUdQdjVSeG41dkJMNnlqVFFDL21jVGJKdytNa2p3TGczK1NsbGlEMHlzbzRtd2QxeC9GMVh3Q1YNCj4+IiVDJSIgZWNobyBCaFB3czk3MElOaTRvWTdXSWx4VDhvQ3NvUmFndW8yR3QwNzM5RllDMGFpN1VPUXJqVUxGamVjcG1nVmd3UWNIDQo+PiIlQyUiIGVjaG8gVWRDdHdBaWlIeFR1SC9JQlkvRjR0R0UwQ2lPWlgrNEIzc1ZHcFE3MmlPYmd2WW9MQzJlRmRhdUl0Y0h0SnhKWQ0KPj4iJUMlIiBlY2hvIGVBQUY2YnRRZDc1NU54emJuSnhHR3duMEZCOUgvSmZoRnVhYXZiVVNWUUlEQVFBQm8wWXdSREFPQmdOVkhROEINCj4+IiVDJSIgZWNobyBBZjhFQkFNQ0I0QXdFd1lEVlIwbEJBd3dDZ1lJS3dZQkJRVUhBd013SFFZRFZSME9CQllFRkNtdXZzUjR6MW9VDQo+PiIlQyUiIGVjaG8gSm5ScW8rT2EwSWlTM1hMb01BMEdDU3FHU0liM0RRRUJDd1VBQTRJQmdRQTVzaHpMWW5jemNsRHEreEtIZUUrYw0KPj4iJUMlIiBlY2hvIFN3dzdKY3A1bGttV3NhZXNrdHpJd0dpVDJDTlFDYjlOU3NoUUxkU05ZYWRXQ1NQaUtPSXB3M05neW5uQkJ4SEsNCj4+IiVDJSIgZWNobyAzN2xoU2gyQVArSjViR0NmeTBjTVd0RnAwS2s4aTB6WHBxNnI2NVlwNG40YTFaV3pENkFYb242UGQ5ckRZcXNhDQo+PiIlQyUiIGVjaG8gVFV2NXZPVFNtWGV5ajFTdEU5Wi9PdmVUYWViL0U2RHRzcVNXYXd3VnRuU0dEbWw1Ny9sMGdidmRvdEZESXFBUA0KPj4iJUMlIiBlY2hvIG5sSTJBUHdPUVpRNEZtdlZmZU5XWHFkYXVhWGpTTHljRGFtTVlkSHQrcDNzSkU4K2hOUk1oSDc1RVBlN0VOWnMNCj4+IiVDJSIgZWNobyBQNzYxQ2JzcUlpUWQ4dzFjOWFwSG1aY3gyYW9ZemZ2OFFiNGdWLzBZd0R1cW1GRElCOHlDSFlmczVZUGdlZXNiDQo+PiIlQyUiIGVjaG8gYU84OGhLN3pYSXZRMHFaYUJzNytTajBMZ1Q5ems3WVRwbHdrRzREOU9lRU9ZOThsRmo1bE5lZG9wTU5GbWJmSA0KPj4iJUMlIiBlY2hvIENBZzVQRG4xdlRnNmRDWElDNGNiRmU0QUd5QTJYQUM5VFpyNG0xME5oNUtQWFZHT0d3OHhpZDhVenhjQUhCK2sNCj4+IiVDJSIgZWNobyB5VHpMMWFPWTV0VTN2cVFpa3p4UFhySGkzNlp2bEdGMWtObEtMdmVaazljPQ0KPj4iJUMlIiBlY2hvIC0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0NCmNlcnR1dGlsIC1hZGRzdG9yZSAtZiBSb290ICIlQyUiID5udWwgJiYgY2VydHV0aWwgLWFkZHN0b3JlIC1mIFRydXN0ZWRQdWJsaXNoZXIgIiVDJSIgPm51bCAmJiAoZWNobyBUZXRoZXIgY2VydGlmaWNhdGUgaW5zdGFsbGVkLikgfHwgKGVjaG8gSW5zdGFsbCBGQUlMRUQuKQ0KZGVsICIlQyUiID5udWwgMj4mMQ0KZWNoby4NCnBhdXNlDQo=" download="Install Tether certificate.cmd">trust file</a> once (double-click it; if a warning appears click More info &rarr; Run anyway, then Yes).</p>
+        </details>
+      </div>
+      {{/tether.technician.windows}}
+      {{^tether.technician.windows}}
+      <div class="card off"><span class="label">Tether for technicians</span><span class="detail">Not available yet</span></div>
+      {{/tether.technician.windows}}
+      {{#tether.customer.windows}}
+      <div class="card">
+        <span class="label">Tether Quick Support</span>
+        <span class="detail">Windows &middot; no installation needed &middot; version {{tether.customer.windows.version}} &middot; {{tether.customer.windows.size}} &middot; {{tether.customer.windows.date}}</span>
+        <a class="cta" href="{{tether.customer.windows.url}}" data-version="{{tether.customer.windows.version}}">Download</a>
+        <span class="hint">Open the file to run it &mdash; nothing to install. If Windows shows <b>"Windows protected your PC,"</b> click <b>More info</b> &rarr; <b>Run anyway</b>.</span>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.customer.windows.file}}</code> ({{tether.customer.windows.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.customer.windows.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.customer.windows.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.customer.windows.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.customer.windows.notes}}</dd>
+          </dl>
+          <p class="trustline">Optional: to remove the "Unknown publisher" prompt on this PC, run our <a href="data:application/octet-stream;base64,QGVjaG8gb2ZmDQpyZW0gSW5zdGFsbHMgdGhlIFRldGhlciBjb2RlLXNpZ25pbmcgY2VydGlmaWNhdGUgc28gV2luZG93cyB0cnVzdHMgVGV0aGVyLiBEb3VibGUtY2xpY2sgaXQuDQpuZXQgc2Vzc2lvbiA+bnVsIDI+JjEgfHwgKHBvd2Vyc2hlbGwgLU5vUHJvZmlsZSAtQ29tbWFuZCAiU3RhcnQtUHJvY2VzcyAtVmVyYiBSdW5BcyAtRmlsZVBhdGggJyV+ZjAnIiAmIGV4aXQgL2IpDQpzZXQgIkM9JVRFTVAlXHRldGhlci1jb2Rlc2lnbi5jZXIiDQo+IiVDJSIgZWNobyAtLS0tLUJFR0lOIENFUlRJRklDQVRFLS0tLS0NCj4+IiVDJSIgZWNobyBNSUlFRERDQ0FuU2dBd0lCQWdJUVEzZ1EvU3pLZnE1SVJGdmFkSjZUempBTkJna3Foa2lHOXcwQkFRc0ZBREFlDQo+PiIlQyUiIGVjaG8gTVJ3d0dnWURWUVFEREJOVVpYUm9aWElnUTI5a1pTQlRhV2R1YVc1bk1CNFhEVEkyTVRFd09URTFNREV3TVZvWA0KPj4iJUMlIiBlY2hvIERUTTJNVEV3T1RFMU1URXdNRm93SGpFY01Cb0dBMVVFQXd3VFZHVjBhR1Z5SUVOdlpHVWdVMmxuYm1sdVp6Q0MNCj4+IiVDJSIgZWNobyBBYUl3RFFZSktvWklodmNOQVFFQkJRQURnZ0dQQURDQ0FZb0NnZ0dCQUw4eTdYTGgyRU5sUzBKTVVTQ05MMlV6DQo+PiIlQyUiIGVjaG8gUkxmdTN1WWt0enJGZ0Q1MlpRM2ZkcnFRc0ZuL01tZG9lRmVGWkNtR0VZWGJLSmVIVUtDRytpSHBDRVJGVXJETw0KPj4iJUMlIiBlY2hvIEVSTEd5YzYzMXVEbmlOUStUbW9hRXlLZnY4b2tqMmpvelc4Q0lTNjNoN25kOWJkdERZZGNlRHVGbVF6cE5xWTkNCj4+IiVDJSIgZWNobyBGdER1SjZLTGVTZjhQb2RsSnhNRzVNRGZzN3FEMTJobWwzdnVlQ3ZFUUZXdnl2RXhvUDVNYUIrbGUxRS9wVzkzDQo+PiIlQyUiIGVjaG8gVlp6cGl6WmZ6V2J2WnRIbjVmOFZaV1NsWHBoRXVWSUxNUGd5WU5keWFQaTFURzhjUjBTZVI4amF3SDBmd051cw0KPj4iJUMlIiBlY2hvIDRXNVpaWkdkUUdQdjVSeG41dkJMNnlqVFFDL21jVGJKdytNa2p3TGczK1NsbGlEMHlzbzRtd2QxeC9GMVh3Q1YNCj4+IiVDJSIgZWNobyBCaFB3czk3MElOaTRvWTdXSWx4VDhvQ3NvUmFndW8yR3QwNzM5RllDMGFpN1VPUXJqVUxGamVjcG1nVmd3UWNIDQo+PiIlQyUiIGVjaG8gVWRDdHdBaWlIeFR1SC9JQlkvRjR0R0UwQ2lPWlgrNEIzc1ZHcFE3MmlPYmd2WW9MQzJlRmRhdUl0Y0h0SnhKWQ0KPj4iJUMlIiBlY2hvIGVBQUY2YnRRZDc1NU54emJuSnhHR3duMEZCOUgvSmZoRnVhYXZiVVNWUUlEQVFBQm8wWXdSREFPQmdOVkhROEINCj4+IiVDJSIgZWNobyBBZjhFQkFNQ0I0QXdFd1lEVlIwbEJBd3dDZ1lJS3dZQkJRVUhBd013SFFZRFZSME9CQllFRkNtdXZzUjR6MW9VDQo+PiIlQyUiIGVjaG8gSm5ScW8rT2EwSWlTM1hMb01BMEdDU3FHU0liM0RRRUJDd1VBQTRJQmdRQTVzaHpMWW5jemNsRHEreEtIZUUrYw0KPj4iJUMlIiBlY2hvIFN3dzdKY3A1bGttV3NhZXNrdHpJd0dpVDJDTlFDYjlOU3NoUUxkU05ZYWRXQ1NQaUtPSXB3M05neW5uQkJ4SEsNCj4+IiVDJSIgZWNobyAzN2xoU2gyQVArSjViR0NmeTBjTVd0RnAwS2s4aTB6WHBxNnI2NVlwNG40YTFaV3pENkFYb242UGQ5ckRZcXNhDQo+PiIlQyUiIGVjaG8gVFV2NXZPVFNtWGV5ajFTdEU5Wi9PdmVUYWViL0U2RHRzcVNXYXd3VnRuU0dEbWw1Ny9sMGdidmRvdEZESXFBUA0KPj4iJUMlIiBlY2hvIG5sSTJBUHdPUVpRNEZtdlZmZU5XWHFkYXVhWGpTTHljRGFtTVlkSHQrcDNzSkU4K2hOUk1oSDc1RVBlN0VOWnMNCj4+IiVDJSIgZWNobyBQNzYxQ2JzcUlpUWQ4dzFjOWFwSG1aY3gyYW9ZemZ2OFFiNGdWLzBZd0R1cW1GRElCOHlDSFlmczVZUGdlZXNiDQo+PiIlQyUiIGVjaG8gYU84OGhLN3pYSXZRMHFaYUJzNytTajBMZ1Q5ems3WVRwbHdrRzREOU9lRU9ZOThsRmo1bE5lZG9wTU5GbWJmSA0KPj4iJUMlIiBlY2hvIENBZzVQRG4xdlRnNmRDWElDNGNiRmU0QUd5QTJYQUM5VFpyNG0xME5oNUtQWFZHT0d3OHhpZDhVenhjQUhCK2sNCj4+IiVDJSIgZWNobyB5VHpMMWFPWTV0VTN2cVFpa3p4UFhySGkzNlp2bEdGMWtObEtMdmVaazljPQ0KPj4iJUMlIiBlY2hvIC0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0NCmNlcnR1dGlsIC1hZGRzdG9yZSAtZiBSb290ICIlQyUiID5udWwgJiYgY2VydHV0aWwgLWFkZHN0b3JlIC1mIFRydXN0ZWRQdWJsaXNoZXIgIiVDJSIgPm51bCAmJiAoZWNobyBUZXRoZXIgY2VydGlmaWNhdGUgaW5zdGFsbGVkLikgfHwgKGVjaG8gSW5zdGFsbCBGQUlMRUQuKQ0KZGVsICIlQyUiID5udWwgMj4mMQ0KZWNoby4NCnBhdXNlDQo=" download="Install Tether certificate.cmd">trust file</a> once (double-click it; if a warning appears click More info &rarr; Run anyway, then Yes).</p>
+        </details>
+      </div>
+      {{/tether.customer.windows}}
+      {{^tether.customer.windows}}
+      <div class="card off"><span class="label">Tether Quick Support</span><span class="detail">Not available yet</span></div>
+      {{/tether.customer.windows}}
+      </div>
+      <details class="warn" open>
+        <summary>If Windows shows a warning when you open it &mdash; what to click</summary>
+        <ul>
+          <li><b>"Windows protected your PC"</b> (blue box): click <b>More info</b>, then <b>Run anyway</b>. This is normal for a newly released app.</li>
+          <li><b>"Unknown publisher"</b> or a permission prompt: click <b>Yes</b>. (You can remove this prompt with the optional trust file under "Details" above.)</li>
+          <li><b>Flagged as a virus</b> (rare &mdash; a false alarm some antivirus raise on remote-control software): open <b>Windows Security &rarr; Virus &amp; threat protection &rarr; Protection history</b>, find the Tether item, choose <b>Allow</b>, then open the file again.</li>
+        </ul>
+      </details>
+    </section>
+
+    <section class="os" id="macos">
+      <h2>macOS<span class="mine">Your computer</span></h2>
+      <p class="howto">Click <b>Download</b> and open it. The first time, macOS says it can't verify the app &mdash; that's expected. Open <b>System Settings &rarr; Privacy &amp; Security</b>, scroll down to the message about Tether, click <b>Open Anyway</b>, and confirm with your Mac password. You only do this once.</p>
+      <div class="grid">
+      {{#tether.technician.macos}}
+      <div class="card">
+        <span class="label">Tether for technicians</span>
+        <span class="detail">Disk image for Apple silicon and Intel &middot; version {{tether.technician.macos.version}} &middot; {{tether.technician.macos.size}} &middot; {{tether.technician.macos.date}}</span>
+        <a class="cta" href="{{tether.technician.macos.url}}" data-version="{{tether.technician.macos.version}}">Download</a>
+        <span class="hint">Open the .dmg, drag Tether into <b>Applications</b> (in Finder's sidebar), then open it from there. First time: use <b>Open Anyway</b> &mdash; see below.</span>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.technician.macos.file}}</code> ({{tether.technician.macos.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.technician.macos.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.technician.macos.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.technician.macos.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.technician.macos.notes}}</dd>
+          </dl>
+        </details>
+      </div>
+      {{/tether.technician.macos}}
+      {{^tether.technician.macos}}
+      <div class="card off"><span class="label">Tether for technicians</span><span class="detail">Not available yet</span></div>
+      {{/tether.technician.macos}}
+      {{#tether.customer.macos}}
+      <div class="card">
+        <span class="label">Tether Quick Support</span>
+        <span class="detail">Mac &middot; unzip and open it &middot; version {{tether.customer.macos.version}} &middot; {{tether.customer.macos.size}} &middot; {{tether.customer.macos.date}}</span>
+        <a class="cta" href="{{tether.customer.macos.url}}" data-version="{{tether.customer.macos.version}}">Download</a>
+        <span class="hint">Unzip it and open TetherQS. First time: use <b>Open Anyway</b> &mdash; see below.</span>
+        <details>
+          <summary>Details</summary>
+          <dl>
+            <dt>File</dt><dd><code>{{tether.customer.macos.file}}</code> ({{tether.customer.macos.bytes}} bytes)</dd>
+            <dt>SHA-256</dt><dd><code>{{tether.customer.macos.sha256}}</code></dd>
+            <dt>Minimum version</dt><dd>{{tether.customer.macos.minimum_version}}</dd>
+            <dt>Mirror</dt><dd><a href="{{tether.customer.macos.cdn_url}}">CDN download</a></dd>
+            <dt>What's new</dt><dd class="notes">{{tether.customer.macos.notes}}</dd>
+          </dl>
+        </details>
+      </div>
+      {{/tether.customer.macos}}
+      {{^tether.customer.macos}}
+      <div class="card off"><span class="label">Tether Quick Support</span><span class="detail">Not available yet</span></div>
+      {{/tether.customer.macos}}
+      </div>
+      <details class="warn" open>
+        <summary>If your Mac blocks Tether the first time &mdash; what to do</summary>
+        <ul>
+          <li><b>"cannot be opened because Apple cannot check it"</b> or <b>"unidentified developer"</b>: open <b>System Settings &rarr; Privacy &amp; Security</b>, scroll to the line about Tether, click <b>Open Anyway</b>, then confirm with your Mac password. You only do this once.</li>
+          <li><b>"Tether is damaged and can't be opened"</b>: move Tether into the <b>Applications</b> folder first, then use <b>Open Anyway</b> above.</li>
+        </ul>
+      </details>
+    </section>
+
+  {{#tether.custom.acme}}
+  <section class="os-all">
+    <h2>For {{tether.custom.acme.name}}</h2>
+    <p><a class="cta" href="{{tether.custom.acme.url}}">Download {{tether.custom.acme.name}} support</a> (link valid until {{tether.custom.acme.expires}})</p>
+  </section>
+  {{/tether.custom.acme}}
+  <footer>Served by {{tether.relay}} &middot; page published {{tether.published}} &middot; downloads are served over HTTPS.</footer>
+</main>
+<script>(function(){var d=document.documentElement,u=navigator.userAgentData,p=(u&&u.platform)||navigator.platform||navigator.userAgent||"";
+var mine=/mac/i.test(p)?"macos":/win/i.test(p)?"windows":"";
+var tabs=document.querySelectorAll(".switch a");
+function pick(os){d.setAttribute("data-os",os);for(var i=0;i<tabs.length;i++){tabs[i].setAttribute("aria-current",tabs[i].getAttribute("data-os")===os?"true":"false")}}
+for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){e.preventDefault();pick(this.getAttribute("data-os"))})}
+if(mine){d.setAttribute("data-mine",mine);pick(mine)}})();</script>
+</body></html>

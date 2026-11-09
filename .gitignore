@@ -14,3 +14,8 @@ __pycache__/
 # Tether Manage key backups (encrypted, but never commit them)
 backup-keys/
 *.tmkeys
+
+# signing private keys never go in git (public .cer/.cmd/.mobileconfig are fine)
+*.pfx
+*.p12
+/secret/

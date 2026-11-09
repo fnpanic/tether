@@ -80,5 +80,11 @@ Tether clients use only TCP 443: put `server/caddy/Caddyfile` (`tether-https.ser
 
 ## License
 
-AGPL-3.0, inherited from RustDesk. You must offer the complete corresponding source, including
-`patches/`, to everyone you distribute Tether to.
+AGPL-3.0, inherited from RustDesk ([LICENSE](LICENSE)). You must offer the complete corresponding
+source, including `patches/`, to everyone you distribute Tether to.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org) (application pending). Team roles, privacy and system changes:
+[CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md), [PRIVACY.md](PRIVACY.md).
