@@ -28,7 +28,8 @@ independent entries. `TetherQS-<version>.exe.gz` is the gzip copy (35 → 15 MB)
 fetches it by its own URL and unpacks it itself, and it is the only TetherQS.exe file on the CDN
 (25 MiB per file limit). The relays serve the plain exe as it is: until 2026-11-09 Caddy's
 `precompressed gzip` sent browsers the exe gzip-encoded with a 206 to a plain GET, and Zscaler's
-download sandbox never finished analysing it ("Wir überprüfen diese Datei…").
+download sandbox never finished analysing it ("Wir überprüfen diese Datei…"). Verified after the change
+(both relays, 2026-11-09): the same download through Zscaler starts right away.
 
 ## How a release reaches devices
 
