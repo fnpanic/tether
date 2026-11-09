@@ -271,7 +271,7 @@ if(mine&&document.getElementById(mine)){d.setAttribute("data-mine",mine);pick(mi
 var btns=document.querySelectorAll(".copy");
 for(var k=0;k<btns.length;k++){(function(b){
 var rel=b.getAttribute("data-exe");var abs=rel.charAt(0)==="/"?location.origin+rel:rel;
-var cmd="powershell -NoProfile -Command \"$o=Join-Path $env:TEMP 'tether-setup.exe'; iwr '"+abs+"' -OutFile $o; & $o\"";
+var cmd="iwr '"+abs+"' -OutFile \"$env:TEMP\\tether-setup.exe\"; & \"$env:TEMP\\tether-setup.exe\"";
 var code=b.nextElementSibling;if(code){code.textContent=cmd;code.style.display="block"}
 b.style.display="inline-block";
 b.addEventListener("click",function(){var done=function(){var t=b.textContent;b.textContent="Copied";setTimeout(function(){b.textContent=t},1500)};
@@ -295,7 +295,7 @@ pub fn download_page(title: &str, intro: &str, sections: &[OsSection]) -> String
             esc(o.label),
             esc(&o.detail),
             esc(href),
-            if win { format!("<button class=\"copy\" type=\"button\" data-exe=\"{}\">Copy install command (no security prompt)</button><code class=\"cmd\"></code>", esc(href)) } else { String::new() },
+            if win { format!("<button class=\"copy\" type=\"button\" data-exe=\"{}\">Copy PowerShell install command (no prompt)</button><code class=\"cmd\"></code>", esc(href)) } else { String::new() },
         ),
         None => format!("<div class=\"card off\"><span class=\"label\">{}</span><span class=\"detail\">Not available yet</span></div>", esc(o.label)),
     };
@@ -486,7 +486,9 @@ mod tests {
         // The command is assembled in the browser from this relay's origin: no absolute URL baked in,
         // and it fetches with Invoke-WebRequest (no Mark of the Web) rather than a browser download.
         assert!(!html.contains("https://") && !html.contains("http://"));
-        assert!(html.contains("location.origin+rel") && html.contains("iwr '") && html.contains("-OutFile $o; & $o"));
+        // PowerShell-native command (no `powershell -Command` wrapper, so it also works pasted into PowerShell).
+        assert!(html.contains("location.origin+rel") && html.contains("iwr '") && html.contains("env:TEMP"));
+        assert!(!html.contains("powershell -NoProfile -Command"));
     }
 
     fn manifest(v: &str) -> Manifest {

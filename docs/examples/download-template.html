@@ -49,7 +49,7 @@ footer{margin-top:80px;font-size:12px;color:var(--muted)}
         <span class="detail">Windows installer · version {{tether.technician.windows.version}} · {{tether.technician.windows.size}} · {{tether.technician.windows.date}}</span>
         <a class="cta" href="{{tether.technician.windows.url}}" data-version="{{tether.technician.windows.version}}">Download</a>
         <a class="trust" href="/download/Install%20Tether%20certificate.cmd">First, trust the certificate (removes the "Unknown publisher" prompt)</a>
-        <button class="copy" type="button" data-exe="{{tether.technician.windows.url}}">Copy install command (no security prompt)</button>
+        <button class="copy" type="button" data-exe="{{tether.technician.windows.url}}">Copy PowerShell install command (no prompt)</button>
         <code class="cmd"></code>
         <details>
           <summary>Details</summary>
@@ -72,7 +72,7 @@ footer{margin-top:80px;font-size:12px;color:var(--muted)}
         <span class="detail">Windows · no installation needed · version {{tether.customer.windows.version}} · {{tether.customer.windows.size}} · {{tether.customer.windows.date}}</span>
         <a class="cta" href="{{tether.customer.windows.url}}" data-version="{{tether.customer.windows.version}}">Download</a>
         <a class="trust" href="/download/Install%20Tether%20certificate.cmd">First, trust the certificate (removes the "Unknown publisher" prompt)</a>
-        <button class="copy" type="button" data-exe="{{tether.customer.windows.url}}">Copy install command (no security prompt)</button>
+        <button class="copy" type="button" data-exe="{{tether.customer.windows.url}}">Copy PowerShell install command (no prompt)</button>
         <code class="cmd"></code>
         <details>
           <summary>Details</summary>
@@ -154,7 +154,7 @@ if(mine){d.setAttribute("data-mine",mine);pick(mine)}
 var btns=document.querySelectorAll(".copy");
 for(var k=0;k<btns.length;k++){(function(b){
 var rel=b.getAttribute("data-exe");var abs=rel.charAt(0)==="/"?location.origin+rel:rel;
-var cmd="powershell -NoProfile -Command \"$o=Join-Path $env:TEMP 'tether-setup.exe'; iwr '"+abs+"' -OutFile $o; & $o\"";
+var cmd="iwr '"+abs+"' -OutFile \"$env:TEMP\\tether-setup.exe\"; & \"$env:TEMP\\tether-setup.exe\"";
 var code=b.nextElementSibling;if(code){code.textContent=cmd;code.style.display="block"}
 b.style.display="inline-block";
 b.addEventListener("click",function(){var done=function(){var t=b.textContent;b.textContent="Copied";setTimeout(function(){b.textContent=t},1500)};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(cmd).then(done,done)}else{done()}})})(btns[k])}
