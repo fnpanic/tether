@@ -91,14 +91,19 @@ ID that is never the technician app's. Up to 0.5.28 both apps on one PC got the 
 same machine UUID, but different keys); hbbs accepts that and lets the last registration win, so a
 technician dialling that ID reached either app at random, with a password that did not match.
 
-From 0.5.29 a TetherQS whose stored ID is the plain MAC-derived one (the technician app's) moves once
-to its own ID at start (`Config::separate_auto_id`, log line "id … is the technician app's on this
-machine, moved to …") and keeps it; key pair and password stay. Not on a relaunch with hand-over
-(update, admin access): that restart keeps the ID the customer already gave out, and the next plain
-start moves it. The technician app's ID never changes (customers and Manage know it). The old ID's
-record on the relays still holds TetherQS's key after the move; hbbs asks the technician app's live
-connection to register again (see [corporate-networks.md](corporate-networks.md)), so it is reachable
-with its own key within about a minute.
+From 0.5.29 a new TetherQS starts with the salted ID. An existing one keeps its stored ID unless
+the technician app on the same machine stores the same one: then it moves once to its own ID at start
+(`Config::separate_auto_id`, log line "id … is the technician app's on this machine, moved to …") and
+keeps it; key pair and password stay. "The technician app's ID" is the `id` in
+`%APPDATA%\Tether\config\Tether.toml` of the same user or in the installed service's
+`C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\Tether\config\Tether.toml` (macOS
+`~/Library/Preferences/app.tether.Tether/Tether.toml`, the root service's under `/var/root`); a file
+TetherQS cannot read counts as absent. Not on a relaunch with hand-over (update, admin access): that
+restart keeps the ID the customer already gave out, and the next plain start moves it. The technician
+app's ID never changes (customers and Manage know it). The old ID's record on the relays still holds
+TetherQS's key after the move; hbbs asks the technician app's live connection to register again (see
+[corporate-networks.md](corporate-networks.md)), so it is reachable with its own key within about a
+minute.
 
 ## Admin access (UAC)
 
@@ -181,7 +186,7 @@ use **Check for updates** or restart it. If the version is newer:
   compiled-in `TETHER_UPDATER_PUB_KEY` (Tauri format: `signature` is base64 of the `.sig` file text;
   the key is base64 of the minisign public key file, a bare `RW…` key also works).
 - It is written to `TetherQS.exe.new` next to the running exe; the running exe is renamed to
-  `TetherQS.exe.old` and the new one takes its name; then TetherQS restarts (same ID and password; see [ID](#id) for the one-time move from 0.5.29)
+  `TetherQS.exe.old` and the new one takes its name; then TetherQS restarts (same ID and password; see [ID](#id) for the one-time move from 0.5.29 on PCs that also run Tether)
   and deletes `.old` on the next start. If the folder is not writable the new exe goes to
   `%LOCALAPPDATA%\Tether-QS\TetherQS.exe` and is started from there.
 - `mandatory` (with a newer version), `minimumVersion` or policy `update.minimum-version` above the

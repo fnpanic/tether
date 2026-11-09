@@ -47,7 +47,7 @@ index 54ec24b..b82f006 100644
    }
  }
 diff --git a/src/config.rs b/src/config.rs
-index 9ee5cac..b4f58e9 100644
+index 9ee5cac..6870b2d 100644
 --- a/src/config.rs
 +++ b/src/config.rs
 @@ -60,6 +60,10 @@ lazy_static::lazy_static! {
@@ -142,7 +142,7 @@ index 9ee5cac..b4f58e9 100644
                  log::info!("Generated id {}", id);
                  Some(id.to_string())
              } else {
-@@ -1208,6 +1255,51 @@ impl Config {
+@@ -1208,6 +1255,87 @@ impl Config {
          }
      }
  
@@ -170,11 +170,47 @@ index 9ee5cac..b4f58e9 100644
 +        }
 +    }
 +
-+    /// Tether: the id an app with `salt` moves to when it stored the unsalted MAC id, i.e. the one the
-+    /// technician app on this machine has (TetherQS up to 0.5.28). None: keep the stored id.
-+    pub fn separated_id(stored: &str, mac: &[u8; 6], salt: u64) -> Option<String> {
-+        (salt != 0 && stored == Self::auto_id_from_mac(mac, 0).to_string())
++    /// Tether: the id an app with `salt` (TetherQS) moves to when the technician app on this machine
++    /// stores the same id (`technician_ids`); None: keep it. A fresh install never moves: its first id
++    /// is already the salted one (`get_auto_id`).
++    pub fn separated_id(stored: &str, technician_ids: &[String], mac: &[u8; 6], salt: u64) -> Option<String> {
++        (salt != 0 && technician_ids.iter().any(|t| t == stored))
 +            .then(|| Self::auto_id_from_mac(mac, salt).to_string())
++            .filter(|id| id != stored)
++    }
++
++    /// Tether: the ids the technician app ("Tether") stores on this machine: this user's config and
++    /// the installed service's. Missing or unreadable files are skipped.
++    #[cfg(not(any(target_os = "android", target_os = "ios")))]
++    fn technician_ids() -> Vec<String> {
++        #[cfg(not(target_os = "macos"))]
++        let org = String::new();
++        #[cfg(target_os = "macos")]
++        let org = ORG.read().unwrap().clone();
++        let mut files: Vec<PathBuf> = directories_next::ProjectDirs::from("", &org, "Tether")
++            .map(|p| patch(p.config_dir().to_path_buf()).join("Tether.toml"))
++            .into_iter()
++            .collect();
++        #[cfg(windows)]
++        files.push(
++            ["ServiceProfiles", "LocalService", "AppData", "Roaming", "Tether", "config", "Tether.toml"]
++                .iter()
++                .fold(PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())), |p, x| p.join(x)),
++        );
++        #[cfg(target_os = "macos")]
++        files.push(format!("/var/root/Library/Preferences/{org}.Tether/Tether.toml").into());
++        files
++            .into_iter()
++            .filter(|f| f.exists()) // load_path must not create one
++            .map(|f| {
++                let c: Config = load_path(f);
++                match decrypt_str_or_original(&c.enc_id, PASSWORD_ENC_VERSION) {
++                    (id, true, _) => id,
++                    _ => c.id,
++                }
++            })
++            .filter(|id| !id.is_empty())
++            .collect()
 +    }
 +
 +    /// Tether: one-time switch for an app with an `AUTO_ID_SALT` (TetherQS), called at start before
@@ -185,7 +221,7 @@ index 9ee5cac..b4f58e9 100644
 +        let salt = AUTO_ID_SALT.load(std::sync::atomic::Ordering::Relaxed);
 +        let ma = mac_address::get_mac_address().ok().flatten().filter(|_| salt != 0)?;
 +        let stored = CONFIG.read().unwrap().id.clone();
-+        let id = Self::separated_id(&stored, &ma.bytes(), salt)?;
++        let id = Self::separated_id(&stored, &Self::technician_ids(), &ma.bytes(), salt)?;
 +        Config::set_key_confirmed(false);
 +        Config::set_id(&id);
 +        Some(stored)
@@ -194,7 +230,7 @@ index 9ee5cac..b4f58e9 100644
      pub fn get_auto_password(length: usize) -> String {
          Self::get_auto_password_with_chars(length, CHARS)
      }
-@@ -3039,6 +3131,44 @@ impl Status {
+@@ -3039,6 +3167,47 @@ impl Status {
  mod tests {
      use super::{permanent_password::PERMANENT_PASSWORD_ENC_VERSION, *};
  
@@ -209,11 +245,14 @@ index 9ee5cac..b4f58e9 100644
 +            assert_eq!(qs, Config::auto_id_from_mac(&mac, salt), "stable");
 +            assert_ne!(qs, plain);
 +            assert_eq!(qs.to_string().len(), 9);
-+            // Migration: only the plain id moves, once (the new id stays).
-+            assert_eq!(Config::separated_id(&plain.to_string(), &mac, salt), Some(qs.to_string()));
-+            assert_eq!(Config::separated_id(&qs.to_string(), &mac, salt), None);
-+            assert_eq!(Config::separated_id("1234567890", &mac, salt), None);
-+            assert_eq!(Config::separated_id(&plain.to_string(), &mac, 0), None, "technician app");
++            let (plain, qs) = (plain.to_string(), qs.to_string());
++            let tether = [plain.clone()];
++            assert_eq!(Config::separated_id(&qs, &tether, &mac, salt), None, "fresh: salted from the start");
++            assert_eq!(Config::separated_id(&plain, &[], &mac, salt), None, "no technician app: keeps its id");
++            assert_eq!(Config::separated_id(&plain, &["987654321".into()], &mac, salt), None, "other id: keeps");
++            assert_eq!(Config::separated_id(&plain, &tether, &mac, salt), Some(qs.clone()), "same id: moves");
++            assert_eq!(Config::separated_id("1234567890", &["1234567890".into()], &mac, salt), Some(qs), "any shared id");
++            assert_eq!(Config::separated_id(&plain, &tether, &mac, 0), None, "technician app never moves");
 +        }
 +        // Upstream derivation unchanged: last 4 bytes, 29 bits.
 +        assert_eq!(Config::auto_id_from_mac(&macs[0], 0), 0x029a3b7f);
