@@ -9,8 +9,9 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ## [0.5.31] — 2026-11-09
 Tether (technician app) 0.5.31 (Windows) and TetherQS 0.5.29 (Windows, macOS), published 2026-11-09:
 index serial 37 on both relays, files identical to dist/ by SHA-256 on both relays and the CDN (the
-plain TetherQS .exe on the relays only, as designed). Tether 0.5.31 for macOS follows after its
-release check. hbbs on both relays (re-register request, deployed 2026-11-09); Tether Manage 0.5.12.
+plain TetherQS .exe on the relays only, as designed). Tether 0.5.31 for macOS published the same day
+(index serial 38, .app.tar.gz identical on both relays and the CDN, .dmg on the relays). hbbs on both
+relays (re-register request, deployed 2026-11-09); Tether Manage 0.5.12 (installed 2026-11-09).
 
 ### Fixed
 - Tether: `tether --connect <this device's own ID>` (and a `tether://connect/` link to it) was
