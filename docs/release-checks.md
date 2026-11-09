@@ -34,3 +34,11 @@ Berechtigungen" for `Tether_0.5.30_x64-setup.exe`. Defender had flagged an earli
 remote-access tools, which company PCs with a higher cloud block level enforce at download time
 (the browser then reports missing permissions). The checks show such a verdict before users see it.
 Code signing with a trusted certificate is the lasting remedy against these ML verdicts.
+
+## False-positive reports
+
+| Date | File | Vendor / detection | Status |
+| --- | --- | --- | --- |
+| 2026-11-09 | Tether_0.5.30_x64-setup.exe (`4751cc11ce30edab`) | Microsoft `Trojan:Win32/Bearfoos.A!ml` (seen on 0.5.14) | submitted (WDSI, software developer) |
+| 2026-11-09 | Tether_0.5.30_universal.dmg (`0b75c85daad7d710`) | Microsoft `Trojan:Script/Wacatac.B!ml` (VirusTotal) | submitted (WDSI, software developer) |
+| – | TetherQS-0.5.28.exe (`c96fb051a1e4b788`) | Trapmine `malicious.moderate.ml.score` (VirusTotal, 1/71) | not reported (minor engine) |
