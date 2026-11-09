@@ -36,8 +36,16 @@ def key() -> str:
     return k
 
 
+_last = [0.0]
+GAP = 15.5  # free API: 4 requests a minute (500 a day): never send faster
+
+
 def call(method: str, url: str, k: str, body: bytes | None = None, ctype: str | None = None) -> dict:
-    req = urllib.request.Request(url if url.startswith("http") else API + url, data=body, method=method)
+    wait = _last[0] + GAP - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _last[0] = time.monotonic()
+    req =urllib.request.Request(url if url.startswith("http") else API + url, data=body, method=method)
     req.add_header("x-apikey", k)
     req.add_header("accept", "application/json")
     if ctype:
@@ -76,16 +84,16 @@ def scan(path: Path, k: str) -> tuple[str, dict]:
     rep = call("GET", f"/files/{sha}", k)
     if not rep:
         aid = upload(path, k)
-        for _ in range(90):  # up to 30 min
+        for _ in range(30):  # one status query a minute, up to 30 min (quota)
+            time.sleep(45)
             a = call("GET", f"/analyses/{aid}", k)
             if a.get("data", {}).get("attributes", {}).get("status") == "completed":
                 break
-            time.sleep(20)
-        for _ in range(30):  # the file object can lag behind the finished analysis
+        for _ in range(10):  # the file object can lag behind the finished analysis
             rep = call("GET", f"/files/{sha}", k)
             if rep.get("data", {}).get("attributes", {}).get("last_analysis_stats"):
                 break
-            time.sleep(10)
+            time.sleep(30)
     return sha, rep
 
 

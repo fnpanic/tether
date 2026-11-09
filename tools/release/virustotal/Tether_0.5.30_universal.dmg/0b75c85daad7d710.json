@@ -1,0 +1,798 @@
+{
+ "data": {
+  "attributes": {
+   "dmg_info": {
+    "blkx": [
+     {
+      "attributes": "0x0050",
+      "name": "Protective Master Boot Record (MBR : 0)"
+     },
+     {
+      "attributes": "0x0050",
+      "name": "GPT Header (Primary GPT Header : 1)"
+     },
+     {
+      "attributes": "0x0050",
+      "name": "GPT Partition Data (Primary GPT Table : 2)"
+     },
+     {
+      "attributes": "0x0050",
+      "name": " (Apple_Free : 3)"
+     },
+     {
+      "attributes": "0x0050",
+      "name": "disk image (Apple_HFS : 4)"
+     },
+     {
+      "attributes": "0x0050",
+      "name": "GPT Partition Data (Backup GPT Table : 5)"
+     },
+     {
+      "attributes": "0x0050",
+      "name": "GPT Header (Backup GPT Header : 6)"
+     }
+    ],
+    "data_fork_length": 17849785,
+    "data_fork_offset": 0,
+    "dmg_version": 4,
+    "hfs": {
+     "info_plist": {
+      "CFBundleDevelopmentRegion": "English",
+      "CFBundleDisplayName": "Tether",
+      "CFBundleExecutable": "tether",
+      "CFBundleIconFile": "icon.icns",
+      "CFBundleIdentifier": "app.tether.desktop",
+      "CFBundleInfoDictionaryVersion": "6.0",
+      "CFBundleName": "Tether",
+      "CFBundlePackageType": "APPL",
+      "CFBundleShortVersionString": "0.5.30",
+      "CFBundleURLTypes": "[{'CFBundleURLSchemes': ['tether'], 'CFBundleURLName': 'app.tether.desktop tether', 'CFBundleTypeRole': 'Editor'}]",
+      "CFBundleVersion": "0.5.30",
+      "CSResourcesFileMapped": "True",
+      "LSApplicationCategoryType": "public.app-category.utilities",
+      "LSMinimumSystemVersion": "11.0",
+      "LSRequiresCarbon": "True",
+      "LSUIElement": "False",
+      "NSAppleEventsUsageDescription": "Tether controls this Mac on behalf of an allowed remote user.",
+      "NSHighResolutionCapable": "True",
+      "NSHumanReadableCopyright": "AGPL-3.0",
+      "NSLocalNetworkUsageDescription": "Tether connects directly to devices on your network when they are nearby, instead of through the relay.",
+      "NSMicrophoneUsageDescription": "Tether can transmit audio during remote sessions.",
+      "NSScreenCaptureUsageDescription": "Tether shares your screen with people you allow to connect."
+     },
+     "main_executable": {
+      "path": "/Tether.app/Contents/MacOS/tether",
+      "sha256": "1b66b9d1d8096aed76633426dfa455847dcb1e16f035c36c4ed43b80858bbfa6",
+      "size": 40548224
+     },
+     "num_files": 6,
+     "unreadable_files": 0
+    },
+    "plst": [
+     {
+      "attributes": "0x0050",
+      "name": "ID:0"
+     }
+    ],
+    "plst_keys": [
+     "resource-fork"
+    ],
+    "resourcefork_keys": [
+     "blkx",
+     "plst"
+    ],
+    "rsrc_fork_length": 0,
+    "rsrc_fork_offset": 0,
+    "running_data_fork_offset": 0,
+    "xml_length": 9818,
+    "xml_offset": 17849785
+   },
+   "filecondis": {
+    "dhash": "000000000e050804",
+    "raw_md5": "c474d64729b7a4c754c0b3c6c18e5a15"
+   },
+   "first_submission_date": 1794217248,
+   "last_analysis_date": 1794217248,
+   "last_analysis_results": {
+    "ALYac": {
+     "category": "undetected",
+     "engine_name": "ALYac",
+     "engine_update": "20261109",
+     "engine_version": "2.0.0.10",
+     "method": "blacklist",
+     "result": null
+    },
+    "APEX": {
+     "category": "type-unsupported",
+     "engine_name": "APEX",
+     "engine_update": "20261107",
+     "engine_version": "6.839",
+     "method": "blacklist",
+     "result": null
+    },
+    "AVG": {
+     "category": "undetected",
+     "engine_name": "AVG",
+     "engine_update": "20261108",
+     "engine_version": "23.9.8494.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "Acronis": {
+     "category": "undetected",
+     "engine_name": "Acronis",
+     "engine_update": "20240328",
+     "engine_version": "1.2.0.121",
+     "method": "blacklist",
+     "result": null
+    },
+    "AhnLab-V3": {
+     "category": "undetected",
+     "engine_name": "AhnLab-V3",
+     "engine_update": "20261109",
+     "engine_version": "3.30.3.10716",
+     "method": "blacklist",
+     "result": null
+    },
+    "Alibaba": {
+     "category": "type-unsupported",
+     "engine_name": "Alibaba",
+     "engine_update": "20190527",
+     "engine_version": "0.3.0.5",
+     "method": "blacklist",
+     "result": null
+    },
+    "Antiy-AVL": {
+     "category": "undetected",
+     "engine_name": "Antiy-AVL",
+     "engine_update": "20261109",
+     "engine_version": "3.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "Arcabit": {
+     "category": "undetected",
+     "engine_name": "Arcabit",
+     "engine_update": "20261109",
+     "engine_version": "2025.0.0.23",
+     "method": "blacklist",
+     "result": null
+    },
+    "Avast": {
+     "category": "undetected",
+     "engine_name": "Avast",
+     "engine_update": "20261108",
+     "engine_version": "23.9.8494.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "Avast-Mobile": {
+     "category": "type-unsupported",
+     "engine_name": "Avast-Mobile",
+     "engine_update": "20261108",
+     "engine_version": "261108-02",
+     "method": "blacklist",
+     "result": null
+    },
+    "Avira": {
+     "category": "undetected",
+     "engine_name": "Avira",
+     "engine_update": "20261109",
+     "engine_version": "8.3.3.24",
+     "method": "blacklist",
+     "result": null
+    },
+    "BitDefender": {
+     "category": "undetected",
+     "engine_name": "BitDefender",
+     "engine_update": "20261109",
+     "engine_version": "7.2",
+     "method": "blacklist",
+     "result": null
+    },
+    "BitDefenderFalx": {
+     "category": "type-unsupported",
+     "engine_name": "BitDefenderFalx",
+     "engine_update": "20261022",
+     "engine_version": "2.0.936",
+     "method": "blacklist",
+     "result": null
+    },
+    "Bkav": {
+     "category": "undetected",
+     "engine_name": "Bkav",
+     "engine_update": "20261107",
+     "engine_version": "8.2.40(8338)",
+     "method": "blacklist",
+     "result": null
+    },
+    "CAT-QuickHeal": {
+     "category": "undetected",
+     "engine_name": "CAT-QuickHeal",
+     "engine_update": "20261108",
+     "engine_version": "22.00",
+     "method": "blacklist",
+     "result": null
+    },
+    "CMC": {
+     "category": "undetected",
+     "engine_name": "CMC",
+     "engine_update": "20261108",
+     "engine_version": "2.4.2022.1",
+     "method": "blacklist",
+     "result": null
+    },
+    "CTX": {
+     "category": "undetected",
+     "engine_name": "CTX",
+     "engine_update": "20261109",
+     "engine_version": "2026.10.27.1",
+     "method": "blacklist",
+     "result": null
+    },
+    "ClamAV": {
+     "category": "timeout",
+     "engine_name": "ClamAV",
+     "engine_update": "20261109",
+     "engine_version": "1.5.4.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "CrowdStrike": {
+     "category": "undetected",
+     "engine_name": "CrowdStrike",
+     "engine_update": "20230417",
+     "engine_version": "1.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "Cylance": {
+     "category": "type-unsupported",
+     "engine_name": "Cylance",
+     "engine_update": "20261103",
+     "engine_version": "3.0.0.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "Cynet": {
+     "category": "undetected",
+     "engine_name": "Cynet",
+     "engine_update": "20261109",
+     "engine_version": "4.0.3.4",
+     "method": "blacklist",
+     "result": null
+    },
+    "DeepInstinct": {
+     "category": "type-unsupported",
+     "engine_name": "DeepInstinct",
+     "engine_update": "20260614",
+     "engine_version": "5.0.0.8",
+     "method": "blacklist",
+     "result": null
+    },
+    "DrWeb": {
+     "category": "undetected",
+     "engine_name": "DrWeb",
+     "engine_update": "20261109",
+     "engine_version": "7.0.76.8280",
+     "method": "blacklist",
+     "result": null
+    },
+    "ESET-NOD32": {
+     "category": "undetected",
+     "engine_name": "ESET-NOD32",
+     "engine_update": "20261109",
+     "engine_version": "18.2.18.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "Elastic": {
+     "category": "type-unsupported",
+     "engine_name": "Elastic",
+     "engine_update": "20261104",
+     "engine_version": "4.0.297",
+     "method": "blacklist",
+     "result": null
+    },
+    "Emsisoft": {
+     "category": "undetected",
+     "engine_name": "Emsisoft",
+     "engine_update": "20261109",
+     "engine_version": "2024.8.0.61147",
+     "method": "blacklist",
+     "result": null
+    },
+    "F-Secure": {
+     "category": "undetected",
+     "engine_name": "F-Secure",
+     "engine_update": "20261109",
+     "engine_version": "18.10.1547.307",
+     "method": "blacklist",
+     "result": null
+    },
+    "Fortinet": {
+     "category": "undetected",
+     "engine_name": "Fortinet",
+     "engine_update": "20261109",
+     "engine_version": "7.0.48.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "GData": {
+     "category": "undetected",
+     "engine_name": "GData",
+     "engine_update": "20261109",
+     "engine_version": "GD:27.46653AVA:64.32201",
+     "method": "blacklist",
+     "result": null
+    },
+    "Google": {
+     "category": "undetected",
+     "engine_name": "Google",
+     "engine_update": "20261109",
+     "engine_version": "1794211252",
+     "method": "blacklist",
+     "result": null
+    },
+    "Gridinsoft": {
+     "category": "undetected",
+     "engine_name": "Gridinsoft",
+     "engine_update": "20261109",
+     "engine_version": "1.0.262.174",
+     "method": "blacklist",
+     "result": null
+    },
+    "Ikarus": {
+     "category": "undetected",
+     "engine_name": "Ikarus",
+     "engine_update": "20261109",
+     "engine_version": "6.5.4.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "Jiangmin": {
+     "category": "undetected",
+     "engine_name": "Jiangmin",
+     "engine_update": "20261108",
+     "engine_version": "16.0.100",
+     "method": "blacklist",
+     "result": null
+    },
+    "K7AntiVirus": {
+     "category": "undetected",
+     "engine_name": "K7AntiVirus",
+     "engine_update": "20261109",
+     "engine_version": "14.91.61407",
+     "method": "blacklist",
+     "result": null
+    },
+    "K7GW": {
+     "category": "undetected",
+     "engine_name": "K7GW",
+     "engine_update": "20261109",
+     "engine_version": "14.91.61407",
+     "method": "blacklist",
+     "result": null
+    },
+    "Kaspersky": {
+     "category": "undetected",
+     "engine_name": "Kaspersky",
+     "engine_update": "20261109",
+     "engine_version": "22.0.1.28",
+     "method": "blacklist",
+     "result": null
+    },
+    "Kingsoft": {
+     "category": "undetected",
+     "engine_name": "Kingsoft",
+     "engine_update": "20261108",
+     "engine_version": "None",
+     "method": "blacklist",
+     "result": null
+    },
+    "Lionic": {
+     "category": "undetected",
+     "engine_name": "Lionic",
+     "engine_update": "20261109",
+     "engine_version": "8.16",
+     "method": "blacklist",
+     "result": null
+    },
+    "Malwarebytes": {
+     "category": "undetected",
+     "engine_name": "Malwarebytes",
+     "engine_update": "20261109",
+     "engine_version": "3.1.0.296",
+     "method": "blacklist",
+     "result": null
+    },
+    "MaxSecure": {
+     "category": "undetected",
+     "engine_name": "MaxSecure",
+     "engine_update": "20261109",
+     "engine_version": "4.0.3.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "McAfeeD": {
+     "category": "undetected",
+     "engine_name": "McAfeeD",
+     "engine_update": "20261109",
+     "engine_version": "1.2.0.16534",
+     "method": "blacklist",
+     "result": null
+    },
+    "MicroWorld-eScan": {
+     "category": "undetected",
+     "engine_name": "MicroWorld-eScan",
+     "engine_update": "20261109",
+     "engine_version": "14.0.409.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "Microsoft": {
+     "category": "malicious",
+     "engine_name": "Microsoft",
+     "engine_update": "20261109",
+     "engine_version": "1.26100",
+     "method": "blacklist",
+     "result": "Trojan:Script/Wacatac.B!ml"
+    },
+    "NANO-Antivirus": {
+     "category": "undetected",
+     "engine_name": "NANO-Antivirus",
+     "engine_update": "20261109",
+     "engine_version": "1.0.170.26895",
+     "method": "blacklist",
+     "result": null
+    },
+    "Paloalto": {
+     "category": "type-unsupported",
+     "engine_name": "Paloalto",
+     "engine_update": "20261109",
+     "engine_version": "0.9.0.1003",
+     "method": "blacklist",
+     "result": null
+    },
+    "Panda": {
+     "category": "undetected",
+     "engine_name": "Panda",
+     "engine_update": "20261108",
+     "engine_version": "4.6.4.2",
+     "method": "blacklist",
+     "result": null
+    },
+    "Rising": {
+     "category": "undetected",
+     "engine_name": "Rising",
+     "engine_update": "20261109",
+     "engine_version": "25.0.0.28",
+     "method": "blacklist",
+     "result": null
+    },
+    "SUPERAntiSpyware": {
+     "category": "undetected",
+     "engine_name": "SUPERAntiSpyware",
+     "engine_update": "20261107",
+     "engine_version": "5.6.0.1032",
+     "method": "blacklist",
+     "result": null
+    },
+    "Sangfor": {
+     "category": "undetected",
+     "engine_name": "Sangfor",
+     "engine_update": "20261107",
+     "engine_version": "2.22.3.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "SentinelOne": {
+     "category": "type-unsupported",
+     "engine_name": "SentinelOne",
+     "engine_update": "20260924",
+     "engine_version": "7.8.0.2",
+     "method": "blacklist",
+     "result": null
+    },
+    "Skyhigh": {
+     "category": "timeout",
+     "engine_name": "Skyhigh",
+     "engine_update": "20261108",
+     "engine_version": null,
+     "method": "blacklist",
+     "result": null
+    },
+    "Sophos": {
+     "category": "undetected",
+     "engine_name": "Sophos",
+     "engine_update": "20261109",
+     "engine_version": "3.7.2.1",
+     "method": "blacklist",
+     "result": null
+    },
+    "Symantec": {
+     "category": "undetected",
+     "engine_name": "Symantec",
+     "engine_update": "20261108",
+     "engine_version": "1.22.0.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "SymantecMobileInsight": {
+     "category": "type-unsupported",
+     "engine_name": "SymantecMobileInsight",
+     "engine_update": "20260123",
+     "engine_version": "2.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "TACHYON": {
+     "category": "undetected",
+     "engine_name": "TACHYON",
+     "engine_update": "20261109",
+     "engine_version": "2026-11-09.02",
+     "method": "blacklist",
+     "result": null
+    },
+    "Tencent": {
+     "category": "undetected",
+     "engine_name": "Tencent",
+     "engine_update": "20261109",
+     "engine_version": "1.0.0.1",
+     "method": "blacklist",
+     "result": null
+    },
+    "Trapmine": {
+     "category": "type-unsupported",
+     "engine_name": "Trapmine",
+     "engine_update": "20261026",
+     "engine_version": "4.0.17.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "TrellixENS": {
+     "category": "undetected",
+     "engine_name": "TrellixENS",
+     "engine_update": "20261108",
+     "engine_version": "6.0.6.653",
+     "method": "blacklist",
+     "result": null
+    },
+    "TrendMicro": {
+     "category": "undetected",
+     "engine_name": "TrendMicro",
+     "engine_update": "20261109",
+     "engine_version": "24.550.0.1002",
+     "method": "blacklist",
+     "result": null
+    },
+    "TrendMicro-HouseCall": {
+     "category": "undetected",
+     "engine_name": "TrendMicro-HouseCall",
+     "engine_update": "20261109",
+     "engine_version": "24.550.0.1002",
+     "method": "blacklist",
+     "result": null
+    },
+    "Trustlook": {
+     "category": "type-unsupported",
+     "engine_name": "Trustlook",
+     "engine_update": "20261109",
+     "engine_version": "1.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "VBA32": {
+     "category": "undetected",
+     "engine_name": "VBA32",
+     "engine_update": "20261109",
+     "engine_version": "5.7.1",
+     "method": "blacklist",
+     "result": null
+    },
+    "VIPRE": {
+     "category": "undetected",
+     "engine_name": "VIPRE",
+     "engine_update": "20261108",
+     "engine_version": "6.0.0.35",
+     "method": "blacklist",
+     "result": null
+    },
+    "Varist": {
+     "category": "undetected",
+     "engine_name": "Varist",
+     "engine_update": "20261109",
+     "engine_version": "6.6.1.3",
+     "method": "blacklist",
+     "result": null
+    },
+    "ViRobot": {
+     "category": "undetected",
+     "engine_name": "ViRobot",
+     "engine_update": "20261109",
+     "engine_version": "2026-11-09.02",
+     "method": "blacklist",
+     "result": null
+    },
+    "VirIT": {
+     "category": "undetected",
+     "engine_name": "VirIT",
+     "engine_update": "20261106",
+     "engine_version": "9.5.1334",
+     "method": "blacklist",
+     "result": null
+    },
+    "Webroot": {
+     "category": "type-unsupported",
+     "engine_name": "Webroot",
+     "engine_update": "20250227",
+     "engine_version": "1.9.0.8",
+     "method": "blacklist",
+     "result": null
+    },
+    "Xcitium": {
+     "category": "undetected",
+     "engine_name": "Xcitium",
+     "engine_update": "20261109",
+     "engine_version": "39100",
+     "method": "blacklist",
+     "result": null
+    },
+    "Yandex": {
+     "category": "undetected",
+     "engine_name": "Yandex",
+     "engine_update": "20261109",
+     "engine_version": "5.5.2.24",
+     "method": "blacklist",
+     "result": null
+    },
+    "Zillya": {
+     "category": "undetected",
+     "engine_name": "Zillya",
+     "engine_update": "20261106",
+     "engine_version": "2.0.0.5725",
+     "method": "blacklist",
+     "result": null
+    },
+    "ZoneAlarm": {
+     "category": "undetected",
+     "engine_name": "ZoneAlarm",
+     "engine_update": "20261109",
+     "engine_version": "6.28-119762366",
+     "method": "blacklist",
+     "result": null
+    },
+    "Zoner": {
+     "category": "undetected",
+     "engine_name": "Zoner",
+     "engine_update": "20261109",
+     "engine_version": "2.2.2.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "alibabacloud": {
+     "category": "undetected",
+     "engine_name": "alibabacloud",
+     "engine_update": "20250321",
+     "engine_version": "2.2.0",
+     "method": "blacklist",
+     "result": null
+    },
+    "huorong": {
+     "category": "undetected",
+     "engine_name": "huorong",
+     "engine_update": "20261108",
+     "engine_version": "bf4e1b9:bf4e1b9:5022543:5022543",
+     "method": "blacklist",
+     "result": null
+    },
+    "tehtris": {
+     "category": "type-unsupported",
+     "engine_name": "tehtris",
+     "engine_update": "20261109",
+     "engine_version": null,
+     "method": "blacklist",
+     "result": null
+    }
+   },
+   "last_analysis_stats": {
+    "confirmed-timeout": 0,
+    "failure": 0,
+    "harmless": 0,
+    "malicious": 1,
+    "suspicious": 0,
+    "timeout": 2,
+    "type-unsupported": 14,
+    "undetected": 58
+   },
+   "last_modification_date": 1794217571,
+   "last_submission_date": 1794217248,
+   "magic": "DOS/MBR boot sector, extended partition table (last) (zlib compressed data)",
+   "magika": "DMG",
+   "md5": "3e4e73eb07dc0292a8ccae5e59d149df",
+   "meaningful_name": "app.tether.desktop",
+   "names": [
+    "Tether_0.5.30_universal.dmg"
+   ],
+   "popular_threat_classification": {
+    "popular_threat_category": [
+     {
+      "count": 1,
+      "value": "trojan"
+     }
+    ],
+    "suggested_threat_label": "trojan."
+   },
+   "reputation": 0,
+   "sha1": "95d66dee249aab8a62869b566d7601184d2e94cc",
+   "sha256": "0b75c85daad7d710c95b03a6283169f96b08113b50c3a97ad7a9dfcd89b13cd5",
+   "signature_info": {
+    "Authority": "Tether Code Signing",
+    "CDHash": "a58ee4342ed07ad430801d73073253ade7d99141",
+    "CMSDigest": "a58ee4342ed07ad430801d73073253ade7d991411d552023b5498161f5b7d3cf",
+    "CMSDigestType": "2",
+    "CandidateCDHash sha256": "a58ee4342ed07ad430801d73073253ade7d99141",
+    "CandidateCDHashFull sha256": "a58ee4342ed07ad430801d73073253ade7d991411d552023b5498161f5b7d3cf",
+    "Format": "app bundle with Mach-O thin (arm64)",
+    "Hash choices": "sha256",
+    "Identifier": "app.tether.desktop",
+    "Info.plist entries": "22",
+    "Runtime Version": "26.2.0",
+    "TeamIdentifier": "not set",
+    "signers": "Tether",
+    "signers details": [
+     {
+      "algorithm": "sha256WithRSAEncryption",
+      "cert issuer": "Tether",
+      "name": "Tether",
+      "serial number": "10 D3 B8 9F 1F EE AE 12 FB 42 91 31 BE 51 93 EC D2 C7 DE 45",
+      "status": "NotTrusted",
+      "thumbprint": "BCF53642C6C9F74356A3D12AE740BCC0EB59FB33",
+      "valid from": "02:01 PM 11/04/2026",
+      "valid to": "02:01 PM 10/30/2046"
+     }
+    ],
+    "verified": "NotTrusted"
+   },
+   "size": 17862684,
+   "ssdeep": "393216:mICZ3mEgEJP3j3BxlIWJQ8bOFTafspEEvLltHTlUUaM6HDDbungs3ZmtxGYJZo:GnJb3BoW28bwjRv4jLVxGYJ",
+   "tags": [
+    "contains-macho",
+    "dmg",
+    "signed",
+    "self-signed"
+   ],
+   "times_submitted": 1,
+   "tlsh": "T181073334740445378759F17CDEEA8DA6BE13BFE78783924231AB1604432EB9ABA33571",
+   "total_votes": {
+    "harmless": 0,
+    "malicious": 0
+   },
+   "trid": [
+    {
+     "file_type": "Macintosh Disk image (BZlib compressed)",
+     "probability": 97.6
+    },
+    {
+     "file_type": "ZLIB compressed data (best comp.)",
+     "probability": 2.3
+    }
+   ],
+   "type_description": "Macintosh Disk Image",
+   "type_extension": "dmg",
+   "type_tag": "dmg",
+   "type_tags": [
+    "executable",
+    "mac",
+    "dmg"
+   ],
+   "unique_sources": 1,
+   "vhash": "80bd495aff949a71e82a671982f150b8"
+  },
+  "id": "0b75c85daad7d710c95b03a6283169f96b08113b50c3a97ad7a9dfcd89b13cd5",
+  "links": {
+   "self": "https://www.virustotal.com/api/v3/files/0b75c85daad7d710c95b03a6283169f96b08113b50c3a97ad7a9dfcd89b13cd5"
+  },
+  "type": "file"
+ }
+}

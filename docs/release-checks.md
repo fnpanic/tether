@@ -20,8 +20,11 @@ flagged file is not published until the detection is understood and, for a false
 reported to the vendor (Microsoft: <https://www.microsoft.com/wdsi/filesubmission>, "Software
 developer", "Incorrectly detected as malware").
 
-API key: env `VT_API_KEY` or `C:\vms\virustotal\api-key.txt` (a free VirusTotal account gives one;
-4 requests a minute, which the script waits out). Never commit it.
+API key: env `VT_API_KEY` or `C:\vms\virustotal\api-key.txt`. Never commit it. The free plan allows
+4 requests a minute and 500 a day: the script keeps 15.5 s between requests and asks for an
+analysis' status once a minute, so a known file costs 1 request and a new one about 6-10; a full
+release (6 files) stays near 60. VirusTotal's free API terms exclude business and commercial use;
+a commercial release process needs a paid plan.
 
 ## Why
 
