@@ -46,7 +46,9 @@ const check = (name, ok, detail = "") => {
 };
 
 async function cdpApp(exe, args, env, port) {
-  const p = spawn(exe, args, { env: { ...process.env, ...env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` }, stdio: "ignore" });
+  // WEBVIEW2_USER_DATA_FOLDER (optional, e.g. when a stray WebView2 holds an app's default folder): one folder per app.
+  const wv2 = process.env.WEBVIEW2_USER_DATA_FOLDER ? { WEBVIEW2_USER_DATA_FOLDER: `${process.env.WEBVIEW2_USER_DATA_FOLDER}-${port}` } : {};
+  const p = spawn(exe, args, { env: { ...process.env, ...env, ...wv2, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` }, stdio: "ignore" });
   let browser;
   for (let i = 0; i < 80 && !browser; i++) {
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`).catch(() => null);
@@ -111,14 +113,26 @@ try {
   const token = created.link.split("/q/")[1];
   const dl = await get(`${RELAYS[1]}/q/${token}`);
   const plain = readFileSync(QS);
-  check("link downloads TetherQS + signed trailer (relay 2)", dl.status === 200 && dl.body.subarray(0, plain.length).equals(plain) && dl.body.subarray(-8).toString() === "TQSPROF1", `${dl.status} ${dl.body.length} bytes, plain ${plain.length}`);
+  // A signed TetherQS gets the trailer inside its certificate table (two size fields change), so
+  // compare up to the PE header only and let Windows judge the signature.
+  check("link downloads TetherQS + signed trailer (relay 2)", dl.status === 200 && dl.body.subarray(0, 0x100).equals(plain.subarray(0, 0x100)) && dl.body.length > plain.length && dl.body.subarray(-8).toString() === "TQSPROF1", `${dl.status} ${dl.body.length} bytes, plain ${plain.length}`);
   check("download filename", (dl.headers.get("content-disposition") || "").includes("ACME Support-Support.exe"), dl.headers.get("content-disposition"));
   check("unknown token 404", (await get(`${RELAYS[0]}/q/${"A".repeat(43)}`)).status === 404);
+  // MAC_ZIP_OUT: save the macOS download (relay 1 needs a darwin-universal release) for the
+  // signature check on a Mac (docs/code-signing.md).
+  if (process.env.MAC_ZIP_OUT) {
+    const mac = await get(`${RELAYS[0]}/q/${token}/mac`);
+    check("macOS link downloads the renamed zip", mac.status === 200 && mac.body.subarray(0, 2).toString() === "PK", `${mac.status} ${mac.body.length} bytes`);
+    writeFileSync(process.env.MAC_ZIP_OUT, mac.body);
+  }
 
   // Run the branded exe
   const dir = mkdtempSync(join(tmpdir(), "tqs-e2e-"));
   const branded = join(dir, "ACME Support-Support.exe");
   writeFileSync(branded, dl.body);
+  const sigOf = (f) => execFileSync("powershell", ["-NoProfile", "-Command", `(Get-AuthenticodeSignature -LiteralPath '${f}').Status`]).toString().trim();
+  const plainSig = sigOf(QS);
+  check("custom exe keeps the Authenticode signature", plainSig === "NotSigned" || sigOf(branded) === plainSig, `plain ${plainSig}, custom ${sigOf(branded)}`);
   const qs = await cdpApp(branded, [], {}, 9447);
   try {
     await qs.page.waitForSelector('[data-testid="qs-title"]', { timeout: 30000 });
@@ -152,7 +166,8 @@ try {
   // List, new link, revoke
   const list = await invoke("custom_list");
   const entry = list.find((c) => c.id === created.id);
-  check("custom list shows 1 download", entry && entry.downloads === 1, JSON.stringify(entry ? { downloads: entry.downloads, expires: entry.expires } : null));
+  const want = process.env.MAC_ZIP_OUT ? 2 : 1; // the macOS download counts too
+  check(`custom list shows ${want} download(s)`, entry && entry.downloads === want, JSON.stringify(entry ? { downloads: entry.downloads, expires: entry.expires } : null));
   const renewed = await invoke("custom_save", { args: { id: created.id, name: "ACME Support", accent: "#c8102e", welcome: "Hello from ACME", logo_png: PNG, layer: {}, channel: "stable", days: 30, new_link: true } });
   const token2 = renewed.link.split("/q/")[1];
   check("new link: old link dead", (await get(`${RELAYS[0]}/q/${token}`)).status === 404);

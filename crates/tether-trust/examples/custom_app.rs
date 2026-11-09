@@ -4,7 +4,7 @@
 //! Creates `<keyfile>` (32-byte Ed25519 seed, keep it private) if missing and prints its public key
 //! (build TetherQS with `TETHER_ADMIN_PUB_KEY=<that>`). With `<exe> <out.exe>` it signs a test
 //! profile ("Example Support", accent #c8102e, 1x1 PNG logo, approve-mode locked to click) and
-//! writes `<out.exe>` = `<exe>` + trailer, like `GET /q/<token>` does. With `--profile <out.json>`
+//! writes `<out.exe>` = `<exe>` + trailer (inside the signature if signed), like `GET /q/<token>` does. With `--profile <out.json>`
 //! it writes the signed profile alone, as `GET /q/m/<mac id>` serves it (macOS test: put it in
 //! TetherQS's cache as `custom-<mac id>.json`, docs/macos.md).
 
@@ -48,8 +48,7 @@ fn main() {
         std::fs::write(out, &doc).expect("write profile");
         return eprintln!("wrote {out}");
     }
-    let mut bytes = std::fs::read(exe).expect("read exe");
-    bytes.extend(custom::trailer(&doc));
-    std::fs::write(out, bytes).expect("write out.exe");
+    let bytes = std::fs::read(exe).expect("read exe");
+    std::fs::write(out, custom::attach(&bytes, &doc)).expect("write out.exe");
     eprintln!("wrote {out}");
 }

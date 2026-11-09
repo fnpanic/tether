@@ -23,8 +23,8 @@ use tether_trust::{
 
 type Loaded = Result<(CustomProfile, Vec<u8>), String>;
 
-/// The verified profile and this exe's trailer bytes (re-appended by self-update), or why there is
-/// none ("" = plain exe).
+/// The verified profile and this exe's signed profile JSON (re-attached by self-update), or why
+/// there is none ("" = plain exe).
 static PROFILE: OnceLock<Loaded> = OnceLock::new();
 
 /// Read once at startup, before policy is resolved.
@@ -69,8 +69,8 @@ pub fn layer() -> Option<&'static Layer> {
     profile().map(|p| &p.layer)
 }
 
-/// Empty for a plain TetherQS.
-pub fn trailer() -> &'static [u8] {
+/// The signed profile JSON from this exe; empty for a plain TetherQS (and on macOS).
+pub fn doc() -> &'static [u8] {
     get().map_or(&[], |(_, t)| t.as_slice())
 }
 
@@ -92,7 +92,7 @@ pub fn logo_url() -> String {
 fn from_file(exe: &Path, keys: &[VerifyingKey]) -> Loaded {
     let tail = read_tail(exe, MAX_PROFILE_BYTES as u64 + 12).map_err(|e| e.to_string())?;
     let Some(doc) = custom::split(&tail).1 else { return Err(String::new()) };
-    Ok((custom::open(doc, keys)?, custom::trailer(doc)))
+    Ok((custom::open(doc, keys)?, doc.to_vec()))
 }
 
 /// macOS: the mac id in the `.app` folder name around `exe`, then the cached or fetched profile.
@@ -154,7 +154,7 @@ mod tests {
         std::fs::write(&exe, &bytes).unwrap();
         let (got, tr) = from_file(&exe, &[k.verifying_key()]).unwrap();
         assert_eq!(got, p);
-        assert_eq!(tr, custom::trailer(&doc));
+        assert_eq!(tr, doc);
         assert!(from_file(&exe, &[tether_trust::generate_key().verifying_key()]).is_err());
         let n = bytes.len();
         bytes[n - 40] ^= 1; // inside the signed JSON

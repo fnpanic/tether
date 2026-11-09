@@ -6,6 +6,15 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Added
+- Code signing (self-signed `Tether Code Signing`, docs/code-signing.md): `scripts/sign-windows.ps1`
+  signs the Windows release files before Tether Manage publishes them. **Custom TetherQS apps stay
+  signed**: the relay (`tether-api`) now places a custom app's profile at the end of the exe's
+  Authenticode certificate table (`tether_trust::custom::attach`) instead of after it, which left
+  the download NotSigned. The copy is prepared file to file (no 35 MB in memory under `MemoryMax=64M`).
+  TetherQS 0.5.30 self-update attaches its profile the same way, so a branded app stays signed
+  after updating. macOS custom apps already kept the signature (only the bundle folder is renamed).
+
 ### Fixed
 - macOS host: a remote drag (e.g. the screenshot-tool selection, Finder rubber-band) only registered
   a single point. `NSEvent.pressedMouseButtons` reflects physical, not injected, button state, so the

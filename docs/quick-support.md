@@ -205,12 +205,16 @@ Tether Manage can create a **custom app**: a name, logo (PNG, at most 96 KiB), a
 welcome text and customer settings, signed with the admin key (`tether_trust::custom::CustomProfile`)
 and stored on every relay together with a private, expiring download link
 `https://<relay>/q/<token>` (256-bit random token, at most 366 days; wire contract in
-[api.md](api.md#custom-apps-branded-tetherqs-downloads)). The relay streams the channel's current
+[api.md](api.md#custom-apps-branded-tetherqs-downloads)). The relay serves the channel's current
 `TetherQS-<v>.exe` with the signed profile appended (`<signed JSON><u32 LE length>TQSPROF1`) as
 `<Name>-Support.exe`, and to a Mac browser the TetherQS zip as `<Name>-Support.zip` holding
 `<Name>-Support [<mac id>].app` (`/q/<token>/mac` and `/q/<token>/windows` choose explicitly). Unknown, revoked and expired links all answer `404`; 30 requests per minute
-per IP; the admin sees download counts. The exe itself stays the same signed build: no per-customer
-compilation.
+per IP; the admin sees download counts. The exe itself stays the same build: no per-customer compilation. If
+the release exe is Authenticode-signed (`scripts/sign-windows.ps1`, see
+[code-signing.md](code-signing.md#custom-tetherqs-apps)), the trailer goes at the end of its certificate
+table (`tether_trust::custom::attach`: zero padding, then the trailer, and both table sizes in the
+header grow), so the custom exe keeps the valid `Tether Code Signing` signature. Appended outside
+the table it would show as NotSigned.
 
 In TetherQS (Windows):
 - At start it reads the tail of its own exe, verifies the profile against the compiled-in
@@ -222,7 +226,9 @@ In TetherQS (Windows):
 - The settings layer is applied with `policy::resolve_with`: defaults < policy profile < **custom
   app** < group < machine. Only customer-profile features are allowed in it.
 - Self-update downloads and verifies the plain exe as usual, then writes it with this instance's
-  trailer appended unchanged, so the customer keeps the branded app.
+  profile attached unchanged (`custom::attach`, inside the signature like the relay does), so the
+  customer keeps the branded, signed app (from TetherQS 0.5.30; 0.5.29 and earlier append it, so
+  their updated copy works but shows as unsigned).
 
 In TetherQS (macOS) the signed `.app` cannot carry a trailer, so:
 - At start it reads the mac id from its own bundle folder name (`… [<16 hex>].app`; also under App

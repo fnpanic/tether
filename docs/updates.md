@@ -219,16 +219,18 @@ token). Tests of the Worker script: `npm test` in `server/cloudflare/worker`.
    technician `npx tauri build --bundles nsis` → `Tether_<version>_x64-setup.exe`; TetherQS
    `npx tauri build` → `TetherQS.exe`. macOS: `bash scripts/build-macos.sh` on a Mac →
    `dist/macos/` ([macos.md](macos.md)).
-3. Test the build on one machine (install, connect, `tether --version`).
-4. Tether Manage → unlock → **Releases**. Quickest: **Publish the latest builds** (Standard
+3. Windows: sign both files with `scripts/sign-windows.ps1` ([code-signing.md](code-signing.md#signing-a-release-built-on-the-pc)),
+   then copy them to `dist/windows` and `dist/quick`. Custom TetherQS apps keep this signature.
+4. Test the build on one machine (install, connect, `tether --version`).
+5. Tether Manage → unlock → **Releases**. Quickest: **Publish the latest builds** (Standard
    rollout). One file at a time, or with Mandatory / Minimum version / Forced / a rollout preset /
    Security release: **Sign and publish a new release**. Upload order: files to every relay (and
    the CDN), then the signed `releases.json` to every relay, then each relay's `latest.json` (for
    clients up to 0.5.23, which update at their next check, once, without rollout).
-5. Watch **Releases › Rollouts** (percent, halt/resume) and **Devices** (versions), or the Grafana
+6. Watch **Releases › Rollouts** (percent, halt/resume) and **Devices** (versions), or the Grafana
    API dashboard's Releases row (generation, hints, index fetches, update states, downloads by
    version).
-6. Republish the **Download page** so its links point to the new files.
+7. Republish the **Download page** so its links point to the new files.
 
 Do not publish a version lower than the one already in a channel: clients only install newer
 versions.

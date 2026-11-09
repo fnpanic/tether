@@ -1533,46 +1533,49 @@ fn custom_file(data: &Path, c: &CustomMeta, token: &str, mac: bool, accel: bool)
     // Behind the Caddyfile's handle_response (it sets X-Tether-Accel): answer with the path of a
     // prepared copy and let Caddy send it, so a slow download does not hold a worker.
     let accel_resp = |rel: &str| empty(204).with_header(hdr("X-Accel-Redirect", rel)).with_header(hdr("Content-Type", ctype)).with_header(hdr("Content-Disposition", &disposition));
-    if mac {
-        // Always prepared on disk: the rename streams file to file, never through memory.
+    // Always prepared on disk, streamed file to file (tether-api runs with MemoryMax=64M): the zip
+    // with its bundle renamed, or the exe with the trailer (custom::attach_plan; inside the
+    // Authenticode table if the exe is signed, which changes two 4-byte size fields).
+    let rel = if mac {
         let bundle = custom::mac_bundle_name(&base, &custom::mac_id(token));
-        let rel = qcache(data, id, &key, &file, &meta, None, |out| maczip::rename_app(&mut f, out, &bundle).map(drop)).map_err(|e| {
-            eprintln!("custom app {id}: could not prepare the macOS zip from {file}: {e}");
-            not_found()
-        })?;
-        if accel {
-            return Ok(accel_resp(&rel));
-        }
-        let f = File::open(data.join(rel.trim_start_matches('/'))).map_err(internal)?;
-        let len = f.metadata().map_err(internal)?.len();
-        return Ok(download(f, len, ctype, &disposition));
-    }
-    let len = meta.len();
-    let trailer = custom::trailer(&doc);
-    let size = len + trailer.len() as u64;
-    if accel {
-        let rel = qcache(data, id, &key, &file, &meta, Some(size), |out| {
+        qcache(data, id, &key, &file, &meta, |out| maczip::rename_app(&mut f, out, &bundle).map(drop))
+    } else {
+        qcache(data, id, &key, &file, &meta, |out| {
+            let (patches, tail) = custom::attach_plan(&mut f, &doc)?;
+            f.rewind()?;
             io::copy(&mut f, out)?;
-            out.write_all(&trailer)
+            for (at, b) in patches {
+                out.seek(io::SeekFrom::Start(at))?;
+                out.write_all(&b)?;
+            }
+            out.seek(io::SeekFrom::End(0))?;
+            out.write_all(&tail)
         })
-        .map_err(internal)?;
+    }
+    .map_err(|e| {
+        eprintln!("custom app {id}: could not prepare the download from {file}: {e}");
+        not_found()
+    })?;
+    if accel {
         return Ok(accel_resp(&rel));
     }
-    Ok(download(f.take(len).chain(io::Cursor::new(trailer)), size, ctype, &disposition))
+    let f = File::open(data.join(rel.trim_start_matches('/'))).map_err(internal)?;
+    let len = f.metadata().map_err(internal)?.len();
+    Ok(download(f, len, ctype, &disposition))
 }
 
 /// `qcache/<id>--<key>--<release file>`: the release with this app's trailer (exe) or renamed
 /// bundle (zip), as Caddy serves it for `/q/` (path relative to the data dir). Rebuilt when the
-/// release is newer or the copy is not `len` long; other copies of the app's platform are
+/// release is newer; other copies of the app's platform are
 /// removed, and every profile or token change drops them all. Concurrent first downloads each
 /// write their own temp file and rename it into place. The directory is not under `download/`,
 /// so it is reachable only through the X-Accel-Redirect of a valid token.
-fn qcache(data: &Path, id: &str, key: &str, file: &str, meta: &fs::Metadata, len: Option<u64>, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<String> {
+fn qcache(data: &Path, id: &str, key: &str, file: &str, meta: &fs::Metadata, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<String> {
     let dir = data.join("qcache");
     mkdirs(&dir, 0o750)?;
     let name = format!("{id}--{key}--{file}");
     let dest = dir.join(&name);
-    let fresh = fs::metadata(&dest).is_ok_and(|m| len.map_or(true, |l| m.len() == l) && m.modified().ok() >= meta.modified().ok());
+    let fresh = fs::metadata(&dest).is_ok_and(|m| m.modified().ok() >= meta.modified().ok());
     if !fresh {
         // shortcut: a copy that finishes after its app was deleted stays on disk (unreachable: no
         // token names it) until an app with that id prepares one; sweep qcache/ in maintain() if

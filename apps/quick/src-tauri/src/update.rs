@@ -283,13 +283,16 @@ fn unpack_app(dest: &Path, zip: &[u8]) -> io::Result<()> {
     r
 }
 
-/// The verified plain exe plus this instance's custom-app trailer (unchanged), so a branded
-/// TetherQS stays branded after updating.
-fn write_exe(p: &Path, plain: &[u8], trailer: &[u8]) -> io::Result<()> {
+/// The verified plain exe with this instance's signed custom-app profile attached unchanged (inside
+/// the Authenticode table, as the relay does it), so a branded TetherQS stays branded and signed.
+fn write_exe(p: &Path, plain: &[u8], doc: &[u8]) -> io::Result<()> {
     use io::Write;
     let mut f = std::fs::File::create(p)?;
-    f.write_all(plain)?;
-    f.write_all(trailer)?;
+    if doc.is_empty() {
+        f.write_all(plain)?;
+    } else {
+        f.write_all(&tether_trust::custom::attach(plain, doc))?;
+    }
     f.sync_all()
 }
 
@@ -602,7 +605,7 @@ pub fn install() -> Result<(), String> {
         let staged = if cfg!(target_os = "macos") {
             stage(&u, &bytes, &fallback_dir(), unpack_app)
         } else {
-            stage(&u, &bytes, &fallback_dir(), |p, b| write_exe(p, b, crate::custom::trailer()))
+            stage(&u, &bytes, &fallback_dir(), |p, b| write_exe(p, b, crate::custom::doc()))
         };
         let target = exe_in(&staged.map_err(replace)?, &exe);
         if let Some(p) = staged_path(&c) {
@@ -855,11 +858,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("ACME-Support.exe");
-        let trailer = tether_trust::custom::trailer(br#"{"payload":"x","sig":"y","key":"z"}"#);
-        let mut v1 = b"MZ v1".to_vec();
-        v1.extend(&trailer);
+        let doc = br#"{"payload":"x","sig":"y","key":"z"}"#;
+        let v1 = tether_trust::custom::attach(b"MZ v1", doc);
         std::fs::write(&exe, &v1).unwrap();
-        stage(&exe, b"MZ v2", &dir.join("fb"), |p, b| write_exe(p, b, &trailer)).unwrap();
+        stage(&exe, b"MZ v2", &dir.join("fb"), |p, b| write_exe(p, b, doc)).unwrap();
         let got = std::fs::read(&exe).unwrap();
         let (plain, doc) = tether_trust::custom::split(&got);
         assert_eq!(plain, b"MZ v2");

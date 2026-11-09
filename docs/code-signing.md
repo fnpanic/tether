@@ -32,6 +32,63 @@ gh secret set MACOS_SIGNING_PASSWORD    < secret/macos-password.txt
 
 Then publish `certs/*` to each relay under `/data/download/` so customers can fetch the installers.
 
+## Signing a release built on the PC
+
+Windows release builds are made on the PC (docs/updates.md, "Publishing a release"). Sign them
+**before** Tether Manage publishes, because Manage hashes and minisigns the files as they are:
+
+```powershell
+powershell -File scripts/sign-windows.ps1 dist\quick\TetherQS-<v>.exe dist\windows\Tether_<v>_x64-setup.exe
+```
+
+It uses `secret/tether-codesign-windows.pfx` and `secret/windows-password.txt` (SHA-256, DigiCert
+timestamp). Status `UnknownError` only means this PC does not trust the self-signed root yet.
+
+macOS: the build runner (`tools/macbuild/jobs/tether/build.sh`) signs both apps with the
+`Tether Code Signing` certificate from `C:\vms\macsign\cs.p12` (SHA-256 `17:D7:96:5C:…:53:98`,
+valid until 2046), the one all installed Macs know. `secret/tether-codesign-macos.p12` is a
+**different** certificate with the same name (`8A:AF:08:25:…:41:71`). Switching to it changes the
+designated requirement: every Mac would lose Screen Recording/Accessibility at the next update, and
+`build.sh` refuses the build (requirement new ≠ old). Keep the runner's certificate.
+
+## Custom TetherQS apps
+
+A custom app ([quick-support.md](quick-support.md#custom-apps-branded-downloads)) is the signed
+release file plus an admin-signed profile, added by the relay at download time. The code signature
+must survive that:
+
+- **Windows.** Bytes appended after an Authenticode signature break it: Windows reports the file as
+  `NotSigned`. `tether-api` therefore puts the profile **inside** the certificate table
+  (`tether_trust::custom::attach_plan`): zero padding to 8 bytes, then the usual trailer
+  (`<JSON><u32 len>TQSPROF1`, still the last bytes of the file). It also raises the table size in
+  the PE header's security directory and in the `WIN_CERTIFICATE` entry. The Authenticode hash
+  leaves the table out, so the signature stays `Valid`. TetherQS reads the trailer from the file's
+  end as before. Its self-update (0.5.30+) attaches the profile the same way. An unsigned exe
+  gets the trailer appended, as before.
+  Limit: Windows' opt-in `EnableCertPaddingCheck` (MS13-098 hardening, off by default) rejects
+  data after the PKCS#7 blob, so on such a PC the custom exe counts as unsigned (it still runs).
+- **macOS.** The relay only renames the bundle folder inside the zip
+  (`<Name>-Support [<mac id>].app`). The folder name is not sealed, so `codesign --verify --deep
+  --strict` passes and the designated requirement is the plain TetherQS one.
+
+Checked on 2026-11-09:
+- PC: `dist/quick/TetherQS-0.5.29.exe`, signed with the key, then the profile attached:
+  `Get-AuthenticodeSignature` reports `Valid` (signer `CN=Tether Code Signing`), and
+  `signtool verify /pa` succeeds. The same file with the profile appended the old way reports `NotSigned`.
+- Windows end to end (`apps/desktop/e2e/manage-e2e.mjs`, 22/22): TetherQS built with the test keys
+  and signed with `scripts/sign-windows.ps1`, published by Tether Manage to two local relays running
+  the new `tether-api`. A custom app was created there and downloaded through `/q/<token>`; the
+  download is `Valid` like the plain exe and runs as the branded app (name, logo, welcome text,
+  custom setting). Then new link and revoke.
+  Run: `WEBVIEW2_USER_DATA_FOLDER=C:\vms\signtest\wv2 MANAGE_EXE=… QS_EXE=<signed exe>
+  MAC_ZIP_OUT=<zip> node e2e/manage-e2e.mjs`.
+- macOS (build Mac, `tools/macbuild` job): the `/q/<token>/mac` zip from the same run,
+  `ACME Support-Support [962374fbb9a64586].app`: `codesign --verify --deep --strict` "valid on
+  disk, satisfies its Designated Requirement", the same requirement and signer as the plain
+  `TetherQS-0.5.29-universal.zip` (`identifier "net.tether.quick" and certificate root =
+  H"bcf53642…"`), and TetherQS recognises its mac id. `spctl` rejects both (self-signed, not
+  notarized: the curl install or "Open Anyway" as above).
+
 ## Chosen approach: self-signed certificate + easy manual trust install
 
 Generate one free self-signed certificate per platform, sign the builds with it, and let each user (or

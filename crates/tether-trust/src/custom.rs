@@ -3,6 +3,8 @@
 //!
 //! Wire format of the appended trailer (end of the exe file):
 //!   `<signed profile JSON (envelope::Signed of CustomProfile)>` `<u32 LE length of it>` `MAGIC`
+//! In an Authenticode-signed exe the trailer sits at the end of the certificate table, so the
+//! code signature stays valid ([`attach`]).
 //! TetherQS reads its own file, verifies the signature against the compiled-in admin keys and
 //! applies the profile; a missing, damaged or untrusted trailer means "plain TetherQS".
 //! See docs/api.md ("Custom apps").
@@ -93,6 +95,67 @@ pub fn trailer(signed_doc_json: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A plain TetherQS.exe with the trailer for `signed_doc_json`. If the exe is Authenticode-signed,
+/// the trailer goes inside its certificate table (zero padding first, then the trailer, still the
+/// last bytes of the file), and the table size in the PE header and in the certificate entry grow
+/// to match. The signature hash leaves the table out, so the signature stays valid. Unsigned
+/// exe: the trailer is simply appended.
+/// shortcut: Windows' opt-in `EnableCertPaddingCheck` rejects any bytes after the PKCS#7 blob;
+/// on such machines the custom exe counts as unsigned. If that becomes common, carry the profile
+/// in an unauthenticated attribute of the signature instead.
+pub fn attach(exe: &[u8], signed_doc_json: &[u8]) -> Vec<u8> {
+    let (patches, tail) = attach_plan(&mut std::io::Cursor::new(exe), signed_doc_json).expect("in-memory reads do not fail");
+    let mut out = [exe, &tail].concat();
+    for (at, b) in patches {
+        out[at as usize..at as usize + 4].copy_from_slice(&b);
+    }
+    out
+}
+
+/// [`attach`] for a file that should not be loaded into memory (the relay): the 4-byte fields to
+/// overwrite (file offset, new bytes) and the bytes to append after the unchanged exe.
+pub fn attach_plan<R: std::io::Read + std::io::Seek>(exe: &mut R, signed_doc_json: &[u8]) -> std::io::Result<(Vec<(u64, [u8; 4])>, Vec<u8>)> {
+    let tr = trailer(signed_doc_json);
+    let Some((dir, start, size)) = cert_table(exe)? else { return Ok((Vec::new(), tr)) };
+    let pad = (8 - (size as usize + tr.len()) % 8) % 8;
+    let new = ((size as usize + pad + tr.len()) as u32).to_le_bytes();
+    let mut tail = vec![0u8; pad];
+    tail.extend_from_slice(&tr);
+    // IMAGE_DIRECTORY_ENTRY_SECURITY.Size and WIN_CERTIFICATE.dwLength
+    Ok((vec![(dir + 4, new), (start, new)], tail))
+}
+
+/// (offset of the security directory entry, table start, table size) of a PE whose certificate
+/// table holds a single entry and ends the file; `None` for anything else (unsigned, not a PE).
+fn cert_table<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Result<Option<(u64, u64, u64)>> {
+    use std::io::{Read, SeekFrom};
+    let len = f.seek(SeekFrom::End(0))?;
+    let mut head = Vec::new();
+    f.seek(SeekFrom::Start(0))?;
+    f.by_ref().take(4096).read_to_end(&mut head)?;
+    let found = (|| {
+        let u16_at = |o: usize| Some(u16::from_le_bytes(head.get(o..o + 2)?.try_into().ok()?) as usize);
+        let u32_at = |o: usize| Some(u32::from_le_bytes(head.get(o..o + 4)?.try_into().ok()?) as u64);
+        if head.get(..2)? != b"MZ" {
+            return None;
+        }
+        let pe = u32_at(0x3c)? as usize;
+        if head.get(pe..pe + 4)? != b"PE\0\0" {
+            return None;
+        }
+        let opt = pe + 24;
+        let dir = opt + match u16_at(opt)? { 0x10b => 96, 0x20b => 112, _ => return None } + 4 * 8;
+        let (start, size) = (u32_at(dir)?, u32_at(dir + 4)?);
+        (start > 0 && start % 8 == 0 && size >= 8 && start + size == len).then_some((dir as u64, start, size))
+    })();
+    let Some((dir, start, size)) = found else { return Ok(None) };
+    let mut entry = [0u8; 4];
+    f.seek(SeekFrom::Start(start))?;
+    f.read_exact(&mut entry)?;
+    let entry = u32::from_le_bytes(entry) as u64;
+    Ok((entry >= 8 && (entry + 7) / 8 * 8 == size).then_some((dir, start, size)))
+}
+
 /// Split a file into (plain exe bytes, signed profile JSON) if it carries a trailer.
 pub fn split(file: &[u8]) -> (&[u8], Option<&[u8]>) {
     let n = file.len();
@@ -181,6 +244,49 @@ mod tests {
         // Untrusted signer and plain files.
         assert!(open(prof.unwrap(), &[crate::generate_key().verifying_key()]).is_err());
         assert_eq!(split(b"MZ plain").1, None);
+    }
+
+    /// Minimal PE32+ with a security directory: table at 0x200, one entry of `cert` bytes.
+    fn signed_pe(cert: usize) -> Vec<u8> {
+        let mut pe = vec![0u8; 0x200];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c] = 0x80;
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        pe[0x98..0x9a].copy_from_slice(&0x20bu16.to_le_bytes());
+        let dir = 0x98 + 112 + 32;
+        let size = (cert + 7) / 8 * 8;
+        pe[dir..dir + 4].copy_from_slice(&0x200u32.to_le_bytes());
+        pe[dir + 4..dir + 8].copy_from_slice(&(size as u32).to_le_bytes());
+        pe.extend((cert as u32).to_le_bytes());
+        pe.extend([0x00, 0x02, 0x02, 0x00]); // revision 2, WIN_CERT_TYPE_PKCS_SIGNED_DATA
+        pe.resize(0x200 + size, 0x30);
+        pe
+    }
+
+    #[test]
+    fn attach_inside_signed_cert_table() {
+        let doc = br#"{"payload":"x","sig":"y","key":"z"}"#; // 35 bytes, so padding is needed
+        for cert in [1003, 1008] {
+            let exe = signed_pe(cert);
+            let out = attach(&exe, doc);
+            let (dir, start, size) = cert_table(&mut std::io::Cursor::new(&out)).unwrap().expect("still one entry that ends the file");
+            let (dir, start, size) = (dir as usize, start as usize, size as usize);
+            assert_eq!((dir, start), (0x98 + 112 + 32, 0x200));
+            assert_eq!(size % 8, 0);
+            assert_eq!(out.len(), start + size);
+            assert_eq!(u32::from_le_bytes(out[start..start + 4].try_into().unwrap()) as usize, size);
+            // Signed bytes unchanged: everything outside the two size fields and the table tail.
+            assert_eq!(&out[..dir + 4], &exe[..dir + 4]);
+            assert_eq!(&out[dir + 8..start], &exe[dir + 8..start]);
+            assert_eq!(&out[start + 4..exe.len()], &exe[start + 4..]);
+            assert_eq!(split(&out).1, Some(&doc[..]));
+        }
+        // Unsigned PE and non-PE: plain append.
+        let mut plain = signed_pe(16);
+        plain.truncate(0x200);
+        plain[0x98 + 144..0x98 + 152].fill(0);
+        assert_eq!(attach(&plain, doc), [&plain[..], &trailer(doc)].concat());
+        assert_eq!(attach(b"MZ fake", doc), [&b"MZ fake"[..], &trailer(doc)].concat());
     }
 
     #[test]
