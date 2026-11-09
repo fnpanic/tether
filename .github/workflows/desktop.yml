@@ -60,7 +60,7 @@ jobs:
   # gh workflow run desktop.yml --ref <ref>
   macos:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-14
+    runs-on: macos-15 # macos-14: "configuration not supported" (2026-11-09)
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
