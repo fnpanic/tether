@@ -1,0 +1,33 @@
+# Release checks: malware scanners
+
+Every release file is checked before it goes into `dist/` or is published (Windows setup and
+TetherQS exe, Tether Manage exe, Mac `.dmg`, `.app.tar.gz` and TetherQS zip):
+
+```sh
+bash scripts/release-checks.sh dist/windows/Tether_<v>_x64-setup.exe dist/quick/TetherQS-<v>.exe \
+  dist/macos/Tether_<v>_universal.dmg dist/macos/Tether_<v>_universal.app.tar.gz \
+  dist/macos/TetherQS-<v>-universal.zip "dist/manage/Tether Manage <v>.exe"
+```
+
+1. **Microsoft Defender** (`MpCmdRun -Scan -ScanType 3`, Windows only; skipped elsewhere).
+2. **VirusTotal** (`scripts/vtscan.py`): looks the SHA-256 up, uploads unknown files (over 32 MB
+   through an upload URL) and waits for the analysis, about 70 engines. The full JSON report goes
+   to `tools/release/virustotal/<file>/<sha256 prefix>.json` and one line per check to
+   `tools/release/virustotal/summary.md`; commit both with the release.
+
+Exit code: 0 all clean, 1 something flagged (engine and detection name printed), 2 error. A
+flagged file is not published until the detection is understood and, for a false positive,
+reported to the vendor (Microsoft: <https://www.microsoft.com/wdsi/filesubmission>, "Software
+developer", "Incorrectly detected as malware").
+
+API key: env `VT_API_KEY` or `C:\vms\virustotal\api-key.txt` (a free VirusTotal account gives one;
+4 requests a minute, which the script waits out). Never commit it.
+
+## Why
+
+2026-11-09: a user behind Zscaler with Defender got "Konnte nicht heruntergeladen werden – Keine
+Berechtigungen" for `Tether_0.5.30_x64-setup.exe`. Defender had flagged an earlier setup (0.5.14,
+2026-11-06) as `Trojan:Win32/Bearfoos.A!ml`: a cloud machine-learning verdict, typical for unsigned
+remote-access tools, which company PCs with a higher cloud block level enforce at download time
+(the browser then reports missing permissions). The checks show such a verdict before users see it.
+Code signing with a trusted certificate is the lasting remedy against these ML verdicts.
