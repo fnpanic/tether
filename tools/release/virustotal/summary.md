@@ -10,3 +10,6 @@
 | 2026-11-09 10:51 | TetherQS-0.5.28-universal.zip | `8b6321b6d48c43e4` | CLEAN | 0 malicious, 0 suspicious, 66 undetected | - |
 | 2026-11-09 11:27 | Tether_0.5.31_x64-setup.exe | `6a9b8be88e544af6` | FLAGGED | 1 malicious, 0 suspicious, 69 undetected | Sophos: Generic ML PUA (PUA) |
 | 2026-11-09 11:28 | TetherQS-0.5.29.exe | `e49e7298eb002b52` | FLAGGED | 1 malicious, 0 suspicious, 70 undetected | Trapmine: malicious.moderate.ml.score |
+| 2026-11-09 12:10 | Tether_0.5.31_universal.dmg | `20346f8a565b489e` | FLAGGED | 1 malicious, 0 suspicious, 60 undetected | Microsoft: Trojan:Script/Wacatac.B!ml |
+| 2026-11-09 12:14 | Tether_0.5.31_universal.app.tar.gz | `dabdc459c90700fc` | CLEAN | 0 malicious, 0 suspicious, 60 undetected | - |
+| 2026-11-09 12:16 | TetherQS-0.5.29-universal.zip | `705ef693f7c775c6` | CLEAN | 0 malicious, 0 suspicious, 67 undetected | - |
