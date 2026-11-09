@@ -9,7 +9,7 @@ use tauri::{
 };
 use tauri_plugin_deep_link::DeepLinkExt;
 
-use crate::{cli, commands, policy, sink, update};
+use crate::{cli, commands, policy, security, sink, update};
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
@@ -20,6 +20,26 @@ static HOST_SESSION: AtomicIsize = AtomicIsize::new(0);
 /// Windows: the main window was hidden for the host session (minimized and off the taskbar).
 #[cfg(windows)]
 static MAIN_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A message the main window shows once as a toast (`notify`, `take_notice`).
+static NOTICE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Main process: show the main window with `msg` as a toast.
+fn notify(app: &AppHandle, msg: &str) {
+    hbb_common::log::info!("notice: {msg}");
+    set_notice(msg);
+    let _ = main_window(app);
+    emit("notice", ());
+}
+
+fn set_notice(msg: &str) {
+    *NOTICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.to_owned());
+}
+
+/// The main window's page takes the message on load and on each `notice` event.
+pub fn take_notice() -> Option<String> {
+    NOTICE.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
 
 /// Broadcast an event to every window (no-op before the UI is up or in headless roles).
 pub fn emit<S: Serialize + Clone>(event: &str, payload: S) {
@@ -64,6 +84,15 @@ pub fn run(args: Vec<String>) {
         if forward_to_running(&ctx.config().identifier, &cli::encode_forward(c, password.as_deref())) {
             return;
         }
+    }
+    // Started by a `--connect` to this device's own ID (cli.rs): the running Tether says why, else this one.
+    if matches!(mode, Mode::Main) && std::env::var_os(cli::OWN_ID_ENV).is_some() {
+        std::env::remove_var(cli::OWN_ID_ENV);
+        #[cfg(any(windows, target_os = "macos"))]
+        if send_to_running(&ctx.config().identifier, OWN_ID_ARG) {
+            return;
+        }
+        set_notice(security::SELF_REFUSED);
     }
     // Started by the main window's process: the connection window gets no Dock icon of its own,
     // only while the main Dock icon can bring it back (docs/macos.md).
@@ -110,11 +139,16 @@ pub fn run(args: Vec<String>) {
                     let handle = app.handle().clone();
                     app.deep_link().on_open_url(move |ev| {
                         for url in ev.urls() {
-                            match cli::parse_uri(url.as_str()).and_then(|c| policy::check_outgoing().map(|_| c)) {
+                            let checked = cli::parse_uri(url.as_str())
+                                .and_then(|c| security::check_not_self(&c.peer).and_then(|_| policy::check_outgoing()).map(|_| c));
+                            match checked {
                                 Ok(c) => {
                                     let _ = open_session(&handle, &c.peer, &c.conn);
                                 }
-                                Err(e) => hbb_common::log::warn!("link refused: {e}"),
+                                Err(e) => {
+                                    hbb_common::log::warn!("link refused: {e}");
+                                    notify(&handle, &e);
+                                }
                             }
                         }
                     });
@@ -212,6 +246,7 @@ fn second_instance(app: &AppHandle, argv: &[String]) {
     match argv.get(1).map(String::as_str) {
         Some(MINIMIZE_MAIN_ARG) => return host_session_started(app, argv.get(2)),
         Some(SESSION_ENDED_ARG) => return host_session_ended(app),
+        Some(OWN_ID_ARG) => return notify(app, security::SELF_REFUSED),
         Some(cli::FORWARD_ARG) => {}
         _ => {
             #[cfg(windows)]
@@ -249,6 +284,8 @@ fn forward_to_running(identifier: &str, payload: &str) -> bool {
 /// (argv[2]: the connection window's HWND on Windows) and when the last one has ended.
 const MINIMIZE_MAIN_ARG: &str = "--minimize-main";
 const SESSION_ENDED_ARG: &str = "--host-session-ended";
+/// argv[1] a Tether started for a refused `--connect` to the own ID sends to the running one.
+const OWN_ID_ARG: &str = "--own-id-refused";
 
 /// A host session started (`sink.rs`): the main window's process, if running, minimizes it.
 pub fn minimize_main(app: &AppHandle) {

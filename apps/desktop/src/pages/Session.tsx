@@ -24,7 +24,7 @@ import {
   X,
 } from "lucide-react";
 import { api, formatId, invoke, subscribe, videoChannel } from "../lib/ipc";
-import { probeCodecs, VideoPipeline, type VideoStats } from "../lib/video";
+import { CODEC, probeCodecs, VideoPipeline, watchdog, watchNative, WATCH0, type VideoStats } from "../lib/video";
 import { loadSharpen, saveSharpen, SHARPEN_MODES, type SharpenMode } from "../lib/sharpen";
 import { Button, IconButton, Logo, TitleBar, useToast } from "../components/ui";
 import { RecordingSaved } from "../components/RecordingSaved";
@@ -120,6 +120,8 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
   const stageRef = useRef<HTMLDivElement>(null);
   const pipeRef = useRef<VideoPipeline | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "connecting", text: "Connecting…" });
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
   const [info, setInfo] = useState<PeerInfo | null>(null);
   const [display, setDisplay] = useState<Display>({ x: 0, y: 0, width: 1920, height: 1080 });
   const [displayIdx, setDisplayIdx] = useState(0);
@@ -205,8 +207,12 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
   // ---------------------------------------------------------------- connection + events
   useEffect(() => {
     let alive = true;
+    let watch = WATCH0;
     const pipe = new VideoPipeline(canvasRef.current!, {
-      onFail: (codec, d) => invoke("session_webcodecs_failed", { key, codec, display: d }),
+      onFail: (codec, d) => {
+        watch = watchNative(watch, performance.now());
+        invoke("session_webcodecs_failed", { key, codec, display: d });
+      },
       onNeedKey: (d) => invoke("session_refresh", { key, display: d }).catch(() => {}),
       onSize: (w, h) => setFrameSize({ w, h }),
       onRgbaDrawn: () => invoke("session_frame_drawn", { key }).catch(() => {}),
@@ -214,6 +220,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
     }, glRef.current.sharpen, glRef.current.useGl);
     if (glRef.current.useGl && !pipe.webgl) setGlFailed(true);
     pipeRef.current = pipe;
+    invoke<string>("dev_video_stall").then((v) => (pipe.devStall = v ?? "")).catch(() => {});
     const sub = subscribe("session", (e) => {
       const p = e.payload;
       switch (e.name) {
@@ -337,7 +344,22 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       }
       setImageQuality((await invoke<string>("get_option", { key: "image-quality" }).catch(() => "")) || "balanced");
     })().catch((e) => alive && setPhase({ kind: "error", title: "Could not start the session", text: String(e), retry: false }));
-    const t = setInterval(() => pipeRef.current && setVstats({ ...pipeRef.current.sample() }), 1000);
+    const t = setInterval(() => {
+      setVstats({ ...pipe.sample() });
+      // Frames arrive but no picture is drawn (a silently failing decoder): heal (lib/video watchdog).
+      const [w, act] = watchdog(watch, pipe.fed, pipe.drawn, performance.now(), phaseRef.current.kind === "connected" && !viewOnly);
+      watch = w;
+      if (act === "native") {
+        console.warn(`[video] watchdog: ${pipe.fed} frames decoded, none drawn: native decoding`);
+        toast.show("The picture stopped updating: switched to software decoding.");
+        invoke("session_webcodecs_failed", { key, codec: pipe.lastCodec, display: pipe.display });
+      } else if (act === "codec") {
+        const codec = pipe.lastCodec === CODEC.vp9 ? "vp8" : "vp9";
+        console.warn(`[video] watchdog: still no picture: asking the host for ${codec}`);
+        toast.show(`Still no picture: asked the remote computer for ${codec.toUpperCase()} video.`);
+        invoke("session_codec", { key, codec }).catch(() => {});
+      }
+    }, 1000);
     return () => {
       alive = false;
       sub.off();

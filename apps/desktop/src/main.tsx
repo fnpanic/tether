@@ -7,6 +7,8 @@ import { Session } from "./pages/Session";
 import { ConnectionManager } from "./pages/ConnectionManager";
 import { inTauri, invoke } from "./lib/ipc";
 import { useMode } from "./lib/mode";
+import { useToast } from "./components/ui";
+import { errorText } from "./lib/policy";
 
 // Advanced mode is its own chunk: the simple home view never downloads or parses it.
 const Hosts = React.lazy(() => import("./pages/Hosts").then((m) => ({ default: m.Hosts })));
@@ -22,7 +24,28 @@ function Main() {
   useEffect(() => {
     invoke("main_window_fit", { advanced: mode === "advanced" }).catch(() => {});
   }, [mode]);
-  return mode === "advanced" ? lazyHosts : <Home />;
+  // Messages from outside the page (a refused `--connect` to this device's own ID): app.rs notify.
+  const toast = useToast();
+  useEffect(() => {
+    const take = () => invoke<string | null>("take_notice").then((m) => m && toast.show(errorText(m)), () => {});
+    if (!inTauri) return;
+    let off: (() => void) | undefined;
+    let dead = false;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) => listen("notice", take))
+      .then((u) => (dead ? u() : (off = u)))
+      .then(take);
+    return () => {
+      dead = true;
+      off?.();
+    };
+  }, []);
+  return (
+    <>
+      {mode === "advanced" ? lazyHosts : <Home />}
+      {toast.node}
+    </>
+  );
 }
 
 applyTheme();

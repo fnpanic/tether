@@ -691,3 +691,51 @@ the next picture did not grow (p95 +53…+70 before, +60…+68 after).
 - Tether through the TLS-inspecting proxy after the change (the relay path through the internet
   was measured; the proxy forwards the same bytes).
 - Slow links: `refine_ratio` scales with the QoS ratio, but no run on a throttled link was made.
+
+# Viewer watchdog: frames arrive, no picture (2026-11-09)
+
+A WebCodecs decoder can fail without an error: it takes every frame and outputs nothing. The
+viewer then showed a frozen (or, before the first picture, black) window for the whole session;
+only a decoder **error** switched to native decoding (`onFail`).
+
+## Design (`apps/desktop/src/lib/video.ts` `watchdog`, `Session.tsx`)
+
+Once a second the session compares two counters of its `VideoPipeline`: pictures given to the
+decoder (`fed`; RGBA pictures from native decoding count too) and pictures drawn (`drawn`). It
+measures frames, not the time since the last frame: a still screen sends nothing, so nothing is
+fed and nothing is expected.
+
+1. At least `STALL_FRAMES` (10) frames fed over at least `STALL_MS` (3 s) with none drawn: native
+   decoding for that codec (the existing `session_webcodecs_failed` path, which also asks for a
+   key frame), console line `[video] watchdog: …`, toast "The picture stopped updating: switched to
+   software decoding."
+2. No picture `NATIVE_MS` (5 s) after switching to native decoding (by step 1 or by a decoder
+   error; a key frame was requested, so one is due even on a still screen): the host is asked for
+   another codec, VP9 (VP8 if VP9 was the failing one), through the codec-preference option
+   (`session_codec`, logged as `codec preference … requested by the viewer`). Toast "Still no
+   picture: asked the remote computer for VP9 video." Nothing more is done after this.
+
+A drawn picture resets steps 1 and 2. Frames dropped while waiting for a key frame (first frame,
+reconnect, display switch) are never fed, so these waits do not count; while the session is not
+connected (connecting, reconnecting) or is view-only, the watchdog does nothing and restarts its
+clocks. The codec preference is saved for that peer like a manual choice.
+
+Debug builds only: `TETHER_DEV_VIDEO_STALL=webcodecs` makes the first WebCodecs codec draw nothing;
+`=native` lets only VP8/VP9 draw (native decoding draws nothing either). Release builds ignore it.
+
+## Result (`apps/desktop/e2e/video-watchdog-e2e.mjs`, debug build, production relays)
+
+Host: a Tether host profile on the development PC (the VM was off); viewer on an invisible desktop.
+
+| Run | What happened |
+|---|---|
+| `webcodecs` | H.265 fed, nothing drawn; after 239 frames (≈ 4 s of frames) native decoding; picture back 1 s later (host continued in H.264, drawn). Toast shown once. |
+| `native` | H.265 fed, nothing drawn → native decoding after 182 frames; still nothing for 5 s (H.264, broken too) → VP9 requested; first VP9 picture 1 s later, 55–59 fps after. |
+| `normal`, 125 s | 3809 frames received, 3808 drawn, H.265; no watchdog line, no toast. |
+
+## Not verified
+
+- A still screen in a real session: the host captured the development PC's own screen, which
+  never stopped changing (0 seconds without frames in 125 s). Covered by the unit tests in
+  `video.test.ts` (5 minutes without frames after a live picture: no action).
+- A real silently failing decoder (the failure was forced); macOS WebKit.

@@ -373,10 +373,28 @@ fn session_webcodecs_failed(key: String, codec: u8, display: i32) {
 
 #[tauri::command]
 fn session_codec(key: String, codec: String) -> R<()> {
+    hbb_common::log::info!("codec preference {codec} requested by the viewer");
     with_session(&key, |s| {
         s.set_option("codec-preference".to_owned(), codec);
         s.update_supported_decodings();
     })
+}
+
+/// A message the main window shows once as a toast (app::notify), e.g. a refused `--connect` to the own ID.
+#[tauri::command]
+fn take_notice() -> Option<String> {
+    app::take_notice()
+}
+
+/// Debug builds only: `TETHER_DEV_VIDEO_STALL` (`webcodecs` or `native`) makes the viewer draw
+/// nothing, like a silently failing decoder, to test its watchdog (lib/video.ts). Release: "".
+#[tauri::command]
+fn dev_video_stall() -> String {
+    if cfg!(debug_assertions) {
+        std::env::var("TETHER_DEV_VIDEO_STALL").unwrap_or_default()
+    } else {
+        String::new()
+    }
 }
 
 // ----------------------------------------------------------------------------- files
@@ -578,6 +596,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         session_webcodecs_failed,
         session_frame_drawn,
         session_codec,
+        dev_video_stall,
+        take_notice,
         fs_local_dir,
         fs_home_dir,
         fs_remote_dir,
