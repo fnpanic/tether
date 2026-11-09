@@ -175,6 +175,9 @@ pub fn take_connect() -> Option<(Connect, Option<String>)> {
     CONNECT.get()?.lock().unwrap().take()
 }
 
+/// Set for the Tether a `--connect` to this device's own ID starts to say why (`app.rs`).
+pub const OWN_ID_ENV: &str = "TETHER_OWN_ID_REFUSED";
+
 /// argv[1] of a session request a second process hands to the running instance (`app.rs`).
 pub const FORWARD_ARG: &str = "--forwarded-connect";
 
@@ -262,8 +265,21 @@ pub fn run(args: &[String]) -> Option<ExitCode> {
             }
         }),
         Cmd::Connect(c) => {
-            let checked = security::check_not_self(&c.peer)
-                .and_then(|_| policy::check_outgoing())
+            // A link or shortcut has no console: a Tether started for it shows the message in the main
+            // window, or hands it to the running one (app.rs). Its own start: this one has no server.
+            if let Err(e) = security::check_not_self(&c.peer) {
+                console();
+                eprintln!("{e}");
+                if let Ok(exe) = std::env::current_exe() {
+                    use std::process::{Command, Stdio};
+                    let child = Command::new(exe).env(OWN_ID_ENV, "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+                    if let Err(err) = child {
+                        hbb_common::log::warn!("own-ID notice: {err}");
+                    }
+                }
+                return Some(ExitCode::from(2));
+            }
+            let checked = policy::check_outgoing()
                 .and_then(|_| c.password.as_ref().map(read_password).transpose());
             return match checked {
                 Ok(pw) => {

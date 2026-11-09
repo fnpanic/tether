@@ -93,12 +93,14 @@ pub fn check_peer_id(id: &str) -> Result<(), String> {
     }
 }
 
+pub const SELF_REFUSED: &str = "That is this device's own ID: it cannot connect to itself.";
+
 /// A session to this device's own ID would show its screen inside itself and feed its input back.
 pub fn check_not_self(peer: &str) -> Result<(), String> {
     // The ID the window shows (status sync), else this profile's config (a `--connect` process).
     let own = Some(librustdesk::ui::api::get_connect_status().id).filter(|i| !i.is_empty()).unwrap_or_else(hbb_common::config::Config::get_id);
     if peer == own {
-        return Err("That is this device's own ID: it cannot connect to itself.".to_owned());
+        return Err(SELF_REFUSED.to_owned());
     }
     Ok(())
 }

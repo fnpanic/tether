@@ -6,6 +6,19 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Fixed
+- Tether: `tether --connect <this device's own ID>` (and a `tether://connect/` link to it) was
+  refused without any visible message. The main window now comes up with "That is this device's
+  own ID: it cannot connect to itself.": in the running Tether, or in a Tether started for it when
+  none runs (Windows, macOS); the command still prints it and exits 2 (docs/cli.md).
+
+### Added
+- Tether: video watchdog in the session window. When frames arrive but no picture is drawn for
+  about 3 s (a decoder failing silently), the session switches to native decoding; if that draws
+  nothing within 5 s, it asks the host for another codec (VP9, VP8 if VP9 failed). Each step is
+  logged and shown as a short message. A still screen (no frames), the first-frame wait,
+  reconnects and view-only sessions never trigger it (docs/performance.md).
+
 ## [TetherQS 0.5.28] — 2026-11-09
 TetherQS 0.5.28, Windows and macOS (published 2026-11-09; index serial 32 on both relays, files
 identical to dist/ by SHA-256 on both relays and the CDN, the plain .exe on the relays only as

@@ -124,6 +124,45 @@ export class KeyRecovery {
   }
 }
 
+/** Watchdog (Session): pictures go into the decoder but none come out for STALL_MS (at least
+ * STALL_FRAMES of them), or none come from native decoding NATIVE_MS after switching to it. */
+export const STALL_MS = 3000;
+export const STALL_FRAMES = 10;
+export const NATIVE_MS = 5000;
+
+/** stage 0: WebCodecs watched; 1: switched to native decoding, a picture is due (`since`);
+ * 2: another codec was requested, nothing more is done. */
+export interface Watch {
+  stage: 0 | 1 | 2;
+  fed: number;
+  drawn: number;
+  stalled: number;
+  since: number | null;
+}
+export const WATCH0: Watch = { stage: 0, fed: 0, drawn: 0, stalled: 0, since: null };
+
+/**
+ * One watchdog check (about once a second). `fed`/`drawn`: pictures given to the decoder / drawn
+ * since the session started. It compares frames, not the time since the last one: a still screen
+ * sends no frames and never triggers. Frames dropped while waiting for a key frame (first frame,
+ * reconnect, display switch) are not fed. `active`: connected, not reconnecting, not view-only.
+ */
+export function watchdog(w: Watch, fed: number, drawn: number, now: number, active: boolean): [Watch, "native" | "codec" | null] {
+  const s: Watch = { ...w, fed, drawn };
+  if (drawn > w.drawn) return [{ ...s, stage: w.stage === 2 ? 2 : 0, stalled: 0, since: null }, null];
+  if (!active) return [{ ...s, stalled: 0, since: w.stage === 1 ? now : null }, null];
+  if (w.stage === 1 && w.since !== null && now - w.since >= NATIVE_MS) return [{ ...s, stage: 2, since: null }, "codec"];
+  if (w.stage !== 0) return [s, null];
+  s.stalled += fed - w.fed;
+  if (s.stalled === 0) return [s, null];
+  s.since ??= now;
+  if (s.stalled >= STALL_FRAMES && now - s.since >= STALL_MS) return [{ ...s, stage: 1, stalled: 0, since: now }, "native"];
+  return [s, null];
+}
+
+/** The decoder failed some other way and native decoding took over: a picture is due from it. */
+export const watchNative = (w: Watch, now: number): Watch => (w.stage === 2 ? w : { ...w, stage: 1, stalled: 0, since: now });
+
 export interface VideoStats {
   fps: number;
   /** Encoded packets received per second (before decoding). */
@@ -191,6 +230,17 @@ export class VideoPipeline {
   private packets = 0;
   private decodedSinceConfigure = 0;
   display = 0;
+  /** Pictures given to the decoder (or received decoded) and pictures drawn, for the watchdog. */
+  fed = 0;
+  drawn = 0;
+  /** Debug builds (TETHER_DEV_VIDEO_STALL), like a silently failing decoder: "webcodecs": the first
+   * WebCodecs codec draws nothing; "native": no codec but VP8/VP9 draws, native decoding neither. */
+  devStall = "";
+  private devStallCodec = 0;
+  private devDrop() {
+    if (this.devStall === "native") return this.codec !== CODEC.vp8 && this.codec !== CODEC.vp9;
+    return this.devStall === "webcodecs" && (this.devStallCodec ||= this.codec) === this.codec;
+  }
 
   private canvas!: HTMLCanvasElement;
 
@@ -229,6 +279,11 @@ export class VideoPipeline {
       else this.ctx!.drawImage(snap, 0, 0);
     } else if (this.decodedSinceConfigure > 0) this.needKey("renderer changed");
     return !!this.gl;
+  }
+
+  /** The last codec WebCodecs decoded (0: none). */
+  get lastCodec() {
+    return this.codec;
   }
 
   /** Drawing with WebGL (sharpening) rather than the 2D canvas. */
@@ -334,6 +389,7 @@ export class VideoPipeline {
       return;
     }
     this.decodedSinceConfigure++;
+    this.fed++;
     const ts = p.pts * 1000;
     this.pending.set(ts, performance.now());
     try {
@@ -345,6 +401,7 @@ export class VideoPipeline {
   }
 
   private output(frame: VideoFrame) {
+    if (this.devStall && this.devDrop()) return frame.close();
     this.stats.coded = `${frame.codedWidth}×${frame.codedHeight}`;
     // Use the visible picture size, not displayWidth: some HEVC streams carry aspect metadata that
     // makes displayWidth half the real width, which would draw every frame at half resolution.
@@ -370,6 +427,8 @@ export class VideoPipeline {
   }
 
   private drawRgba(p: Packet) {
+    this.fed++;
+    if (this.devStall === "native") return this.cb.onRgbaDrawn?.();
     this.resize(p.width, p.height);
     const px = new Uint8ClampedArray(p.data.buffer as ArrayBuffer, p.data.byteOffset, p.width * p.height * 4);
     this.timed(() => {
@@ -390,6 +449,7 @@ export class VideoPipeline {
 
   private tick() {
     this.frames++;
+    this.drawn++;
     const now = performance.now();
     if (this.lastDraw) this.maxGap = Math.max(this.maxGap, now - this.lastDraw);
     this.lastDraw = now;

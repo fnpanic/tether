@@ -51,6 +51,12 @@ open, the result of the connection is shown there, not in the exit code. When a 
 the same `<id>` and connection type is already open in the running Tether, that window comes to
 the front instead of a second one (a password given with the second request is not used).
 
+`--connect` to this device's own ID is refused (exit code 2) with "That is this device's own ID:
+it cannot connect to itself." on stderr and, since a link or shortcut has no console, also in the
+main window as a short message: the running Tether brings its main window up and shows it, or, when
+none runs, Tether starts and shows it there (Windows and macOS; on Linux the main window comes up
+without the message when Tether already runs).
+
 ## Exit codes
 
 | Code | Meaning | Typical cause |
@@ -79,8 +85,8 @@ arguments. A link never carries a password, so a link in a ticket or e-mail cann
 access by itself; the technician still enters the password or the remote user accepts.
 
 On Windows, opening a link starts `tether.exe tether://connect/<id>` and opens a session window.
-On macOS the running app receives the link. A link that fails the policy check is refused and
-logged (`link refused: …`).
+On macOS the running app receives the link. A link that fails the policy check or names this
+device's own ID is refused, logged (`link refused: …`) and shown in the main window.
 
 ## Calling Tether from other applications
 
