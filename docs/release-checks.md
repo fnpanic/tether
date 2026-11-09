@@ -42,3 +42,5 @@ Code signing with a trusted certificate is the lasting remedy against these ML v
 | 2026-11-09 | Tether_0.5.30_x64-setup.exe (`4751cc11ce30edab`) | Microsoft `Trojan:Win32/Bearfoos.A!ml` (seen on 0.5.14) | submitted (WDSI, software developer) |
 | 2026-11-09 | Tether_0.5.30_universal.dmg (`0b75c85daad7d710`) | Microsoft `Trojan:Script/Wacatac.B!ml` (VirusTotal) | submitted (WDSI, software developer) |
 | – | TetherQS-0.5.28.exe (`c96fb051a1e4b788`) | Trapmine `malicious.moderate.ml.score` (VirusTotal, 1/71) | not reported (minor engine) |
+| – | Tether_0.5.31_x64-setup.exe (`6a9b8be88e544af6`) | Sophos `Generic ML PUA` (VirusTotal, 1/70) | not reported: Sophos offers non-customers only its Intelix portal (account), no false-positive form; published 2026-11-09 by decision |
+| – | TetherQS-0.5.29.exe (`e49e7298eb002b52`) | Trapmine `malicious.moderate.ml.score` (VirusTotal, 1/71) | not reported (minor engine); published 2026-11-09 by decision |
