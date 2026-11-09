@@ -6,6 +6,13 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Changed
+- CI: the `macos` job of `desktop.yml` is the production Mac release build: universal (Intel +
+  Apple silicon), production secrets, signed with `Tether Code Signing` (fails without the
+  certificate), started only by hand (`gh workflow run desktop.yml --ref <ref>`), on `macos-15`
+  (the `macos-14` label is refused). Not yet proven: GitHub refuses every hosted job of the repo
+  since 2026-11-04 (account billing / spending limit); see docs/macos.md.
+
 ## [TetherQS 0.5.28] — 2026-11-09
 TetherQS 0.5.28, Windows and macOS (published 2026-11-09; index serial 32 on both relays, files
 identical to dist/ by SHA-256 on both relays and the CDN, the plain .exe on the relays only as

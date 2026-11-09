@@ -58,7 +58,35 @@ In `dist/macos/` (the script prints the paths at the end):
 The bundles themselves are in `apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/`
 and `apps/quick/src-tauri/target/universal-apple-darwin/release/bundle/macos/`.
 
-CI (`.github/workflows/desktop.yml`, job `macos`) runs the same script and uploads `dist/macos/*`.
+CI (`.github/workflows/desktop.yml`, job `macos`) runs the same script and uploads `dist/macos/*`
+(see [Mac release on GitHub Actions](#mac-release-on-github-actions)).
+
+## Mac release on GitHub Actions
+
+The `macos` job of `.github/workflows/desktop.yml` builds the **universal** release (x86_64 +
+arm64) with the production secrets `TETHER_SERVER`, `TETHER_PUB_KEY`, `TETHER_ADMIN_PUB_KEY`,
+`TETHER_UPDATER_PUB_KEY` and signs both apps with the `Tether Code Signing` certificate
+(`MACOS_SIGNING_P12`, `MACOS_SIGNING_PASSWORD`; the job fails without it). It runs only when
+started by hand (not on pushes; release commits carry `[skip ci]` anyway):
+
+```bash
+gh workflow run desktop.yml --ref main          # or a branch / tag; also starts the Windows build job
+gh run watch <run id>                           # ~1 h: vcpkg builds the codecs for both architectures
+gh run download <run id> -n tether-macos-universal -D <folder>
+```
+
+The artifact `tether-macos-universal` holds `Tether_<v>_universal.app.tar.gz`,
+`Tether_<v>_universal.dmg` and `TetherQS-<v>-universal.zip`. They are unsigned for the updater:
+Tether Manage signs them when it publishes, so copy them to `dist/macos/` on the PC and publish
+as below. Before publishing check `lipo -archs` (x86_64 arm64) and that `codesign -d -r-` of the
+app equals the installed `/Applications/Tether.app`.
+
+**Status 2026-11-09: not yet proven.** Every GitHub-hosted job of this (private) repository is
+refused since 2026-11-04 18:13 with "recent account payments have failed or your spending limit
+needs to be increased" (Billing & plans of the `fnpanic` account; macOS minutes count 10×). Until
+that is fixed, Mac releases come from the build runner ([mac-build-runner.md](mac-build-runner.md),
+`tools/macbuild/jobs/tether/build.sh`), which builds **Apple silicon only** (`MAC_ARCH=arm64`) and
+copies the result to the `_universal` names: those builds do not run on Intel Macs.
 
 ## First start (Gatekeeper)
 
@@ -115,7 +143,7 @@ certificate (`Tether Code Signing`) when the repository secrets `MACOS_SIGNING_P
 instead of one build's hash, so the permissions survive updates (one last re-grant when moving from
 an ad-hoc build). Gatekeeper still needs **Open Anyway** once (no Apple notarization), as before.
 The smoke test prints each app's signature and fails when the certificate was expected but not
-used. Without the secrets CI signs ad-hoc as before. The certificate and its key live only in the
+used. Without the secrets the CI job fails (it builds releases only). The certificate and its key live only in the
 secrets and in the admin's own backup (not in the repository); renewing it means one more re-grant
 on every Mac. A Developer ID identity (`APPLE_SIGNING_IDENTITY` secret) takes precedence.
 
