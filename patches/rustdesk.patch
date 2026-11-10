@@ -74,6 +74,25 @@ index 5f5bf8f..1228f95 100644
  /// Maximum number of files allowed during a single file transfer request.
  ///
  /// Key: `file-transfer-max-files`.
+diff --git a/libs/clipboard/src/platform/unix/macos/paste_observer.rs b/libs/clipboard/src/platform/unix/macos/paste_observer.rs
+index 01e8b6c..6d1de19 100644
+--- a/libs/clipboard/src/platform/unix/macos/paste_observer.rs
++++ b/libs/clipboard/src/platform/unix/macos/paste_observer.rs
+@@ -149,10 +149,13 @@ impl PasteObserver {
+                                 Some(Self::new_fsevent(home_dir.clone(), tx_observer.clone()));
+                         }
+                     }
+-                    Ok(FseventControl::Stop) | Err(RecvTimeoutError::Timeout) => {
++                    Ok(FseventControl::Stop) => {
+                         let _ = fsevent.as_mut().map(|e| e.shutdown_observe());
+                         fsevent = None;
+                     }
++                    // Keep watching while the placeholder is on the pasteboard (it outlives 30 s
++                    // now, see pasteboard_context.rs); a paste after a quiet spell went unnoticed.
++                    Err(RecvTimeoutError::Timeout) => {}
+                     Ok(FseventControl::Exit) | Err(RecvTimeoutError::Disconnected) => {
+                         break;
+                     }
 diff --git a/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs b/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs
 index dbd9917..5ea528e 100644
 --- a/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs

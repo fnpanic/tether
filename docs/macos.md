@@ -182,6 +182,27 @@ node e2e/mac-click-e2e.mjs              # TextEdit: double-click selects a word,
 They click and drag on the Mac's screen: run them while nobody uses the Mac (a window that comes
 to the front ends a screenshot selection).
 
+## Files through the clipboard
+
+Files copied in Finder (⌘C) can be pasted in Explorer on the Windows side (Ctrl+V), and files copied in
+Explorer can be pasted in Finder (⌘V), with the Mac as host or as viewer. The macOS builds enable the
+core's `unix-file-copy-paste` feature for this (`[target.'cfg(target_os = "macos")'.dependencies]` in
+both apps' `Cargo.toml`; Windows uses its own clipboard code and needs no feature). Mac ↔ Mac and Linux
+are not covered here.
+
+How the Mac receives files (`vendor/rustdesk/libs/clipboard/src/platform/unix/macos`): the pasteboard gets
+an empty placeholder file `/tmp/.rustdesk_<uuid>`; when Finder pastes it somewhere in the home folder,
+an fsevent watcher notices the copy, removes it and fetches the real files from the other side into
+that folder. So a paste works only in the home folder (Desktop, Documents, Downloads, …), not on other
+volumes. The placeholder stays until the clipboard changes or the session ends, and the fsevent watch on the
+home folder stays on from the first received file until the clipboard context closes (the core stopped both after 30
+quiet seconds, so a later ⌘V found nothing or went unnoticed; patched).
+
+Same requirements as the clipboard itself (permission "clipboard", on by default) plus file transfer
+allowed on the host side. Test: `node e2e/mac-fileclip-e2e.mjs` (build Mac + Windows VM: Mac viewer ↔
+TetherQS in the VM, the technician app in the VM ↔ Mac host; the viewer must not run on a hidden desktop,
+where Explorer never asks for the file contents).
+
 ## Windows and the Dock
 
 Tether shows **one** icon in the Dock. Session windows (screen, file transfer, camera, terminal),
