@@ -32,6 +32,10 @@ tauri-plugin-single-instance = "2"
 [dev-dependencies]
 minisign = "0.10"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Finder file copy-paste with Windows peers (cliprdr): the core's macOS pasteboard code (libs/clipboard/src/platform/unix/macos).
+librustdesk = { package = "rustdesk", path = "../../../vendor/rustdesk", default-features = false, features = ["unix-file-copy-paste"] }
+
 [target.'cfg(windows)'.dependencies]
 # VRAM (D3D11) zero-copy encoding exists on Windows only (hwcodec's ffmpeg_vram is D3D11 code).
 librustdesk = { package = "rustdesk", path = "../../../vendor/rustdesk", default-features = false, features = ["vram"] }
