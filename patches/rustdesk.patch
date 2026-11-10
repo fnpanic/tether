@@ -76,10 +76,10 @@ index 5f5bf8f..1228f95 100644
  /// Key: `file-transfer-max-files`.
 diff --git a/libs/enigo/src/macos/hid_post.rs b/libs/enigo/src/macos/hid_post.rs
 new file mode 100644
-index 0000000..1f39c80
+index 0000000..46eec6e
 --- /dev/null
 +++ b/libs/enigo/src/macos/hid_post.rs
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,106 @@
 +//! Left-button presses and drags through IOKit's HID event path (`IOHIDPostEvent`).
 +//!
 +//! The Screenshot app's selection (Cmd+Shift+5) follows a drag only when its events enter at the
@@ -145,7 +145,9 @@ index 0000000..1f39c80
 +fn post(event_type: u32, x: f64, y: f64, data: EventData, flags: u32) -> bool {
 +    let Some(connect) = connection() else { return false };
 +    let clamp = |v: f64| v.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16;
++    let t0 = std::time::Instant::now(); // DIAG-HID (temporary)
 +    let r = unsafe { IOHIDPostEvent(connect, event_type, IOGPoint { x: clamp(x), y: clamp(y) }, &data, K_NX_EVENT_DATA_VERSION, flags, K_IOHID_SET_CURSOR_POSITION) };
++    log::info!("DIAG-HID {event_type} ({x:.0},{y:.0}) r={r:#x} {:?}", t0.elapsed()); // DIAG-HID (temporary)
 +    if r != 0 {
 +        log::warn!("IOHIDPostEvent {event_type} failed ({r:#x}), using CGEvent");
 +    }
@@ -185,7 +187,7 @@ index 0000000..1f39c80
 +    }
 +}
 diff --git a/libs/enigo/src/macos/macos_impl.rs b/libs/enigo/src/macos/macos_impl.rs
-index 0f1436a..41530c8 100644
+index 0f1436a..838749a 100644
 --- a/libs/enigo/src/macos/macos_impl.rs
 +++ b/libs/enigo/src/macos/macos_impl.rs
 @@ -112,6 +112,10 @@ pub struct Enigo {
@@ -258,7 +260,7 @@ index 0f1436a..41530c8 100644
      /// Internal implementation for mouse movement with optional delta values.
      ///
      /// The `delta` parameter is crucial for browser Pointer Lock API support.
-@@ -549,7 +582,9 @@ impl Enigo {
+@@ -549,7 +582,10 @@ impl Enigo {
      /// (MOUSE_EVENT_DELTA_X/Y) directly from CGEvent to calculate movementX/Y.
      /// Without setting these fields, the browser sees zero movement.
      fn mouse_move_to_impl(&mut self, x: i32, y: i32, delta: Option<(i32, i32)>) {
@@ -266,10 +268,11 @@ index 0f1436a..41530c8 100644
 +        // Our injected presses are not in `pressed_buttons()` (physical/global state), so OR in the
 +        // buttons we are holding; without this a remote drag emits MouseMoved and does not select.
 +        let pressed = Self::pressed_buttons() | self.held_buttons;
++        log::info!("DIAG-MOVE ({x},{y}) pressed={pressed} held={}", self.held_buttons); // DIAG-HID (temporary)
  
          // Determine event type and corresponding mouse button based on pressed buttons.
          // The CGMouseButton must match the event type for drag events.
-@@ -563,6 +598,9 @@ impl Enigo {
+@@ -563,6 +599,9 @@ impl Enigo {
              (CGEventType::MouseMoved, CGMouseButton::Left) // Button doesn't matter for MouseMoved
          };
  
