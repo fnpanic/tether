@@ -1,0 +1,6 @@
+# Installed as /etc/tether/caddy.d/paseo.caddy (paseo-tunnel/relay/install.sh). Loaded by Tether's
+# Caddyfile import inside its site block: Paseo relay WebSocket at wss://<relay host>:443/ws.
+# Tether uses /ws/id and /ws/relay; the exact path /ws does not overlap.
+handle /ws {
+	reverse_proxy 127.0.0.1:8411
+}

@@ -1,5 +1,8 @@
 # Paseo on a Zscaler Mac → Windows PC
 
+> Own Paseo relay on the Hetzner node (`tether-desk.duckdns.org:443`, path `/ws` via a Tether Caddy drop-in):
+> setup guide [`relay/setup.html`](relay/setup.html), deploy files in [`relay/`](relay/).
+
 **Problem:** Paseo on the Mac (managed: Zscaler Client Connector + Microsoft Defender) cannot
 connect to the Paseo daemon on the Windows PC. The PC shows up as *offline: "Cannot reach host.
 Check the connection; retrying automatically."*

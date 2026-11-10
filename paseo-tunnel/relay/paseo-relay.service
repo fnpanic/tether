@@ -1,0 +1,17 @@
+[Unit]
+Description=Paseo relay (community Go relay zenghongtu/paseo-relay, paseo-tunnel/relay)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/paseo-relay --addr 127.0.0.1:8411 --log-format json
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=256M
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Own Paseo relay – setup</title>
+<style>
+  body { font: 16px/1.55 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; color: #1b1b1b; }
+  h1 { font-size: 1.6rem; } h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: .2rem; }
+  pre { background: #f4f4f4; padding: .8rem 1rem; overflow-x: auto; border-radius: 6px; }
+  code { font: 14px ui-monospace, Consolas, monospace; }
+  .box { background: #eef6ee; border-left: 4px solid #3a8a3a; padding: .6rem 1rem; }
+  .warn { background: #fff6e5; border-left: 4px solid #d18a00; padding: .6rem 1rem; }
+  td, th { text-align: left; padding: .25rem .8rem .25rem 0; vertical-align: top; }
+</style>
+</head>
+<body>
+<h1>Own Paseo relay – setup</h1>
+
+<div class="box">
+  <b>Relay address:</b> <code>tether-desk.duckdns.org:443</code> (TLS)<br>
+  Works from the PC, the phone and the corporate MacBook (Zscaler), tested 2026-11-10.
+</div>
+
+<p>Paseo connects your phone and other computers to the Paseo daemon through a relay. By default that
+is <code>relay.paseo.sh</code>. Your own relay now runs on the Hetzner server. Traffic stays end-to-end
+encrypted, so the relay only sees IP addresses, timing and sizes.</p>
+
+<h2>1. Switch a computer (each PC or Mac that runs Paseo)</h2>
+<p>Run these commands in a terminal on that computer. They change only the relay part of
+<code>~/.paseo/config.json</code>, then restart the daemon.</p>
+
+<p><b>Windows</b> (PowerShell):</p>
+<pre><code>$p = "$env:LOCALAPPDATA\Programs\Paseo\resources\bin\paseo.cmd"
+&amp; $p daemon config set daemon.relay.endpoint       tether-desk.duckdns.org:443
+&amp; $p daemon config set daemon.relay.publicEndpoint tether-desk.duckdns.org:443
+&amp; $p daemon config set daemon.relay.useTls true
+&amp; $p daemon restart</code></pre>
+
+<p><b>Mac</b> (Terminal):</p>
+<pre><code>p=/Applications/Paseo.app/Contents/Resources/bin/paseo
+$p daemon config set daemon.relay.endpoint       tether-desk.duckdns.org:443
+$p daemon config set daemon.relay.publicEndpoint tether-desk.duckdns.org:443
+$p daemon config set daemon.relay.useTls true
+$p daemon restart</code></pre>
+
+<p>Check that it worked: <code>daemon pair</code> must print a link that starts with
+<code>relay://tether-desk.duckdns.org:443/</code> and contains <code>ssl=true</code>.</p>
+<pre><code>&amp; $p daemon pair        # Windows
+$p daemon pair          # Mac</code></pre>
+
+<div class="warn">
+  <b>Corporate Mac (Zscaler):</b> Zscaler re-signs the TLS connection, so the Mac needs the CA fix
+  from <code>paseo-tunnel/README.md</code> (<code>paseo-corp-ca.sh</code>). It is already installed,
+  and it covers this relay as well. Without it Paseo reports <code>unable to get local issuer certificate</code>.
+</div>
+
+<h2>2. Pair your devices again</h2>
+<p>Phones and other computers saved the old relay address in their host entry, so pair each one again:</p>
+<ul>
+  <li><b>Phone:</b> in the Paseo app, choose <i>Add host → Scan QR code</i> and scan the QR code from
+      <code>daemon pair</code>, or the one under Settings → (this host) → <i>Pair a device</i>. Then remove the old entry.</li>
+  <li><b>Another computer:</b> Settings → <i>Add host</i> → paste the <code>relay://…</code> link.</li>
+</ul>
+<p>Treat the pairing link like a password: anyone who has it can control that daemon.</p>
+
+<h2>3. Undo (back to relay.paseo.sh)</h2>
+<pre><code>$p daemon config unset daemon.relay.endpoint
+$p daemon config unset daemon.relay.publicEndpoint
+$p daemon config unset daemon.relay.useTls
+$p daemon restart</code></pre>
+<p>(On Windows put <code>&amp;</code> in front of <code>$p</code>.) Then pair your devices again.</p>
+
+<h2>Server side (for reference)</h2>
+<table>
+  <tr><th>Server</th><td>Hetzner <code>tether-relay-hz1</code> (46.224.17.114), user <code>tadmin</code>, key <code>~/.ssh/tether_hetzner</code></td></tr>
+  <tr><th>Relay</th><td><code>paseo-relay.service</code>: community Go relay
+      <a href="https://github.com/zenghongtu/paseo-relay">zenghongtu/paseo-relay</a> v0.5.0, on <code>127.0.0.1:8411</code> only</td></tr>
+  <tr><th>Port 443</th><td>Tether's Caddy forwards the path <code>/ws</code> to the relay, through the drop-in
+      <code>/etc/tether/caddy.d/paseo.caddy</code> (3 lines; Tether's Caddyfile already imports that folder). Same certificate as Tether.
+      Tether's own paths (<code>/ws/id</code>, <code>/ws/relay</code>, <code>/api</code>, …) are unchanged.</td></tr>
+  <tr><th>Files</th><td><code>paseo-tunnel/relay/</code> in the repo: <code>install.sh</code>, <code>paseo.caddy</code>,
+      <code>paseo-relay.service</code>, <code>test-e2e.sh</code>, this page</td></tr>
+</table>
+<pre><code>ssh -i ~/.ssh/tether_hetzner tadmin@46.224.17.114
+systemctl status paseo-relay                          # state
+journalctl -u paseo-relay -f                          # who connects
+sudo bash /etc/paseo-relay/install.sh uninstall       # remove everything</code></pre>
+<p>A changed or removed drop-in needs a restart of Tether's Caddy (its admin API is off): about 1 s
+without HTTPS, and Tether clients reconnect. <code>install.sh</code> does that only when the drop-in
+changes, and puts the old config back if Tether is not healthy afterwards.</p>
+<p>Test from the PC (throwaway daemon, does not touch your setup): <code>bash paseo-tunnel/relay/test-e2e.sh</code> → <code>ALL PASS</code>.</p>
+</body>
+</html>
