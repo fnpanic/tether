@@ -18,6 +18,39 @@ fn with_session<T>(key: &str, f: impl FnOnce(&core::TauriSession) -> T) -> R<T> 
         .ok_or_else(|| "Not connected to the remote device.".to_owned())
 }
 
+/// Commands that change this machine's security posture answer only the main window: a session
+/// or connection window shows content from the other side.
+fn main_only(w: &tauri::WebviewWindow) -> R<()> {
+    main_label(w.label())
+}
+
+fn main_label(label: &str) -> R<()> {
+    if label == "main" {
+        Ok(())
+    } else {
+        Err("not available in this window".to_owned())
+    }
+}
+
+const CHAT_MAX: usize = 4096;
+
+/// Chat text: bounded, and only while policy `connect.chat` allows chat.
+fn check_chat(text: &str) -> R<()> {
+    if text.len() > CHAT_MAX {
+        return Err("message too long".to_owned());
+    }
+    crate::policy::require("connect.chat", "Your organisation does not allow chat.")
+}
+
+/// Session types the windows may start.
+fn conn_type(conn: Option<&str>) -> R<&'static str> {
+    match conn {
+        None | Some("default") => Ok("default"),
+        Some("file-transfer") => Ok("file-transfer"),
+        Some(_) => Err("unsupported connection type".to_owned()),
+    }
+}
+
 // ----------------------------------------------------------------------------- main window
 
 #[derive(Serialize)]
@@ -51,7 +84,8 @@ fn refresh_password() {
 }
 
 #[tauri::command]
-fn set_permanent_password(password: String) -> R<()> {
+fn set_permanent_password(window: tauri::WebviewWindow, password: String) -> R<()> {
+    main_only(&window)?;
     crate::policy::require("security.permanent-password", "Your organisation does not allow a permanent password.")?;
     security::check_password_strength(&password)?;
     if api::set_permanent_password(password) {
@@ -68,7 +102,8 @@ fn get_option(key: String) -> R<String> {
 }
 
 #[tauri::command]
-fn set_option(key: String, value: String) -> R<()> {
+fn set_option(window: tauri::WebviewWindow, key: String, value: String) -> R<()> {
+    main_only(&window)?;
     security::check_option(&key)?;
     security::check_option_write(&key)?;
     if value.len() > 512 {
@@ -87,12 +122,14 @@ fn tfa_enabled() -> bool {
 
 /// Starts enrolment; returns the `otpauth://` URI to show as a QR code.
 #[tauri::command]
-fn tfa_begin() -> String {
-    api::generate2fa()
+fn tfa_begin(window: tauri::WebviewWindow) -> R<String> {
+    main_only(&window)?;
+    Ok(api::generate2fa())
 }
 
 #[tauri::command]
-fn tfa_confirm(code: String) -> R<()> {
+fn tfa_confirm(window: tauri::WebviewWindow, code: String) -> R<()> {
+    main_only(&window)?;
     if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
         return Err("Enter the 6-digit code.".to_owned());
     }
@@ -104,8 +141,10 @@ fn tfa_confirm(code: String) -> R<()> {
 }
 
 #[tauri::command]
-fn tfa_disable() {
+fn tfa_disable(window: tauri::WebviewWindow) -> R<()> {
+    main_only(&window)?;
     api::disable_2fa();
+    Ok(())
 }
 
 #[tauri::command]
@@ -121,7 +160,8 @@ fn remove_peer(id: String) -> R<()> {
 }
 
 #[tauri::command]
-async fn install_service() -> R<()> {
+async fn install_service(window: tauri::WebviewWindow) -> R<()> {
+    main_only(&window)?;
     crate::policy::require("security.unattended", "Your organisation does not allow unattended access.")?;
     // Windows: on success the core restarts Tether, so this only returns on failure or cancel.
     if blocking(api::install_service).await? {
@@ -152,11 +192,7 @@ async fn open_session(app: AppHandle, peer: String, conn: Option<String>, from: 
     security::check_peer_id(&peer)?;
     security::check_not_self(&peer)?;
     crate::policy::check_outgoing()?;
-    let conn = match conn.as_deref() {
-        None | Some("default") => "default",
-        Some("file-transfer") => "file-transfer",
-        Some(_) => return Err("unsupported connection type".to_owned()),
-    };
+    let conn = conn_type(conn.as_deref())?;
     if let Some(f) = &from {
         if core::session(f).is_none() {
             return Err("The session has ended; connect again.".to_owned());
@@ -190,6 +226,12 @@ fn session_start(
     if password.as_ref().is_some_and(|p| p.len() > 128) {
         return Err("password too long".to_owned());
     }
+    // The same checks as `open_session`: a window cannot start what the main window could not.
+    let conn = conn_type(conn.as_deref())?;
+    crate::policy::check_outgoing()?;
+    if webcodecs.len() > 8 || webcodecs.iter().any(|f| f.len() > 8) {
+        return Err("invalid codec list".to_owned());
+    }
     let mut password = password;
     let mut login_from = None;
     if let Some(s) = sink::get() {
@@ -203,7 +245,7 @@ fn session_start(
         &key,
         &peer,
         password.as_deref().unwrap_or(""),
-        conn.as_deref().unwrap_or("default"),
+        conn,
         force_relay.unwrap_or(false),
         login_from.as_deref(),
     );
@@ -226,6 +268,9 @@ fn session_reconnect(key: String, force_relay: bool) -> R<()> {
 
 #[tauri::command]
 fn session_login(key: String, password: String, remember: bool) -> R<()> {
+    if password.len() > 128 {
+        return Err("password too long".to_owned());
+    }
     with_session(&key, |s| s.login(String::new(), String::new(), password, remember))
 }
 
@@ -248,6 +293,10 @@ fn session_mouse(
 /// PC/Mac shortcut mapping (`keys.rs`).
 #[tauri::command]
 fn session_key(key: String, code: String, down: bool, lock_modes: i32, character: Option<String>) -> R<()> {
+    // One typed character (a few code points at most).
+    if character.as_ref().is_some_and(|c| c.len() > 32) {
+        return Err("invalid character".to_owned());
+    }
     let k = rdev::chrome_key_from_code(&code);
     if rdev::usb_hid_keycode_from_key(k).unwrap_or(0) == 0 {
         return Ok(());
@@ -282,6 +331,9 @@ fn session_mac_force_quit(key: String) -> R<()> {
 
 #[tauri::command]
 fn session_type_text(key: String, text: String) -> R<()> {
+    if text.len() > 4096 {
+        return Err("text too long".to_owned());
+    }
     with_session(&key, |s| s.input_string(&text))
 }
 
@@ -347,9 +399,7 @@ fn session_get_toggle(key: String, name: String) -> R<bool> {
 
 #[tauri::command]
 fn session_chat(key: String, text: String) -> R<()> {
-    if text.len() > 4096 {
-        return Err("message too long".to_owned());
-    }
+    check_chat(&text)?;
     with_session(&key, |s| s.send_chat(text))
 }
 
@@ -367,8 +417,13 @@ fn session_frame_drawn(key: String) {
 }
 
 #[tauri::command]
-fn session_webcodecs_failed(key: String, codec: u8, display: i32) {
+fn session_webcodecs_failed(key: String, codec: u8, display: i32) -> R<()> {
+    // The core shifts a u8 mask by it.
+    if codec >= 8 {
+        return Err("unknown codec".to_owned());
+    }
     core::session_webcodecs_failed(&key, codec, display);
+    Ok(())
 }
 
 #[tauri::command]
@@ -478,14 +533,52 @@ fn cm_close(id: i32) {
     cm::close(id);
 }
 
-#[tauri::command]
-fn cm_permission(id: i32, name: String, enabled: bool) {
-    cm::switch_permission(id, name, enabled);
+/// Core permission name → policy feature (None: no policy feature, the host user decides).
+pub const PERMS: &[(&str, Option<&str>)] = &[
+    ("keyboard", Some("permission.control")),
+    ("clipboard", Some("permission.clipboard")),
+    ("file", Some("permission.file-transfer")),
+    ("audio", Some("permission.audio")),
+    ("restart", Some("permission.restart")),
+    ("block_input", Some("permission.block-input")),
+    ("recording", None),
+];
+
+/// Policy keeps this feature off (locked or hidden).
+fn locked_off(e: &tether_trust::policy::Effective, feature: &str) -> bool {
+    (e.is_locked(feature) || e.hidden.contains(feature)) && !e.on(feature)
+}
+
+/// Permissions policy keeps off: never granted here, and taken from running connections (sink.rs).
+pub fn perms_locked_off(e: &tether_trust::policy::Effective) -> Vec<&'static str> {
+    PERMS.iter().filter(|(_, f)| f.is_some_and(|f| locked_off(e, f))).map(|(n, _)| *n).collect()
+}
+
+fn check_perm(e: &tether_trust::policy::Effective, name: &str, enabled: bool) -> R<()> {
+    if !PERMS.iter().any(|(n, _)| *n == name) {
+        return Err("unknown permission".to_owned());
+    }
+    if enabled && perms_locked_off(e).contains(&name) {
+        return Err("locked: Your organisation does not allow this.".to_owned());
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn cm_chat(id: i32, text: String) {
+fn cm_permission(id: i32, name: String, enabled: bool) -> R<()> {
+    check_perm(&crate::policy::effective(), &name, enabled)?;
+    cm::switch_permission(id, name.clone(), enabled);
+    if let Some(s) = sink::get() {
+        s.cm_set_field(id, &name, enabled);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn cm_chat(id: i32, text: String) -> R<()> {
+    check_chat(&text)?;
     cm::send_chat(id, text);
+    Ok(())
 }
 
 // --- policy/update/diagnostics/cli ---
@@ -668,7 +761,8 @@ async fn hosts_store_load() -> R<String> {
 }
 
 #[tauri::command]
-async fn hosts_store_save(doc: String) -> R<()> {
+async fn hosts_store_save(window: tauri::WebviewWindow, doc: String) -> R<()> {
+    main_only(&window)?;
     blocking(move || hosts::save_store(&doc)).await?
 }
 
@@ -735,7 +829,8 @@ async fn team_tags_get() -> R<Value> {
 }
 
 #[tauri::command]
-async fn team_tags_put(rev: u64, doc: String) -> R<Value> {
+async fn team_tags_put(window: tauri::WebviewWindow, rev: u64, doc: String) -> R<Value> {
+    main_only(&window)?;
     blocking(move || team::tags_put(rev, &doc)).await?
 }
 
@@ -853,6 +948,42 @@ fn cm_record_consent(conn_id: i32, allow: bool) {
 
 #[cfg(test)]
 mod tests {
+    use tether_trust::policy::{resolve, Layer, Rule, State, PROFILE_TECHNICIAN};
+
+    #[test]
+    fn permissions_are_allow_listed_and_follow_policy_locks() {
+        let open = resolve(None, PROFILE_TECHNICIAN, "", None);
+        assert!(super::check_perm(&open, "clipboard", true).is_ok());
+        assert!(super::check_perm(&open, "recording", true).is_ok());
+        assert!(super::check_perm(&open, "privacy_mode", true).is_err());
+        assert!(super::perms_locked_off(&open).is_empty());
+        let machine: Layer = [("permission.clipboard".to_owned(), Rule { state: State::Off, value: None }), ("permission.file-transfer".to_owned(), Rule { state: State::Hidden, value: None })].into();
+        let locked = resolve(None, PROFILE_TECHNICIAN, "", Some(&machine));
+        assert_eq!(super::perms_locked_off(&locked), ["clipboard", "file"]);
+        assert!(super::check_perm(&locked, "clipboard", true).unwrap_err().starts_with("locked:"));
+        assert!(super::check_perm(&locked, "file", true).is_err());
+        // Switching off is always allowed.
+        assert!(super::check_perm(&locked, "clipboard", false).is_ok());
+        assert!(super::check_perm(&locked, "keyboard", true).is_ok());
+    }
+
+    #[test]
+    fn boundary_checks() {
+        assert!(super::main_label("main").is_ok());
+        assert!(super::main_label("cm").is_err());
+        assert!(super::main_label("s-0123").is_err());
+        assert_eq!(super::conn_type(None), Ok("default"));
+        assert_eq!(super::conn_type(Some("file-transfer")), Ok("file-transfer"));
+        assert!(super::conn_type(Some("terminal")).is_err());
+        assert!(super::conn_type(Some("port-forward")).is_err());
+        assert!(super::check_chat(&"x".repeat(super::CHAT_MAX + 1)).is_err());
+        assert!(super::session_login("k".into(), "p".repeat(129), false).unwrap_err().contains("too long"));
+        assert!(super::session_type_text("k".into(), "t".repeat(4097)).unwrap_err().contains("too long"));
+        assert!(super::session_webcodecs_failed("k".into(), 8, 0).is_err());
+        assert!(super::session_webcodecs_failed("k".into(), 255, 0).is_err());
+        assert!(super::session_key("k".into(), "KeyA".into(), true, 0, Some("x".repeat(33))).is_err());
+    }
+
     #[test]
     fn session_policy_get_refuses_secrets() {
         assert!(super::session_policy_get("recording.upload-token".into()).is_err());

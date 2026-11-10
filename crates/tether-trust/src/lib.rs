@@ -33,7 +33,12 @@ pub fn key_to_b64(k: &VerifyingKey) -> String {
 pub fn key_from_b64(s: &str) -> Result<VerifyingKey, String> {
     let raw = B64.decode(s.trim()).map_err(|e| format!("bad key encoding: {e}"))?;
     let arr: [u8; 32] = raw.try_into().map_err(|_| "key must be 32 bytes".to_owned())?;
-    VerifyingKey::from_bytes(&arr).map_err(|e| format!("bad key: {e}"))
+    let key = VerifyingKey::from_bytes(&arr).map_err(|e| format!("bad key: {e}"))?;
+    // A small-order key (the identity point …) has signatures that fit any message.
+    if key.is_weak() {
+        return Err("bad key: weak (small-order) key".into());
+    }
+    Ok(key)
 }
 
 /// A fresh random admin signing key (management app first run).
@@ -70,6 +75,13 @@ pub(crate) fn b64() -> &'static base64::engine::GeneralPurpose {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn weak_keys_are_refused() {
+        assert!(super::key_from_b64("AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap_err().contains("weak"));
+        let k = super::generate_key().verifying_key();
+        assert_eq!(super::key_from_b64(&super::key_to_b64(&k)).unwrap(), k);
+    }
+
     #[test]
     fn read_limited_stops_after_the_limit() {
         assert_eq!(super::read_limited(&b"abcd"[..], 4).unwrap(), b"abcd");

@@ -157,7 +157,7 @@ export function Devices() {
             <tr key={d.uuid}>
               <td>
                 <p className="whitespace-nowrap font-mono">{d.id || "–"}</p>
-                <p className="select-text break-all font-mono text-footnote text-faint">{d.uuid}</p>
+                <p className="select-text break-all font-mono text-footnote text-muted">{d.uuid}</p>
               </td>
               <td>
                 <p className="capitalize">{d.profile}</p>

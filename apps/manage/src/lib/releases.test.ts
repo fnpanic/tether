@@ -1,7 +1,7 @@
 // node --test src/lib/releases.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compareVersion, customFields, customRollout, defaultCustom, describeRamp, groupReleases, rampPresets, rampSteps, rolloutProblem, rolloutState, perRelay, releaseToast, Tally } from "./releases.ts";
+import { compareVersion, minimumProblem, customFields, customRollout, defaultCustom, describeRamp, groupReleases, rampPresets, rampSteps, rolloutProblem, rolloutState, perRelay, releaseToast, Tally } from "./releases.ts";
 
 test("one group per release, manifest separate, newest first", () => {
   const f = (path: string, size = 1) => ({ channel: "stable", path, size, modified: size });
@@ -62,6 +62,16 @@ test("rollout state", () => {
   assert.equal(rolloutState({ ...e, percent: 100 }), "Everyone");
   assert.equal(rolloutState({ ...e, percent: 0 }), "Not started");
   assert.equal(rolloutState({ ...e, security: true }), "Security release: everyone");
+});
+
+test("a minimum version above the release itself is refused", () => {
+  assert.match(minimumProblem("0.5.1", " 0.5.2 ")!, /0\.5\.2 is above this release \(0\.5\.1\)/);
+  assert.match(minimumProblem("0.5.1-beta", "0.5.1")!, /above/);
+  assert.equal(minimumProblem("0.5.1", "0.5.1"), null);
+  assert.equal(minimumProblem("0.5.10", "0.5.9"), null);
+  // Empty or not yet a version: the format check speaks, not this one.
+  assert.equal(minimumProblem("0.5.1", ""), null);
+  assert.equal(minimumProblem("", "0.5.2"), null);
 });
 
 // Mirrors tether_trust::version tests (ordering).

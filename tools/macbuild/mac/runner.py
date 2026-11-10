@@ -367,17 +367,22 @@ class Runner:
             self.cancel(user, manifest["target"], cfg)
             return
         d = self.jobdir(user, job_id)
-        os.makedirs(d)
-        for x in members:  # checked above: files and directories under work/ and secrets/ only
-            if os.path.normpath(x.name) != "manifest.json":
-                tf.extract(x, d, set_attrs=False, **EXTRACT_KW)
-                if x.isfile():
-                    os.chmod(os.path.join(d, x.name), 0o700 if x.mode & 0o100 else 0o600)
-        for sub in ("work", "secrets", "artifacts"):
-            os.makedirs(os.path.join(d, sub), exist_ok=True)
-        os.chmod(os.path.join(d, "secrets"), 0o700)
-        write_json(os.path.join(d, "manifest.json"), manifest)
-        self.set_status(user, job_id, id=job_id, user=user, state="queued", queued_at=time.time(), timeout=manifest["timeout"])
+        os.makedirs(d)  # outside the try: a folder that exists already is another job's
+        try:
+            for x in members:  # checked above: files and directories under work/ and secrets/ only
+                if os.path.normpath(x.name) != "manifest.json":
+                    tf.extract(x, d, set_attrs=False, **EXTRACT_KW)
+                    if x.isfile():
+                        os.chmod(os.path.join(d, x.name), 0o700 if x.mode & 0o100 else 0o600)
+            for sub in ("work", "secrets", "artifacts"):
+                os.makedirs(os.path.join(d, sub), exist_ok=True)
+            os.chmod(os.path.join(d, "secrets"), 0o700)
+            write_json(os.path.join(d, "manifest.json"), manifest)
+            self.set_status(user, job_id, id=job_id, user=user, state="queued", queued_at=time.time(), timeout=manifest["timeout"])
+        except BaseException:
+            # Without a status, cleanup() would never delete the folder and its secrets/.
+            shutil.rmtree(d, ignore_errors=True)
+            raise
         log("queued %s/%s: %s" % (user, job_id, " ".join(manifest["cmd"])[:120]))
 
     def scan_inbox(self, cfg):

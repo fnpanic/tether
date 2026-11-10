@@ -40,7 +40,7 @@ Fast, private, self-hosted remote desktop for Windows and macOS, with a Linux re
 ```
 apps/desktop/            Tauri app (src/ = React UI, src-tauri/ = Rust shell)
 patches/                 Our changes to the pinned upstream sources
-scripts/bootstrap.sh     Fetch vendor/ at pinned tags and apply patches
+scripts/bootstrap.sh     Fetch vendor/ at pinned tags (checked against pinned commits) and apply patches
 server/                  Relay deployment: Dockerfile, compose, systemd units, install.sh
 docs/                    FluxRT spec, benchmarks
 ```
@@ -70,7 +70,10 @@ and viewer side by side on one machine, start a second instance with `TETHER_PRO
 ## Deploy the relay
 
 ```bash
-# Docker (host networking)
+# Docker (host networking). The containers run as uid 65532: create the data directory first
+# (an existing one, before starting the new image: sudo chown -R 65532:65532 server/data &&
+# sudo chmod 0700 server/data; otherwise hbbs/hbbr cannot open their database and key and restart in a loop)
+sudo install -d -m 0700 -o 65532 -g 65532 server/data
 RELAY_HOST=relay.example.com docker compose -f server/docker-compose.yml up -d
 # or systemd with prebuilt binaries
 sudo server/install.sh relay.example.com ./bin

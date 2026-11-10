@@ -137,8 +137,8 @@ function watch(p) {
 }
 /** Both tether-api instances (relay A and B), trusting `keys`. */
 function startApis(keys) {
-  watch(wsl([`${BIN}/tether-api`, "--data", wslPath(apiDir), "--listen", "127.0.0.1:22130"], [`ADMIN_PUB_KEY=${keys}`]));
-  watch(wsl([`${BIN}/tether-api`, "--data", wslPath(apiDirB), "--listen", "127.0.0.1:22140"], [`ADMIN_PUB_KEY=${keys}`]));
+  watch(wsl([`${BIN}/tether-api`, "--data", wslPath(apiDir), "--listen", "127.0.0.1:22130"], [`ADMIN_PUB_KEY=${keys}`, "RELAY_HOST=127.0.0.1,localhost"]));
+  watch(wsl([`${BIN}/tether-api`, "--data", wslPath(apiDirB), "--listen", "127.0.0.1:22140"], [`ADMIN_PUB_KEY=${keys}`, "RELAY_HOST=127.0.0.1,localhost"]));
 }
 async function restartApis(keys) {
   try {

@@ -58,6 +58,13 @@ export function compareVersion(a: string, b: string): number {
   return comparePre(va.pre, vb.pre);
 }
 
+/** Why `minimum` cannot be the minimum version of release `version`, or null: above the release
+ *  itself, every device would count as too old even after updating (release_publish refuses it too). */
+export function minimumProblem(version: string, minimum: string): string | null {
+  const [v, m] = [version.trim(), minimum.trim()];
+  return parseVersion(v) && parseVersion(m) && compareVersion(m, v) > 0 ? `The minimum version ${m} is above this release (${v}). Use ${v} or lower.` : null;
+}
+
 /** One line per release, newest version first within a channel and app. */
 export function groupReleases(files: ReleaseFile[]): ReleaseGroup[] {
   const groups = new Map<string, ReleaseGroup>();

@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index f018be6..3ce211c 100644
+index f018be6..9c0f0ad 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -508,7 +508,7 @@ dependencies = [
@@ -223,15 +223,13 @@ index f018be6..3ce211c 100644
  [[package]]
  name = "subtle"
  version = "2.6.1"
-@@ -3253,6 +3333,27 @@ dependencies = [
+@@ -3253,6 +3333,25 @@ dependencies = [
   "utf-8",
  ]
  
 +[[package]]
 +name = "turn"
 +version = "0.10.0"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "3f5aea1116456e1da71c45586b87c72e3b43164fbf435eb93ff6aa475416a9a4"
 +dependencies = [
 + "async-trait",
 + "base64 0.22.1",
@@ -251,7 +249,7 @@ index f018be6..3ce211c 100644
  [[package]]
  name = "typenum"
  version = "1.15.0"
-@@ -3518,6 +3619,27 @@ dependencies = [
+@@ -3518,6 +3617,27 @@ dependencies = [
   "rustls-pki-types",
  ]
  
@@ -280,7 +278,7 @@ index f018be6..3ce211c 100644
  name = "which"
  version = "4.2.5"
 diff --git a/Cargo.toml b/Cargo.toml
-index e5162ee..3f4cb69 100644
+index e5162ee..9e92250 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -52,6 +52,16 @@ local-ip-address = "0.5.1"
@@ -300,6 +298,20 @@ index e5162ee..3f4cb69 100644
  
  [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
  # https://github.com/rustdesk/rustdesk-server-pro/issues/189, using native-tls for better tls support
+@@ -65,7 +75,12 @@ hbb_common = { path = "libs/hbb_common" }
+ 
+ [workspace]
+ members = ["libs/hbb_common"]
+-exclude = ["ui"]
++exclude = ["ui", "patched"]
++
++# Tether: turn 0.10.0 with a bounded nonce table. The source is server/patched/turn in the Tether
++# repository; scripts/build-relay.sh and server/Dockerfile copy it to patched/turn.
++[patch.crates-io]
++turn = { path = "patched/turn" }
+ 
+ #https://github.com/johnthagen/min-sized-rust
+ #https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles
 diff --git a/src/bin/relay-harness.rs b/src/bin/relay-harness.rs
 new file mode 100644
 index 0000000..19ab20f
@@ -1712,10 +1724,59 @@ index 0000000..b660d01
 +    }
 +}
 diff --git a/src/common.rs b/src/common.rs
-index 9c76f41..bd52403 100644
+index 9c76f41..2d35c1d 100644
 --- a/src/common.rs
 +++ b/src/common.rs
-@@ -215,4 +215,260 @@ async fn check_software_update_() -> hbb_common::ResultType<()> {
+@@ -105,11 +105,33 @@ pub fn now() -> u64 {
+ }
+ 
+ pub fn gen_sk(wait: u64) -> (String, Option<sign::SecretKey>) {
+-    let sk_file = "id_ed25519";
++    gen_sk_in("id_ed25519", wait)
++}
++
++/// Tether: `-k _` asks for the key check, and an empty key means "no check": without a usable key
++/// file the server must not run, or it accepts every client.
++pub fn require_key(asked: bool, pk: &str) {
++    if asked && pk.is_empty() {
++        // don't use log here, since it is async
++        println!("Fatal error: -k _ needs the private key file id_ed25519 (working directory), which cannot be read or created.");
++        std::process::exit(1);
++    }
++}
++
++fn gen_sk_in(sk_file: &str, wait: u64) -> (String, Option<sign::SecretKey>) {
+     if wait > 0 && !std::path::Path::new(sk_file).exists() {
+         std::thread::sleep(std::time::Duration::from_millis(wait));
+     }
+-    if let Ok(mut file) = std::fs::File::open(sk_file) {
++    let file = std::fs::File::open(sk_file);
++    if let Err(err) = &file {
++        // Tether: only a missing key is generated. One that cannot be opened is still the key
++        // the clients trust: do not write a new id_ed25519.pub next to it.
++        if err.kind() != std::io::ErrorKind::NotFound {
++            println!("Cannot read private key {sk_file}: {err}");
++            return ("".to_owned(), None);
++        }
++    }
++    if let Ok(mut file) = file {
+         let mut contents = String::new();
+         if file.read_to_string(&mut contents).is_ok() {
+             let contents = contents.trim();
+@@ -142,6 +164,12 @@ pub fn gen_sk(wait: u64) -> (String, Option<sign::SecretKey>) {
+         if let Ok(mut f) = std::fs::File::create(&pub_file) {
+             f.write_all(pk.as_bytes()).ok();
+             if let Ok(mut f) = std::fs::File::create(sk_file) {
++                // The data directory may be readable by others (Docker bind mount): the key is not.
++                #[cfg(unix)]
++                {
++                    use std::os::unix::fs::PermissionsExt;
++                    f.set_permissions(std::fs::Permissions::from_mode(0o600)).ok();
++                }
+                 let s = base64::encode(&sk);
+                 if f.write_all(s.as_bytes()).is_ok() {
+                     log::info!("Private/public key written to {}/{}", sk_file, pub_file);
+@@ -215,4 +243,282 @@ async fn check_software_update_() -> hbb_common::ResultType<()> {
         log::info!("new version is available: {}", latest_release_version);
      }
      Ok(())
@@ -1885,6 +1946,28 @@ index 9c76f41..bd52403 100644
 +mod key_tests {
 +    use super::*;
 +
++    #[cfg(unix)]
++    #[test]
++    fn unreadable_private_key_is_not_replaced() {
++        let dir = std::env::temp_dir().join(format!("hbbs-gensk-{}-{}", std::process::id(), line!()));
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).unwrap();
++        let sk = dir.join("id_ed25519");
++        let (sk, pub_file) = (sk.to_str().unwrap().to_owned(), format!("{}.pub", sk.to_str().unwrap()));
++        // Missing: generated, as on a first start.
++        let (pk, key) = gen_sk_in(&sk, 0);
++        assert!(key.is_some() && std::fs::read_to_string(&pub_file).unwrap() == pk);
++        assert_eq!(gen_sk_in(&sk, 0).0, pk, "the key that was written is read back");
++        // Present but cannot be opened (a symlink loop fails for root too): no key, and the
++        // public key the clients were built with stays.
++        std::fs::remove_file(&sk).unwrap();
++        std::os::unix::fs::symlink("id_ed25519", &sk).unwrap();
++        let (none, key) = gen_sk_in(&sk, 0);
++        assert!(none.is_empty() && key.is_none());
++        assert_eq!(std::fs::read_to_string(&pub_file).unwrap(), pk, "id_ed25519.pub was overwritten");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
 +    #[test]
 +    fn own_key_and_rotation_keys_are_accepted() {
 +        let (own, old) = ("O".repeat(43) + "=", "A".repeat(43) + "=");
@@ -2014,7 +2097,7 @@ index 8da29a2..5c72db5 100644
  mod version;
 diff --git a/src/metrics.rs b/src/metrics.rs
 new file mode 100644
-index 0000000..dfc52e2
+index 0000000..7425639
 --- /dev/null
 +++ b/src/metrics.rs
 @@ -0,0 +1,553 @@
@@ -2273,7 +2356,7 @@ index 0000000..dfc52e2
 +    sample(&mut o, "hbbs_turn_allocations_max", "", now.turn_max as f64);
 +    header(&mut o, "hbbs_turn_allocations_total", "counter", "TURN allocations made.");
 +    sample(&mut o, "hbbs_turn_allocations_total", "", TURN_ALLOCATIONS.get() as f64);
-+    header(&mut o, "hbbs_turn_allocations_refused_total", "counter", "TURN allocations refused at TURN_MAX_ALLOCATIONS.");
++    header(&mut o, "hbbs_turn_allocations_refused_total", "counter", "TURN allocations refused at TURN_MAX_ALLOCATIONS or the limit per client IP.");
 +    sample(&mut o, "hbbs_turn_allocations_refused_total", "", TURN_ALLOCATIONS_REFUSED.get() as f64);
 +    header(&mut o, "hbbs_turn_requests_total", "counter", "TURN control datagrams (requests and channel data) taken.");
 +    sample(&mut o, "hbbs_turn_requests_total", "", TURN_REQUESTS.get() as f64);
@@ -2595,7 +2678,7 @@ index 4ca87cf..7efd9c5 100644
      pub(crate) async fn is_in_memory(&self, id: &str) -> bool {
          self.map.read().await.contains_key(id)
 diff --git a/src/relay_server.rs b/src/relay_server.rs
-index 0ec190a..ad44169 100644
+index 0ec190a..77f09ca 100644
 --- a/src/relay_server.rs
 +++ b/src/relay_server.rs
 @@ -42,12 +42,19 @@ static DOWNGRADE_START_CHECK: AtomicUsize = AtomicUsize::new(1_800_000); // in m
@@ -2736,11 +2819,19 @@ index 0ec190a..ad44169 100644
  fn get_server_sk(key: &str) -> String {
      let mut key = key.to_owned();
      if let Ok(sk) = base64::decode(&key) {
+@@ -576,6 +611,7 @@ fn get_server_sk(key: &str) -> String {
+ 
+     if key == "-" || key == "_" {
+         let (pk, _) = crate::common::gen_sk(300);
++        crate::common::require_key(true, &pk);
+         key = pk;
+     }
+ 
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..3eac3de 100644
+index dff45eb..581239a 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
-@@ -44,10 +44,14 @@ use std::{
+@@ -44,10 +44,23 @@ use std::{
  enum Data {
      Msg(Box<RendezvousMessage>, SocketAddr),
      RelayServers0(String),
@@ -2753,10 +2844,19 @@ index dff45eb..3eac3de 100644
  const REG_TIMEOUT: i64 = 30_000;
 +/// A JSON ICE candidate is ~200 bytes; anything far larger is not one.
 +const MAX_ICE_CANDIDATE_LEN: usize = 2048;
++/// The client's WebRTC offer/answer is under 1 KiB without candidates and a few KiB with them.
++const MAX_SDP_LEN: usize = 64 << 10;
++/// A relay address or wss:// URL.
++const MAX_RELAY_SERVER_LEN: usize = 1024;
++/// Largest message taken from a rendezvous client (TCP and WebSocket); the largest real one is an
++/// online query for MAX_ONLINE_QUERY ids, below 200 KiB.
++const MAX_FRAME: usize = 512 << 10;
++/// Source IPs the RegisterPk limiter remembers; see `prune_limiters`.
++const IP_BLOCKER_MAX: usize = 50_000;
  type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
  type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
  enum Sink {
-@@ -57,17 +61,87 @@ enum Sink {
+@@ -57,17 +70,87 @@ enum Sink {
  type Sender = mpsc::UnboundedSender<Data>;
  type Receiver = mpsc::UnboundedReceiver<Data>;
  static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
@@ -2845,8 +2945,13 @@ index dff45eb..3eac3de 100644
  
  #[derive(Clone)]
  struct Inner {
-@@ -84,7 +158,7 @@ pub struct RendezvousServer {
-     tcp_punch: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
+@@ -81,10 +164,11 @@ struct Inner {
+ 
+ #[derive(Clone)]
+ pub struct RendezvousServer {
+-    tcp_punch: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
++    /// Punch sockets of controllers waiting for an answer: the queue of each one's writer task.
++    tcp_punch: Arc<Mutex<HashMap<SocketAddr, TcpPeerTx>>>,
      pm: PeerMap,
      tx: Sender,
 -    relay_servers: Arc<RelayServers>,
@@ -2854,7 +2959,7 @@ index dff45eb..3eac3de 100644
      relay_servers0: Arc<RelayServers>,
      rendezvous_servers: Arc<Vec<String>>,
      inner: Arc<Inner>,
-@@ -101,6 +175,10 @@ impl RendezvousServer {
+@@ -101,6 +185,10 @@ impl RendezvousServer {
      #[tokio::main(flavor = "multi_thread")]
      pub async fn start(port: i32, serial: i32, key: &str, rmem: usize) -> ResultType<()> {
          let (key, sk) = Self::get_server_sk(key);
@@ -2865,7 +2970,7 @@ index dff45eb..3eac3de 100644
          let nat_port = port - 1;
          let ws_port = port + 2;
          let pm = PeerMap::new().await?;
-@@ -108,8 +186,15 @@ impl RendezvousServer {
+@@ -108,8 +196,15 @@ impl RendezvousServer {
          let rendezvous_servers = get_servers(&get_arg("rendezvous-servers"), "rendezvous-servers");
          log::info!("Listening on tcp/udp :{}", port);
          log::info!("Listening on tcp :{}, extra port for NAT test", nat_port);
@@ -2882,7 +2987,7 @@ index dff45eb..3eac3de 100644
          let (tx, mut rx) = mpsc::unbounded_channel::<Data>();
          let software_url = get_arg("software-url");
          let version = hbb_common::get_version_from_url(&software_url);
-@@ -147,9 +232,10 @@ impl RendezvousServer {
+@@ -147,9 +242,10 @@ impl RendezvousServer {
          log::info!("local-ip: {:?}", rs.inner.local_ip);
          std::env::set_var("PORT_FOR_API", port.to_string());
          rs.parse_relay_servers(&get_arg("relay-servers"));
@@ -2894,7 +2999,7 @@ index dff45eb..3eac3de 100644
          let test_addr = std::env::var("TEST_HBBS").unwrap_or_default();
          if std::env::var("ALWAYS_USE_RELAY")
              .unwrap_or_default()
-@@ -216,12 +302,20 @@ impl RendezvousServer {
+@@ -216,12 +312,20 @@ impl RendezvousServer {
                      }
                      LoopFailure::Listener3 => {
                          drop(listener3);
@@ -2917,7 +3022,7 @@ index dff45eb..3eac3de 100644
          tokio::select!(
              res = main_task => res,
              res = listen_signal => res,
-@@ -237,6 +331,9 @@ impl RendezvousServer {
+@@ -237,10 +341,14 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> LoopFailure {
@@ -2927,7 +3032,12 @@ index dff45eb..3eac3de 100644
          let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
          loop {
              tokio::select! {
-@@ -251,9 +348,25 @@ impl RendezvousServer {
+                 _ = timer_check_relay.tick() => {
++                    Self::prune_limiters().await;
+                     if self.relay_servers0.len() > 1 {
+                         let rs = self.relay_servers0.clone();
+                         let tx = self.tx.clone();
+@@ -251,9 +359,25 @@ impl RendezvousServer {
                  }
                  Some(data) = rx.recv() => {
                      match data {
@@ -2955,7 +3065,7 @@ index dff45eb..3eac3de 100644
                      }
                  }
                  res = socket.next() => {
-@@ -321,10 +434,21 @@ impl RendezvousServer {
+@@ -321,10 +445,24 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> ResultType<()> {
@@ -2970,6 +3080,9 @@ index dff45eb..3eac3de 100644
 +            return Ok(());
 +        }
          if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
++            if oversized(&msg_in) {
++                return Ok(());
++            }
              match msg_in.union {
                  Some(rendezvous_message::Union::RegisterPeer(rp)) => {
                      // B registered
@@ -2977,15 +3090,13 @@ index dff45eb..3eac3de 100644
                      if !rp.id.is_empty() {
                          log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
                          self.update_addr(rp.id, addr, socket).await?;
-@@ -340,89 +464,9 @@ impl RendezvousServer {
+@@ -340,89 +478,9 @@ impl RendezvousServer {
                      }
                  }
                  Some(rendezvous_message::Union::RegisterPk(rk)) => {
 -                    if rk.uuid.is_empty() || rk.pk.is_empty() {
 -                        return Ok(());
-+                    if let Some(msg_out) = self.register_pk(rk, addr).await {
-+                        socket.send(&msg_out, addr).await?
-                     }
+-                    }
 -                    let id = rk.id;
 -                    let ip = addr.ip().to_string();
 -                    if id.len() < 6 {
@@ -3059,7 +3170,9 @@ index dff45eb..3eac3de 100644
 -                    }
 -                    if changed {
 -                        self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
--                    }
++                    if let Some(msg_out) = self.register_pk(rk, addr, true).await {
++                        socket.send(&msg_out, addr).await?
+                     }
 -                    let mut msg_out = RendezvousMessage::new();
 -                    msg_out.set_register_pk_response(RegisterPkResponse {
 -                        result: register_pk_response::Result::OK.into(),
@@ -3069,13 +3182,16 @@ index dff45eb..3eac3de 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // UDP PunchHoleRequest is intentionally unsupported.
-@@ -479,9 +523,34 @@ impl RendezvousServer {
+@@ -479,13 +537,41 @@ impl RendezvousServer {
          addr: SocketAddr,
          key: &str,
          ws: bool,
 +        peer_tx: &TcpPeerTx,
      ) -> bool {
          if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
++            if oversized(&msg_in) {
++                return false;
++            }
              match msg_in.union {
 +                Some(rendezvous_message::Union::RegisterPeer(rp)) => {
 +                    // Host registered over TCP/WebSocket: keep this connection as its signalling path,
@@ -3083,7 +3199,7 @@ index dff45eb..3eac3de 100644
 +                    // answer is request_pk and the RegisterPk that follows decides.
 +                    crate::metrics::REGISTER_PEER[crate::metrics::transport(ws)].inc();
 +                    if !rp.id.is_empty() {
-+                        let mut msg_out = self.register_peer(rp.id.clone(), addr).await;
++                        let mut msg_out = self.register_peer(rp.id.clone(), addr, false).await;
 +                        if !msg_out.register_peer_response().request_pk {
 +                            TCP_PEERS.lock().await.insert(try_into_v4(addr), (peer_tx.clone(), rp.id.clone()));
 +                        }
@@ -3104,7 +3220,21 @@ index dff45eb..3eac3de 100644
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // there maybe several attempt, so sink can be none
                      if let Some(sink) = sink.take() {
-@@ -521,8 +590,18 @@ impl RendezvousServer {
+-                        self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
++                        self.tcp_punch.lock().await.insert(try_into_v4(addr), Self::punch_writer(sink));
+                     }
+                     allow_err!(self.handle_tcp_punch_hole_request(addr, ph, key, ws).await);
+                     return true;
+@@ -493,7 +579,7 @@ impl RendezvousServer {
+                 Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
+                     // there maybe several attempt, so sink can be none
+                     if let Some(sink) = sink.take() {
+-                        self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
++                        self.tcp_punch.lock().await.insert(try_into_v4(addr), Self::punch_writer(sink));
+                     }
+                     if let Some(peer) = self.pm.get_in_memory(&rf.id).await {
+                         let mut msg_out = RendezvousMessage::new();
+@@ -521,8 +607,18 @@ impl RendezvousServer {
                              rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
                          }
                      }
@@ -3124,7 +3254,7 @@ index dff45eb..3eac3de 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
                      allow_err!(self.handle_hole_sent(phs, addr, None).await);
-@@ -545,14 +624,31 @@ impl RendezvousServer {
+@@ -545,14 +641,31 @@ impl RendezvousServer {
                      msg_out.set_test_nat_response(res);
                      Self::send_to_sink(sink, msg_out).await;
                  }
@@ -3146,7 +3276,7 @@ index dff45eb..3eac3de 100644
 +                }
 +                Some(rendezvous_message::Union::RegisterPk(rk)) => {
 +                    let id = rk.id.clone();
-+                    if let Some(msg_out) = self.register_pk(rk, addr).await {
++                    if let Some(msg_out) = self.register_pk(rk, addr, false).await {
 +                        let ok = msg_out.register_pk_response().result.enum_value()
 +                            == Ok(register_pk_response::Result::OK);
 +                        if ok {
@@ -3164,20 +3294,36 @@ index dff45eb..3eac3de 100644
                  }
                  _ => {}
              }
-@@ -567,6 +663,12 @@ impl RendezvousServer {
+@@ -567,7 +680,19 @@ impl RendezvousServer {
          socket_addr: SocketAddr,
          socket: &mut FramedSocket,
      ) -> ResultType<()> {
-+        let msg_out = self.register_peer(id, socket_addr).await;
++        let msg_out = self.register_peer(id, socket_addr, true).await;
 +        socket.send(&msg_out, socket_addr).await
 +    }
 +
 +    /// RegisterPeer handling shared by UDP and TCP/WebSocket clients; returns the response.
-+    async fn register_peer(&mut self, id: String, socket_addr: SocketAddr) -> RendezvousMessage {
++    /// `udp`: `socket_addr` is a datagram's source address, which the sender chooses.
++    async fn register_peer(&mut self, id: String, socket_addr: SocketAddr, udp: bool) -> RendezvousMessage {
          let (request_pk, ip_change) = if let Some(old) = self.pm.get_in_memory(&id).await {
++            // Tether: a datagram does not take the path of a host whose TCP/WebSocket connection
++            // is open (a forged one from the host's IP made it unreachable). Once that connection
++            // has ended its TCP_PEERS entry is gone, and a client that went over to UDP registers.
++            let path = old.read().await.socket_addr;
++            let keep_path = udp && TCP_PEERS.lock().await.contains_key(&try_into_v4(path));
              let mut old = old.write().await;
              let ip = socket_addr.ip();
-@@ -601,7 +703,122 @@ impl RendezvousServer {
+             let ip_change = if old.socket_addr.port() != 0 {
+@@ -576,7 +701,7 @@ impl RendezvousServer {
+                 ip.to_string() != old.info.ip
+             } && !ip.is_loopback();
+             let request_pk = old.pk.is_empty() || ip_change;
+-            if !request_pk {
++            if !request_pk && !keep_path {
+                 old.socket_addr = socket_addr;
+                 old.last_reg_time = Instant::now();
+             }
+@@ -601,7 +726,128 @@ impl RendezvousServer {
              request_pk,
              ..Default::default()
          });
@@ -3207,7 +3353,8 @@ index dff45eb..3eac3de 100644
 +    }
 +
 +    /// RegisterPk handling shared by UDP and TCP/WebSocket clients. None = ignore the request.
-+    async fn register_pk(&mut self, rk: RegisterPk, addr: SocketAddr) -> Option<RendezvousMessage> {
++    /// `udp`: `addr` is a datagram's source address, which the sender chooses.
++    async fn register_pk(&mut self, rk: RegisterPk, addr: SocketAddr, udp: bool) -> Option<RendezvousMessage> {
 +        if rk.uuid.is_empty() || rk.pk.is_empty() {
 +            return None;
 +        }
@@ -3231,7 +3378,9 @@ index dff45eb..3eac3de 100644
 +                (true, false)
 +            } else {
 +                if peer.uuid == rk.uuid {
-+                    if norm_ip(&peer.info.ip) != ip && peer.pk != rk.pk {
++                    // Tether: over UDP "same IP" proves nothing, so a registered key stays: else a
++                    // spoofed datagram replaces it, and the host then loses its id to the new key.
++                    if (norm_ip(&peer.info.ip) != ip || udp && !peer.pk.is_empty()) && peer.pk != rk.pk {
 +                        log::warn!(
 +                            "Peer {} ip/pk mismatch: {}/{:?} vs {}/{:?}",
 +                            id,
@@ -3288,7 +3437,10 @@ index dff45eb..3eac3de 100644
 +                );
 +            }
 +        }
-+        if changed {
++        // Tether: as in register_peer, a datagram (here: registered key, forged other IP) does not
++        // take the path of a host whose TCP/WebSocket connection is open.
++        let path = peer.read().await.socket_addr;
++        if changed && !(udp && TCP_PEERS.lock().await.contains_key(&try_into_v4(path))) {
 +            self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
 +        }
 +        crate::metrics::register_pk(0);
@@ -3301,7 +3453,7 @@ index dff45eb..3eac3de 100644
      }
  
      #[inline]
-@@ -620,17 +837,25 @@ impl RendezvousServer {
+@@ -620,17 +866,25 @@ impl RendezvousServer {
              &addr
          );
          let mut msg_out = RendezvousMessage::new();
@@ -3328,7 +3480,7 @@ index dff45eb..3eac3de 100644
              socket.send(&msg_out, addr_a).await?;
          } else {
              self.send_to_tcp(msg_out, addr_a).await;
-@@ -658,6 +883,7 @@ impl RendezvousServer {
+@@ -658,6 +912,7 @@ impl RendezvousServer {
              socket_addr: la.local_addr.clone(),
              pk: self.get_pk(&la.version, la.id).await,
              relay_server: la.relay_server,
@@ -3336,7 +3488,7 @@ index dff45eb..3eac3de 100644
              ..Default::default()
          };
          p.set_is_local(true);
-@@ -679,8 +905,9 @@ impl RendezvousServer {
+@@ -679,8 +934,9 @@ impl RendezvousServer {
          ws: bool,
      ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
          let mut ph = ph;
@@ -3347,7 +3499,7 @@ index dff45eb..3eac3de 100644
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
                  failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
-@@ -700,6 +927,7 @@ impl RendezvousServer {
+@@ -700,6 +956,7 @@ impl RendezvousServer {
                  (r.last_reg_time.elapsed().as_millis() as i64, r.socket_addr)
              };
              if elapsed >= REG_TIMEOUT {
@@ -3355,7 +3507,7 @@ index dff45eb..3eac3de 100644
                  let mut msg_out = RendezvousMessage::new();
                  msg_out.set_punch_hole_response(PunchHoleResponse {
                      failure: punch_hole_response::Failure::OFFLINE.into(),
-@@ -721,7 +949,12 @@ impl RendezvousServer {
+@@ -721,7 +978,12 @@ impl RendezvousServer {
                          break;
                      }
                  }
@@ -3369,7 +3521,7 @@ index dff45eb..3eac3de 100644
              }
  
              let mut msg_out = RendezvousMessage::new();
-@@ -744,6 +977,7 @@ impl RendezvousServer {
+@@ -744,6 +1006,7 @@ impl RendezvousServer {
                      }
                  });
              let socket_addr = AddrMangle::encode(addr).into();
@@ -3377,7 +3529,7 @@ index dff45eb..3eac3de 100644
              if same_intranet {
                  log::debug!(
                      "Fetch local addr {:?} {:?} request from {:?}",
-@@ -754,6 +988,7 @@ impl RendezvousServer {
+@@ -754,6 +1017,7 @@ impl RendezvousServer {
                  msg_out.set_fetch_local_addr(FetchLocalAddr {
                      socket_addr,
                      relay_server,
@@ -3385,7 +3537,7 @@ index dff45eb..3eac3de 100644
                      ..Default::default()
                  });
              } else {
-@@ -763,15 +998,29 @@ impl RendezvousServer {
+@@ -763,15 +1027,29 @@ impl RendezvousServer {
                      peer_addr,
                      addr
                  );
@@ -3415,7 +3567,7 @@ index dff45eb..3eac3de 100644
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
                  failure: punch_hole_response::Failure::ID_NOT_EXIST.into(),
-@@ -787,6 +1036,13 @@ impl RendezvousServer {
+@@ -787,6 +1065,13 @@ impl RendezvousServer {
          stream: &mut FramedStream,
          peers: Vec<String>,
      ) -> ResultType<()> {
@@ -3429,7 +3581,7 @@ index dff45eb..3eac3de 100644
          let mut states = BytesMut::zeroed((peers.len() + 7) / 8);
          for (i, peer_id) in peers.iter().enumerate() {
              if let Some(peer) = self.pm.get_in_memory(peer_id).await {
-@@ -805,9 +1061,7 @@ impl RendezvousServer {
+@@ -805,32 +1090,82 @@ impl RendezvousServer {
              states: states.into(),
              ..Default::default()
          });
@@ -3439,11 +3591,22 @@ index dff45eb..3eac3de 100644
 +        msg_out
      }
  
++    /// The last message for a controller's punch socket: its writer ends after sending it.
      #[inline]
-@@ -821,19 +1075,57 @@ impl RendezvousServer {
+     async fn send_to_tcp(&mut self, msg: RendezvousMessage, addr: SocketAddr) {
+-        let mut tcp = self.tcp_punch.lock().await.remove(&try_into_v4(addr));
+-        tokio::spawn(async move {
+-            Self::send_to_sink(&mut tcp, msg).await;
+-        });
++        if let Some(tx) = self.tcp_punch.lock().await.remove(&try_into_v4(addr)) {
++            tx.try_send(msg).ok();
++        }
+     }
+ 
++    /// False when the write failed or did not finish within PEER_SEND_TIMEOUT_MS.
      #[inline]
-     async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) {
-         if let Some(sink) = sink.as_mut() {
+-    async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) {
+-        if let Some(sink) = sink.as_mut() {
 -            if let Ok(bytes) = msg.write_to_bytes() {
 -                match sink {
 -                    Sink::TcpStream(s) => {
@@ -3452,34 +3615,49 @@ index dff45eb..3eac3de 100644
 -                    Sink::Ws(ws) => {
 -                        allow_err!(ws.send(tungstenite::Message::Binary(bytes)).await);
 -                    }
-+            Self::send_sink(sink, msg).await;
++    async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) -> bool {
++        match sink.as_mut() {
++            Some(sink) => Self::send_sink(sink, msg).await,
++            None => true,
 +        }
 +    }
 +
-+    async fn send_sink(sink: &mut Sink, msg: RendezvousMessage) {
-+        if let Ok(bytes) = msg.write_to_bytes() {
-+            match sink {
-+                Sink::TcpStream(s) => {
-+                    allow_err!(s.send(Bytes::from(bytes)).await);
-+                }
-+                Sink::Ws(ws) => {
-+                    allow_err!(ws.send(tungstenite::Message::Binary(bytes)).await);
++    async fn send_sink(sink: &mut Sink, msg: RendezvousMessage) -> bool {
++        let Ok(bytes) = msg.write_to_bytes() else {
++            return true;
++        };
++        let sent = match sink {
++            Sink::TcpStream(s) => timeout(PEER_SEND_TIMEOUT_MS, s.send(Bytes::from(bytes))).await.map(|r| r.is_ok()),
++            Sink::Ws(ws) => {
++                timeout(PEER_SEND_TIMEOUT_MS, ws.send(tungstenite::Message::Binary(bytes))).await.map(|r| r.is_ok())
++            }
++        };
++        sent.unwrap_or(false)
++    }
++
++    /// Tether: a punch socket is written by its own task from a bounded queue, in order, so
++    /// nobody (the main loop least of all) waits for a controller that does not read. The task
++    /// ends, closing the write side, when the entry leaves `tcp_punch` or a write fails.
++    fn punch_writer(mut sink: Sink) -> TcpPeerTx {
++        let (tx, mut rx) = mpsc::channel::<RendezvousMessage>(PEER_QUEUE);
++        tokio::spawn(async move {
++            while let Some(msg) = rx.recv().await {
++                if !Self::send_sink(&mut sink, msg).await {
++                    break;
                  }
              }
-         }
-     }
- 
++        });
++        tx
++    }
++
 +    /// Send to the controller's punch socket and keep it for later messages (ICE candidates);
-+    /// it is dropped when that connection closes.
-+    /// The lock is held while sending so a candidate racing this message is not lost; a peer that
-+    /// does not read within the bound loses its socket.
++    /// it is dropped when that connection closes, or here once its writer has ended or a
++    /// controller that does not read has filled its queue.
 +    async fn send_to_tcp_keep(&mut self, msg: RendezvousMessage, addr: SocketAddr) {
 +        let key = try_into_v4(addr);
 +        let mut punch = self.tcp_punch.lock().await;
-+        if let Some(sink) = punch.get_mut(&key) {
-+            if timeout(500, Self::send_sink(sink, msg)).await.is_err() {
-+                punch.remove(&key);
-+            }
++        if punch.get(&key).is_some_and(|tx| tx.try_send(msg).is_err()) {
++            punch.remove(&key);
 +        }
 +    }
 +
@@ -3500,13 +3678,20 @@ index dff45eb..3eac3de 100644
 +            let peer_addr = peer.read().await.socket_addr;
 +            msg_out.set_ice_candidate(ice);
 +            self.tx.send(Data::Msg(msg_out.into(), peer_addr)).ok();
-+        }
-+    }
-+
-     #[inline]
-     async fn send_to_tcp_sync(
-         &mut self,
-@@ -880,6 +1172,17 @@ impl RendezvousServer {
+         }
+     }
+ 
+@@ -840,8 +1175,7 @@ impl RendezvousServer {
+         msg: RendezvousMessage,
+         addr: SocketAddr,
+     ) -> ResultType<()> {
+-        let mut sink = self.tcp_punch.lock().await.remove(&try_into_v4(addr));
+-        Self::send_to_sink(&mut sink, msg).await;
++        self.send_to_tcp(msg, addr).await;
+         Ok(())
+     }
+ 
+@@ -880,6 +1214,17 @@ impl RendezvousServer {
          Ok(())
      }
  
@@ -3524,7 +3709,7 @@ index dff45eb..3eac3de 100644
      async fn check_ip_blocker(&self, ip: &str, id: &str) -> bool {
          let mut lock = IP_BLOCKER.lock().await;
          let now = Instant::now();
-@@ -887,7 +1190,8 @@ impl RendezvousServer {
+@@ -887,7 +1232,8 @@ impl RendezvousServer {
              let counter = &mut old.0;
              if counter.1.elapsed().as_secs() > IP_BLOCK_DUR {
                  counter.0 = 0;
@@ -3534,7 +3719,7 @@ index dff45eb..3eac3de 100644
                  return false;
              }
              counter.0 += 1;
-@@ -897,7 +1201,10 @@ impl RendezvousServer {
+@@ -897,7 +1243,10 @@ impl RendezvousServer {
              let is_new = counter.0.get(id).is_none();
              if counter.1.elapsed().as_secs() > DAY_SECONDS {
                  counter.0.clear();
@@ -3546,9 +3731,36 @@ index dff45eb..3eac3de 100644
                  return !is_new;
              }
              if is_new {
-@@ -911,19 +1218,28 @@ impl RendezvousServer {
+@@ -905,25 +1254,55 @@ impl RendezvousServer {
+             }
+             counter.1 = now;
+         } else {
++            // Tether: full until the next `prune_limiters`. Hosts re-sending their key still pass.
++            if lock.len() >= IP_BLOCKER_MAX {
++                crate::metrics::IP_BLOCKED[0].inc();
++                return false;
++            }
+             lock.insert(ip.to_owned(), ((0, now), (Default::default(), now)));
+         }
+         true
      }
  
++    /// Tether: what the `ib` and `ic` admin commands did by hand, on the main loop's timer: the
++    /// limiter tables are filled from unauthenticated (UDP: spoofable) source addresses.
++    async fn prune_limiters() {
++        let mut lock = IP_BLOCKER.lock().await;
++        lock.retain(|&_, (a, b)| {
++            a.1.elapsed().as_secs() <= IP_BLOCK_DUR
++                || b.1.elapsed().as_secs() <= DAY_SECONDS
++        });
++        if lock.len() >= IP_BLOCKER_MAX {
++            // Still full: forget the per-day id counts of IPs not seen within the per-minute window.
++            lock.retain(|&_, (a, _)| a.1.elapsed().as_secs() <= IP_BLOCK_DUR);
++        }
++        drop(lock);
++        IP_CHANGES.lock().await.retain(|&_, v| v.0.elapsed().as_secs() < IP_CHANGE_DUR_X2);
++    }
++
      fn parse_relay_servers(&mut self, relay_servers: &str) {
 -        let rs = get_servers(relay_servers, "relay-servers");
 +        let rs: RelayServers = relay_servers
@@ -3584,7 +3796,7 @@ index dff45eb..3eac3de 100644
      }
  
      async fn check_cmd(&self, cmd: &str) -> String {
-@@ -948,8 +1264,9 @@ impl RendezvousServer {
+@@ -948,8 +1327,9 @@ impl RendezvousServer {
                  if let Some(rs) = fds.next() {
                      self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                  } else {
@@ -3596,7 +3808,15 @@ index dff45eb..3eac3de 100644
                      }
                  }
              }
-@@ -1148,20 +1465,22 @@ impl RendezvousServer {
+@@ -1110,6 +1490,7 @@ impl RendezvousServer {
+         let stream = FramedStream::from(stream, addr);
+         tokio::spawn(async move {
+             let mut stream = stream;
++            stream.codec_mut().set_max_packet_length(MAX_FRAME);
+             if let Some(Ok(bytes)) = stream.next_timeout(30_000).await {
+                 if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
+                     match msg_in.union {
+@@ -1148,43 +1529,136 @@ impl RendezvousServer {
          key: &str,
          ws: bool,
      ) -> ResultType<()> {
@@ -3627,8 +3847,14 @@ index dff45eb..3eac3de 100644
                      }
                  }
                  Ok(response)
-@@ -1169,22 +1488,106 @@ impl RendezvousServer {
-             let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
+             };
+-            let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
++            let config = tungstenite::protocol::WebSocketConfig {
++                max_message_size: Some(MAX_FRAME),
++                max_frame_size: Some(MAX_FRAME),
++                ..Default::default()
++            };
++            let ws_stream = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(config)).await?;
              let (a, mut b) = ws_stream.split();
              sink = Some(Sink::Ws(a));
 -            while let Ok(Some(Ok(msg))) = timeout(30_000, b.next()).await {
@@ -3651,7 +3877,7 @@ index dff45eb..3eac3de 100644
 +                tokio::select! {
 +                    Ok(()) = release.changed(), if registered.is_some() => {
 +                        let g = *release.borrow_and_update();
-+                        if timeout(PEER_SEND_TIMEOUT_MS, Self::send_to_sink(&mut sink, release_hint(g))).await.is_err() {
++                        if !Self::send_to_sink(&mut sink, release_hint(g)).await {
 +                            break;
 +                        }
 +                        crate::metrics::RELEASE_HINTS[0].inc();
@@ -3674,7 +3900,7 @@ index dff45eb..3eac3de 100644
 +                                    log::info!("{} takes back its orphaned path for {}", addr, id);
 +                                    let mut m = RendezvousMessage::new();
 +                                    m.set_register_peer_response(RegisterPeerResponse { request_pk: true, ..Default::default() });
-+                                    if timeout(PEER_SEND_TIMEOUT_MS, Self::send_to_sink(&mut sink, m)).await.is_err() {
++                                    if !Self::send_to_sink(&mut sink, m).await {
 +                                        break;
 +                                    }
 +                                }
@@ -3690,7 +3916,7 @@ index dff45eb..3eac3de 100644
 +                            // during a push learns of the release on reconnect.
 +                            let g = *release.borrow_and_update();
 +                            if !was && registered.is_some() && g > 0 {
-+                                if timeout(PEER_SEND_TIMEOUT_MS, Self::send_to_sink(&mut sink, release_hint(g))).await.is_err() {
++                                if !Self::send_to_sink(&mut sink, release_hint(g)).await {
 +                                    break;
 +                                }
 +                                crate::metrics::RELEASE_HINTS[1].inc();
@@ -3701,14 +3927,17 @@ index dff45eb..3eac3de 100644
 +                        _ => break,
 +                    },
 +                    Some(msg) = peer_rx.recv() => {
-+                        if timeout(PEER_SEND_TIMEOUT_MS, Self::send_to_sink(&mut sink, msg)).await.is_err() {
++                        if !Self::send_to_sink(&mut sink, msg).await {
 +                            break;
 +                        }
                      }
                  }
              }
          } else {
-             let (a, mut b) = Framed::new(stream, BytesCodec::new()).split();
+-            let (a, mut b) = Framed::new(stream, BytesCodec::new()).split();
++            let mut codec = BytesCodec::new();
++            codec.set_max_packet_length(MAX_FRAME);
++            let (a, mut b) = Framed::new(stream, codec).split();
              sink = Some(Sink::TcpStream(a));
 -            while let Ok(Some(Ok(bytes))) = timeout(30_000, b.next()).await {
 -                if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
@@ -3724,7 +3953,7 @@ index dff45eb..3eac3de 100644
 +                        _ => break,
 +                    },
 +                    Some(msg) = peer_rx.recv() => {
-+                        if timeout(PEER_SEND_TIMEOUT_MS, Self::send_to_sink(&mut sink, msg)).await.is_err() {
++                        if !Self::send_to_sink(&mut sink, msg).await {
 +                            break;
 +                        }
 +                    }
@@ -3741,7 +3970,15 @@ index dff45eb..3eac3de 100644
          if sink.is_none() {
              self.tcp_punch.lock().await.remove(&try_into_v4(addr));
          }
-@@ -1268,24 +1671,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
+@@ -1233,6 +1707,7 @@ impl RendezvousServer {
+ 
+         if key.is_empty() || key == "-" || key == "_" {
+             let (pk, sk) = crate::common::gen_sk(0);
++            crate::common::require_key(key == "_", &pk);
+             out_sk = sk;
+             if !key.is_empty() {
+                 key = pk;
+@@ -1268,24 +1743,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
      let mut futs = Vec::new();
      let rs = Arc::new(Mutex::new(Vec::new()));
      for x in rs0.iter() {
@@ -3799,9 +4036,24 @@ index dff45eb..3eac3de 100644
      if !rs.is_empty() {
          tx.send(Data::RelayServers(rs)).ok();
      }
-@@ -1330,17 +1760,14 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+@@ -1329,18 +1831,29 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+     }
  }
  
++/// Tether: text fields hbbs passes on between peers, capped like ICE candidates.
++fn oversized(msg: &RendezvousMessage) -> bool {
++    use rendezvous_message::Union::*;
++    let (sdp, relay) = match &msg.union {
++        Some(PunchHoleRequest(m)) => (m.webrtc_sdp_offer.len(), 0),
++        Some(PunchHoleSent(m)) => (m.webrtc_sdp_answer.len(), m.relay_server.len()),
++        Some(RelayResponse(m)) => (m.webrtc_sdp_answer.len(), m.relay_server.len()),
++        Some(RequestRelay(m)) => (0, m.relay_server.len()),
++        Some(LocalAddr(m)) => (0, m.relay_server.len()),
++        _ => (0, 0),
++    };
++    sdp > MAX_SDP_LEN || relay > MAX_RELAY_SERVER_LEN
++}
++
  #[inline]
 -async fn send_rk_res(
 -    socket: &mut FramedSocket,
@@ -3820,7 +4072,7 @@ index dff45eb..3eac3de 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1788,483 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1874,716 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }
@@ -4113,7 +4365,7 @@ index dff45eb..3eac3de 100644
 +            };
 +            let mut first = vec![];
 +            for i in 0..40 {
-+                if ok(rs.register_pk(rk(i, &format!("uuid-{i}")), addr(i)).await) {
++                if ok(rs.register_pk(rk(i, &format!("uuid-{i}")), addr(i), false).await) {
 +                    first.push(i);
 +                }
 +            }
@@ -4121,10 +4373,10 @@ index dff45eb..3eac3de 100644
 +            // Restart: a new hbbs (empty memory, same database) behind the saturated limit.
 +            let mut rs = server(PeerMap::new().await.unwrap());
 +            for &i in &first {
-+                assert!(ok(rs.register_pk(rk(i, &format!("uuid-{i}")), addr(100 + i)).await), "known host {i} refused");
++                assert!(ok(rs.register_pk(rk(i, &format!("uuid-{i}")), addr(100 + i), false).await), "known host {i} refused");
 +            }
-+            assert!(!ok(rs.register_pk(rk(35, "uuid-35"), addr(200)).await), "new id passed the limit");
-+            assert!(!ok(rs.register_pk(rk(first[0], "wrong-uuid"), addr(201)).await), "wrong uuid passed");
++            assert!(!ok(rs.register_pk(rk(35, "uuid-35"), addr(200), false).await), "new id passed the limit");
++            assert!(!ok(rs.register_pk(rk(first[0], "wrong-uuid"), addr(201), false).await), "wrong uuid passed");
 +            let _ = std::fs::remove_file(&db);
 +        });
 +    }
@@ -4261,6 +4513,239 @@ index dff45eb..3eac3de 100644
 +        });
 +    }
 +
++    /// RegisterPk over UDP: the source address is the sender's choice, so it cannot stand in for
++    /// "same machine" when the key changes. First registrations and unchanged keys work as before.
++    #[test]
++    fn udp_register_pk_cannot_replace_a_key() {
++        let _g = DB_ENV.lock().unwrap_or_else(|e| e.into_inner());
++        tokio::runtime::Runtime::new().unwrap().block_on(async {
++            let db = std::env::temp_dir().join(format!("hbbs-udpkey-{}.sqlite3", std::process::id()));
++            let _ = std::fs::remove_file(&db);
++            std::env::set_var("DB_URL", db.to_str().unwrap());
++            let mut rs = server(PeerMap::new().await.unwrap());
++            let id = "udpkey01";
++            let rk = |pk: &'static str| RegisterPk {
++                id: id.into(),
++                uuid: Bytes::from_static(b"host-uuid"),
++                pk: Bytes::from_static(pk.as_bytes()),
++                ..Default::default()
++            };
++            let res = |m: Option<RendezvousMessage>| m.unwrap().register_pk_response().result.enum_value().unwrap();
++            let host: SocketAddr = "198.51.100.90:5000".parse().unwrap();
++            let evil: SocketAddr = "203.0.113.90:5000".parse().unwrap();
++            use register_pk_response::Result::OK;
++            assert_eq!(res(rs.register_pk(rk("host-pk"), host, true).await), OK, "first registration over UDP");
++            // The takeover: the host's uuid in a datagram that claims the host's address.
++            assert_eq!(res(rs.register_pk(rk("evil-pk"), host, true).await), UUID_MISMATCH);
++            assert_eq!(rs.pm.get_in_memory(id).await.unwrap().read().await.pk.as_ref(), b"host-pk");
++            // ... so its second step, the same key from the attacker's own address, fails too.
++            assert_eq!(res(rs.register_pk(rk("evil-pk"), evil, false).await), UUID_MISMATCH);
++            assert_eq!(res(rs.register_pk(rk("host-pk"), host, true).await), OK, "unchanged key over UDP");
++            // A connection's address is real: the host changes its key over TCP/WebSocket as before.
++            assert_eq!(res(rs.register_pk(rk("new-pk"), host, false).await), OK);
++            assert_eq!(rs.pm.get_in_memory(id).await.unwrap().read().await.pk.as_ref(), b"new-pk");
++            let _ = std::fs::remove_file(&db);
++        });
++    }
++
++    /// What hbbs does with datagrams: a forged RegisterPeer or RegisterPk from the IP of a host
++    /// registered over WebSocket neither moves its signalling path nor changes its key, and a
++    /// client whose connection has ended registers over UDP as before.
++    #[test]
++    fn udp_datagrams_do_not_take_over_a_websocket_host() {
++        let _g = DB_ENV.lock().unwrap_or_else(|e| e.into_inner());
++        tokio::runtime::Runtime::new().unwrap().block_on(async {
++            let db = std::env::temp_dir().join(format!("hbbs-udppath-{}.sqlite3", std::process::id()));
++            let _ = std::fs::remove_file(&db);
++            std::env::set_var("DB_URL", db.to_str().unwrap());
++            let mut rs = server(PeerMap::new().await.unwrap());
++            let mut socket = FramedSocket::new("127.0.0.1:0").await.unwrap();
++            // Somewhere for hbbs's answers to go; the sender's address in every datagram below.
++            let sender = hbb_common::tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
++            let udp = sender.local_addr().unwrap();
++            let id = "udppath1";
++            let host: SocketAddr = "127.0.0.1:40000".parse().unwrap();
++            let (host_tx, _h) = mpsc::channel(PEER_QUEUE);
++            assert!(rs.handle_tcp(&register_pk(id, b"host-uuid", b"host-pk"), &mut None, host, "", true, &host_tx).await);
++            assert_eq!(path(&rs, id).await, host);
++
++            rs.handle_udp(&BytesMut::from(&register_peer(id)[..]), udp, &mut socket, "").await.unwrap();
++            assert_eq!(path(&rs, id).await, host, "a datagram moved a WebSocket host's path");
++            rs.handle_udp(&BytesMut::from(&register_pk(id, b"host-uuid", b"evil-pk")[..]), udp, &mut socket, "").await.unwrap();
++            assert_eq!(path(&rs, id).await, host);
++            assert_eq!(rs.pm.get_in_memory(id).await.unwrap().read().await.pk.as_ref(), b"host-pk", "a datagram changed the key");
++            // The registered key from another (forged) IP: accepted before, and the path went there.
++            let other: SocketAddr = "127.0.0.2:9".parse().unwrap();
++            rs.handle_udp(&BytesMut::from(&register_pk(id, b"host-uuid", b"host-pk")[..]), other, &mut socket, "").await.unwrap();
++            assert_eq!(path(&rs, id).await, host, "RegisterPk in a datagram moved a WebSocket host's path");
++
++            // The connection ends (handle_listener_inner removes the entry): UDP registers.
++            TCP_PEERS.lock().await.remove(&host);
++            rs.handle_udp(&BytesMut::from(&register_peer(id)[..]), udp, &mut socket, "").await.unwrap();
++            assert_eq!(path(&rs, id).await, udp, "a client that went over to UDP did not register");
++            let _ = std::fs::remove_file(&db);
++        });
++    }
++
++    /// A connected TCP pair: hbbs's sink for it, and the controller's end.
++    async fn punch_pair() -> (Sink, Framed<TcpStream, BytesCodec>) {
++        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
++        let (server, _) = listener.accept().await.unwrap();
++        (Sink::TcpStream(Framed::new(server, BytesCodec::new()).split().0), Framed::new(client, BytesCodec::new()))
++    }
++
++    /// Messages for a controller's punch socket arrive in order and the socket is kept; one that
++    /// does not read costs the caller (the main loop, for UDP hosts) no time and loses its socket.
++    #[test]
++    fn punch_socket_writes_do_not_block_the_caller() {
++        let _g = DB_ENV.lock().unwrap_or_else(|e| e.into_inner());
++        tokio::runtime::Runtime::new().unwrap().block_on(async {
++            let db = std::env::temp_dir().join(format!("hbbs-punch-{}.sqlite3", std::process::id()));
++            let _ = std::fs::remove_file(&db);
++            std::env::set_var("DB_URL", db.to_str().unwrap());
++            let mut rs = server(PeerMap::new().await.unwrap());
++            let ice = |c: String| {
++                let mut m = RendezvousMessage::new();
++                m.set_ice_candidate(IceCandidate { candidate: c, ..Default::default() });
++                m
++            };
++            let reader: SocketAddr = "198.51.100.91:5000".parse().unwrap();
++            let (sink, mut controller) = punch_pair().await;
++            rs.tcp_punch.lock().await.insert(reader, RendezvousServer::punch_writer(sink));
++            for i in 0..10 {
++                rs.send_to_tcp_keep(ice(i.to_string()), reader).await;
++            }
++            for i in 0..10 {
++                let bytes = controller.next().await.unwrap().unwrap();
++                let m = RendezvousMessage::parse_from_bytes(&bytes).unwrap();
++                assert_eq!(m.ice_candidate().candidate, i.to_string());
++            }
++            assert!(rs.tcp_punch.lock().await.contains_key(&reader), "a socket that is read is kept");
++
++            let stalled: SocketAddr = "198.51.100.92:5000".parse().unwrap();
++            let (sink, _never_read) = punch_pair().await;
++            rs.tcp_punch.lock().await.insert(stalled, RendezvousServer::punch_writer(sink));
++            let big = ice("x".repeat(60_000));
++            let t = Instant::now();
++            for _ in 0..1_000 {
++                rs.send_to_tcp_keep(big.clone(), stalled).await;
++            }
++            assert!(t.elapsed() < Duration::from_millis(400), "waited {:?} for a controller that does not read", t.elapsed());
++            assert!(!rs.tcp_punch.lock().await.contains_key(&stalled), "stalled punch socket kept");
++            let _ = std::fs::remove_file(&db);
++        });
++    }
++
++    #[test]
++    fn oversized_fields_and_frames_are_refused() {
++        use tokio_tungstenite::tungstenite::Message as WsMsg;
++        let msg = |sdp: usize, relay: usize| {
++            let mut m = RendezvousMessage::new();
++            m.set_punch_hole_sent(PunchHoleSent {
++                webrtc_sdp_answer: "x".repeat(sdp),
++                relay_server: "x".repeat(relay),
++                ..Default::default()
++            });
++            m
++        };
++        assert!(!oversized(&msg(MAX_SDP_LEN, MAX_RELAY_SERVER_LEN)));
++        assert!(oversized(&msg(MAX_SDP_LEN + 1, 0)));
++        assert!(oversized(&msg(0, MAX_RELAY_SERVER_LEN + 1)));
++        let mut m = RendezvousMessage::new();
++        m.set_punch_hole_request(PunchHoleRequest { webrtc_sdp_offer: "x".repeat(MAX_SDP_LEN + 1), ..Default::default() });
++        assert!(oversized(&m));
++
++        let _g = DB_ENV.lock().unwrap_or_else(|e| e.into_inner());
++        tokio::runtime::Runtime::new().unwrap().block_on(async {
++            let db = std::env::temp_dir().join(format!("hbbs-frame-{}.sqlite3", std::process::id()));
++            let _ = std::fs::remove_file(&db);
++            std::env::set_var("DB_URL", db.to_str().unwrap());
++            let rs = server(PeerMap::new().await.unwrap());
++            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++            let port = listener.local_addr().unwrap().port();
++            tokio::spawn(async move {
++                loop {
++                    let (stream, addr) = listener.accept().await.unwrap();
++                    let mut rs = rs.clone();
++                    tokio::spawn(async move { rs.handle_listener_inner(stream, addr, "", true).await });
++                }
++            });
++            // An online query hbbs would answer, were it not larger than MAX_FRAME.
++            let online = |id_len: usize| {
++                let mut m = RendezvousMessage::new();
++                m.set_online_request(OnlineRequest { peers: vec!["x".repeat(id_len); 9_000], ..Default::default() });
++                m.write_to_bytes().unwrap()
++            };
++            assert!(online(10).len() < MAX_FRAME && online(60).len() > MAX_FRAME);
++            for (id_len, answered) in [(10, true), (60, false)] {
++                let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
++                let mut ws = tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws/id"), tcp).await.unwrap().0;
++                // The server may close while the oversized message is still being written.
++                let _ = ws.send(WsMsg::Binary(online(id_len))).await;
++                let got = hbb_common::tokio::time::timeout(Duration::from_secs(5), ws.next()).await.expect("no answer, not closed");
++                let is_answer = matches!(&got, Some(Ok(WsMsg::Binary(b))) if RendezvousMessage::parse_from_bytes(b).map_or(false, |m| m.has_online_response()));
++                assert_eq!(is_answer, answered, "{id_len}-byte ids: {:.80}", format!("{got:?}"));
++            }
++            // The same over plain TCP (stock clients, port 21116).
++            let rs = server(PeerMap::new().await.unwrap());
++            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++            let port = listener.local_addr().unwrap().port();
++            tokio::spawn(async move {
++                loop {
++                    let (stream, addr) = listener.accept().await.unwrap();
++                    let mut rs = rs.clone();
++                    tokio::spawn(async move { rs.handle_listener_inner(stream, addr, "", false).await });
++                }
++            });
++            for (id_len, answered) in [(10, true), (60, false)] {
++                let mut tcp = Framed::new(TcpStream::connect(("127.0.0.1", port)).await.unwrap(), BytesCodec::new());
++                let _ = tcp.send(Bytes::from(online(id_len))).await;
++                let got = hbb_common::tokio::time::timeout(Duration::from_secs(5), tcp.next()).await.expect("no answer, not closed");
++                let is_answer = matches!(&got, Some(Ok(b)) if RendezvousMessage::parse_from_bytes(b).map_or(false, |m| m.has_online_response()));
++                assert_eq!(is_answer, answered, "TCP, {id_len}-byte ids");
++            }
++            let _ = std::fs::remove_file(&db);
++        });
++    }
++
++    /// The RegisterPk limiter's table: stale entries go on the timer, and it is bounded while a
++    /// flood of (spoofed) source addresses lasts.
++    #[test]
++    fn ip_limiter_table_is_pruned_and_bounded() {
++        let _g = DB_ENV.lock().unwrap_or_else(|e| e.into_inner());
++        tokio::runtime::Runtime::new().unwrap().block_on(async {
++            let db = std::env::temp_dir().join(format!("hbbs-limiter-{}.sqlite3", std::process::id()));
++            let _ = std::fs::remove_file(&db);
++            std::env::set_var("DB_URL", db.to_str().unwrap());
++            let rs = server(PeerMap::new().await.unwrap());
++            let now = Instant::now();
++            let day_old = now - Duration::from_secs(DAY_SECONDS + 1);
++            let minute_old = now - Duration::from_secs(IP_BLOCK_DUR + 1);
++            IP_BLOCKER.lock().await.insert("stale".to_owned(), ((0, day_old), (Default::default(), day_old)));
++            assert!(rs.check_ip_blocker("192.0.2.200", "limiter01").await);
++            RendezvousServer::prune_limiters().await;
++            {
++                let lock = IP_BLOCKER.lock().await;
++                assert!(!lock.contains_key("stale"), "an entry older than a day survived the timer");
++                assert!(lock.contains_key("192.0.2.200"));
++            }
++            // A flood: more source addresses than the table takes, each seen once, a minute ago.
++            {
++                let mut lock = IP_BLOCKER.lock().await;
++                for i in 0..IP_BLOCKER_MAX {
++                    lock.insert(format!("flood-{i}"), ((0, minute_old), (Default::default(), now)));
++                }
++            }
++            assert!(!rs.check_ip_blocker("192.0.2.201", "limiter02").await, "the table grew past its bound");
++            assert!(!IP_BLOCKER.lock().await.contains_key("192.0.2.201"));
++            RendezvousServer::prune_limiters().await;
++            assert!(!IP_BLOCKER.lock().await.contains_key("flood-0"));
++            assert!(rs.check_ip_blocker("192.0.2.201", "limiter02").await, "no room after the prune");
++            let _ = std::fs::remove_file(&db);
++        });
++    }
++
 +    #[test]
 +    fn release_generation_file() {
 +        let p = std::env::temp_dir().join(format!("hbbs-relgen-{}", std::process::id()));
@@ -4306,10 +4791,10 @@ index dff45eb..3eac3de 100644
 +}
 diff --git a/src/turn.rs b/src/turn.rs
 new file mode 100644
-index 0000000..778654b
+index 0000000..f8be936
 --- /dev/null
 +++ b/src/turn.rs
-@@ -0,0 +1,934 @@
+@@ -0,0 +1,1076 @@
 +//! Tether: a TURN server (RFC 5766, UDP) inside hbbs, on hbbs's own UDP port (21116), so a
 +//! WebRTC session that cannot form a direct pair is relayed over UDP instead of hbbr's
 +//! TCP/WebSocket leg. The core's WebRTC data channel (KCP-style SCTP, see
@@ -4329,8 +4814,8 @@ index 0000000..778654b
 +//!
 +//! Abuse limits (a TURN server sends wherever it is told): no relaying to or from private,
 +//! loopback, link-local, CGNAT, multicast or reserved addresses, IPv4-mapped/embedded forms of
-+//! those, or the relay's own public address; at most `TURN_MAX_ALLOCATIONS` allocations and
-+//! `MAX_PEERS` peers per allocation; a per-allocation bandwidth cap; a credential opens new
++//! those, or the relay's own public address; at most `TURN_MAX_ALLOCATIONS` allocations,
++//! `TURN_MAX_ALLOCATIONS_PER_IP` of them per client IP, and `MAX_PEERS` peers per allocation; a per-allocation bandwidth cap; a credential opens new
 +//! allocations only for `CREDENTIAL_TTL`.
 +
 +use async_trait::async_trait;
@@ -4357,6 +4842,9 @@ index 0000000..778654b
 +const QUEUE: usize = 512;
 +/// Unauthenticated TURN requests (the first Allocate of each session) per second, all clients.
 +const UNAUTH_PER_SEC: usize = 50;
++/// Client addresses remembered for ChannelData and Send indications: those whose last
++/// authenticated request is the most recent (a client refreshes its permissions every few minutes).
++const MAX_CLIENTS: usize = 10_000;
 +/// A peer an allocation has not sent to for this long is no longer routed to it (RFC 5766
 +/// permission lifetime).
 +const PEER_TTL: Duration = Duration::from_secs(300);
@@ -4578,6 +5066,9 @@ index 0000000..778654b
 +    /// Fixed relay address; otherwise `host` is resolved every minute (DuckDNS follows the VM).
 +    pub public_ip: Option<Ipv4Addr>,
 +    pub max_allocations: usize,
++    /// Allocations one client IP may hold at a time (a session takes one per side; an office NAT
++    /// is one IP for all its hosts).
++    pub max_allocations_per_ip: usize,
 +    /// Per allocation, bytes per second in each direction.
 +    pub bandwidth: usize,
 +    /// Lab only: relay to private addresses and to the relay's own address (local and VM tests).
@@ -4596,6 +5087,7 @@ index 0000000..778654b
 +            port,
 +            public_ip: var("TURN_PUBLIC_IP").and_then(|v| v.parse().ok()),
 +            max_allocations: var("TURN_MAX_ALLOCATIONS").and_then(|v| v.parse().ok()).unwrap_or(64),
++            max_allocations_per_ip: var("TURN_MAX_ALLOCATIONS_PER_IP").and_then(|v| v.parse().ok()).unwrap_or(16),
 +            bandwidth: var("TURN_BANDWIDTH_MBPS")
 +                .and_then(|v| v.parse::<f64>().ok())
 +                .map_or(4 << 20, |m| (m * 1024. * 1024. / 8.) as usize),
@@ -4612,6 +5104,11 @@ index 0000000..778654b
 +    sock: Mutex<Option<Arc<UdpSocket>>>,
 +    control: Tx,
 +    clients: Mutex<HashMap<SocketAddr, Instant>>,
++    /// Client IP of the request the TURN crate is handling (its read loop handles one at a time),
++    /// which `allocate_conn` is not told.
++    handling: Mutex<IpAddr>,
++    /// Open allocations per client IP.
++    per_ip: Mutex<HashMap<IpAddr, usize>>,
 +    /// Peer address -> (allocation id, its queue, last sent to).
 +    peers: Mutex<HashMap<SocketAddr, (u64, Tx, Instant)>>,
 +    auth: Arc<RestAuth>,
@@ -4642,6 +5139,8 @@ index 0000000..778654b
 +            sock: Default::default(),
 +            control,
 +            clients: Default::default(),
++            handling: Mutex::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
++            per_ip: Default::default(),
 +            peers: Default::default(),
 +            auth: auth.clone(),
 +            live: AtomicUsize::new(0),
@@ -4681,10 +5180,11 @@ index 0000000..778654b
 +            });
 +        }
 +        log::info!(
-+            "TURN on udp :{} for {} (max {} allocations, {} Mbit/s each){}",
++            "TURN on udp :{} for {} (max {} allocations, {} per client IP, {} Mbit/s each){}",
 +            t.cfg.port,
 +            t.cfg.host,
 +            t.cfg.max_allocations,
++            t.cfg.max_allocations_per_ip,
 +            t.cfg.bandwidth * 8 / 1024 / 1024,
 +            if t.cfg.allow_private { ", private peers allowed: lab only" } else { "" }
 +        );
@@ -4747,25 +5247,19 @@ index 0000000..778654b
 +    pub fn dispatch(&self, b: &[u8], from: SocketAddr) -> bool {
 +        let from = v4(from);
 +        let to_control = match stun_method(b) {
-+            // The TURN crate keeps every nonce it hands out for an hour; requests without a valid
-+            // MESSAGE-INTEGRITY (each gets one) are capped so a flood cannot grow that map
-+            // without bound. Only a verified request claims its credential's first use.
++            // The TURN crate stores a nonce for each 401/438 it answers: 200 000 at most in the
++            // patched copy (server/patched/turn), where upstream keeps every unused one for good.
++            // Requests that are not authenticated are capped, so a flood cannot push the nonces
++            // of sessions being set up out of that table.
 +            Some(3) | Some(4) | Some(8) | Some(9) => {
-+                match self.auth.verified_user(b) {
-+                    Some(user) => self.auth.record_first_use(&user, from, now_secs()),
-+                    None if !self.unauth.lock().unwrap().take(1) => {
-+                        crate::metrics::TURN_UNAUTH_DROPPED.inc();
-+                        return true;
-+                    }
-+                    None => {}
++                if !self.admit(b, from) {
++                    crate::metrics::TURN_UNAUTH_DROPPED.inc();
++                    return true;
 +                }
-+                self.client(from);
 +                true
 +            }
-+            Some(6) => {
-+                self.client(from);
-+                true
-+            }
++            // Send indications and ChannelData carry no credential: from known clients only.
++            Some(6) => self.clients.lock().unwrap().contains_key(&from),
 +            _ => is_channel_data(b) && self.clients.lock().unwrap().contains_key(&from),
 +        };
 +        if to_control {
@@ -4792,14 +5286,33 @@ index 0000000..778654b
 +        true
 +    }
 +
++    /// Whether a TURN request goes on to the server. Authenticated (a valid MESSAGE-INTEGRITY
++    /// under a credential `RestAuth::check` still accepts from this address): always, and only
++    /// such a request claims its credential's first use and makes its sender a known client.
++    /// Anything else (the first Allocate of a session, a bad or expired credential): within
++    /// `UNAUTH_PER_SEC`.
++    fn admit(&self, b: &[u8], from: SocketAddr) -> bool {
++        let now = now_secs();
++        match self.auth.verified_user(b).filter(|u| self.auth.check(u, from, now).is_ok()) {
++            Some(user) => {
++                self.auth.record_first_use(&user, from, now);
++                self.client(from);
++                true
++            }
++            None => self.unauth.lock().unwrap().take(1),
++        }
++    }
++
 +    fn client(&self, from: SocketAddr) {
 +        let mut c = self.clients.lock().unwrap();
-+        if c.len() > 10_000 {
-+            c.retain(|_, at| at.elapsed() < Duration::from_secs(900));
++        if c.len() >= MAX_CLIENTS && !c.contains_key(&from) {
++            // Full: the client heard of longest ago makes room (its Allocate succeeded, so a new
++            // one must not be left out).
++            if let Some(oldest) = c.iter().min_by_key(|(_, at)| **at).map(|(a, _)| *a) {
++                c.remove(&oldest);
++            }
 +        }
-+        if c.len() < 10_000 {
-+            c.insert(from, Instant::now());
-+        }
++        c.insert(from, Instant::now());
 +    }
 +
 +    async fn send_to(&self, b: &[u8], to: SocketAddr) -> std::io::Result<usize> {
@@ -4838,6 +5351,7 @@ index 0000000..778654b
 +    async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
 +        match self.rx.lock().await.recv().await {
 +            Some((b, from)) => {
++                *self.turn.handling.lock().unwrap() = from.ip();
 +                let n = b.len().min(buf.len());
 +                buf[..n].copy_from_slice(&b[..n]);
 +                Ok((n, from))
@@ -4869,6 +5383,7 @@ index 0000000..778654b
 +/// to it, with the peer filter, peer cap and bandwidth cap applied.
 +struct RelayConn {
 +    id: u64,
++    client: IpAddr,
 +    turn: Arc<Turn>,
 +    tx: Tx,
 +    rx: Rx,
@@ -4882,6 +5397,13 @@ index 0000000..778654b
 +        if !self.closed.swap(true, Ordering::SeqCst) {
 +            self.turn.live.fetch_sub(1, Ordering::SeqCst);
 +            self.turn.peers.lock().unwrap().retain(|_, p| p.0 != self.id);
++            let mut per_ip = self.turn.per_ip.lock().unwrap();
++            if let Some(n) = per_ip.get_mut(&self.client) {
++                *n -= 1;
++                if *n == 0 {
++                    per_ip.remove(&self.client);
++                }
++            }
 +        }
 +    }
 +}
@@ -4985,10 +5507,23 @@ index 0000000..778654b
 +            log::warn!("TURN allocation refused: {} allocations open", t.cfg.max_allocations);
 +            return Err(turn::Error::Other("allocation limit".into()));
 +        }
++        let client = *t.handling.lock().unwrap();
++        {
++            let mut per_ip = t.per_ip.lock().unwrap();
++            let n = per_ip.entry(client).or_insert(0);
++            if *n >= t.cfg.max_allocations_per_ip {
++                crate::metrics::TURN_ALLOCATIONS_REFUSED.inc();
++                t.live.fetch_sub(1, Ordering::SeqCst);
++                log::warn!("TURN allocation refused: {} allocations open for {client}", t.cfg.max_allocations_per_ip);
++                return Err(turn::Error::Other("allocation limit per client address".into()));
++            }
++            *n += 1;
++        }
 +        crate::metrics::TURN_ALLOCATIONS.inc();
 +        let (tx, rx) = mpsc::channel(QUEUE);
 +        let conn = RelayConn {
 +            id: t.next_id.fetch_add(1, Ordering::SeqCst),
++            client,
 +            turn: t.clone(),
 +            tx,
 +            rx: tokio::sync::Mutex::new(rx),
@@ -5085,6 +5620,7 @@ index 0000000..778654b
 +            port,
 +            public_ip: Some(Ipv4Addr::LOCALHOST),
 +            max_allocations: 2,
++            max_allocations_per_ip: 16,
 +            bandwidth: 1 << 20,
 +            allow_private,
 +        })
@@ -5160,11 +5696,16 @@ index 0000000..778654b
 +    }
 +
 +    async fn lab_turn() -> Arc<Turn> {
++        lab_turn_max(4).await
++    }
++
++    async fn lab_turn_max(max_allocations: usize) -> Arc<Turn> {
 +        Turn::start(TurnConfig {
 +            host: "127.0.0.1".into(),
 +            port: 3478,
 +            public_ip: Some(Ipv4Addr::LOCALHOST),
-+            max_allocations: 4,
++            max_allocations,
++            max_allocations_per_ip: 3,
 +            bandwidth: 1 << 20,
 +            allow_private: true, // documentation-range test peers
 +        })
@@ -5198,33 +5739,119 @@ index 0000000..778654b
 +
 +    /// An Allocate request with USERNAME and a MESSAGE-INTEGRITY attribute that is not valid.
 +    fn bogus_signed_allocate(n: u32) -> Vec<u8> {
++        signed_allocate(n, &format!("{}:x", now_secs() + 100), None)
++    }
++
++    /// An Allocate request with USERNAME and MESSAGE-INTEGRITY, valid under `secret` if given.
++    fn signed_allocate(n: u32, user: &str, secret: Option<&str>) -> Vec<u8> {
 +        let mut b = vec![0x00, 0x03, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42];
 +        b.extend(n.to_be_bytes());
 +        b.extend([0u8; 8]);
-+        let user = format!("{}:x", now_secs() + 100);
 +        b.extend([0x00, 0x06]);
 +        b.extend((user.len() as u16).to_be_bytes());
 +        b.extend(user.as_bytes());
 +        while b.len() % 4 != 0 {
 +            b.push(0);
 +        }
-+        b.extend([0x00, 0x08, 0x00, 0x14]);
-+        b.extend([0u8; 20]);
-+        let len = (b.len() - 20) as u16;
++        let len = (b.len() - 20 + 24) as u16;
 +        b[2..4].copy_from_slice(&len.to_be_bytes());
++        let mac = secret.map_or(vec![0u8; 20], |s| {
++            let key = generate_auth_key(user, REALM, &password(s, user));
++            let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &key);
++            ring::hmac::sign(&key, &b).as_ref().to_vec()
++        });
++        b.extend([0x00, 0x08, 0x00, 0x14]);
++        b.extend(mac);
 +        b
 +    }
 +
 +    #[tokio::test(flavor = "multi_thread")]
 +    async fn invalid_integrity_counts_as_unauthenticated() {
 +        let t = lab_turn().await;
++        let mut passed = 0;
 +        for i in 0..200u32 {
 +            let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 30)), 10_000 + i as u16);
-+            t.dispatch(&bogus_signed_allocate(i), from);
++            passed += t.admit(&bogus_signed_allocate(i), from) as usize;
 +        }
 +        // Only what the unauthenticated budget (UNAUTH_PER_SEC, burst a quarter of it) let through.
-+        let passed = t.clients.lock().unwrap().len();
 +        assert!(passed <= UNAUTH_PER_SEC / 2, "{passed} requests with a bogus MESSAGE-INTEGRITY passed the cap");
++        assert!(t.clients.lock().unwrap().is_empty(), "an unauthenticated request made a known client");
++        t.close().await;
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn expired_credential_is_unauthenticated_except_for_its_session() {
++        let t = lab_turn().await;
++        let a: SocketAddr = "198.51.100.40:4000".parse().unwrap();
++        let b: SocketAddr = "198.51.100.41:4000".parse().unwrap();
++        let now = now_secs();
++        t.unauth.lock().unwrap().tokens = -1e12; // the unauthenticated budget is used up
++        let (user, _) = credential(&t.secret, "s", now);
++        assert!(!t.admit(&signed_allocate(1, &user, None), a));
++        assert!(t.admit(&signed_allocate(2, &user, Some(&t.secret)), a), "a current credential is not capped");
++        assert!(t.clients.lock().unwrap().contains_key(&a));
++        // A credential past its expiry still verifies, but opens nothing: capped like no credential.
++        let old = format!("{}:old", now - 10);
++        assert!(!t.admit(&signed_allocate(3, &old, Some(&t.secret)), b), "an expired credential passed the cap");
++        assert!(!t.clients.lock().unwrap().contains_key(&b));
++        // ... except from the address whose session it opened, which keeps refreshing under a flood.
++        t.auth.first_use.lock().unwrap().insert(old.clone(), (a, now - 10));
++        assert!(t.admit(&signed_allocate(4, &old, Some(&t.secret)), a));
++        assert!(!t.admit(&signed_allocate(5, &old, Some(&t.secret)), b));
++        t.close().await;
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn known_clients_are_authenticated_and_the_table_prunes_at_its_limit() {
++        let t = lab_turn().await;
++        let a: SocketAddr = "198.51.100.50:4000".parse().unwrap();
++        let mut send = vec![0x00, 0x16, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42];
++        send.extend([0u8; 12]);
++        let channel_data = [0x40, 0x00, 0x00, 0x02, 1, 2, 0, 0];
++        // Neither a Send indication nor ChannelData makes its sender a client or reaches the server.
++        assert!(!t.dispatch(&send, a) && !t.dispatch(&channel_data, a));
++        assert!(t.clients.lock().unwrap().is_empty());
++        t.client(a); // what an authenticated request does
++        assert!(t.dispatch(&send, a) && t.dispatch(&channel_data, a));
++        // Exactly full of clients heard of just now: a new one still gets in, for the oldest.
++        let oldest: SocketAddr = "198.51.100.51:4000".parse().unwrap();
++        {
++            let mut c = t.clients.lock().unwrap();
++            c.clear();
++            c.insert(oldest, Instant::now() - Duration::from_secs(60));
++            for i in 1..MAX_CLIENTS {
++                c.insert(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i as u32)), 1), Instant::now());
++            }
++        }
++        t.client(a);
++        let c = t.clients.lock().unwrap();
++        assert_eq!(c.len(), MAX_CLIENTS);
++        assert!(c.contains_key(&a), "a new client was left out of the full table");
++        assert!(!c.contains_key(&oldest));
++        drop(c);
++        t.close().await;
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn allocations_per_client_ip_are_limited() {
++        let t = lab_turn_max(64).await;
++        let relays = Relays(t.clone());
++        let (a, b): (IpAddr, IpAddr) = ("198.51.100.60".parse().unwrap(), "198.51.100.61".parse().unwrap());
++        *t.handling.lock().unwrap() = a;
++        let mut conns = Vec::new();
++        for _ in 0..t.cfg.max_allocations_per_ip {
++            conns.push(relays.allocate_conn(true, 0).await.unwrap().0);
++        }
++        assert!(relays.allocate_conn(true, 0).await.is_err(), "one client IP took more than its share");
++        assert_eq!(t.live.load(Ordering::SeqCst), t.cfg.max_allocations_per_ip);
++        // Another client IP is not affected, and an allocation that ends makes room again.
++        *t.handling.lock().unwrap() = b;
++        let other = relays.allocate_conn(true, 0).await.unwrap().0;
++        *t.handling.lock().unwrap() = a;
++        conns.pop().unwrap().close().await.unwrap();
++        conns.push(relays.allocate_conn(true, 0).await.unwrap().0);
++        drop((conns, other));
++        assert!(t.per_ip.lock().unwrap().is_empty());
 +        t.close().await;
 +    }
 +

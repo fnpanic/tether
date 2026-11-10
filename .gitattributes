@@ -13,3 +13,6 @@ server/sysctl/* text eol=lf
 
 # Paseo relay files, copied to the Hetzner node as they are.
 paseo-tunnel/relay/** text eol=lf
+
+# Patched TURN crate, copied into the relay build tree as it is.
+server/patched/** text eol=lf

@@ -74,7 +74,7 @@ class Crash extends React.Component<{ children: React.ReactNode }, { error: stri
       <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 bg-canvas p-6 text-center text-ink">
         <div className="text-callout font-semibold">Something went wrong in this window</div>
         <pre className="max-h-48 max-w-full overflow-auto whitespace-pre-wrap text-left font-mono text-footnote text-muted">{this.state.error}</pre>
-        <button className="rounded-full bg-accent px-4 py-1.5 text-caption text-white" onClick={() => location.reload()}>
+        <button className="rounded-full bg-accent px-4 py-1.5 text-caption text-on-accent" onClick={() => location.reload()}>
           Reload
         </button>
       </div>

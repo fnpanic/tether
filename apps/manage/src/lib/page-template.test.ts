@@ -111,6 +111,11 @@ test("placeholders only where escaping is enough", () => {
   assert.match(err('<a href="{{tether.customer.windows.notes}}">x</a>'), /takes only a \.url placeholder/);
   assert.match(err('<a href="javascript:{{tether.technician.windows.url}}">x</a>'), /at its start/);
   assert.match(err("<a {{tether.title}}>x</a>"), /quoted attribute values or text/);
+  // A `>` inside an earlier quoted value does not end the tag.
+  assert.match(err('<a title="a>b" onclick="go(\'{{tether.title}}\')">x</a>'), /event handler onclick/);
+  assert.match(err('<a title=\'a>b\' href="javascript:{{tether.technician.windows.url}}">x</a>'), /at its start/);
+  // Quotes and `<` in comments, scripts and text before the tag do not confuse it.
+  assert.deepEqual(fill('<!-- don\'t --><script>if(a<b)x="\'"</script><p>1 < 2 {{tether.title}}</p><a title="a>b" href="{{tether.technician.windows.url}}">x</a>', data()).errors, []);
   assert.deepEqual(fill('<div data-v="{{tether.technician.windows.version}}" title=\'{{tether.title}}\'></div><script>var a=1</script>{{tether.title}}', data()).errors, []);
 });
 

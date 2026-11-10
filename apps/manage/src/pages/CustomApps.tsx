@@ -71,6 +71,9 @@ async function toLogo(file: File): Promise<string> {
 
 const days = (unix: number) => Math.round((unix - Date.now() / 1000) / 86400);
 
+/** The product's default accent (policy customer.accent-color): the colour picker's start value. */
+const DEFAULT_ACCENT = "#0071e3";
+
 function Logo({ png, accent, size = 40 }: { png?: string; accent?: string; size?: number }) {
   return png ? (
     <img src={`data:image/png;base64,${png}`} alt="" width={size} height={size} className="shrink-0 rounded-md border border-hairline bg-tile object-contain" style={{ width: size, height: size }} />
@@ -107,7 +110,7 @@ function Editor({ form, set, features, onReview, onClose }: { form: Form; set: (
     >
       <div className="grid grid-cols-2 gap-x-6 gap-y-4">
         <Label text="Name" hint="Window title and company name in TetherQS; also the download's file name. 1–64 characters.">
-          <TextField autoFocus maxLength={64} value={form.name} onChange={(e) => set({ ...form, name: e.target.value })} placeholder="ACME Support" />
+          <TextField data-autofocus maxLength={64} value={form.name} onChange={(e) => set({ ...form, name: e.target.value })} placeholder="ACME Support" />
         </Label>
         <Label text="Logo" hint="PNG, JPEG or SVG; scaled to at most 256 × 256 px and 96 KiB.">
           <div className="flex items-center gap-3">
@@ -141,8 +144,8 @@ function Editor({ form, set, features, onReview, onClose }: { form: Form; set: (
         </Label>
         <Label text="Accent colour" hint="Buttons and highlights in TetherQS. Empty: the policy's colour.">
           <div className="flex items-center gap-2">
-            <input type="color" aria-label="Pick accent colour" className="h-9 w-12 shrink-0 rounded-md border border-hairline bg-parchment" value={form.accent || "#0071e3"} onChange={(e) => set({ ...form, accent: e.target.value })} />
-            <TextField value={form.accent} maxLength={7} placeholder="#0071e3" onChange={(e) => set({ ...form, accent: e.target.value.trim() })} />
+            <input type="color" aria-label="Pick accent colour" className="h-9 w-12 shrink-0 rounded-md border border-hairline bg-parchment" value={form.accent || DEFAULT_ACCENT} onChange={(e) => set({ ...form, accent: e.target.value })} />
+            <TextField aria-label="Accent colour (#rrggbb)" value={form.accent} maxLength={7} placeholder={DEFAULT_ACCENT} onChange={(e) => set({ ...form, accent: e.target.value.trim() })} />
           </div>
         </Label>
         <Label text="Update channel" hint="The TetherQS build the link serves.">

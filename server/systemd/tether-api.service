@@ -7,8 +7,14 @@ Wants=network-online.target
 Type=simple
 User=tether-api
 Group=tether-api
+# RELAY_HOST from server.env (install.sh): this relay's public host name(s), comma-separated.
+# Signed requests of current apps name the relay they are for and are refused without it; the
+# other values in server.env are not read by tether-api. api.env, read last, may override it.
+EnvironmentFile=-/etc/tether/server.env
 # ADMIN_PUB_KEY=<base64 Ed25519 key>[,<key>…]; empty disables the admin endpoints.
-# Optional: AUDIT_RETENTION_DAYS (default 90, 0 = store no audit records), AUDIT_MAX_MB (default 50).
+# Optional: AUDIT_RETENTION_DAYS (default 90, 0 = store no audit records), AUDIT_MAX_MB (default 50),
+# TETHER_SIG_V1=off (refuse the older request signatures that are not bound to a relay, once
+# every Tether Manage and technician app signs the new way).
 EnvironmentFile=/etc/tether/api.env
 ExecStart=/usr/local/bin/tether-api --data /var/lib/tether-api --listen 127.0.0.1:21120
 Restart=always

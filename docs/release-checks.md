@@ -1,7 +1,9 @@
 # Release checks: malware scanners
 
-Every release file is checked before it goes into `dist/` or is published (Windows setup and
-TetherQS exe, Tether Manage exe, Mac `.dmg`, `.app.tar.gz` and TetherQS zip):
+A manual step of every release: before publishing, the maintainer runs this on every release file
+(Windows setup and TetherQS exe, Tether Manage exe, Mac `.dmg`, `.app.tar.gz` and TetherQS zip).
+Nothing enforces it: neither Tether Manage nor CI looks at the result, and files have been published
+before the check finished (table below).
 
 ```sh
 bash scripts/release-checks.sh dist/windows/Tether_<v>_x64-setup.exe dist/quick/TetherQS-<v>.exe \
@@ -16,8 +18,12 @@ bash scripts/release-checks.sh dist/windows/Tether_<v>_x64-setup.exe dist/quick/
    `tools/release/virustotal/summary.md`; commit both with the release.
 
 Verdicts: CLEAN; WARN for a single detection by an engine other than Microsoft (printed and kept in
-the report, exit 0); FLAGGED for any Microsoft detection or two or more engines (exit 1). Exit code
-2 is an error. A flagged file is not published until the detection is understood and, for a false positive,
+the report, exit 0); FLAGGED for any Microsoft detection or two or more engines (exit 1); ERROR
+when there is no result: the file is unknown to VirusTotal, the analysis did not finish within the
+waiting time, or a request failed (exit 2). No result is never CLEAN: run the check again later.
+`release-checks.sh` exits with the highest code of its checks: 0 all clean (or WARN only), 1 a
+detection by Defender or VirusTotal, 2 a missing file or a check without a result. Publish only
+after exit 0. A flagged file is not published until the detection is understood and, for a false positive,
 reported to the vendor (Microsoft: <https://www.microsoft.com/wdsi/filesubmission>, "Software
 developer", "Incorrectly detected as malware").
 

@@ -15,7 +15,7 @@ are not deleted.
 
 | Step | Where |
 | --- | --- |
-| Standard page: the stable `latest.json` per app and OS from the first relay, then the HTML | `page_render`, `apps/manage/src-tauri/src/main.rs:1322`; `release::download_page`, `apps/manage/src-tauri/src/release.rs:253` (not changed by this feature) |
+| Standard page: the stable `latest.json` per app and OS from the first relay, then the HTML | `page_render` in `apps/manage/src-tauri/src/main.rs`; `release::download_page` in `apps/manage/src-tauri/src/release.rs` (not changed by this feature). `latest.json` is unsigned, so `published_artifact` takes its file name only when it is exactly the name Manage publishes for that app, platform and version (`release::target`); otherwise the app is shown as "Not available yet". The name goes into the page's links and its copy-paste PowerShell command. |
 | Upload to every relay | `page_publish`, `main.rs:1369`: `PUT /api/admin/download-page` |
 | Relay stores it | `server/api/src/main.rs:835` writes `download/index.html`. The body limit is `LIMIT_PAGE` = 512 KiB (`server/api/src/main.rs:52`, [api.md](api.md) lines 13 and 138) |
 | Relay serves it | Caddy `handle /` (`server/caddy/Caddyfile:109`) and nginx `location = /` (`server/nginx/nginx.conf:196`) serve `index.html`. It is also served as `/download/index.html` by the `/download/*` file server |

@@ -184,7 +184,9 @@ pub fn run(args: Vec<String>) {
                             }
                         });
                     }
-                    refuse_incoming_while_update_required();
+                    // Incoming sessions are checked per connection (sink.rs) against current
+                    // policy; a permission locked meanwhile is taken from running sessions.
+                    policy::start(false);
                 }
                 Mode::Connect { c, password } => {
                     let key = open_session_with(app.handle(), c)?;
@@ -606,23 +608,6 @@ fn listen_show_cm(identifier: &str) -> Option<std::os::unix::net::UnixListener> 
     std::os::unix::net::UnixListener::bind(&path)
         .map_err(|e| hbb_common::log::warn!("cm show socket {path:?}: {e}"))
         .ok()
-}
-
-/// Incoming sessions are refused while this version must be updated first: every connection the
-/// CM sees is closed. Policy and update state come from the caches (`policy::init`, `update.rs`).
-fn refuse_incoming_while_update_required() {
-    if !update::blocked() {
-        return;
-    }
-    hbb_common::log::warn!("update required: refusing incoming sessions");
-    std::thread::spawn(|| loop {
-        for c in sink::get().map(|s| s.cm_clients()).unwrap_or_default() {
-            if let Some(id) = c.get("id").and_then(|v| v.as_i64()) {
-                librustdesk::ui::cm::close(id as i32);
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(300));
-    });
 }
 
 pub fn open_session(app: &AppHandle, peer: &str, conn: &str) -> tauri::Result<String> {

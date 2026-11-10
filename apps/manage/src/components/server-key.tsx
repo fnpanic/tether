@@ -1,10 +1,10 @@
 // Keys › Server key: what the relays serve and the guided rotation (docs/key-rotation.md).
 import { useCallback, useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Check, Copy } from "lucide-react";
 import { useApp } from "../App";
-import { api, host, invoke, type Device, type RelayResult } from "../lib/ipc";
-import { announceList, confirmed, HELM_RETIRE, helmSwitch, isKey, newest, notSwitched, retireList, retireCommands, step, switchCommands, type LiveKeys, type Rotation, type Step } from "../lib/serverkeys";
+import { api, host, inTauri, invoke, type Device, type RelayResult } from "../lib/ipc";
+import { announceList, confirmed, currentKey, fromProblem, HELM_RETIRE, helmSwitch, isKey, newest, notSwitched, retireList, retireCommands, step, switchCommands, type LiveKeys, type Rotation, type Step } from "../lib/serverkeys";
 import { PublishSheet } from "./publish";
 import { Badge, Button, CopyField, ErrorText, IconButton, Label, StatusDot, TextField } from "./ui";
 
@@ -47,7 +47,7 @@ function Confirmations({ serial }: { serial: number }) {
       </p>
       {of > 0 && (
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-hairline" aria-hidden>
-          <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${(done / of) * 100}%` }} />
+          <div className="h-full origin-left rounded-full bg-accent transition-transform" style={{ transform: `scaleX(${done / of})` }} />
         </div>
       )}
       <p className="mt-2 text-footnote text-muted">
@@ -108,6 +108,8 @@ export function ServerKey() {
   const [expiry, setExpiry] = useState("");
   const [sheet, setSheet] = useState<"announce" | "retire" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The last publish could not compare the list with the relays' signing keys (none told).
+  const [unchecked, setUnchecked] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -135,8 +137,17 @@ export function ServerKey() {
       setError(e.message);
     }
   };
-  const fromLive = live?.keys[0] ?? "";
+  // What the relays sign with, not the list's first key: after a cancelled rotation they differ.
+  const fromLive = currentKey(relays ?? [], live);
+  const fromError = isKey(current || fromLive) || !(current || fromLive) ? fromProblem(current || fromLive, relays ?? []) : null;
   const pending = notSwitched(relays ?? [], rot.to);
+  // The list the sheet shows is the list that is published (expiry included).
+  const list = sheet === "announce" ? announceList(rot, expiry ? Math.floor(new Date(expiry).getTime() / 1000) : undefined) : sheet ? retireList(rot) : [];
+  const cancel = async () => {
+    const using = (relays ?? []).filter((r) => rot.to && r.signing === rot.to).map((r) => host(r.server));
+    if (using.length && inTauri && !(await ask(`${using.join(", ")} already sign${using.length === 1 ? "s" : ""} with the new key ${short(rot.to)}. Cancelling does not switch ${using.length === 1 ? "it" : "them"} back; the next rotation then starts from that key. Cancel the rotation?`, { title: "Cancel rotation", kind: "warning" }))) return;
+    await save({});
+  };
   const filesDeleted = async () => {
     await save({ ...rot, files: undefined });
     toast("Key files deleted");
@@ -144,7 +155,8 @@ export function ServerKey() {
   const from = rot.from ?? (current || fromLive);
 
   const publish = async (keys: ReturnType<typeof retireList>, skip: string[]): Promise<RelayResult[]> => {
-    const r = await invoke<{ serial: number; relays: RelayResult[] }>("serverkeys_publish", { keys, skip });
+    const r = await invoke<{ serial: number; relays: RelayResult[]; signing_checked?: boolean }>("serverkeys_publish", { keys, skip });
+    setUnchecked(r.signing_checked === false);
     await load();
     return r.relays;
   };
@@ -170,7 +182,7 @@ export function ServerKey() {
                 <>
                   <span className="text-muted">serial {r.serial}</span>
                   {r.keys?.map((k, i) => (
-                    <Badge key={k.key} tone={i === 0 ? "accent" : "muted"} title={k.key}>
+                    <Badge key={k.key} tone={i === 0 ? "ink" : "muted"} title={k.key}>
                       {short(k.key)}
                       {i === 0 ? " · presented" : ""}
                       {k.expires ? ` · until ${new Date(k.expires * 1000).toLocaleDateString()}` : ""}
@@ -195,7 +207,7 @@ export function ServerKey() {
           return (
             <li key={s.id} className={`rounded-xl border p-4 ${now ? "border-accent/60" : "border-hairline"} ${!now && !done ? "opacity-60" : ""}`} data-testid={`sk-step-${s.id}`}>
               <p className="flex items-center gap-2 text-callout font-semibold">
-                <span className={`grid h-5 w-5 place-items-center rounded-full text-footnote ${done ? "bg-ok text-white" : now ? "bg-accent text-white" : "bg-hairline"}`}>{done ? <Check size={12} /> : i + 1}</span>
+                <span className={`grid h-5 w-5 place-items-center rounded-full text-footnote ${done ? "bg-ok text-canvas" : now ? "bg-accent text-on-accent" : "bg-hairline"}`}>{done ? <Check size={12} /> : i + 1}</span>
                 {s.title}
               </p>
               {now && s.id === "generate" && (
@@ -203,13 +215,14 @@ export function ServerKey() {
                   <Label text="Current server public key" hint="The key the installed apps were built with (TETHER_PUB_KEY, /var/lib/tether/id_ed25519.pub on the relays).">
                     <TextField value={current || fromLive} onChange={(e) => setCurrent(e.target.value.trim())} placeholder="base64, 44 characters" className="font-mono" />
                   </Label>
+                  <ErrorText error={fromError} />
                   <div className="flex items-end gap-2">
                     <Label text="Passphrase" hint="The new private key is sealed into the key file with it.">
-                      <TextField type="password" value={pass} onChange={(e) => setPass(e.target.value)} />
+                      <TextField type="password" autoComplete="current-password" value={pass} onChange={(e) => setPass(e.target.value)} />
                     </Label>
                     <Button
                       variant="primary"
-                      disabled={!isKey(current || fromLive) || !pass}
+                      disabled={!isKey(current || fromLive) || !!fromError || !pass}
                       onClick={() =>
                         run(async () => {
                           const to = await invoke<string>("serverkeys_generate", { passphrase: pass });
@@ -246,7 +259,7 @@ export function ServerKey() {
                   <Confirmations serial={live.serial} />
                   <p className="text-caption text-muted">
                     When enough devices have the list: install the new key on every relay, one at a time. hbbs and hbbr then sign with the new key and still accept the old one. Devices without the list stop
-                    connecting until they fetch it. Copy <code className="font-mono">server/rotate-key.sh</code> next to the key files.
+                    connecting until they fetch it. Copy <code className="font-mono">server/rotate-key.sh</code> next to the key files and run the commands in that folder.
                   </p>
                   <div>
                     <Button
@@ -320,9 +333,9 @@ export function ServerKey() {
         </div>
       )}
       {at !== "generate" && at !== "done" && (
-        <p className="mt-3 text-footnote text-faint">
+        <p className="mt-3 text-footnote text-muted">
           Rotating {short(from)} → {short(rot.to)}.{" "}
-          <button className="underline" onClick={() => run(() => save({}))}>
+          <button className="underline" onClick={() => run(cancel)}>
             Cancel rotation
           </button>{" "}
           (the generated key stays in the key file).
@@ -336,15 +349,23 @@ export function ServerKey() {
           title={sheet === "announce" ? "Publish key list: current + new" : "Publish key list: new key only"}
           action="Publish"
           onClose={() => setSheet(null)}
-          run={(skip) => publish(sheet === "announce" ? announceList(rot, expiry ? Math.floor(new Date(expiry).getTime() / 1000) : undefined) : retireList(rot), skip)}
-          after={(r) => r.some((x) => x.ok) && <p className="mt-4 text-caption text-muted">Devices pick it up with their next policy check.</p>}
+          run={(skip) => publish(list, skip)}
+          after={(r) =>
+            r.some((x) => x.ok) && (
+              <p className="mt-4 text-caption text-muted">
+                Devices pick it up with their next policy check.
+                {unchecked && " No relay told which key it signs with, so the list could not be checked against it."}
+              </p>
+            )
+          }
         >
           <ul className="flex flex-col gap-1.5 text-caption">
-            {(sheet === "announce" ? announceList(rot) : retireList(rot)).map((k, i) => (
-              <li key={k.key} className="flex items-center gap-2">
-                <Badge tone={i === 0 ? "accent" : "muted"}>{i === 0 ? "presented" : "trusted"}</Badge>
+            {list.map((k, i) => (
+              <li key={k.key} className="flex flex-wrap items-center gap-2">
+                <Badge tone={i === 0 ? "ink" : "muted"}>{i === 0 ? "presented" : "trusted"}</Badge>
                 <code className="font-mono">{k.key}</code>
                 {k.key === rot.from ? "current" : "new"}
+                {!!k.expires && <span className="text-muted">· trusted until {new Date(k.expires * 1000).toLocaleDateString()}</span>}
               </li>
             ))}
           </ul>

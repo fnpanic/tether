@@ -192,6 +192,7 @@ export function Diagnostics() {
 
       {created && (
         <Modal
+          label="Diagnostics code"
           onClose={() => setCreated(null)}
           width={520}
           footer={

@@ -65,8 +65,9 @@ retry without them on a `400`): `release_serial` (release index serial the devic
 `200 {"releases": G}` on success (relays before 0.5.24: `204`, no body): `G` is the relay's
 release generation, bumped by every change of a `releases.json` or `latest.json`. A client that
 sees it change checks for updates (after a random delay); it is unsigned and only triggers a fetch.
-Clients up to 0.5.23 accept any 2xx and ignore the body. `429` when the same uuid posts more than once per 60 s or an IP more than 30 per
-minute. The server stores `{…, "ip": <client ip from X-Forwarded-For>, "last_seen": unix}` per uuid,
+Clients up to 0.5.23 accept any 2xx and ignore the body. `429` when the same uuid posts more than once per 60 s, or when one IP sends more than 30
+heartbeats per minute for uuids the relay does not know yet (known devices are not counted per
+IP; an IPv6 client counts as its /64, see "Limits"). The server stores `{…, "ip": <client ip from X-Forwarded-For>, "last_seen": unix}` per uuid,
 at most 50 000 devices (oldest `last_seen` evicted; ~30 MB of memory, [scaling.md](scaling.md)), entries older than 180 days dropped.
 Clients send it after each policy check.
 
@@ -75,7 +76,7 @@ Upload a diagnostics zip for a ticket an admin opened. `<ticket>` is 8 character
 (no ambiguous letters). Body `application/zip`, ≤ 2 MiB. `204` if the ticket is open (state
 `open`, below) on this relay, else `404`, answered before the body is read: body `not found` when
 the relay does not know the ticket, `ticket not open` when it is used, expired or closed there. One upload per ticket. Upload limits as for release uploads ("Limits" below):
-`503` with `Retry-After: 30` while 4 uploads run, `413` over 2 MiB, `408` below the minimum rate,
+`503` with `Retry-After: 30` while 4 diagnostics uploads run, `413` over 2 MiB, `408` below the minimum rate,
 `400 request body incomplete` when the client went away before its `Content-Length` arrived (the
 ticket stays open; up to 0.5.26 such a truncated body was stored and used the ticket up).
 
@@ -119,7 +120,7 @@ alarm (whitelist block, …):   {"typ":0,"info":"<JSON text ≤ 1024>",…}
 
 Answers: `204` with an empty body when stored (also when the same `nonce` was stored in the last
 10 minutes: a client retry), `400` invalid (the client drops it), `413` too large, `429` more than
-120 posts/min from one IP or 60/min from one device `uuid` (the client retries 429 and 5xx for up
+120 posts/min from one IP (IPv6: one /64) or 60/min from one device `uuid` (the client retries 429 and 5xx for up
 to 120 s), `507` disk low or the log at its size cap. Not authenticated: see SECURITY.md
 "Session audit log". Records never change devices, policy or anything else on the relay.
 
@@ -138,14 +139,50 @@ start and every minute.
 
 ## Admin endpoints (signed requests)
 
-Every request carries `Tether-Sig: v1 ts=… nonce=… sig=…` (see `tether_trust::reqauth`; the path
-includes the query string; body hash covers the exact bytes sent). The server verifies against
-every trusted admin key, allows ±300 s clock skew, and rejects a nonce seen in the last 600 s.
+Every request carries `Tether-Sig: v2 host=<relay host> ts=<unix secs> nonce=<16-64 [A-Za-z0-9]> sig=<b64>`
+(`tether_trust::reqauth`). The signed message is
+
+```
+tether-admin-v2\n<host>\n<METHOD>\n<path with query>\n<ts>\n<nonce>\n<hex sha256 of the body>
+```
+
+`<host>` is the relay the request is for (`reqauth::host_of`: the host of its base URL, lower
+case, without scheme, port and path), so a captured request is worth nothing at another relay.
+`host_of` accepts only a plain host name or an IPv6 literal, with an optional numeric port;
+anything else (a user name, `\`, `%`, spaces) names no host, and no relay accepts that.
+The body hash covers the exact bytes sent. The server verifies against every trusted admin key
+(strictly: a weak key or a non-canonical signature never verifies), allows ±300 s clock skew, and
+rejects a nonce seen in the last 601 s (longer than the whole window a signature is accepted in).
+The nonce of a release upload is remembered for about 70 minutes, longer than the slowest upload
+the server lets finish, so a captured upload cannot be replayed as a slow upload that ends after
+the nonce was forgotten.
 Failure: `401` with a short reason. Bodies over the limits: `413`.
+
+**The relay must know its own name.** tether-api accepts a v2 signature only when `host` is one of
+the names in its environment variable `RELAY_HOST` (comma-separated; an entry may be a host name
+or a URL). `install.sh` writes it to `/etc/tether/server.env`, which `tether-api.service` reads
+(`api.env`, read after it, may override it); the Helm chart sets it from `publicUrl`. Without
+`RELAY_HOST` every v2 request gets `401` (`this relay does not know its own host name …`) and
+tether-api logs `warning: RELAY_HOST is not set` at start. A request signed for another name gets
+`401 request signed for another relay`.
+
+**v1 (apps before this change).** `Tether-Sig: v1 ts=… nonce=… sig=…` has no `host=` and signs
+`tether-admin-v1\n<METHOD>\n<path>\n<ts>\n<nonce>\n<body hash>`. A relay accepts it until
+`TETHER_SIG_V1=off` is set in `/etc/tether/api.env` (then: `401 v1 signatures are switched off on
+this relay: update the app`). While v1 is accepted, a captured v1 request can be replayed at
+another relay that trusts the same key within ±300 s (each relay keeps its own nonces). Tether
+Manage and the technician app (team requests) sign v2 and follow no HTTP redirects. They never
+fall back to v1 by themselves. **Rollout order:** first every relay, with `RELAY_HOST` set to the
+host name(s) entered for it in Tether Manage; then Tether Manage and the apps; last
+`TETHER_SIG_V1=off` on every relay.
+
+Used nonces are stored in `nonces.json`, so a restart does not reopen the replay window. When that
+file cannot be written (disk full) the request still succeeds and the error is logged; the nonce
+keeps blocking replays in memory.
 
 | Method & path | Body | Result |
 | --- | --- | --- |
-| `PUT /api/admin/policy` | signed policy document (≤ 256 KiB) | `204`. The server also verifies the signature, validates the bundle and requires `serial` > current (`409` otherwise). Stored atomically, previous versions kept in `policy-history/<serial>.json` (last 50). |
+| `PUT /api/admin/policy` | signed policy document (≤ 256 KiB) | `204`. The server also verifies the signature, validates the bundle strictly (`Bundle::validate`; `400` for an unknown feature, a bad value, an `update.minimum-version` that is not empty or a version, an `update.channel` that is not empty or a channel name) and requires `serial` > current (`409` otherwise). Stored atomically, previous versions kept in `policy-history/<serial>.json` (last 50). |
 | `PUT /api/admin/server-keys` | signed server key list (≤ 16 KiB) | `204`. Verified against the admin keys, validated (`KeyList::validate`), `serial` > current (`409` otherwise). Stored as `server-keys.json`. |
 | `GET /api/admin/policy-history` | – | `[{"serial":…, "issued_at":…}]` newest first |
 | `GET /api/admin/policy-history/<serial>` | – | the signed document exactly as published (`404` if not kept) |
@@ -155,12 +192,12 @@ Failure: `401` with a short reason. Bodies over the limits: `413`.
 | `GET /api/admin/diag/<ticket>` | – | the zip (`application/zip`, also of a closed ticket) or `404` |
 | `POST /api/admin/diag/<ticket>/close` | – | `204`: the ticket is closed (archived), uploads get `404`, kept 90 days with its zip. Closing again: `204`, no change. Unknown: `404`. Journal line `diag ticket <code> closed`. |
 | `DELETE /api/admin/diag/<ticket>` | – | `204`: ticket and zip removed for good, in any state. Unknown (or deleted already): `404`. Journal line `diag ticket <code> deleted`. |
-| `PUT /api/admin/release/<channel>/<path>` | file bytes (≤ 200 MiB) | `204`. Writes `download/<channel>/<path>` atomically. `<channel>` `[a-z0-9-]{1,32}`; `<path>` segments `[A-Za-z0-9._-]`, no `..`. Upload artifacts first, `latest.json` last. Refused before the body is read: admin API off (`503`), bad path (`400`), no `Tether-Sig` or its `ts` outside ±300 s (`401`); the signature itself is checked after the body arrived. At most 4 release and diagnostics uploads at once (`503`, `Retry-After: 30`). |
+| `PUT /api/admin/release/<channel>/<path>` | file bytes (≤ 200 MiB) | `204`. Writes `download/<channel>/<path>` atomically. `<channel>` `[a-z0-9-]{1,32}`; `<path>` segments `[A-Za-z0-9._-]`, no `..`. Upload artifacts first, `latest.json` last. Refused before the body is read: admin API off (`503`), bad path (`400`), no `Tether-Sig` or its `ts` outside ±300 s (`401`); the signature itself is checked after the body arrived, its `ts` against the time the upload began (a slow upload may outlast the skew). At most 4 release uploads at once (`503`, `Retry-After: 30`); diagnostics uploads have their own 4 slots. The slot is granted on the unverified header, see "Limits". |
 | `DELETE /api/admin/release/<channel>/<path>[?force=1]` | – | `204`; `404` if missing. `409 "published release: …"` for `releases.json`, any `latest.json`, and every file of the version the channel's release index or the folder's `latest.json` publishes, unless `?force=1` (part of the signed URL). Forced deletes are logged (`release-prune.jsonl`, journal). |
 | `POST /api/admin/releases/prune` | JSON (≤ 64 KiB, below) | Release clean-up: the plan (`dry_run: true`) or the deletion of the listed versions (below). |
 | `GET /api/admin/releases` | – | `[{channel,path,size,modified}]` |
 | `PUT /api/admin/download-page` | HTML (≤ 512 KiB) | `204`, stored as `download/index.html` |
-| `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>` | – | Session audit records (above), newest first. All optional: `since` (default 0), `limit` 1–5000 (default 1000), `device` matches `id` or `uuid` exactly (URL-encoded). Unknown parameter or bad value: `400`. |
+| `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>` | – | Session audit records (above), newest first. All optional: `since` (default 0), `limit` 1–5000 (default 1000), `device` matches `id` or `uuid` exactly (URL-encoded). Unknown parameter or bad value: `400`. One answer holds at most about 8 MiB of records; when older ones were left out for that, it carries the header `X-Audit-Truncated: 1` (the Sessions page of Tether Manage then names the relay). |
 | `GET /api/admin/status` | – | `{version, disk_free, devices, policy_serial, server_keys_serial, release_generation, release_indexes: {<channel>: {serial, expires}}, uptime, last_prune: {time, files, bytes} \| null}` |
 | `PUT /api/admin/team` | team roster (≤ 64 KiB, below) | `204`. Validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600). `{"members":[]}` turns team access off. |
 | `GET /api/admin/team` | – | the roster (`{"members":[]}` when none) |
@@ -182,10 +219,10 @@ key as its **fingerprint**: `hex(sha256(raw 32-byte key))`, first 16 hex digits,
 groups of 4 (`630D-CD29-66C4-3366` for the key bytes `00 01 … 1f`;
 `tether_trust::team::fingerprint`).
 
-Member requests carry the same `Tether-Sig` header as admin requests (same message, ±300 s skew),
+Member requests carry the same `Tether-Sig` header as admin requests (same message, v2 or v1 under the same rules, ±300 s skew),
 signed with the member's key. The relay tries every roster key; the nonce cache is the one admin
 requests use. Unknown key, bad signature, no roster or an empty roster: `401` with a short reason.
-Limits: 120 requests/min per member key and 60 failed signatures/min per IP (`429`). Unknown path:
+Limits: 120 requests/min per member key and 60 failed signatures/min per IP (IPv6: per /64; `429`). Unknown path:
 `404`.
 
 | Method & path | Body | Result |
@@ -279,7 +316,7 @@ Written by Tether Manage (`PUT /api/admin/release/<channel>/releases.json`, sign
 the `latest.json` files. tether-api accepts it only if it is a `tether_trust::envelope::Signed`
 document from a trusted admin key, of `type` `tether-releases/1`, for the channel of its path, with
 a serial above the stored one (`409` otherwise; the identical document again is `204`). Served by
-tether-api (Caddy/nginx route `GET /download/<channel>/releases.json` to it) with
+tether-api (Caddy and nginx route `GET /download/<channel>/releases.json` and `releases-v2.json` to it) with
 `ETag: "<serial>"` (equal on every relay), `304` on `If-None-Match`, `Cache-Control: no-cache`.
 Payload (≤ 64 KiB):
 ```json
@@ -318,7 +355,7 @@ old format for them.
 
 - Written by Manage right after `releases.json` (`PUT …/releases-v2.json`, same checks: trusted
   admin key, channel, serial above the stored v2 serial); served by tether-api the same way
-  (Caddy's `@index` matcher covers both names). Deleted on disk: `404` at once.
+  (Caddy's `@index` matcher and the nginx location cover both names). Deleted on disk: `404` at once.
 - TetherQS 0.5.31 / Tether 0.5.33 and later ask every relay for both files, v2 first, and take the
   highest serial over all of them (v2 on a tie). A stale v2 (published with it switched off, see
   docs/updates.md "Two index files") or a missing one costs nothing: `releases.json` wins.
@@ -337,7 +374,7 @@ works on any relay. The relay never modifies the profile; TetherQS verifies the 
 | `PUT /api/admin/custom/<id>` (signed) | `{"profile": <signed CustomProfile document>, "token": "<43 chars base64url>", "expires": <unix>, "channel": "stable"}` (≤ 300 KiB) | `204`. The server verifies the signature against its admin keys, runs `CustomProfile::validate`, requires `profile.id == <id>`, `custom::valid_token(token)` and `expires` in the future (≤ 366 days). Replaces an existing entry with that id (new token = old link stops working). Stored in `custom/<id>.json` (0600). |
 | `GET /api/admin/custom` (signed) | – | `[{id, name, token, expires, channel, created, downloads, last_download}]` |
 | `DELETE /api/admin/custom/<id>` (signed) | – | `204`; the link stops working at once. `404` if unknown. |
-| `GET /q/<token>` (public) | – | Windows: the current `TetherQS-<v>.exe` of the entry's channel (from `download/<channel>/customer/windows-x86_64/latest.json`) with `custom::attach(<exe>, <signed profile>)` (the trailer appended, or for an Authenticode-signed exe placed at the end of its certificate table so the signature stays valid), `Content-Disposition: attachment; filename="<Name>-Support.exe"` (name reduced to `[A-Za-z0-9 _.-]`). A `User-Agent` containing `Macintosh` (every Mac browser; iPhones say "like Mac OS X" and get the exe) gets the macOS zip instead, as `/mac`. `404` for unknown, revoked **and** expired tokens (same answer, no oracle). Rate-limited to 30 requests/min per IP (all `/q/` requests together). Counts downloads. |
+| `GET /q/<token>` (public) | – | Windows: the current `TetherQS-<v>.exe` of the entry's channel (from `download/<channel>/customer/windows-x86_64/latest.json`) with `custom::attach(<exe>, <signed profile>)` (the trailer appended, or for an Authenticode-signed exe placed at the end of its certificate table so the signature stays valid), `Content-Disposition: attachment; filename="<Name>-Support.exe"` (name reduced to `[A-Za-z0-9 _.-]`). A `User-Agent` containing `Macintosh` (every Mac browser; iPhones say "like Mac OS X" and get the exe) gets the macOS zip instead, as `/mac`. `404` for unknown, revoked **and** expired tokens (same answer, no oracle). Rate-limited to 30 requests/min per IP (IPv6: per /64; all `/q/` requests together). Counts downloads. |
 | `GET /q/<token>/windows`, `GET /q/<token>/mac` (public) | – | The same link for one platform, whatever the browser. `/mac`: the channel's `TetherQS-<v>-universal.zip` (`customer/darwin-universal/latest.json`, key `darwin-universal`) with its one top-level `TetherQS.app` folder renamed to `<Name>-Support [<mac id>].app` (also in `__MACOSX/`), `Content-Type: application/zip`, `filename="<Name>-Support.zip"`. Only the names in the zip headers change (data, CRCs, modes, the signature inside are byte-for-byte the same; zip64 refused). |
 | `GET /q/m/<mac id>` (public) | – | The signed profile document of the custom app whose token gives this mac id (`custom::mac_id`: the first 16 hex characters of SHA-256 over `"tetherqs-mac-id\0" + token`), `Cache-Control: no-store`. Answers also after the link expired (a copy downloaded before keeps its branding, as on Windows); `404` once the app is deleted or got a new link. Not counted as a download. |
 
@@ -359,13 +396,43 @@ Evidence and limits: [macos.md](macos.md#custom-apps).
 ## Limits (1 GB relay VM)
 
 `tether-api` is a `tiny_http` service with `MemoryMax=64M`. It serves up to 32 requests at once
-(more get 503) and keeps its state behind one lock that is never held while a body is read or a
-response written, nor for the release signature check, audit log queries or preparing a `/q/`
-copy; each read and write times out after 30 s, and a body must arrive within 60 s plus 64 KiB/s
-and, after its first 30 s, average at least 16 KiB/s (else `408` for uploads, `400` otherwise).
-Request bodies are streamed to disk for uploads (release, diagnostics; at most 4 at a time, more
-get `503` with `Retry-After: 30`, so heartbeats keep 28 workers) and held in memory otherwise
-(512 KiB at most). A request refused before its body was read is answered with
-`Connection: close` and the rest of the body is not read. Device lists are written through a temp
-file, not a buffer; custom-app profiles stay on disk (`custom/<id>.json`). Every JSON write is temp
-file + rename; no database.
+(more get `503 busy`, answered without reading the body) and keeps its state behind one lock that
+is never held while a body is read or a response written, nor for the release signature check,
+audit log queries or preparing a `/q/` copy; each read and write times out after 30 s, and a body
+must arrive within 60 s plus 64 KiB/s and, after its first 30 s, average at least 16 KiB/s (else
+`408` for uploads, `400` otherwise).
+
+Request bodies are streamed to disk for uploads and held in memory otherwise (512 KiB at most).
+Uploads have two separate pools of 4 slots, one for release uploads and one for diagnostics
+uploads (more get `503` with `Retry-After: 30`), so uploads never hold more than 8 workers and
+heartbeats keep 24 of the 32. A diagnostics upload gets its slot only for an open ticket. A
+release upload gets its slot on a `Tether-Sig` header with a current `ts`: the signature covers
+the body, so it is verified only after the body arrived. Somebody without a key can therefore
+occupy the 4 release slots with made-up uploads (each for as long as the minimum rate allows) and
+keep real release uploads out meanwhile. The diagnostics slots and all other requests are not
+affected (`shortcut:` note at `MAX_UPLOADS` in `server/api/src/main.rs`).
+
+Only `POST` and `PUT` routes take a body. Any other request that announces one (`Content-Length`
+above 0, or `Transfer-Encoding`) and any request with `Connection: upgrade` gets
+`400 unexpected request body` before anything is read. A request refused before its body was read
+(these, `503 busy`, a refused upload, `413`) is answered with `Connection: close` and the rest of
+the body is not read. `/metrics` reads no body.
+
+The patched `tiny_http` (`server/api/patched/tiny_http`) gives every accepted connection a 30 s
+read timeout: a client that stalls in the request head or in a small body, and an idle kept-alive
+connection, are dropped after 30 s (the proxy reconnects). It also starts a thread for every
+connection of a burst at once and really sends `Connection: close` (upstream dropped that header).
+What remains: reached directly (not through the proxies), 32 clients that each stall a `POST` body
+can hold all workers for up to 30 s. Caddy reads the first 600 KiB of a body on `/api/*`, `/q/*`
+and the release-index route before it connects to tether-api, so a slow client waits in Caddy;
+nginx buffers request bodies too, except on the two upload routes.
+
+tether-api closes an idle connection after 30 s; Caddy and nginx keep idle connections to it for
+20 s only (`keepalive 20s` in the Caddyfile, `keepalive_timeout 20s` in the nginx upstream), so
+they never reuse one that tether-api is closing. The new `Caddyfile` / `nginx.conf` therefore go
+out together with the new tether-api. The audit answer is sent with `Content-Length`.
+
+Per-IP limits (heartbeats of new devices, audit posts, `/q/`, failed team signatures) count an IPv6
+client by its /64; an IPv4 client reported in the mapped form (`::ffff:a.b.c.d`) is counted as
+that IPv4 address. Device lists are written through a temp file, not a buffer; custom-app profiles
+stay on disk (`custom/<id>.json`). Every JSON write is temp file + rename; no database.

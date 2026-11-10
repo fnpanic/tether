@@ -87,6 +87,19 @@ impl UiSink for TauriSink {
                 }
             }
         }
+        // Chat off by policy: the technician's text is not shown and does not restore the window.
+        if name == "chat" && !policy::current().on("connect.chat") {
+            return;
+        }
+        // A resumed connection brings back the permissions the user last set: what policy denies
+        // by now is taken again, in the mirror here and in the core (not from inside its callback).
+        let mut payload = payload;
+        if name == "add_connection" {
+            let announced = payload.clone();
+            if take_denied(&policy::current(), &mut payload) {
+                std::thread::spawn(move || crate::commands::revoke(&policy::current(), &[announced]));
+            }
+        }
         let mut ended_session = false;
         let (remaining, action) = {
             let mut c = self.clients.lock().unwrap();
@@ -130,6 +143,16 @@ impl UiSink for TauriSink {
             });
         }
     }
+}
+
+/// Switch off in an announced client what policy `e` denies; true if it held any of it. The
+/// corrected client holds none, so a re-announce does not come back here.
+fn take_denied(e: &tether_trust::policy::Effective, client: &mut Value) -> bool {
+    let denied = crate::commands::to_revoke(e, std::slice::from_ref(client));
+    for (_, name) in &denied {
+        client[*name] = Value::Bool(false);
+    }
+    !denied.is_empty()
 }
 
 /// During a request and session the window always sits in the same place: bottom right of the
@@ -201,6 +224,18 @@ fn apply(w: &tauri::WebviewWindow, action: WindowAction) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_resumed_client_loses_what_policy_locked_off_meanwhile() {
+        use tether_trust::policy::{resolve, Bundle, PROFILE_CUSTOMER};
+        let b = Bundle::from_json(br#"{"serial":1,"issued_at":0,"profiles":{"customer":{"permission.clipboard":{"state":"off"}}}}"#).unwrap();
+        let e = resolve(Some(&b), PROFILE_CUSTOMER, "dev", None);
+        let mut c = json!({ "id": 1, "authorized": true, "keyboard": true, "clipboard": true });
+        assert!(take_denied(&e, &mut c));
+        assert_eq!(c, json!({ "id": 1, "authorized": true, "keyboard": true, "clipboard": false }));
+        // The corrected client announced again: nothing to do, no loop.
+        assert!(!take_denied(&e, &mut c));
+    }
 
     #[test]
     fn window_follows_the_session() {

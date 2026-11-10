@@ -44,6 +44,10 @@ Rules:
 - Without a password, the session window asks for it (or the remote side accepts by click).
 - `--file-transfer <id> [password]` (connection type as the command, RustDesk style) is also
   accepted.
+- `tether --help` also lists `--view-camera <id>` and `--terminal <id>`. They are parsed, but
+  Tether has neither: the session window opens the remote screen for them (`session_start` accepts
+  only the types `default` and `file-transfer`), and every Tether host refuses a camera view and a
+  remote terminal (`enable-camera` and `enable-terminal` are forced to `N`).
 
 `--connect` checks the policy (`connect.outgoing`) and the update state first, then opens the
 session window in a new process. The command does not wait for the session: once the window is

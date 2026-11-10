@@ -13,7 +13,7 @@ const STATES: { value: RuleState | "default"; label: string }[] = [
 ];
 
 /** "Default" selected stays quiet (most rows); any other state is a filled accent segment. */
-const stateSelected = (v: string) => (v === "default" ? "bg-tile text-ink font-semibold ring-1 ring-hairline" : "bg-accent text-white font-semibold");
+const stateSelected = (v: string) => (v === "default" ? "bg-tile text-ink font-semibold ring-1 ring-hairline" : "bg-accent text-on-accent font-semibold");
 
 const words = (f: Feature, v: string) => (f.kind === "bool" ? (v === "Y" ? "on" : "off") : v || "empty");
 
@@ -41,19 +41,19 @@ export function FeatureRow({ f, rule, lang, onChange, live }: { f: Feature; rule
   return (
     <div
       data-feature={f.id}
-      className={`flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-l-[3px] border-b-hairline py-2.5 pl-3 pr-1 last:border-b-0 ${rule ? "border-l-accent bg-accent/5" : "border-l-transparent"}`}
+      className={`flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-l-[3px] border-b-hairline py-2.5 pl-3 pr-1 last:border-b-0 ${rule ? "border-l-ink bg-tile-2" : "border-l-transparent"}`}
     >
       <div className="min-w-[180px] flex-1">
         <p className="flex flex-wrap items-center gap-2 text-caption" title={lang === "en" ? f.de : f.en}>
           <span className={rule ? "font-semibold" : ""}>{lang === "en" ? f.en : f.de}</span>
-          {rule && <Badge tone="accent">Changed from default</Badge>}
+          {rule && <Badge tone="ink">Changed from default</Badge>}
           {unpublished && (
             <Badge tone="warn" title={live ? `Live: ${live.state}${live.value != null ? ` ${live.value}` : ""}` : "Live: default"}>
               Not published
             </Badge>
           )}
         </p>
-        <p className="font-mono text-footnote text-faint">
+        <p className="font-mono text-footnote text-muted">
           {f.id} · default {words(f, f.default)}
         </p>
       </div>

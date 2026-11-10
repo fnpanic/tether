@@ -1,34 +1,51 @@
 # Code signing for Windows and macOS: the free route (checked 2026-11-09)
 
-Tether's Windows files are unsigned, and the Mac apps carry a self-signed certificate (`Tether Code
-Signing`, CI secrets `MACOS_SIGNING_P12`/`MACOS_SIGNING_PASSWORD`, see docs/macos.md). Results:
-SmartScreen warnings and ML detections on Windows (Defender `Bearfoos.A!ml`, Sophos `Generic ML PUA`,
-docs/release-checks.md), Gatekeeper's "Open Anyway" on the Mac.
+Tether's releases carry self-signed certificates, both named `Tether Code Signing`: one for Windows
+(`scripts/sign-windows.ps1` on the PC), one for macOS (the Mac build runner). A self-signed
+certificate is trusted only where it is installed. Elsewhere the results are SmartScreen warnings
+and ML detections on Windows (Defender `Bearfoos.A!ml`, Sophos `Generic ML PUA`,
+docs/release-checks.md) and Gatekeeper's "Open Anyway" on the Mac.
 
-## Status: generated and in hand (2026-11-09)
+## Status: the two certificates
 
-Both free self-signed certificates and their double-click installers are generated for this app and
-verified (keys open with their passwords; installers embed the matching cert):
+| | Windows | macOS |
+| --- | --- | --- |
+| Public certificate | `certs/tether-codesign.cer` | `certs/tether-codesign-macos.cer` |
+| SHA-1 | `9BDFE83E548CEF50DF2E96B8737ABCCD39BDC346` | `BCF53642C6C9F74356A3D12AE740BCC0EB59FB33` |
+| SHA-256 | `F9:38:C0:9D:71:F9:FD:3C:E4:21:DD:31:5B:BC:B8:18:97:4E:46:E5:D5:6F:A1:D3:BE:4A:C6:CD:46:B5:CD:1D` | `17:D7:96:5C:BC:1C:11:0B:52:31:15:CE:B4:23:1B:F2:A3:46:1C:71:F8:02:B7:77:7B:3B:55:B6:42:B6:53:98` |
+| Valid | 2026-11-09 to 2036-11-09 | 2026-11-04 to 2046-10-30 |
+| Key (never in the repository) | `secret/tether-codesign-windows.pfx` | `C:\vms\macsign\cs.p12` |
+| Signs | releases built on the PC (`scripts/sign-windows.ps1`) | every Mac release (`tools/macbuild/jobs/tether/build.sh`) |
+| Trust installer | `certs/Install Tether certificate.cmd` | `certs/Trust Tether.mobileconfig` |
 
-- `certs/` (public, safe to publish/commit): `Install Tether certificate.cmd` (Windows),
-  `Trust Tether.mobileconfig` (macOS), `tether-codesign.cer`, `tether-codesign-macos.cer`.
-- `secret/` (gitignored, your backup — never commit): the `.pfx`/`.p12`, their base64, and passwords.
+- `certs/` (public, safe to publish/commit): the files above and `Remove Tether certificate.cmd`.
+  `scripts/trust-windows-cert.ps1` and `scripts/trust-macos-cert.sh` install only the certificate
+  with the fingerprint above, whatever a server sends.
+- `secret/` (gitignored, your backup — never commit): the Windows `.pfx`, its base64 and password.
+  The macOS `.p12` there (`secret/tether-codesign-macos.p12`, SHA-1 `D21EA174…A4CB`) was generated
+  on 2026-11-09 and is **not in use**: the releases are not signed with it. Until 2026-11-10
+  `certs/Trust Tether.mobileconfig` and `certs/tether-codesign-macos.cer` held that certificate by
+  mistake. A Mac that installed that profile trusts a certificate nothing is signed with: remove
+  the profile ("Removing the trust" below) and install the current one.
 
-Both certs are codesign/signtool-verified: the Windows cert signs a binary locally, and the macOS
-cert was verified on the build Mac on 2026-11-09 (job via `tools/macbuild`): `codesign -s "Tether Code
-Signing"` signs, and the designated requirement names the certificate (the criterion `smoke-macos.sh`
-checks) — `designated => identifier ... and certificate leaf = H"d21ea174..."`.
+Check a file: `openssl x509 -inform DER -in certs/tether-codesign-macos.cer -noout -fingerprint -sha256`.
+The Mac build refuses a TetherQS signature from any other certificate (`build.sh`: `certificate
+root = H"bcf53642…"`) and a Tether signature whose requirement differs from the installed app's.
 
-**One step left — activate CI signing** (writing repo secrets is intentionally not automated; run it
-yourself, e.g. prefix with `!` in Claude Code). Setting the macOS ones replaces the prior self-signed
-cert; the next macOS CI run's smoke test verifies codesign accepts the new one:
+**CI signing (optional, not used for releases).** Releases are built and signed on the PC and on
+the Mac build runner, not in GitHub Actions. `desktop.yml` signs its Windows artifact when these
+secrets exist (writing repo secrets is intentionally not automated; run it yourself):
 
 ```sh
 gh secret set WINDOWS_SIGNING_P12       < secret/windows-p12.b64
 gh secret set WINDOWS_SIGNING_PASSWORD  < secret/windows-password.txt
-gh secret set MACOS_SIGNING_P12         < secret/macos-p12.b64
-gh secret set MACOS_SIGNING_PASSWORD    < secret/macos-password.txt
 ```
+
+Do **not** set `MACOS_SIGNING_P12` from `secret/macos-p12.b64`: that is the unused certificate, and
+an app signed with it has another designated requirement than the releases (it loses Screen
+Recording/Accessibility when installed over one). Without the secret the CI Mac build is ad-hoc
+signed, which the smoke test in `desktop.yml` accepts. If the secret was set from that file, delete it:
+`gh secret delete MACOS_SIGNING_P12` and `gh secret delete MACOS_SIGNING_PASSWORD`.
 
 Then publish `certs/*` to each relay under `/data/download/` so customers can fetch the installers.
 
@@ -45,9 +62,10 @@ It uses `secret/tether-codesign-windows.pfx` and `secret/windows-password.txt` (
 timestamp). Status `UnknownError` only means this PC does not trust the self-signed root yet.
 
 macOS: the build runner (`tools/macbuild/jobs/tether/build.sh`) signs both apps with the
-`Tether Code Signing` certificate from `C:\vms\macsign\cs.p12` (SHA-256 `17:D7:96:5C:…:53:98`,
-valid until 2046), the one all installed Macs know. `secret/tether-codesign-macos.p12` is a
-**different** certificate with the same name (`8A:AF:08:25:…:41:71`). Switching to it changes the
+`Tether Code Signing` certificate from `C:\vms\macsign\cs.p12` (SHA-1 `BCF53642…FB33`, SHA-256
+`17:D7:96:5C:…:53:98`, valid until 2046), the one all installed Macs know and the one in `certs/`.
+`secret/tether-codesign-macos.p12` is a **different** certificate with the same name (SHA-1
+`D21EA174…A4CB`, SHA-256 `8A:AF:08:25:…:41:71`). Switching to it changes the
 designated requirement: every Mac would lose Screen Recording/Accessibility at the next update, and
 `build.sh` refuses the build (requirement new ≠ old). Keep the runner's certificate.
 
@@ -96,8 +114,8 @@ their IT) install the **public** `.cer` once to trust it. No cost, no applicatio
 
 | | Certificate (free, in hand) | Make it trusted on a PC/Mac | Fallback with no cert install |
 | --- | --- | --- | --- |
-| **Windows** | `scripts/make-windows-cert.ps1` → `tether-codesign.pfx` (signs the NSIS setup in CI). | `scripts/trust-windows-cert.ps1` installs the `.cer` into Trusted Root + Trusted Publishers (per user, or `-Machine` for all / GPO / Intune). The signed installer is then fully trusted: no SmartScreen, no "Unknown publisher". | Mark-of-the-Web-free install on the download page (PowerShell/`curl.exe` set no MotW, so SmartScreen never checks). |
-| **macOS** | `scripts/make-macos-cert.sh` → `tether-codesign.p12` (the `MACOS_SIGNING_P12` secret; already signs the apps). | `scripts/trust-macos-cert.sh` adds the `.cer` to the keychain trusted for code signing (per user, or `--machine`). codesign then trusts the signature and TCC permissions stay stable across updates. | `scripts/install-macos.sh` (curl sets no quarantine, so Gatekeeper never prompts). |
+| **Windows** | Made with `scripts/make-windows-cert.ps1` → `tether-codesign.pfx` (signs the releases on the PC, and the NSIS setup in CI when the secret exists). | `scripts/trust-windows-cert.ps1` installs the `.cer` into Trusted Root + Trusted Publishers (per user, or `-Machine` for all / GPO / Intune). The signed installer is then fully trusted: no SmartScreen, no "Unknown publisher". | Mark-of-the-Web-free install on the download page (PowerShell/`curl.exe` set no MotW, so SmartScreen never checks). |
+| **macOS** | The build runner's certificate (`C:\vms\macsign\cs.p12`). `scripts/make-macos-cert.sh` makes a **new** one: do not switch to it (see "Signing a release built on the PC"). | `scripts/trust-macos-cert.sh` adds the `.cer` to the keychain trusted for code signing (per user, or `--machine`). codesign then trusts the signature and TCC permissions stay stable across updates. | `scripts/install-macos.sh` (curl sets no quarantine, so Gatekeeper never prompts). |
 
 A self-signed certificate is **not** a CA/Apple-issued identity: without the `.cer` installed, Windows
 still shows "Unknown publisher" and macOS still needs one "Open Anyway" on a browser download (Gatekeeper
@@ -107,9 +125,10 @@ the paid-or-org routes at the end still apply (SignPath for Windows, Apple fee w
 
 ## Make the signed apps trusted — one double-click (recommended)
 
-`make-windows-cert.ps1` and `make-macos-cert.sh` each also emit a ready installer with the certificate
-built in; hand it to customers. No command line, no store picking (verified 2026-11-09: the embedded
-certificate round-trips to the real one; the profile's data decodes to the cert).
+`certs/` holds a ready installer per platform with the certificate built in; hand it to customers.
+No command line, no store picking. `make-windows-cert.ps1` and `make-macos-cert.sh` emit such
+installers for a new certificate. Checked 2026-11-10: the `.cmd` embeds `tether-codesign.cer`, and
+the profile's data is `tether-codesign-macos.cer` byte for byte.
 
 - **Windows — `Install Tether certificate.cmd`:** double-click → confirm UAC → done. It self-elevates and
   installs the cert machine-wide (Trusted Root + Trusted Publishers) with the built-in `certutil`. Then
@@ -121,11 +140,40 @@ certificate round-trips to the real one; the profile's data decodes to the cert)
 
 Publish all of these next to the downloads on each relay under `/data/download/` (served at
 `https://<relay>/download/...`, like `install-macos.sh`; the release pruner leaves top-level files alone):
-`Install Tether certificate.cmd`, `Trust Tether.mobileconfig`, and the raw `tether-codesign.cer`.
+`Install Tether certificate.cmd`, `Remove Tether certificate.cmd`, `Trust Tether.mobileconfig`, the
+raw `tether-codesign.cer` and `tether-codesign-macos.cer`, and the two scripts below.
 
 **Scripted / fleet alternative** (same effect, for IT automation): `scripts/trust-windows-cert.ps1`
 (`-Machine` for all users, or push the `.cer` by GPO/Intune) and `scripts/trust-macos-cert.sh`
-(`--machine` for all users).
+(`--machine` for all users). Both take `https://` servers only and install nothing but the
+certificate with the fingerprint above:
+
+```
+powershell -NoProfile -Command "& ([scriptblock]::Create((irm https://<relay>/download/trust-windows-cert.ps1))) -Server https://<relay>"
+curl -fsSL https://<relay>/download/trust-macos-cert.sh | sh -s -- https://<relay>
+```
+
+### Removing the trust
+
+- **Windows:** double-click `Remove Tether certificate.cmd` (confirm UAC), or
+  `scripts\trust-windows-cert.ps1 -Remove -Machine` in an elevated PowerShell (without `-Machine`
+  after a per-user install). By hand: `certutil -delstore Root 9BDFE83E548CEF50DF2E96B8737ABCCD39BDC346`
+  and the same with `TrustedPublisher` (`certutil -user -delstore …` after a per-user install).
+- **macOS, profile:** System Settings → General → Device Management (macOS 13 and 14: Privacy &
+  Security → Profiles) → "Trust Tether" → − (Remove). This removes its certificate too.
+- **macOS, script install:** `security delete-certificate -t -Z BCF53642C6C9F74356A3D12AE740BCC0EB59FB33`
+  (after `--machine`: with `sudo` and `/Library/Keychains/System.keychain` as the last argument),
+  or delete "Tether Code Signing" in Keychain Access.
+
+### What installing the certificate means
+
+Both installers put a self-signed certificate into the machine's trusted roots. The macOS
+certificate has `basicConstraints CA:FALSE` (critical) and the code-signing usage only. The Windows
+certificate in use has the code-signing usage (EKU) but **no** basicConstraints extension;
+`make-windows-cert.ps1` sets `CA=false` (critical) for future certificates. The current one is not
+regenerated: a new certificate has a new thumbprint, so every customer PC would have to install the
+trust again. Whoever holds a private key can sign software these machines trust: keep the
+`.pfx`/`.p12` offline.
 
 ## Windows, free route 1: self-signed certificate (in hand now)
 
@@ -219,7 +267,7 @@ Gatekeeper assesses an app only when the file carries `com.apple.quarantine`, wh
 [forum thread](https://developer.apple.com/forums/thread/706273), [who decides to quarantine
 files](https://eclecticlight.co/2025/12/08/who-decides-to-quarantine-files/)). So:
 
-1. **Signature:** keep the self-signed `Tether Code Signing` certificate (already in CI). macOS ties
+1. **Signature:** keep the build runner's self-signed `Tether Code Signing` certificate. macOS ties
    Screen Recording/Accessibility to its designated requirement, so permissions survive updates.
 2. **First install:** `scripts/install-macos.sh`, published on every relay as
    `/data/download/install-macos.sh` (served at `https://<relay>/download/install-macos.sh`; the

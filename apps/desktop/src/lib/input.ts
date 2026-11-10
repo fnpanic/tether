@@ -31,6 +31,19 @@ export function wheelSteps(e: { deltaX: number; deltaY: number; deltaMode: numbe
   return { x: -sx, y: -sy, acc: { x: ax, y: ay } };
 }
 
+/**
+ * Whether a key event goes to the remote side. While the keyboard is local (the session toolbar
+ * has it) nothing a key does there is sent: not its press and not its release, also when the
+ * release comes after the keyboard went back. A key that was already down before gets its release,
+ * so nothing stays pressed on the remote computer. `held`: keys pressed while local, still down.
+ */
+export function remoteKey(held: Set<string>, local: boolean, code: string, down: boolean): boolean {
+  if (!down) return !held.delete(code);
+  if (local) held.add(code);
+  else held.delete(code); // pressed again: this press and its release are the remote's
+  return !local;
+}
+
 /** Lock key state bits: 1 << 1 caps lock, 1 << 2 num lock. */
 export function lockModes(e: { getModifierState(k: string): boolean }): number {
   let m = 0;

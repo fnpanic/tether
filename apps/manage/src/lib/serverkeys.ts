@@ -54,6 +54,28 @@ export function step(r: Rotation, live: { keys: string[] } | null): Step {
  * this is empty. */
 export const notSwitched = (relays: LiveKeys[], key?: string): LiveKeys[] => relays.filter((r) => !key || r.signing !== key);
 
+/** The keys the relays' hbbs sign with now (those that tell), each once. */
+export const signingKeys = (relays: LiveKeys[]): string[] => [...new Set(relays.flatMap((r) => (r.signing ? [r.signing] : [])))];
+
+/** The "current key" a new rotation starts from: the one the relays sign with when they tell and
+ *  agree; else the key the live list presents. After a rotation was cancelled past the switch the
+ *  relays already sign with its new key, and the list's first key is no longer the one in use. */
+export function currentKey(relays: LiveKeys[], live: { keys: string[] } | null): string {
+  const signing = signingKeys(relays);
+  return signing.length === 1 ? signing[0] : signing.length ? "" : (live?.keys[0] ?? "");
+}
+
+/** Why a rotation cannot start from `from`, or null: the list current + new would leave out a key
+ *  a relay signs with, and devices would stop trusting that relay. */
+export function fromProblem(from: string, relays: LiveKeys[]): string | null {
+  const other = relays.filter((r) => r.signing && r.signing !== from);
+  if (!other.length) return null;
+  const names = other.map((r) => `${r.server.replace(/^https?:\/\//, "")} (${r.signing!.slice(0, 8)}…)`).join(", ");
+  return signingKeys(relays).length > 1
+    ? `The relays sign with different keys: ${names}. Bring every relay to one key before a new rotation.`
+    : `Not the key the relays sign with: ${names}. Start from that key.`;
+}
+
 /** Phase 1: devices keep presenting the current key and also trust the new one. */
 export function announceList(r: Rotation, expires?: number): KeyEntry[] {
   return [{ key: r.from!, ...(expires ? { expires } : {}) }, { key: r.to! }];
@@ -70,17 +92,24 @@ export function confirmed(devices: Device[], serial: number, now = Date.now() / 
 
 const host = (server: string) => server.replace(/^https?:\/\//, "").replace(/[/:].*$/, "");
 
-/** Phase 2 on VM relays, one relay at a time (server/rotate-key.sh). */
+/** Phase 2 on VM relays, one relay at a time (server/rotate-key.sh), as in docs/key-rotation.md:
+ *  a folder only the login user can enter (not /tmp: the script runs as root again days later),
+ *  and the private key removed whether the switch worked or not. */
 export function switchCommands(servers: string[]): string {
   return servers
     .map(host)
-    .map((h) => `scp id_ed25519 id_ed25519.pub rotate-key.sh opc@${h}:/tmp/\nssh opc@${h} 'sudo bash /tmp/rotate-key.sh switch /tmp/id_ed25519 && rm /tmp/id_ed25519 /tmp/id_ed25519.pub'`)
+    .map(
+      (h) =>
+        `ssh opc@${h} 'install -d -m 0700 ~/tether-key'\n` +
+        `scp id_ed25519 id_ed25519.pub rotate-key.sh opc@${h}:tether-key/\n` +
+        `ssh opc@${h} 'sudo bash ~/tether-key/rotate-key.sh switch ~/tether-key/id_ed25519; rc=$?; rm -f ~/tether-key/id_ed25519 ~/tether-key/id_ed25519.pub; exit $rc'`,
+    )
     .join("\n");
 }
 
 /** Phase 3b on VM relays: stop accepting the old key. */
 export function retireCommands(servers: string[]): string {
-  return servers.map(host).map((h) => `ssh opc@${h} 'sudo bash /tmp/rotate-key.sh retire'`).join("\n");
+  return servers.map(host).map((h) => `ssh opc@${h} 'sudo bash ~/tether-key/rotate-key.sh retire'`).join("\n");
 }
 
 export function helmSwitch(oldKey: string): string {

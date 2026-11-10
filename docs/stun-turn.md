@@ -46,10 +46,20 @@ Abuse limits (TURN is a classic open-relay/SSRF vector, see the coturn CVEs abov
 - credentials open allocations for 300 s; afterwards only the client address that first used a
   credential (in a request whose MESSAGE-INTEGRITY verified) may keep refreshing its allocation
   (12 h at most); at most 100 000 such first uses are kept, pruned by expiry;
-- Allocate, Refresh, CreatePermission and ChannelBind requests without a valid MESSAGE-INTEGRITY
-  (each makes the TURN library keep a nonce for an hour) are capped at 50/s for all clients;
-- `TURN_MAX_ALLOCATIONS` (64), 16 peers per allocation, `TURN_BANDWIDTH_MBPS` (32) per
-  allocation and direction, extra datagrams dropped;
+- Allocate, Refresh, CreatePermission and ChannelBind requests that are not authenticated (no
+  valid MESSAGE-INTEGRITY, or an expired credential from an address other than its own session's)
+  share a budget of 50/s for all clients (`Turn::admit`); each such request makes the TURN library
+  store a nonce;
+- the nonce table holds at most 200 000 nonces (`MAX_NONCES` in the patched `turn` 0.10.0 crate,
+  `server/patched/turn/src/server/request.rs`; upstream never removed a nonce that was not used
+  again, so the table grew for good). At the bound one stored nonce makes room for the new one; a
+  client that still held it is answered 438 with a fresh nonce and retries;
+- Send indications and ChannelData carry no credential: they are taken only from client addresses
+  that sent an authenticated request (the 10 000 most recent ones; at the limit the address
+  heard of longest ago goes, so a new authenticated client always gets in, `Turn::client`);
+- `TURN_MAX_ALLOCATIONS` (64) in total and `TURN_MAX_ALLOCATIONS_PER_IP` (16) allocations per
+  client IP (an office NAT is one IP), 16 peers per allocation, `TURN_BANDWIDTH_MBPS` (32) per allocation and direction, extra
+  datagrams dropped;
 - IPv4 relays only, UDP only.
 
 Single port: every relayed address is `<public IP>:21116`. hbbs passes each datagram to
@@ -121,14 +131,17 @@ after Disconnect, fails the same with the previous hbbs on both relays). hbbs RS
 | `RELAY_HOST` | (written by `install.sh`) | This node's name; TURN is on when it is set. Resolved every 60 s for the relayed address. |
 | `TURN` | on | `0` turns TURN off. |
 | `TURN_PUBLIC_IP` | resolve `RELAY_HOST` | Fixed relayed address. |
-| `TURN_MAX_ALLOCATIONS` | 64 | Concurrent allocations. |
+| `TURN_MAX_ALLOCATIONS` | 64 | Concurrent allocations in total. |
+| `TURN_MAX_ALLOCATIONS_PER_IP` | 16 | Concurrent allocations per client IP (an office NAT is one IP). |
 | `TURN_BANDWIDTH_MBPS` | 32 | Per allocation and direction. |
 | `TURN_ALLOW_PRIVATE_PEERS` | off | `1` = lab only (relay to private addresses and to itself). |
 
 ## Deploy (hbbs only; no port, firewall, OCI, key or `api.env` change)
 
 TURN uses UDP 21116, which firewalld and the OCI security list already open for STUN. Build with
-`scripts/build-relay.sh` (WSL), then per relay, one at a time:
+`scripts/build-relay.sh` (WSL; the build needs the patched `turn` crate in `server/patched/turn`,
+which the script, `server/Dockerfile` and `scripts/bootstrap.sh` copy beside the hbbs sources),
+then per relay, one at a time:
 
 ```bash
 ip=158.101.205.185   # then 92.5.231.71

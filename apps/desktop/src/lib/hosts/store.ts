@@ -3,6 +3,7 @@
 // or tagging 5,000 hosts never waits for the disk.
 import { create } from "zustand";
 import { invoke } from "../ipc";
+import { errorText } from "../policy";
 import { cleanTags, emptyStore, MAX_NAME, MAX_NOTES, shared, applyShared, STORE_VERSION, type HostEntry, type OrgDevice, type Peer, type SharedDoc, type Store } from "./model";
 import { merge3, readShared } from "./sync";
 
@@ -39,17 +40,30 @@ export const useHosts = create<S>(() => ({
 const get = () => useHosts.getState();
 const set = (p: Partial<S>) => useHosts.setState(p);
 
-function readStore(raw: string): Store {
-  if (!raw) return emptyStore();
+// The backend does not tell its path; docs/advanced.md names the file the same way.
+const FILE = "hosts.json in Tether's config folder";
+
+/** The store in a file's text. `block`: why this run must not write over that file (only a missing
+ *  or empty file is a fresh store; a damaged or newer one would be lost at the first save). */
+export function readStore(raw: string): { store: Store; block?: string } {
+  if (!raw.trim()) return { store: emptyStore() };
+  let d: Partial<Store> | null = null;
   try {
-    const d = JSON.parse(raw) as Partial<Store>;
-    if (!d || typeof d !== "object") return emptyStore();
-    return { ...emptyStore(), ...d, v: STORE_VERSION, hosts: d.hosts ?? {}, tags: d.tags ?? {}, rules: d.rules ?? [], searches: d.searches ?? [] };
+    d = JSON.parse(raw);
   } catch {
-    return emptyStore();
+    /* handled below */
   }
+  if (!d || typeof d !== "object" || Array.isArray(d)) return { store: emptyStore(), block: `The host list (${FILE}) is damaged, so it was not loaded and changes are not saved. Restore the file from a backup, or rename or delete it and restart Tether to start a new list.` };
+  const store = { ...emptyStore(), ...d, v: STORE_VERSION, hosts: d.hosts ?? {}, tags: d.tags ?? {}, rules: d.rules ?? [], searches: d.searches ?? [] };
+  return typeof d.v === "number" && d.v > STORE_VERSION ? { store, block: `The host list (${FILE}) was saved by a newer version of Tether: it is shown, but changes are not saved. Update Tether to change it.` } : { store };
 }
 
+/** Team members without write permission cannot change what the team shares: the next sync would drop it. */
+export const readOnly = (s: Pick<S, "store" | "team"> = get()) => !!s.store.team?.enabled && s.team.me?.write === false;
+export const useReadOnly = () => useHosts(readOnly);
+
+// Set by load: the file on disk could not be read as this version's store, so it is never written.
+let blocked = false;
 let saveTimer = 0;
 let teamTimer = 0;
 let saving: Promise<void> = Promise.resolve();
@@ -58,11 +72,12 @@ export function flush(): Promise<void> {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = 0;
+    if (blocked) return saving;
     const doc = JSON.stringify(get().store);
     saving = saving.then(() =>
       invoke("hosts_store_save", { doc }).then(
         () => set({ saveError: undefined }),
-        (e) => set({ saveError: String(e) }),
+        (e) => set({ saveError: errorText(e) }),
       ),
     );
   }
@@ -83,8 +98,11 @@ export function commit(next: Store, sharedChange = true) {
 function edit(ids: string[], f: (e: HostEntry, id: string) => HostEntry, sharedChange = true) {
   const s = get().store;
   const hosts = { ...s.hosts };
+  const ro = sharedChange && readOnly();
   for (const id of ids) {
-    const e = f({ ...(hosts[id] ?? {}) }, id);
+    const old = hosts[id] ?? {};
+    const e = f({ ...old }, id);
+    if (ro) Object.assign(e, { name: old.name, tags: old.tags });
     // Drop keys that became empty so the file stays small.
     for (const k of Object.keys(e) as (keyof HostEntry)[]) {
       const v = e[k];
@@ -93,13 +111,20 @@ function edit(ids: string[], f: (e: HostEntry, id: string) => HostEntry, sharedC
     if (Object.keys(e).length) hosts[id] = e;
     else delete hosts[id];
   }
-  commit({ ...s, hosts }, sharedChange);
+  commit({ ...s, hosts }, sharedChange && !ro);
 }
 
 export const actions = {
   async load() {
-    const [raw, peers] = await Promise.all([invoke<string>("hosts_store_load").catch(() => ""), invoke<Peer[]>("hosts_peers").catch(() => [])]);
-    set({ store: readStore(raw ?? ""), peers: peers ?? [], loaded: true });
+    const [file, peers] = await Promise.all([
+      invoke<string>("hosts_store_load").then(
+        (raw) => readStore(raw ?? ""),
+        (e) => ({ store: emptyStore(), block: `The host list (${FILE}) could not be read just now: ${errorText(e)} Changes are not saved. Close this window and open it again, or restart Tether, to try again.` }),
+      ),
+      invoke<Peer[]>("hosts_peers").catch(() => []),
+    ]);
+    blocked = !!file.block;
+    set({ store: file.store, peers: peers ?? [], loaded: true, saveError: file.block });
     if (get().store.team?.enabled) {
       void actions.teamRefresh();
     }
@@ -150,7 +175,9 @@ export const actions = {
     edit([id], (e) => ({ ...e, history: [{ t: Math.floor(Date.now() / 1000), conn }, ...(e.history ?? [])].slice(0, 50) }), false);
   },
   setStore(f: (s: Store) => Store, sharedChange = true) {
-    commit(f(get().store), sharedChange);
+    const s = get().store;
+    const ro = sharedChange && readOnly();
+    commit(ro ? applyShared(f(s), shared(s)) : f(s), sharedChange && !ro);
   },
   setTeam(p: Partial<NonNullable<Store["team"]>>) {
     const s = get().store;
@@ -164,7 +191,7 @@ export const actions = {
       team.me = await invoke<TeamInfo["me"]>("team_me");
     } catch (e) {
       team.me = null;
-      team.error = String(e).replace(/^(not-member|unsupported|offline): /, "");
+      team.error = errorText(e).replace(/^(not-member|unsupported): /, "");
       set({ team, org: [] });
       return;
     }
@@ -207,6 +234,6 @@ export async function teamSync(): Promise<void> {
     }
     set({ team: { ...get().team, syncing: false, error: undefined } });
   } catch (e) {
-    set({ team: { ...get().team, syncing: false, error: String(e).replace(/^(not-member|unsupported|offline): /, "") } });
+    set({ team: { ...get().team, syncing: false, error: errorText(e).replace(/^(not-member|unsupported): /, "") } });
   }
 }

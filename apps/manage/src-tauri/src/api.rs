@@ -18,6 +18,8 @@ fn client() -> &'static reqwest::Client {
             // Release uploads may be up to 200 MiB on a slow uplink; STALL and ANSWER end a
             // transfer to a relay that stops taking part long before this.
             .timeout(FILE)
+            // A signed request (or an API token, cdn.rs) is never sent on to wherever a relay points.
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("tether-manage/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("http client")
@@ -32,6 +34,11 @@ fn explain(status: u16, body: &str) -> String {
     let reason = body.trim();
     let reason = if reason.is_empty() { "no details".to_owned() } else { reason.chars().take(300).collect() };
     let hint = match status {
+        300..=399 => "The server redirects to another address, which this app does not follow. Enter the server's own https:// address.",
+        // Requests are signed for one relay host (v2); the three ways a relay is not ready for that.
+        401 if reason.contains("unsupported signature version") => "This relay runs an older tether-api that does not know this app's request signatures. Update the relay first.",
+        401 if reason.contains("RELAY_HOST") => "The relay does not know its own host name. Set RELAY_HOST on the relay to the name entered under Status and relays.",
+        401 if reason.contains("signed for another relay") => "The relay knows itself under another host name. Enter the relay's own name (its RELAY_HOST) under Status and relays.",
         401 => "The server did not accept this app's admin signature. Check that the server's ADMIN_PUB_KEY contains this app's admin public key and that the PC clock is correct.",
         404 => "Not found on the server.",
         409 if reason.starts_with("published release") => "The relay keeps the published release.",
@@ -111,7 +118,7 @@ pub async fn cancellable<T>(f: impl std::future::Future<Output = Result<T, Strin
 /// within [`WRITE`]. Returns the body on 2xx.
 pub async fn admin(server: &str, key: &SigningKey, method: &str, path: &str, body: Vec<u8>, content_type: &str) -> Result<Vec<u8>, String> {
     let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
-    let sig = reqauth::sign_request(key, method, path, &body, now());
+    let sig = reqauth::sign_request_for(key, server, method, path, &body, now());
     let mut req = client().request(m, url(server, path)).header(reqauth::HEADER, sig).timeout(WRITE);
     if !body.is_empty() {
         req = req.header("Content-Type", content_type).body(body);
@@ -121,7 +128,7 @@ pub async fn admin(server: &str, key: &SigningKey, method: &str, path: &str, bod
 
 /// Signed `GET` of a file: the answer must start within [`QUICK`] and be complete within `total`.
 pub async fn admin_download(server: &str, key: &SigningKey, path: &str, total: Duration) -> Result<Vec<u8>, String> {
-    let sig = reqauth::sign_request(key, "GET", path, b"", now());
+    let sig = reqauth::sign_request_for(key, server, "GET", path, b"", now());
     read_body(started(client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(total)).await?).await
 }
 
@@ -144,14 +151,22 @@ async fn started(req: reqwest::RequestBuilder) -> Result<reqwest::Response, Stri
 
 /// Signed `GET` that gives up after [`QUICK`].
 pub async fn admin_quick(server: &str, key: &SigningKey, path: &str) -> Result<Vec<u8>, String> {
-    let sig = reqauth::sign_request(key, "GET", path, b"", now());
+    let sig = reqauth::sign_request_for(key, server, "GET", path, b"", now());
     finish(client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(QUICK).send().await).await
+}
+
+/// [`admin_quick`], and whether the answer carries the response header `flag`.
+pub async fn admin_quick_flag(server: &str, key: &SigningKey, path: &str, flag: &str) -> Result<(Vec<u8>, bool), String> {
+    let sig = reqauth::sign_request_for(key, server, "GET", path, b"", now());
+    let res = client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(QUICK).send().await.map_err(unreachable)?;
+    let set = res.headers().contains_key(flag);
+    Ok((read_body(res).await?, set))
 }
 
 /// Signed `PUT` of a release file with the limits of [`upload`]; `sent(bytes so far)` runs as the
 /// body goes out (256 KiB steps).
 pub async fn admin_upload(server: &str, key: &SigningKey, path: &str, body: Vec<u8>, content_type: &str, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<Vec<u8>, String> {
-    let sig = reqauth::sign_request(key, "PUT", path, &body, now());
+    let sig = reqauth::sign_request_for(key, server, "PUT", path, &body, now());
     let req = client().put(url(server, path)).header(reqauth::HEADER, sig).header("Content-Type", content_type);
     let res = upload(req, body, sent).await?;
     cancellable(read_body(res)).await
@@ -296,7 +311,8 @@ pub(crate) mod tests {
             }
             let mut body = vec![0; len];
             r.read_exact(&mut body).unwrap();
-            let ok = reqauth::verify_request(&sig, &pk, &method, &path, &body, now(), |_| true);
+            let relay = reqauth::Relay { hosts: &["127.0.0.1".to_owned()], v1: false };
+            let ok = reqauth::verify_request_for(&sig, &pk, relay, &method, &path, &reqauth::body_digest(&body), now(), |_| true);
             let (code, text) = if ok.is_ok() { (200, "{\"ok\":true}".to_owned()) } else { (401, ok.unwrap_err()) };
             write!(&s, "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).unwrap();
             (method, path, body)
@@ -461,11 +477,39 @@ pub(crate) mod tests {
         h.join().unwrap();
     }
 
+    /// A relay that answers with a redirect: the signed request is not sent on to the target.
+    #[test]
+    fn redirect_is_not_followed() {
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let to = format!("http://{}/api/admin/status", target.local_addr().unwrap());
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            write!(s, "HTTP/1.1 307 X\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let key = tether_trust::generate_key();
+        let e = tauri::async_runtime::block_on(admin_quick(&server, &key, "/api/admin/status")).unwrap_err();
+        assert!(e.contains("HTTP 307") && e.contains("redirects"), "{e}");
+        h.join().unwrap();
+        assert!(target.accept().is_err(), "the redirect target was contacted");
+    }
+
     #[test]
     fn errors_are_explained() {
         let e = explain(401, "signature does not match");
         assert!(e.contains("ADMIN_PUB_KEY") && e.contains("HTTP 401: signature does not match"));
         assert!(explain(409, "published release: stable/x 1.0 is in latest.json").starts_with("The relay keeps the published release."));
         assert!(explain(409, "serial must be greater").contains("newer version"));
+        // v2 signatures: each reason names what to do, not the admin key or the clock.
+        let old = explain(401, "unsupported signature version");
+        assert!(old.contains("Update the relay first") && !old.contains("ADMIN_PUB_KEY"), "{old}");
+        let unset = explain(401, "this relay does not know its own host name (RELAY_HOST), so it cannot accept v2 signatures");
+        assert!(unset.contains("Set RELAY_HOST on the relay") && !unset.contains("ADMIN_PUB_KEY"), "{unset}");
+        let other = explain(401, "request signed for another relay");
+        assert!(other.contains("relay's own name") && !other.contains("ADMIN_PUB_KEY"), "{other}");
     }
 }

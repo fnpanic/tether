@@ -1,7 +1,8 @@
 //! Policy bundle (signed by the admin key), feature registry and resolution.
 //!
-//! Layers, later wins: built-in defaults < profile < group overrides (device assigned to a group)
-//! < machine policy (GPO/MDM, same `Layer` JSON). Every feature can be:
+//! Layers, later wins: built-in defaults < profile < custom app (settings built into a TetherQS
+//! download; never for a feature the profile locks) < group overrides (device assigned to a
+//! group) < machine policy (GPO/MDM, same `Layer` JSON). Every feature can be:
 //! - `on`     enabled; the user may change it; `value` (if given) is the default;
 //! - `off`    disabled and locked off;
 //! - `locked` locked to `value` (bool features: on);
@@ -183,6 +184,8 @@ pub const FLOOR: &[&str] = &[
     "allow-auto-record-incoming",
     "allow-auto-record-outgoing",
     "stop-service",
+    "enable-camera",
+    "enable-terminal",
     "allow-websocket",
     "disable-udp",
     "enable-lan-discovery",
@@ -200,15 +203,17 @@ pub fn feature(id: &str) -> Option<&'static Feature> {
 }
 
 fn check_value(f: &Feature, v: &str) -> Result<(), String> {
-    let ok = match f.kind {
-        Kind::Bool => v == "Y" || v == "N",
-        Kind::Choice => f.choices.contains(&v),
-        Kind::Number => v.parse::<u32>().is_ok(),
-        Kind::Text => v.len() <= 1024 && !v.chars().any(|c| c.is_control() && c != '\n'),
+    let ok = match (f.id, f.kind) {
+        (SERVERS_LIST, _) => return parse_servers(v).map(|_| ()).map_err(|e| format!("feature {}: {e}", f.id)),
+        // Free text that does not parse would silently never block (`version::below_minimum`).
+        // Trimmed, as `version::compare` reads it: a padded minimum always was enforced.
+        ("update.minimum-version", _) => v.trim().is_empty() || crate::release::valid_version(v.trim()),
+        ("update.channel", _) => v.is_empty() || crate::release::valid_channel(v),
+        (_, Kind::Bool) => v == "Y" || v == "N",
+        (_, Kind::Choice) => f.choices.contains(&v),
+        (_, Kind::Number) => v.parse::<u32>().is_ok(),
+        (_, Kind::Text) => v.len() <= 1024 && !v.chars().any(|c| c.is_control() && c != '\n'),
     };
-    if f.id == SERVERS_LIST {
-        return parse_servers(v).map(|_| ()).map_err(|e| format!("feature {}: {e}", f.id));
-    }
     if ok {
         Ok(())
     } else {
@@ -276,37 +281,63 @@ pub fn parse_servers(s: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// The feature of one rule, if this build knows it and the rule is valid for it.
+fn check_rule(id: &str, rule: &Rule) -> Result<&'static Feature, String> {
+    let f = feature(id).ok_or_else(|| format!("unknown feature {id:?}"))?;
+    if let Some(v) = &rule.value {
+        check_value(f, v)?;
+    }
+    if rule.state == State::Locked && rule.value.is_none() && f.kind != Kind::Bool {
+        return Err(format!("locked feature {id} needs a value"));
+    }
+    Ok(f)
+}
+
 fn check_layer(layer: &Layer, ctx: &str) -> Result<(), String> {
     for (id, rule) in layer {
-        let f = feature(id).ok_or_else(|| format!("{ctx}: unknown feature {id:?}"))?;
-        if let Some(v) = &rule.value {
-            check_value(f, v).map_err(|e| format!("{ctx}: {e}"))?;
-        }
-        if rule.state == State::Locked && rule.value.is_none() && f.kind != Kind::Bool {
-            return Err(format!("{ctx}: locked feature {id} needs a value"));
-        }
+        check_rule(id, rule).map_err(|e| format!("{ctx}: {e}"))?;
     }
     Ok(())
 }
 
+/// Takes out of a layer (JSON) the rules this build cannot read (a state or field of a newer
+/// Tether Manage), so that they do not make the whole document unreadable.
+pub(crate) fn drop_unreadable_rules(layer: &mut serde_json::Value) {
+    if let Some(rules) = layer.as_object_mut() {
+        rules.retain(|_, r| Rule::deserialize(&*r).is_ok());
+    }
+}
+
 impl Bundle {
-    /// Strict validation: unknown features, bad values, unknown profiles or groups make the whole
-    /// bundle invalid, so a typo can never silently do nothing.
+    /// Strict validation, for whoever writes or accepts a policy (Tether Manage, the relay):
+    /// unknown features, bad values, unknown profiles or groups make the whole bundle invalid, so
+    /// a typo can never silently do nothing.
     pub fn validate(&self) -> Result<(), String> {
+        self.check(true)
+    }
+
+    /// Not `strict` (the apps): only what would make the document inconsistent; a rule, profile
+    /// or group profile this build does not know or finds invalid is left to [`resolve`].
+    fn check(&self, strict: bool) -> Result<(), String> {
+        let known = |p: &str| !strict || p == PROFILE_TECHNICIAN || p == PROFILE_CUSTOMER;
         for (p, layer) in &self.profiles {
-            if p != PROFILE_TECHNICIAN && p != PROFILE_CUSTOMER {
+            if !known(p) {
                 return Err(format!("unknown profile {p:?}"));
             }
-            check_layer(layer, &format!("profile {p}"))?;
+            if strict {
+                check_layer(layer, &format!("profile {p}"))?;
+            }
         }
         for (name, g) in &self.groups {
             if name.is_empty() || name.len() > 64 {
                 return Err("group names must be 1-64 characters".into());
             }
-            if g.profile != PROFILE_TECHNICIAN && g.profile != PROFILE_CUSTOMER {
+            if !known(&g.profile) {
                 return Err(format!("group {name}: unknown profile {:?}", g.profile));
             }
-            check_layer(&g.overrides, &format!("group {name}"))?;
+            if strict {
+                check_layer(&g.overrides, &format!("group {name}"))?;
+            }
         }
         for (dev, group) in &self.assignments {
             if !self.groups.contains_key(group) {
@@ -316,9 +347,17 @@ impl Bundle {
         Ok(())
     }
 
+    /// Open a published bundle (the apps). Unlike [`Bundle::validate`], one rule this build does
+    /// not know or finds invalid (a newer feature, a value an older Tether Manage let through)
+    /// does not make the bundle invalid: [`resolve`] skips that rule and names it in `rejected`.
+    /// An app must not ignore a whole policy, with its lock-downs, for one such rule.
     pub fn from_json(payload: &[u8]) -> Result<Self, String> {
-        let b: Bundle = serde_json::from_slice(payload).map_err(|e| format!("invalid policy: {e}"))?;
-        b.validate()?;
+        let mut v: serde_json::Value = serde_json::from_slice(payload).map_err(|e| format!("invalid policy: {e}"))?;
+        let groups = v.get_mut("groups").and_then(|g| g.as_object_mut()).into_iter().flat_map(|g| g.values_mut()).filter_map(|g| g.get_mut("overrides"));
+        groups.for_each(drop_unreadable_rules);
+        v.get_mut("profiles").and_then(|p| p.as_object_mut()).into_iter().flat_map(|p| p.values_mut()).for_each(drop_unreadable_rules);
+        let b: Bundle = serde_json::from_value(v).map_err(|e| format!("invalid policy: {e}"))?;
+        b.check(false)?;
         Ok(b)
     }
 
@@ -339,8 +378,11 @@ pub struct Effective {
     pub values: BTreeMap<String, String>,
     pub locked: BTreeSet<String>,
     pub hidden: BTreeSet<String>,
-    /// Which layers contributed: "defaults", "profile", "group:<name>", "machine".
+    /// Which layers contributed: "defaults", "custom-app", "profile", "group:<name>", "machine".
     pub sources: Vec<String>,
+    /// Rules that were not applied (unknown feature, bad value), as `<source>: <reason>`, for the
+    /// log; the other rules of their layer are applied.
+    pub rejected: Vec<String>,
 }
 
 impl Effective {
@@ -371,9 +413,16 @@ impl Effective {
     }
 }
 
-fn apply(eff: &mut Effective, layer: &Layer) {
+fn apply(eff: &mut Effective, layer: &Layer, source: String) {
     for (id, rule) in layer {
-        let Some(f) = feature(id) else { continue };
+        // Rule by rule: one bad or unknown rule must not drop the rest of its layer.
+        let f = match check_rule(id, rule) {
+            Ok(f) => f,
+            Err(e) => {
+                eff.rejected.push(format!("{source}: {e}"));
+                continue;
+            }
+        };
         if !eff.values.contains_key(f.id) {
             continue; // feature not part of this profile
         }
@@ -399,10 +448,11 @@ fn apply(eff: &mut Effective, layer: &Layer) {
             }
         }
     }
+    eff.sources.push(source);
 }
 
-/// Resolve the effective policy for `profile` on `device`. `bundle` must already be validated
-/// (it is, when obtained via [`Bundle::from_json`]); `machine` is the optional GPO/MDM layer.
+/// Resolve the effective policy for `profile` on `device`; `machine` is the optional GPO/MDM
+/// layer. A rule that is not valid in this build is left out and named in `rejected`.
 pub fn resolve(bundle: Option<&Bundle>, profile: &str, device: &str, machine: Option<&Layer>) -> Effective {
     resolve_with(bundle, profile, device, None, machine)
 }
@@ -410,7 +460,9 @@ pub fn resolve(bundle: Option<&Bundle>, profile: &str, device: &str, machine: Op
 /// [`resolve`] with the settings of a custom app (a signed [`crate::custom::CustomProfile`] built
 /// into a TetherQS download). Order, later wins: defaults < profile < custom app < group <
 /// machine: the custom app is the admin's choice for everyone who uses that download, while groups
-/// and GPO/MDM still target individual devices.
+/// and GPO/MDM still target individual devices. Except for what the profile locks (`off`,
+/// `locked`, `hidden`): there the custom app's rule is left out, because its signed profile has no
+/// serial or expiry and cannot be revoked, so it must never unlock what the current policy locks.
 pub fn resolve_with(bundle: Option<&Bundle>, profile: &str, device: &str, custom: Option<&Layer>, machine: Option<&Layer>) -> Effective {
     let mut eff = Effective { profile: profile.to_owned(), sources: vec!["defaults".into()], ..Default::default() };
     for f in FEATURES.iter().filter(|f| f.profiles.contains(&profile)) {
@@ -419,28 +471,22 @@ pub fn resolve_with(bundle: Option<&Bundle>, profile: &str, device: &str, custom
     if let Some(b) = bundle {
         eff.serial = b.serial;
         if let Some(layer) = b.profiles.get(profile) {
-            apply(&mut eff, layer);
-            eff.sources.push("profile".into());
+            apply(&mut eff, layer, "profile".into());
         }
     }
     if let Some(c) = custom {
-        if check_layer(c, "custom app").is_ok() {
-            apply(&mut eff, c);
-            eff.sources.push("custom-app".into());
-        }
+        // Only the profile layer has locked anything so far.
+        let open: Layer = c.iter().filter(|(id, _)| !eff.locked.contains(*id)).map(|(id, r)| (id.clone(), r.clone())).collect();
+        apply(&mut eff, &open, "custom-app".into());
     }
     if let Some(b) = bundle {
         if let Some(g) = b.group_of(profile, device) {
-            apply(&mut eff, &b.groups[g].overrides);
+            apply(&mut eff, &b.groups[g].overrides, format!("group:{g}"));
             eff.group = Some(g.to_owned());
-            eff.sources.push(format!("group:{g}"));
         }
     }
     if let Some(m) = machine {
-        if check_layer(m, "machine policy").is_ok() {
-            apply(&mut eff, m);
-            eff.sources.push("machine".into());
-        }
+        apply(&mut eff, m, "machine".into());
     }
     eff
 }
@@ -528,6 +574,9 @@ mod tests {
                 assert!(f.choices.contains(&f.off_value), "bad off value for {}", f.id);
             }
         }
+        for o in ["enable-camera", "enable-terminal"] {
+            assert!(FLOOR.contains(&o), "{o} must be a floor option");
+        }
     }
 
     #[test]
@@ -575,15 +624,137 @@ mod tests {
 
     #[test]
     fn invalid_bundles_are_rejected() {
-        let bad_feature = br#"{"serial":1,"issued_at":0,"profiles":{"technician":{"no.such":{"state":"on"}}}}"#;
-        assert!(Bundle::from_json(bad_feature).is_err());
-        let bad_value = br#"{"serial":1,"issued_at":0,"profiles":{"technician":{"security.approve-mode":{"state":"locked","value":"never"}}}}"#;
-        assert!(Bundle::from_json(bad_value).is_err());
+        // Authoring (`validate`): everything unknown or invalid; the apps (`from_json`): only
+        // what is not a matter of one rule.
+        for bad in [
+            &br#"{"serial":1,"issued_at":0,"profiles":{"nobody":{}}}"#[..],
+            br#"{"serial":1,"issued_at":0,"groups":{"g":{"profile":"nobody"}}}"#,
+            br#"{"serial":1,"issued_at":0,"profiles":{"technician":{"no.such":{"state":"on"}}}}"#,
+            br#"{"serial":1,"issued_at":0,"profiles":{"technician":{"security.approve-mode":{"state":"locked","value":"never"}}}}"#,
+        ] {
+            let b = Bundle::from_json(bad).unwrap_or_else(|e| panic!("{e}"));
+            assert!(b.validate().is_err(), "{}", String::from_utf8_lossy(bad));
+        }
         let bad_group = br#"{"serial":1,"issued_at":0,"assignments":{"d":"nope"}}"#;
         assert!(Bundle::from_json(bad_group).is_err());
         let unknown_field = br#"{"serial":1,"issued_at":0,"extra":1}"#;
         assert!(Bundle::from_json(unknown_field).is_err());
         let ok = br#"{"serial":1,"issued_at":0,"profiles":{"customer":{"customer.title":{"state":"locked","value":"ACME Support"}}}}"#;
         assert!(Bundle::from_json(ok).is_ok());
+    }
+
+    #[test]
+    fn unknown_feature_is_skipped_by_apps_and_refused_when_authoring() {
+        // A bundle from a newer Tether Manage: features this build does not know.
+        let newer = br#"{"serial":3,"issued_at":0,"profiles":{"technician":{"no.such":{"state":"off"},"permission.clipboard":{"state":"off"}}},"groups":{"g":{"profile":"technician","overrides":{"no.such2":{"state":"locked","value":"x"}}}},"assignments":{"d":"g"}}"#;
+        let b = Bundle::from_json(newer).expect("the rest of the policy still applies");
+        assert!(b.validate().unwrap_err().contains("unknown feature"));
+        let e = resolve(Some(&b), PROFILE_TECHNICIAN, "d", None);
+        assert!(e.is_locked("permission.clipboard") && !e.on("permission.clipboard"));
+        assert_eq!(e.rejected, ["profile: unknown feature \"no.such\"", "group:g: unknown feature \"no.such2\""]);
+    }
+
+    #[test]
+    fn values_a_released_manage_let_through_do_not_drop_the_policy() {
+        // Free text until now: a padded minimum (enforced by every released app), one that never
+        // parsed, a channel no relay can have.
+        let old = br#"{"serial":4,"issued_at":0,"profiles":{"technician":{"update.minimum-version":{"state":"locked","value":"0.5.3 "},"update.channel":{"state":"locked","value":"Stable"},"permission.clipboard":{"state":"off"}},"customer":{"update.minimum-version":{"state":"locked","value":"0.5.x"},"update.channel":{"state":"locked","value":"beta_1"},"permission.clipboard":{"state":"off"}}}}"#;
+        let b = Bundle::from_json(old).expect("the policy still applies");
+        let e = resolve(Some(&b), PROFILE_TECHNICIAN, "d", None);
+        assert_eq!(e.get("update.minimum-version"), "0.5.3 ");
+        assert!(crate::version::below_minimum("0.5.2", e.get("update.minimum-version")), "still blocks");
+        assert_eq!(e.get("update.channel"), "stable");
+        assert!(e.is_locked("permission.clipboard") && !e.on("permission.clipboard"));
+        assert_eq!(e.rejected.len(), 1, "{:?}", e.rejected);
+        let e = resolve(Some(&b), PROFILE_CUSTOMER, "d", None);
+        assert_eq!((e.get("update.minimum-version"), e.get("update.channel")), ("", "stable"));
+        assert!(e.is_locked("permission.clipboard") && !e.on("permission.clipboard"));
+        assert!(e.rejected.iter().any(|r| r.contains("0.5.x")) && e.rejected.len() == 2, "{:?}", e.rejected);
+        // Publishing them again is refused.
+        assert!(b.validate().is_err());
+    }
+
+    #[test]
+    fn rules_of_a_newer_manage_are_left_out() {
+        // A state and a rule field this build cannot read: the other rules still apply.
+        let newer = br#"{"serial":5,"issued_at":0,"profiles":{"technician":{"permission.audio":{"state":"forced"},"permission.tunnel":{"state":"on","until":9},"permission.clipboard":{"state":"off"}}},"groups":{"g":{"profile":"technician","overrides":{"permission.restart":{"state":"forced"},"permission.control":{"state":"off"}}}},"assignments":{"d":"g"}}"#;
+        let b = Bundle::from_json(newer).expect("the rest of the policy still applies");
+        let e = resolve(Some(&b), PROFILE_TECHNICIAN, "d", None);
+        assert!(e.is_locked("permission.clipboard") && e.is_locked("permission.control"));
+        assert!(!e.is_locked("permission.audio") && !e.is_locked("permission.restart") && !e.on("permission.tunnel"));
+        // Authoring (serde, as Tether Manage and the relay read a bundle) stays strict.
+        assert!(serde_json::from_slice::<Bundle>(newer).is_err());
+    }
+
+    #[test]
+    fn custom_app_cannot_unlock_what_the_policy_locks() {
+        let mut b = Bundle::default();
+        b.profiles.insert(
+            PROFILE_CUSTOMER.into(),
+            Layer::from([
+                ("permission.file-transfer".into(), rule(State::Off, None)),
+                ("permission.restart".into(), rule(State::On, None)),
+                ("customer.title".into(), rule(State::On, Some("Policy"))),
+            ]),
+        );
+        let custom = Layer::from([
+            ("permission.file-transfer".into(), rule(State::On, None)),
+            ("permission.audio".into(), rule(State::Locked, None)),
+            ("permission.restart".into(), rule(State::Off, None)),
+            ("customer.title".into(), rule(State::On, Some("ACME"))),
+        ]);
+        let e = resolve_with(Some(&b), PROFILE_CUSTOMER, "d", Some(&custom), None);
+        assert_eq!(e.get("permission.file-transfer"), "N");
+        assert!(e.is_locked("permission.file-transfer"));
+        // What the policy does not lock is the custom app's: its own lock-down survives a profile
+        // `on`, and so do its settings.
+        assert!(e.on("permission.audio") && e.is_locked("permission.audio"));
+        assert!(!e.on("permission.restart") && e.is_locked("permission.restart"));
+        assert_eq!(e.get("customer.title"), "ACME");
+        assert_eq!(e.sources, ["defaults", "profile", "custom-app"]);
+        assert!(e.rejected.is_empty());
+        // Groups and the machine layer still win over the custom app.
+        b.groups.insert("g".into(), Group { profile: PROFILE_CUSTOMER.into(), overrides: Layer::from([("permission.restart".into(), rule(State::On, None))]) });
+        b.assignments.insert("d".into(), "g".into());
+        assert!(resolve_with(Some(&b), PROFILE_CUSTOMER, "d", Some(&custom), None).on("permission.restart"));
+    }
+
+    #[test]
+    fn one_bad_rule_does_not_drop_its_layer() {
+        let layer = Layer::from([
+            ("permission.clipboard".into(), rule(State::Off, None)),
+            ("no.such".into(), rule(State::Off, None)),
+            ("security.approve-mode".into(), rule(State::Locked, Some("never"))),
+            ("video.quality".into(), rule(State::Locked, None)),
+        ]);
+        for (custom, machine, source) in [(None, Some(&layer), "machine"), (Some(&layer), None, "custom-app")] {
+            let e = resolve_with(None, PROFILE_TECHNICIAN, "d", custom, machine);
+            assert!(e.is_locked("permission.clipboard") && !e.on("permission.clipboard"), "{source}");
+            assert_eq!(e.get("security.approve-mode"), "both");
+            assert!(!e.is_locked("video.quality"));
+            assert_eq!(e.rejected.len(), 3, "{:?}", e.rejected);
+            assert!(e.rejected.iter().all(|r| r.starts_with(&format!("{source}: "))), "{:?}", e.rejected);
+            assert!(e.sources.contains(&source.to_owned()));
+        }
+        assert!(resolve(None, PROFILE_TECHNICIAN, "d", None).rejected.is_empty());
+    }
+
+    #[test]
+    fn minimum_version_and_channel_must_parse() {
+        let check = |id: &str, v: &str| check_value(feature(id).unwrap(), v).is_ok();
+        for ok in ["", "0.5.35", "0.5.0-test.1", "1.0", " 0.5.35 "] {
+            assert!(check("update.minimum-version", ok), "{ok:?}");
+        }
+        for bad in ["0.5.x", "latest", "0.5 .35", ">=0.5"] {
+            assert!(!check("update.minimum-version", bad), "{bad:?}");
+        }
+        // What made it a defect: such a minimum never blocked anyone.
+        assert!(!crate::version::below_minimum("0.0.1", "0.5.x"));
+        for ok in ["", "stable", "beta-2"] {
+            assert!(check("update.channel", ok), "{ok:?}");
+        }
+        for bad in ["Stable", "../x", "a b"] {
+            assert!(!check("update.channel", bad), "{bad:?}");
+        }
     }
 }

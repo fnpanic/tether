@@ -202,12 +202,16 @@ a zip that opens and holds `diagnostics.json`, and refuses the used code; the ke
 and the apps' throw-away HOME are deleted. First run: job `20261108T093709Z-ebc984ce2ca51eb2`, `ok`
 in 6 min (debug builds incremental), both apps PASS on macOS 15.7.4 (833 and 991 byte zips).
 
-`submit.sh` builds both UIs on the PC under `buildlock.sh` (npm is blocked on the Mac), packs
+`submit.sh` refuses to run while `apps`, `crates`, `patches` or `scripts` have uncommitted changes
+(the UIs come from the working tree, everything else from `HEAD`; `ALLOW_DIRTY=1` for a test
+build). It builds both UIs on the PC under `buildlock.sh` (npm is blocked on the Mac), packs
 `git archive HEAD` + `prebuilt/` as `src.tgz`, and sends `build.sh` + `swap.sh` with `keys.env`
 (`C:\vms\mac59\keys.env`) and `cs.p12`/`p12.pass` (`C:\vms\macsign`) as secrets. On the Mac
 [`build.sh`](../tools/macbuild/jobs/tether/build.sh) is the former `~/tether-build/run.sh` with
-`$JOB_CACHE` as its folder (incremental: `src/`, `.tools/`, Cargo's `target/` stay; the first build
-is a cold one): temporary keychain, codesign probe, `scripts/build-macos.sh` with `CI=true` and
+`$JOB_CACHE` as its folder (incremental: `src/.tools/` and Cargo's `target/` folders stay, every
+other file in `src/` is deleted and comes from the job's `src.tgz`, so a file removed from git is
+not built in; the first build is a cold one): temporary keychain, codesign probe,
+`scripts/build-macos.sh` with `CI=true` and
 `MAC_ARCH` from the job (`MAC_ARCH=universal bash tools/macbuild/jobs/tether/submit.sh` for a
 **release**: Intel + Apple silicon; the default `arm64` is for test builds only),
 designated-requirement check against `/Applications/Tether.app`, TetherQS check, keychain deleted,

@@ -41,7 +41,7 @@ systemctl restart paseo-relay
 
 if ! cmp -s paseo.caddy "$DROPIN"; then
   install -m 644 paseo.caddy "$DROPIN.new"
-  t=$(mktemp -d); cp /etc/tether/caddy.d/*.caddy "$t/"; cp "$DROPIN.new" "$t/paseo.caddy"
+  t=$(mktemp -d); cp /etc/tether/caddy.d/*.caddy "$t/" 2>/dev/null || true; cp "$DROPIN.new" "$t/paseo.caddy"
   sed "s|/etc/tether/caddy.d/|$t/|" /etc/tether/Caddyfile > "$t/Caddyfile"
   if ! RELAY_HOST=$H /usr/local/bin/caddy validate --config "$t/Caddyfile" --adapter caddyfile >/dev/null 2>&1; then
     rm -rf "$t" "$DROPIN.new"; echo "drop-in invalid: Tether not touched"; exit 1; fi

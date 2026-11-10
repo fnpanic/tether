@@ -3,10 +3,21 @@
 Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
 [SignPath Foundation](https://signpath.org).
 
-Status: application pending; until it is accepted, Windows releases are unsigned.
+Status: application pending. No file has been signed by SignPath yet.
 
-Only Windows files built by this repository's GitHub Actions workflow (`.github/workflows/desktop.yml`)
-from the tagged source are signed. Every signing request is approved by hand.
+**Today (interim).** Releases are built on the maintainer's PC (Windows) and on the maintainer's
+Mac build runner (macOS), not by GitHub Actions, and are signed there with the project's own
+self-signed certificates named `Tether Code Signing` (fingerprints and trust files:
+[docs/code-signing.md](docs/code-signing.md)). A self-signed certificate is trusted only on
+machines where its public part was installed; everywhere else Windows shows "Unknown publisher".
+The workflow `.github/workflows/desktop.yml` builds and tests on pushes to `main`, on pull requests
+and on manual runs; it has no tag trigger and its artifacts are not the released files.
+
+**Once SignPath has accepted the project.** Only Windows files built by this repository's GitHub
+Actions workflow (`.github/workflows/desktop.yml`) from the source in this repository will be
+signed with the SignPath Foundation certificate, and every signing request will be approved by
+hand. Releases will then be taken from that workflow instead of the maintainer's PC, and this page
+will say so.
 
 ## Team roles
 

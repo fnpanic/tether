@@ -52,10 +52,18 @@ http://:21125 {
 	}
 
 	# Relay API (tether-api). Caddy ignores client-sent X-Forwarded-For and sets the real peer.
-	# Small bodies are read whole by Caddy first, so a slow client waits here, not in tether-api.
+	# Caddy reads the first 600 KiB of a body before it connects to tether-api, so a slow client
+	# waits here, not in one of tether-api's workers: more than tether-api reads into memory
+	# (512 KiB + 1; `512k` would be 512 000 bytes). Of the two uploads tether-api streams to disk
+	# (release, diagnostics) only that start is held in memory, the rest streams through;
+	# tether-api limits how many run at once and how slowly.
 	handle /api/* {
 		reverse_proxy 127.0.0.1:21120 {
-			request_buffers 512k
+			request_buffers 600KiB
+			# Shorter than tether-api keeps an idle connection (30 s), so Caddy closes it first.
+			transport http {
+				keepalive 20s
+			}
 		}
 	}
 
@@ -71,6 +79,10 @@ http://:21125 {
 	# download/, so it is reachable only this way.
 	handle /q/* {
 		reverse_proxy 127.0.0.1:21120 {
+			request_buffers 600KiB
+			transport http {
+				keepalive 20s
+			}
 			header_up X-Tether-Accel 1
 			@accel header X-Accel-Redirect *
 			handle_response @accel {
@@ -93,7 +105,12 @@ http://:21125 {
 		# the same index with xz copies, read by TetherQS 0.5.31 / Tether 0.5.33 on.
 		@index path_regexp ^/download/[a-z0-9-]+/releases(-v2)?\.json$
 		handle @index {
-			reverse_proxy 127.0.0.1:21120
+			reverse_proxy 127.0.0.1:21120 {
+				request_buffers 600KiB
+				transport http {
+					keepalive 20s
+				}
+			}
 		}
 		handle {
 			root * /var/lib/tether-api

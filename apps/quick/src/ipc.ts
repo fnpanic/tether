@@ -16,6 +16,10 @@ export interface Client {
   name: string;
   authorized: boolean;
   is_file_transfer: boolean;
+  is_view_camera: boolean;
+  is_terminal: boolean;
+  /** Port forwarding target, "" = none. */
+  port_forward: string;
   [perm: string]: unknown;
 }
 
@@ -38,6 +42,8 @@ export interface State {
     diagnostics: boolean;
     /** Help › Send to support (policy diagnostics.upload). */
     diagnostics_upload: boolean;
+    /** Policy connect.chat. */
+    chat: boolean;
     perms: Perm[];
     /** Custom app name (signed profile in this exe), null for plain TetherQS. */
     custom_app: string | null;
@@ -76,6 +82,7 @@ export const api = {
   macFix: (which: "screen" | "accessibility") => invoke("mac_fix", { which }),
   /** Result text ("… is up to date", "Version … is available"); rejects with the reason. */
   checkUpdate: () => invoke<string>("update_check"),
+  /** Rejects while a session runs (the update restarts TetherQS). */
   installUpdate: () => invoke("update_install"),
   diagnostics: () => invoke<Diagnostics>("diagnostics"),
   diagnosticsProbe: (server: string) => invoke<Probe>("diagnostics_probe", { server }),

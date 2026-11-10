@@ -20,8 +20,9 @@ No Apple trademarks, logos or product imagery are used anywhere.
 
 ## Colour tokens
 
-Defined once in `apps/desktop/src/styles.css` as CSS variables and exposed to Tailwind as
-`bg-*/text-*/border-*` utilities. Never hard-code hex values in components.
+Defined in `apps/desktop/src/styles.css` (and with the same values in `apps/manage` and `apps/quick`)
+as CSS variables and exposed to Tailwind as `bg-*/text-*/border-*` utilities. Never hard-code hex
+values in components.
 
 | Token | Light | Dark | Use |
 | --- | --- | --- | --- |
@@ -32,19 +33,25 @@ Defined once in `apps/desktop/src/styles.css` as CSS variables and exposed to Ta
 | `ink` | `#1d1d1f` | `#f5f5f7` | Primary text |
 | `ink-80` | `#333333` | `#cccccc` | Secondary text on buttons |
 | `muted` | `#6e6e73` | `#98989d` | Captions, helper text |
-| `faint` | `#7a7a7a` | `#6e6e73` | Disabled, fine print |
+| `faint` | `#707070` | `#909095` | Placeholders, disabled, status dots; quieter than `muted`. Text that informs uses `muted` |
 | `hairline` | `rgba(0,0,0,.08)` | `rgba(255,255,255,.10)` | 1px borders, dividers |
 | `accent` | `#0066cc` | `#2997ff` | Buttons, links, selection, toggles |
+| `on-accent` | `#ffffff` | `#000000` | Text and icons on an `accent` fill (`text-on-accent`) |
 | `focus` | `#0071e3` | `#2997ff` | 2px focus outline |
 
 **Status colours** (extension; the source system has none). Only used as small dots, icons or short
 inline text, never as fills for large areas or buttons:
-`ok #1f9d55 / #30d158`, `warn #b25000 / #ffb340`, `danger #d70015 / #ff453a`.
+`ok #198146 / #30d158`, `warn #b25000 / #ffb340`, `danger #d70015 / #ff544a`.
 Destructive buttons use `danger` text on a neutral capsule, not a red fill, except the in-session
 **Disconnect** control, which is red so it can be found without reading.
 
+**Contrast.** Every text token (`ink`, `ink-80`, `muted`, `faint`, `accent`, `ok`, `warn`, `danger`)
+has at least 4.5:1 (WCAG 1.4.3) on `canvas`, `tile`, `tile-2` and `parchment` in both themes, and
+`on-accent` has it on `accent`. Check a changed token value with the WCAG formula before it goes in.
+
 Session surfaces always use the dark palette regardless of theme: stage `#000000`, glass
-`rgba(39,39,41,.72)` with `backdrop-filter: saturate(180%) blur(20px)`.
+`rgba(39,39,41,.72)` with `backdrop-filter: saturate(180%) blur(20px)`. The palette is the `.dark`
+class, on `<html>` for the dark theme and on the session root for that window alone.
 
 ## Typography
 
@@ -101,7 +108,7 @@ and is never applied below 12px.
 
 | Component | Spec |
 | --- | --- |
-| **Primary button** | `accent` fill, white text, callout 15/400, pill, height 44 (36 compact), padding x 22. |
+| **Primary button** | `accent` fill, `on-accent` text (white on light, black on dark), callout 15/400, pill, height 44 (36 compact), padding x 22. |
 | **Secondary button** | Transparent, `accent` text, 1px `accent` border, pill. |
 | **Utility button** | `ink` fill (`#f5f5f7` text) on light / `tile-2` on dark, caption 14, radius 8, height 32. |
 | **Pearl capsule** | `tile-2` fill, `ink-80` text, 1px `hairline`, radius 11. Neutral actions (Cancel, Decline). |
@@ -109,8 +116,8 @@ and is never applied below 12px.
 | **Text field** | `parchment` fill, 1px `hairline`, radius 11 (pill for search and the ID field), height 44, body text. Focus = `focus` ring. Error = `danger` 1px border + caption helper text below. |
 | **Card** | `tile`, 1px `hairline`, radius 18, padding 24. No shadow. |
 | **List row** | Height 36, radius 8, caption 14, hover `tile-2`, selected `accent` at 12% with `ink` text. |
-| **Toggle** (extension) | 40×24 track, `accent` when on, `hairline`-toned `parchment` when off, white 20px knob. |
-| **Segmented control** | Pill track in `parchment`, selected segment filled `accent` with white semibold text (`SELECTED` in `ui.tsx`; the policy state control keeps “Default” neutral), caption text. Selected list rows, nav items and cards use the same accent fill or an accent ring, so a selection reads at a glance. |
+| **Toggle** (extension) | 40×24 track, `accent` when on, `faint` when off (3:1 or more against the surface and the knob in both themes), white 20px knob, no shadow. The same in all three apps. |
+| **Segmented control** | Pill track in `parchment`, selected segment filled `accent` with `on-accent` semibold text (`SELECTED` in `ui.tsx`; the policy state control keeps “Default” neutral), caption text. Selected list rows, nav items and cards use the same accent fill or an accent ring, so a selection reads at a glance. |
 | **Status pill** | `parchment` pill, 6px status dot + footnote text. |
 | **Dialog** | `tile`, radius 18, padding 32, floating shadow, dim backdrop `rgba(0,0,0,.4)`. |
 | **Tag chip** (extension) | Neutral chip (`tile-2`, 1px `hairline`, radius 5, footnote) with a 7px colour dot; namespace in `muted`. The dot is the only colour (`--tag-*` tokens, identification, never a fill); rule tags use a dashed border. |

@@ -69,7 +69,10 @@ impl TaskPool {
     pub fn spawn(&self, code: Box<dyn FnMut() + Send>) {
         let mut queue = self.sharing.todo.lock().unwrap();
 
-        if self.sharing.waiting_tasks.load(Ordering::Acquire) == 0 {
+        // Tether: upstream queued the task whenever a thread was waiting, also one already woken
+        // for an earlier task that it had not taken yet: in a burst of new connections some then
+        // sat in the queue until another connection ended. Every queued task has its waiter now.
+        if self.sharing.waiting_tasks.load(Ordering::Acquire) <= queue.len() {
             self.add_thread(Some(code));
         } else {
             queue.push_back(code);

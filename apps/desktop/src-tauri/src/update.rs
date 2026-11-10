@@ -86,10 +86,16 @@ pub struct Found {
 /// Per relay: ETag and body of its last 200 answer, for `latest.json` and `releases.json`.
 static ETAGS: LazyLock<Mutex<HashMap<String, (String, Vec<u8>)>>> = LazyLock::new(Default::default);
 
-static LAST: LazyLock<Mutex<Found>> = LazyLock::new(|| {
-    let cached = std::fs::read(Config::path("update-state.json")).ok();
-    Mutex::new(cached.and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default())
-});
+static LAST: LazyLock<Mutex<Found>> = LazyLock::new(|| Mutex::new(cached()));
+
+fn cached() -> Found {
+    std::fs::read(Config::path("update-state.json")).ok().and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default()
+}
+
+/// `--cm` process: take over what the main UI's last check found (it runs no checks itself).
+pub fn reload() {
+    *LAST.lock().unwrap() = cached();
+}
 static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 /// Background download: `idle`, `downloading`, `staged`, `failed`.
 static PHASE: Mutex<&'static str> = Mutex::new("idle");
@@ -159,6 +165,13 @@ pub fn guard() -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// Below the release's or the policy's minimum version this device is blocked, so the release is
+/// offered to it whatever its place in the rollout (`update.rollout = late` too); a halted release
+/// never is.
+fn must_update(current: &str, c: &Candidate, policy_minimum: &str) -> bool {
+    !c.halted && (below_minimum(current, &c.minimum_version) || below_minimum(current, policy_minimum))
 }
 
 /// The release this device may install now.
@@ -320,7 +333,8 @@ pub fn check() -> Result<Value, String> {
         Some(c) => {
             let t = now();
             let bucket = release::bucket(&policy::install_uuid(), "technician", &c.version);
-            Found { eligible: c.eligible(bucket, t, &policy::get("update.rollout")), stale: c.stale(t), release: Some(c) }
+            let eligible = must_update(VERSION, &c, &policy::get("update.minimum-version")) || c.eligible(bucket, t, &policy::get("update.rollout"));
+            Found { eligible, stale: c.stale(t), release: Some(c) }
         }
         None => Found::default(),
     };
@@ -329,6 +343,7 @@ pub fn check() -> Result<Value, String> {
         log::warn!("cannot cache update state: {e}");
     }
     *LAST.lock().unwrap() = found;
+    policy::apply_incoming();
     // The Windows installer exits the app before `install` can delete the file it used.
     if let Some(dir) = Config::path("update-state.json").parent() {
         release::prune_staged(dir, offer().and_then(|c| staged_path(&c)).as_deref());
@@ -580,6 +595,19 @@ mod tests {
         let mut halted = found("999.0.0", true, "", true);
         halted.release.as_mut().unwrap().halted = true;
         assert_eq!(reason_for(&halted, "", true), None);
+    }
+
+    #[test]
+    fn below_the_minimum_the_update_is_offered_outside_the_rollout() {
+        let c = |minimum: &str, halted| Candidate { version: "999.0.0".into(), minimum_version: minimum.into(), halted, ..Default::default() };
+        assert!(must_update("0.5.0", &c("0.6.0", false), ""));
+        assert!(!must_update("0.6.0", &c("0.6.0", false), ""));
+        assert!(!must_update("0.5.0", &c("", false), ""));
+        assert!(!must_update("0.5.0", &c("0.6.0", true), ""));
+        // The policy minimum blocks the same way.
+        assert!(must_update("0.5.0", &c("", false), "0.6.0"));
+        assert!(!must_update("0.6.0", &c("", false), "0.6.0"));
+        assert!(!must_update("0.5.0", &c("", true), "0.6.0"));
     }
 
     #[test]

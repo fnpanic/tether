@@ -2,7 +2,7 @@
 
 use crate::b64;
 use base64::Engine;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -30,7 +30,7 @@ pub fn open(doc: &Signed, trusted: &[VerifyingKey]) -> Result<Vec<u8>, String> {
     let payload = b64().decode(&doc.payload).map_err(|e| format!("bad payload: {e}"))?;
     let sig = b64().decode(&doc.sig).map_err(|e| format!("bad signature: {e}"))?;
     let sig = Signature::from_slice(&sig).map_err(|e| format!("bad signature: {e}"))?;
-    key.verify(&payload, &sig).map_err(|_| "signature does not match".to_owned())?;
+    key.verify_strict(&payload, &sig).map_err(|_| "signature does not match".to_owned())?;
     Ok(payload)
 }
 
@@ -57,5 +57,11 @@ mod tests {
         // Swapping in an attacker key that signs its own payload is still untrusted.
         let forged = sign(b"{\"serial\":9}", &other);
         assert!(open(&forged, &[k.verifying_key()]).is_err());
+        // A weak key that got into the trusted list: its fixed signature fits no payload.
+        let (mut id, mut sig) = ([0u8; 32], [0u8; 64]);
+        (id[0], sig[0]) = (1, 1);
+        let weak = VerifyingKey::from_bytes(&id).unwrap();
+        let doc = Signed { payload: b64().encode(b"{\"serial\":9}"), sig: b64().encode(sig), key: b64().encode(id) };
+        assert!(open(&doc, &[weak]).is_err());
     }
 }

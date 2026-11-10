@@ -18,9 +18,11 @@ case $src in
   https://*) cer=$(mktemp); curl -fsSL "${src%/}/download/tether-codesign-macos.cer" -o "$cer" ;;
   *) cer=$src ;;
 esac
-# Confirm it is the right certificate and public (no private key).
-subj=$(openssl x509 -in "$cer" -inform DER -noout -subject 2>/dev/null || openssl x509 -in "$cer" -noout -subject)
-case $subj in *"Tether Code Signing"*) ;; *) echo "unexpected certificate: $subj" >&2; exit 1 ;; esac
+# Only this certificate (SHA-256 of certs/tether-codesign-macos.cer): a name proves nothing, anyone
+# can make a "Tether Code Signing" certificate.
+pin=17:D7:96:5C:BC:1C:11:0B:52:31:15:CE:B4:23:1B:F2:A3:46:1C:71:F8:02:B7:77:7B:3B:55:B6:42:B6:53:98
+fp=$(openssl x509 -in "$cer" -inform DER -noout -fingerprint -sha256 2>/dev/null || openssl x509 -in "$cer" -noout -fingerprint -sha256)
+case $fp in *="$pin") ;; *) echo "unexpected certificate: $fp (expected $pin)" >&2; exit 1 ;; esac
 
 if [ "$machine" = "--machine" ]; then
   sudo security add-trusted-cert -d -r trustAsRoot -p codeSign -k /Library/Keychains/System.keychain "$cer"

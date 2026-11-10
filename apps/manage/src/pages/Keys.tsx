@@ -56,7 +56,7 @@ export function Keys() {
             </Button>
             <div className="ml-auto flex items-end gap-2">
               <Label text="Import: passphrase of the backup">
-                <TextField type="password" value={importPass} onChange={(e) => setImportPass(e.target.value)} />
+                <TextField type="password" autoComplete="off" value={importPass} onChange={(e) => setImportPass(e.target.value)} />
               </Label>
               <Button
                 variant="danger"
@@ -65,7 +65,7 @@ export function Keys() {
                   const f = await open({ filters: [{ name: "Tether Manage key backup", extensions: ["tmkeys", "json"] }] });
                   if (typeof f !== "string") return;
                   if (!(await ask("Importing replaces the keys on this PC. Devices only trust the new keys if their public keys are deployed. Continue?", { title: "Replace keys", kind: "warning" }))) return;
-                  run(() => invoke("keys_import", { path: f, passphrase: importPass }), "Keys imported");
+                  run(() => invoke("keys_import", { path: f, passphrase: importPass }).then(() => setImportPass("")), "Keys imported");
                 }}
               >
                 Import backup…

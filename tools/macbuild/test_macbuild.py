@@ -305,6 +305,19 @@ class Security(Base):
         # a user key line cannot sign admin jobs, even if listed under "admin" for the job namespace
         self.assertIn('alice namespaces="macbuild-job"', open(self.r.p("keys", "allowed_signers")).read())
 
+    def test_failed_ingest_leaves_no_job_folder(self):
+        jid = self.send("alice", secrets=[(__file__, "s")])
+        ok = self.r.set_status
+
+        def full(user, job_id, /, **kw):
+            self.assertTrue(os.path.exists(os.path.join(self.r.jobdir(user, job_id), "secrets", "s")))
+            raise OSError("disk full")
+        self.r.set_status = full
+        self.r.tick()
+        self.r.set_status = ok
+        self.assertIn("disk full", self.rejected("alice", jid)["reason"])
+        self.assertFalse(os.path.exists(self.r.jobdir("alice", jid)), "no folder with secrets/ and no status")
+
     def test_job_moved_to_other_inbox(self):
         jid = self.send("alice")
         os.replace(self.r.p("inbox", "alice", jid + ".job"), self.r.p("inbox", "bob", jid + ".job"))

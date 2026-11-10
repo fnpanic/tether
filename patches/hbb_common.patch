@@ -740,7 +740,7 @@ index f33f914..1703bbd 100644
      // session's final close (here via `Stream`'s Drop) is issued. Both land on the serialized
      // closer thread, so the first runs to completion and the second is a benign no-op — the pc
 diff --git a/src/websocket.rs b/src/websocket.rs
-index 3a98a84..7cb05a7 100644
+index 3a98a84..c232d43 100644
 --- a/src/websocket.rs
 +++ b/src/websocket.rs
 @@ -19,7 +19,10 @@ use std::{
@@ -1074,7 +1074,7 @@ index 3a98a84..7cb05a7 100644
          // rendezvous
          (false, endpoint_port + 2)
      } else if endpoint_port == rendezvous_port - 1 {
-@@ -533,6 +680,139 @@ pub fn check_ws(endpoint: &str) -> String {
+@@ -533,6 +680,144 @@ pub fn check_ws(endpoint: &str) -> String {
      format!("{}://{}", protocol, address)
  }
  
@@ -1152,6 +1152,11 @@ index 3a98a84..7cb05a7 100644
 +
 +/// Connect every route to `url` now, in parallel, and report each result (also recorded).
 +pub async fn probe_routes(url: &str, ms_timeout: u64) -> Vec<RouteAttempt> {
++    // Same rule as `WsFramedStream::new`, which this bypasses.
++    if let Err(e) = check_tls(url, REQUIRE_TLS.load(Ordering::Relaxed)) {
++        let route = Route { url: url.to_owned(), via_proxy: false };
++        return vec![record_attempt(&route, std::time::Instant::now(), Some(&e))];
++    }
 +    let proxy_conf = Config::get_socks();
 +    let routes = connect_routes(url, proxy_conf.is_some());
 +    let attempts = routes.iter().map(|route| {
@@ -1214,7 +1219,7 @@ index 3a98a84..7cb05a7 100644
  /// Port of the reverse proxy serving `/ws/id` and `/ws/relay` on this client's own servers, for
  /// when it cannot listen on the scheme's default port. Any other host, such as a peer's server or
  /// a relay on another machine, keeps the default port. IP endpoints never get here.
-@@ -583,15 +863,21 @@ mod tests {
+@@ -583,15 +868,21 @@ mod tests {
      use tungstenite::protocol::Role;
  
      async fn ws_from_tcp(stream: TcpStream, addr: SocketAddr) -> WsFramedStream {
@@ -1239,7 +1244,7 @@ index 3a98a84..7cb05a7 100644
          }
      }
  
-@@ -622,6 +908,39 @@ mod tests {
+@@ -622,6 +913,39 @@ mod tests {
          server.await.unwrap();
      }
  
@@ -1279,7 +1284,7 @@ index 3a98a84..7cb05a7 100644
      #[test]
      fn test_check_ws() {
          let options = Config::get_options();
-@@ -902,3 +1221,45 @@ mod tests {
+@@ -902,3 +1226,45 @@ mod tests {
          }
      }
  }

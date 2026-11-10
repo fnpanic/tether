@@ -294,6 +294,11 @@ impl Server {
                 let new_client = match server.accept() {
                     Ok((sock, _)) => {
                         use util::RefinedTcpStream;
+                        // Tether: upstream read the request head and a body of up to 1024 bytes
+                        // on this connection's own thread with no timeout, so a client that
+                        // stopped sending kept the thread for good (threads are not capped).
+                        // tether-api sets its own timeouts once it has the request.
+                        sock.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok();
                         let (read_closable, write_closable) = match ssl {
                             None => RefinedTcpStream::new(sock),
                             #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]

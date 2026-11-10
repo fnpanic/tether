@@ -99,6 +99,8 @@ devices present B to relays that do not accept it yet.
 | Relay sends an endless or huge answer | Clients read at most 16 KiB (key list) / 512 KiB, in TetherQS 256 KiB (policy) plus one byte, then fail. |
 | Operator marks the switch done while a relay still signs with the old key | Manage enables "Every relay is switched" only when every relay's hbbs reports the new key (`/rendezvous/pubkey`). |
 | Saved `id_ed25519` read by another user of the admin PC | Created with an ACL for the current user only (0600 on unix); Manage keeps warning until **Delete key files**. |
+| **Save key files** or **Delete key files** pointed at a folder with another `id_ed25519` pair (an SSH key) | Save refuses a folder that already holds another pair of that name; Delete removes the two files only when the `.pub` there is a server key of this vault. |
+| Rotation cancelled after a relay switched | Manage asks first and names the relays that already sign with the new key: cancelling does not switch them back. |
 | Relay withholds the newest list | Devices keep the last list (they keep trusting what was trusted). Mitigation: the expiry on the old key; Manage shows per relay which serial it serves. |
 | Stolen old server key (e.g. a relay was compromised) | With it an attacker who also gets into the path (a relay, or DNS plus a certificate for the relay name) can forge device identities for devices that still trust it. Rotate: phase 1 with an expiry on A, phase 2 at once, phase 3a. |
 | Stolen admin key | It could already push any policy; now it can also make devices trust another server key. Still needs the path into the relay connection (TLS) to MITM. Admin key stays offline in the passphrase-sealed vault. |
@@ -118,6 +120,10 @@ The server key never protects session content: that is end-to-end encrypted betw
 | List published before the relays accept its first key | Viewers present a key the relays refuse (message above) | Publish the previous order again (Manage), or finish phase 2 |
 | A relay was skipped in phase 2 | Devices trust A and B, so both relays work | Switch it later |
 | Rollback of phase 2 | `sudo bash rotate-key.sh rollback` puts A back as signer; devices with [A, B] keep working | – |
+| `rollback` a second time (`id_ed25519.old` is already the signing key) | `rotate-key.sh` refuses ("already rolled back: id_ed25519.old is the signing key"): it would drop B from `KEYS_ACCEPT` | `switch` again to go forward |
+| Key list that lacks the key a relay signs with | Manage does not publish it ("Not published: the list lacks the key these relays sign with now …"). Checked for the relays that report their key; when none reports one, the list is published and the result says it could not be checked | Keep that key in the list until the relays use another one |
+| New rotation after one was cancelled past the switch | Manage starts from the key the relays sign with (not the first key of the live list); when the relays sign with different keys it does not start | Bring every relay to one key first |
+| `id_ed25519` on a relay cannot be read by hbbs/hbbr | Both exit at start (`-k _`) instead of running without the key check; `id_ed25519.pub` is not overwritten | Fix owner and mode (`install.sh` does), restart |
 | Old hbbs/hbbr without `KEYS_ACCEPT` | `rotate-key.sh` refuses to switch | Update the binaries first (phase 0) |
 | `switch` again while a switch is in progress (`id_ed25519.old` is another key) | `rotate-key.sh` refuses: it would drop the key devices still present from `KEYS_ACCEPT` | `retire` or `rollback` first |
 | Relay API without the endpoint | Manage shows the error per relay; devices get 404 and keep their list | Update tether-api |
@@ -152,14 +158,29 @@ one relay at a time.
 # phase 2, per relay: Tether Manage › Keys › Rotate server key › "Save key files…" wrote
 # id_ed25519 and id_ed25519.pub (the new key B) into a folder on this PC (id_ed25519 readable by
 # your user only; "Delete key files" in Manage removes both once every relay is switched)
-scp -i ~/.ssh/tether_oracle id_ed25519 id_ed25519.pub server/rotate-key.sh opc@<relay>:/tmp/
-ssh -i ~/.ssh/tether_oracle opc@<relay> 'sudo bash /tmp/rotate-key.sh switch /tmp/id_ed25519 && rm /tmp/id_ed25519 /tmp/id_ed25519.pub'
+# A folder only the login user can enter (not /tmp: every local user can read and replace files
+# there, and the script is run as root again days later):
+ssh -i ~/.ssh/tether_oracle opc@<relay> 'install -d -m 0700 ~/tether-key'
+scp -i ~/.ssh/tether_oracle id_ed25519 id_ed25519.pub server/rotate-key.sh opc@<relay>:tether-key/
+# The private key is removed whether the switch worked or not; the exit code is the script's:
+ssh -i ~/.ssh/tether_oracle opc@<relay> 'sudo bash ~/tether-key/rotate-key.sh switch ~/tether-key/id_ed25519; rc=$?; rm -f ~/tether-key/id_ed25519 ~/tether-key/id_ed25519.pub; exit $rc'
 #   -> B signs, A is accepted (KEYS_ACCEPT in /etc/tether/keys.env), A kept as id_ed25519.old
 # phase 3b, per relay, after the retire list reached enough devices:
-ssh -i ~/.ssh/tether_oracle opc@<relay> 'sudo bash /tmp/rotate-key.sh retire'
-# undo phase 2 (A signs again):
-ssh -i ~/.ssh/tether_oracle opc@<relay> 'sudo bash /tmp/rotate-key.sh rollback'
+ssh -i ~/.ssh/tether_oracle opc@<relay> 'sudo bash ~/tether-key/rotate-key.sh retire'
+# undo phase 2 (A signs again; a second rollback is refused):
+ssh -i ~/.ssh/tether_oracle opc@<relay> 'sudo bash ~/tether-key/rotate-key.sh rollback'
 ```
+
+If the switch failed, copy the key files again before the next try. Tether Manage prints the same
+commands in its Switch and Retire steps (`switchCommands`, `retireCommands` in
+`apps/manage/src/lib/serverkeys.ts`): the same folder `~/tether-key`, the key removed also on
+failure. It prints them without the `-i` key option, and with `rotate-key.sh` taken from the
+folder that holds the key files: copy `server/rotate-key.sh` there first.
+
+hbbs and hbbr started with `-k _` exit when `id_ed25519` exists but cannot be read (for example a
+key restored as root): they no longer run without the key check, and they do not write a new
+`id_ed25519.pub` beside it. `install.sh` gives existing key files in `/var/lib/tether` to user `tether` and sets the private
+ones to mode 0600.
 
 ### Kubernetes (Helm)
 

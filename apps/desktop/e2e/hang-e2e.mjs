@@ -60,7 +60,7 @@ const held = [];
 for (const [i, r] of RELAYS.entries()) {
   r.dir = join(work, `api${i + 1}`);
   mkdirSync(r.dir, { recursive: true });
-  const p = spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, `${BIN}/tether-api`, "--data", wslPath(r.dir), "--listen", `127.0.0.1:${r.api}`], { stdio: ["ignore", "pipe", "pipe"] });
+  const p = spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, "RELAY_HOST=127.0.0.1,localhost", `${BIN}/tether-api`, "--data", wslPath(r.dir), "--listen", `127.0.0.1:${r.api}`], { stdio: ["ignore", "pipe", "pipe"] });
   r.out = "";
   p.stdout.on("data", (d) => (r.out += d));
   p.stderr.on("data", (d) => (r.out += d));

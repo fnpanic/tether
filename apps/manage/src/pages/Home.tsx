@@ -86,7 +86,7 @@ function Relays() {
                 </td>
                 <td>
                   {!saved ? (
-                    <Badge tone="accent">Not saved yet</Badge>
+                    <Badge tone="ink">Not saved yet</Badge>
                   ) : !health ? (
                     <span className="text-muted">Checking…</span>
                   ) : h?.ok ? (

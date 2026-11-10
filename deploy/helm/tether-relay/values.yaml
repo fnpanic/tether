@@ -9,6 +9,7 @@ image:
 # Base URL clients use for this cluster's front end, without path. hbbs hands out
 # <publicUrl>/ws/relay/<n> so both peers of a session reach the same hbbr pod.
 # Production: wss://relay.example.com (TLS at the proxy or at your load balancer/ingress).
+# Its host name is also the one tether-api accepts signed requests for (RELAY_HOST).
 publicUrl: wss://relay.example.com
 
 # Server key pair; must be the same on every relay (clients pin TETHER_PUB_KEY).
@@ -68,7 +69,16 @@ proxy:
     tlsPort: 443      # served when tls.secretName is set
     tlsNodePort: null
     annotations: {}
-  # Secret of type kubernetes.io/tls (e.g. from cert-manager); serves TLS on tlsPort.
+    # Empty: the cluster default (Cluster), where the proxy sees a node's address instead of the
+    # client's. Local (LoadBalancer/NodePort) keeps the client IP for the per-IP limits and the
+    # audit log; the load balancer must then health-check the nodes.
+    externalTrafficPolicy: ""
+  # Address ranges of the load balancer or ingress in front, if it hides the client IP and
+  # reports it in X-Forwarded-For, e.g. ["10.0.0.0/8"]. Empty: the connecting peer is the client.
+  # Never list ranges clients can connect from: they could then name any address as theirs.
+  trustedProxies: []
+  # Secret of type kubernetes.io/tls (e.g. from cert-manager); serves TLS on tlsPort. The plain
+  # port then only redirects to https (and answers the probes).
   tls:
     secretName: ""
   resources:

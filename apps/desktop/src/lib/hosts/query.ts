@@ -80,9 +80,14 @@ function term(v: string, quoted: boolean): Node {
   return { k: "word", v: v.toLowerCase() };
 }
 
+/** Brackets and NOTs nest by recursion; past this depth the rest of the nesting is ignored (a
+ *  query from a shared team doc must not overflow the stack while the page renders). */
+const MAX_DEPTH = 200;
+
 export function parse(q: string): Parsed {
   const toks = tokenize(q);
   let pos = 0;
+  let depth = 0;
   let error: string | undefined;
   const words: string[] = [];
 
@@ -114,15 +119,24 @@ export function parse(q: string): Parsed {
   };
   const unary = (): Node | null => {
     const t = toks[pos];
+    if ((t?.t === "not" || t?.t === "(") && depth >= MAX_DEPTH) {
+      error ??= "Too many nested brackets";
+      pos++;
+      return null;
+    }
     if (t?.t === "not") {
       pos++;
+      depth++;
       const u = unary();
+      depth--;
       if (!u) error ??= "Nothing after NOT";
       return u ? { k: "not", c: u } : null;
     }
     if (t?.t === "(") {
       pos++;
+      depth++;
       const e = or();
+      depth--;
       if (toks[pos]?.t === ")") pos++;
       else error ??= "Missing )";
       return e;

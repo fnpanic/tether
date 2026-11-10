@@ -85,6 +85,9 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.proxy.service.type }}
+  {{- with .Values.proxy.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
   selector: {{- include "tr.selector" $ctx | nindent 4 }}
   ports:
     - name: http

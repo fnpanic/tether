@@ -29,9 +29,10 @@ import { loadSharpen, saveSharpen, SHARPEN_MODES, type SharpenMode } from "../li
 import { Button, IconButton, Logo, TitleBar, useToast } from "../components/ui";
 import { RecordingSaved } from "../components/RecordingSaved";
 import { FileTransfer } from "./FileTransfer";
-import { mouseMask, MOUSE, wheelSteps, lockModes } from "../lib/input";
+import { mouseMask, MOUSE, wheelSteps, lockModes, remoteKey } from "../lib/input";
 import { classify, onFailure, reconnectMinutes, type Series } from "../lib/reconnect";
 import { passwordWhy, RESUME_GRACE_MS } from "../lib/login";
+import { errorText, isOn, usePolicy } from "../lib/policy";
 import { ADMIN_ON, elevationError, hostNote, NOTE_TEXT, UAC_SETTLE_MS, uacOutcome, type HostNote } from "../lib/elevation";
 
 interface Display {
@@ -198,9 +199,31 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
     setRecState(r);
   };
   const toast = useToast();
+  const chatOn = isOn(usePolicy(), "connect.chat");
   /** Every toolbar action either works or says why not. */
-  const act = (p: Promise<unknown>) => p.catch((e) => toast.show(String(e)));
+  const act = (p: Promise<unknown>) => p.catch((e) => toast.show(errorText(e)));
   const [ask, setAsk] = useState<"lock" | "restart" | null>(null);
+  // Local keyboard (docs/keyboard.md): after Ctrl+Alt+Home the keys work this window's toolbar,
+  // menus and dialogs instead of going to the remote computer, until Escape or a click into the picture.
+  const [local, setLocal] = useState(false);
+  // Keys pressed while local and still down (lib/input remoteKey).
+  const localKeys = useRef(new Set<string>());
+  const enterLocal = () => {
+    setLocal(true);
+    invoke("session_keyboard", { key, pause: true }).catch(() => {});
+    toast.show("The keyboard now works this toolbar. Esc gives it back to the remote computer.", 4000);
+  };
+  /** `by`: the key that ended it and is still down (its release is not the remote's). */
+  const leaveLocal = (by?: string) => {
+    // Anything else in the set had its release missed (focus was elsewhere): forget it.
+    localKeys.current = new Set(by ? [by] : []);
+    setLocal(false);
+    canvasRef.current?.focus();
+    invoke("session_keyboard", { key, pause: false }).catch(() => {});
+  };
+  useEffect(() => {
+    if (local && toolbar && !ask && !barRef.current?.contains(document.activeElement)) barRef.current?.querySelector("button")?.focus();
+  }, [local, toolbar, ask]);
   /** What the host said is missing (a Mac without Screen Recording / Accessibility). */
   const [hostMissing, setHostMissing] = useState<string[]>([]);
 
@@ -211,7 +234,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
     const pipe = new VideoPipeline(canvasRef.current!, {
       onFail: (codec, d) => {
         watch = watchNative(watch, performance.now());
-        invoke("session_webcodecs_failed", { key, codec, display: d });
+        invoke("session_webcodecs_failed", { key, codec, display: d }).catch(() => {});
       },
       onNeedKey: (d) => invoke("session_refresh", { key, display: d }).catch(() => {}),
       onSize: (w, h) => setFrameSize({ w, h }),
@@ -318,6 +341,10 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
         case "chat":
           setChat((c) => ({ ...c, unread: c.open ? 0 : c.unread + 1, msgs: [...c.msgs, { me: false, text: p.text }] }));
           break;
+        // The system-key hook saw Ctrl+Alt+Home (it swallows the keys, so the page did not).
+        case "local_escape":
+          enterLocal();
+          break;
       }
     });
     (async () => {
@@ -343,7 +370,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
         restoreView.current = viewOnly;
       }
       setImageQuality((await invoke<string>("get_option", { key: "image-quality" }).catch(() => "")) || "balanced");
-    })().catch((e) => alive && setPhase({ kind: "error", title: "Could not start the session", text: String(e), retry: false }));
+    })().catch((e) => alive && setPhase({ kind: "error", title: "Could not start the session", text: errorText(e), retry: false }));
     const t = setInterval(() => {
       setVstats({ ...pipe.sample() });
       // Frames arrive but no picture is drawn (a silently failing decoder): heal (lib/video watchdog).
@@ -352,7 +379,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       if (act === "native") {
         console.warn(`[video] watchdog: ${pipe.fed} frames decoded, none drawn: native decoding`);
         toast.show("The picture stopped updating: switched to software decoding.");
-        invoke("session_webcodecs_failed", { key, codec: pipe.lastCodec, display: pipe.display });
+        invoke("session_webcodecs_failed", { key, codec: pipe.lastCodec, display: pipe.display }).catch(() => {});
       } else if (act === "codec") {
         const codec = pipe.lastCodec === CODEC.vp9 ? "vp8" : "vp9";
         console.warn(`[video] watchdog: still no picture: asking the host for ${codec}`);
@@ -447,7 +474,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
     setRec({ state: "pending", since: 0 });
     invoke("session_record", { key, start: true }).catch((e) => {
       setRec({ state: "idle", since: 0 });
-      toast.show(String(e));
+      toast.show(errorText(e));
     });
   };
 
@@ -502,6 +529,8 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       c.setPointerCapture(e.pointerId);
       c.focus();
       // A click into the picture always gives the session the keyboard (ends a local escape).
+      localKeys.current.clear();
+      setLocal(false);
       invoke("session_keyboard", { key, pause: false }).catch(() => {});
       send(mouseMask(MOUSE.DOWN, e.button), e);
     };
@@ -517,9 +546,23 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
     };
     const ctx = (e: MouseEvent) => e.preventDefault();
     const key_ = (down: boolean) => (e: KeyboardEvent) => {
-      if (chat.open && (e.target as HTMLElement)?.tagName === "INPUT") return;
+      const chord = !local && down && e.code === "Home" && e.ctrlKey && e.altKey;
+      const remote = remoteKey(localKeys.current, local || chord, e.code, down);
+      if (local && down && e.key === "Escape") {
+        // Escape closes what is open (confirmation, menu) first, then returns the keyboard.
+        e.preventDefault();
+        const menu = barRef.current?.querySelector<HTMLElement>('[aria-expanded="true"]');
+        if (ask) setAsk(null);
+        else if (menu) (menu.click(), menu.focus());
+        else leaveLocal(e.code);
+        return;
+      }
+      // Local: the browser handles the key; only the release of a key held from before goes out.
+      if (local && !remote) return;
+      if (!local && chat.open && (e.target as HTMLElement)?.tagName === "INPUT") return;
       e.preventDefault();
-      if (!viewOnly) invoke("session_key", { key, code: e.code, down, lockModes: lockModes(e), character: e.key.length === 1 ? e.key : "" });
+      if (chord) return enterLocal();
+      if (remote && !viewOnly) invoke("session_key", { key, code: e.code, down, lockModes: lockModes(e), character: e.key.length === 1 ? e.key : "" });
     };
     const kd = key_(true);
     const ku = key_(false);
@@ -529,7 +572,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       if (isText(e.target)) invoke("session_keyboard", { key, pause: true }).catch(() => {});
     };
     const fout = (e: FocusEvent) => {
-      if (isText(e.target) && !isText(e.relatedTarget)) invoke("session_keyboard", { key, pause: false }).catch(() => {});
+      if (!local && isText(e.target) && !isText(e.relatedTarget)) invoke("session_keyboard", { key, pause: false }).catch(() => {});
     };
     document.addEventListener("focusin", fin);
     document.addEventListener("focusout", fout);
@@ -552,7 +595,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       document.removeEventListener("focusin", fin);
       document.removeEventListener("focusout", fout);
     };
-  }, [phase.kind, key, toRemote, chat.open, useGl, viewOnly]);
+  }, [phase.kind, key, toRemote, chat.open, useGl, viewOnly, local, ask]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keyboard settings; asked again once the peer's platform is known (PC/Mac mapping).
   useEffect(() => {
@@ -566,7 +609,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
   // (hover ~300 ms or click): the top edge belongs to the remote picture (title bars, tabs).
   const reveal = useRef(() => {});
   useEffect(() => {
-    if (pinned || phase.kind !== "connected") return setToolbar(true);
+    if (pinned || local || phase.kind !== "connected") return setToolbar(true);
     const hide = () => {
       t = 0;
       setToolbar(false);
@@ -591,7 +634,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       reveal.current = () => {};
       window.removeEventListener("mousemove", m);
     };
-  }, [pinned, phase.kind]);
+  }, [pinned, local, phase.kind]);
   const hoverTimer = useRef(0);
   useEffect(() => () => clearTimeout(hoverTimer.current), []);
 
@@ -660,7 +703,8 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
   const latencyColor = delay == null ? "bg-muted" : delay < 40 ? "bg-ok" : delay < 120 ? "bg-warn" : "bg-danger";
 
   return (
-    <div className="relative flex h-full flex-col bg-black text-white">
+    // "dark": the session surface uses the dark palette whatever the app's theme (DESIGN.md).
+    <div className="dark relative flex h-full flex-col bg-black text-white">
       {/* stage */}
       <div ref={stageRef} className={`relative min-h-0 flex-1 ${fit === "original" ? "overflow-auto" : "overflow-hidden"} grid place-items-center`}>
         <canvas
@@ -725,7 +769,22 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
           (toolbar || chat.unread > 0) && connected && frameSize.w ? "translate-y-0 opacity-100" : "pointer-events-none invisible -translate-y-3 opacity-0"
         }`}
       >
-        <div ref={barRef} data-testid="toolbar" className="drag pointer-events-auto mt-2 flex items-center gap-1 glass rounded-full border border-white/10 p-1 shadow-float" data-tauri-drag-region>
+        <div
+          ref={barRef}
+          role="toolbar"
+          aria-label="Session (Ctrl+Alt+Home to use it with the keyboard)"
+          data-testid="toolbar"
+          className="drag pointer-events-auto mt-2 flex items-center gap-1 glass rounded-full border border-white/10 p-1 shadow-float"
+          data-tauri-drag-region
+          // Local keyboard: arrows move along the toolbar and through an open menu.
+          onKeyDown={(e) => {
+            const d = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+            if (!d || !local) return;
+            e.preventDefault();
+            const bs = [...e.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled)")];
+            bs[(bs.indexOf(document.activeElement as HTMLElement) + d + bs.length) % bs.length]?.focus();
+          }}
+        >
           <div className="flex items-center gap-2 pl-2 pr-3" data-tauri-drag-region>
             <span className={`h-2 w-2 rounded-full ${connected ? latencyColor : "bg-warn"}`} />
             {/* Narrow window: the name gives way so the toolbar fits (the window title has it too). */}
@@ -739,6 +798,11 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
             )}
             {route && <span className="rounded-[5px] bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white/70">{route}</span>}
             {viewOnly && <span className="rounded-[5px] bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white/70">View only</span>}
+            {local && (
+              <span role="status" data-testid="kbd-local" className="whitespace-nowrap rounded-sm bg-accent px-1.5 py-0.5 text-footnote text-on-accent">
+                Keyboard: this window, Esc to return
+              </span>
+            )}
           </div>
           <Sep />
           {info && info.displays.length > 1 && (
@@ -767,14 +831,16 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
             <Activity size={17} />
           </TB>
           <Sep />
-          <TB label={chat.unread ? `Chat (${chat.unread} unread)` : "Chat"} active={chat.open} onClick={() => setChat((c) => ({ ...c, open: !c.open, unread: 0 }))}>
-            <MessageSquare size={17} />
-            {chat.unread > 0 && (
-              <span data-testid="chat-unread" className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-danger px-1 text-[10px] font-semibold leading-none text-white">
-                {chat.unread}
-              </span>
-            )}
-          </TB>
+          {(chatOn || chat.msgs.length > 0) && (
+            <TB label={chat.unread ? `Chat (${chat.unread} unread)` : "Chat"} active={chat.open} onClick={() => setChat((c) => ({ ...c, open: !c.open, unread: 0 }))}>
+              <MessageSquare size={17} />
+              {chat.unread > 0 && (
+                <span data-testid="chat-unread" className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-danger px-1 text-footnote font-semibold leading-none text-on-accent">
+                  {chat.unread}
+                </span>
+              )}
+            </TB>
+          )}
           <TB label="Transfer files" onClick={() => act(api.openSession(peer, "file-transfer", key))}>
             <FolderSync size={17} />
           </TB>
@@ -851,10 +917,13 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
         <ChatPanel
           msgs={chat.msgs}
           onClose={() => setChat((c) => ({ ...c, open: false }))}
-          onSend={(text) => {
-            act(invoke("session_chat", { key, text }));
-            setChat((c) => ({ ...c, msgs: [...c.msgs, { me: true, text }] }));
-          }}
+          onSend={(text) =>
+            // Listed only once it was sent (too long, or chat turned off by the organisation).
+            invoke("session_chat", { key, text }).then(
+              () => (setChat((c) => ({ ...c, msgs: [...c.msgs, { me: true, text }] })), true),
+              (e) => (toast.show(errorText(e)), false),
+            )
+          }
         />
       )}
     </div>
@@ -874,11 +943,13 @@ function Sep() {
   return <div className="mx-1 h-5 w-px bg-white/10" />;
 }
 
-function TB({ label, active, children, onClick }: { label: string; active?: boolean; children: React.ReactNode; onClick?: () => void }) {
+/** `expanded`: this button opens a menu (the local keyboard's Escape closes the open one). */
+function TB({ label, active, expanded, children, onClick }: { label: string; active?: boolean; expanded?: boolean; children: React.ReactNode; onClick?: () => void }) {
   return (
     <button
       aria-label={label}
       title={label}
+      aria-expanded={expanded}
       onClick={onClick}
       className={`no-drag relative grid h-9 min-w-9 place-items-center rounded-full px-2 transition ${active ? "bg-white/15 text-white" : "text-white/70 hover:bg-white/10 hover:text-white"}`}
     >
@@ -930,11 +1001,11 @@ function KeyboardMenu({ kbd, mac, onChange, onForceQuit }: { kbd: KbdSettings; m
   );
   return (
     <div className="no-drag relative">
-      <TB label="Keyboard" active={open} onClick={() => setOpen(!open)}>
+      <TB label="Keyboard" active={open} expanded={open} onClick={() => setOpen(!open)}>
         <Keyboard size={17} />
       </TB>
       {open && (
-        <div role="menu" className="animate-fade absolute right-0 top-11 z-30 max-h-[calc(100vh-7rem)] w-80 overflow-y-auto rounded-xl border border-white/10 bg-[#272729] p-1 shadow-float" onMouseLeave={() => setOpen(false)}>
+        <div role="menu" className="animate-fade absolute right-0 top-11 z-30 max-h-[calc(100vh-7rem)] w-80 overflow-y-auto rounded-xl border border-white/10 bg-tile p-1 shadow-float" onMouseLeave={() => setOpen(false)}>
           {kbd.dir === "pc-mac" && item("Windows shortcuts on the Mac", "Ctrl works as ⌘ (Ctrl+C, Ctrl+V…), the Win key as Control, Home/End, Ctrl+arrows like on Windows. Off: keys as on a Mac keyboard (e.g. for a terminal).", kbd.shortcuts, () => onChange({ shortcuts: !kbd.shortcuts }))}
           {kbd.dir === "mac-pc" && item("Mac shortcuts on the PC", "⌘ works as Ctrl (⌘C, ⌘V…), Control as the Windows key, ⌘/⌥+arrows like on a Mac.", kbd.shortcuts, () => onChange({ shortcuts: !kbd.shortcuts }))}
           {kbd.hook && item("Send system keys", "Win, Win+R, Alt+Space, Alt+Esc, Ctrl+Esc, Print go to the remote computer while this window is active. Ctrl+Alt+Home gives them back to this PC until you click into the picture.", kbd.system_keys, () => onChange({ systemKeys: !kbd.system_keys }))}
@@ -965,11 +1036,11 @@ function ActionsMenu({ windows, service, adminOn, onCad, onElevate, onAsk }: { w
   );
   return (
     <div className="no-drag relative">
-      <TB label="Remote actions" active={open} onClick={() => setOpen(!open)}>
+      <TB label="Remote actions" active={open} expanded={open} onClick={() => setOpen(!open)}>
         <MonitorCog size={17} />
       </TB>
       {open && (
-        <div role="menu" className="animate-fade absolute right-0 top-11 z-30 w-72 overflow-hidden rounded-xl border border-white/10 bg-[#272729] p-1 shadow-float" onMouseLeave={() => setOpen(false)}>
+        <div role="menu" className="animate-fade absolute right-0 top-11 z-30 w-72 overflow-hidden rounded-xl border border-white/10 bg-tile p-1 shadow-float" onMouseLeave={() => setOpen(false)}>
           {windows &&
             item(
               "Send Ctrl+Alt+Del",
@@ -1010,9 +1081,9 @@ function ConfirmAction({ what, windows, service, onCancel, onConfirm }: { what: 
   return (
     <div role="dialog" aria-label={title} className="animate-rise absolute left-1/2 top-16 z-30 w-[360px] -translate-x-1/2 rounded-2xl border border-white/10 glass p-4 text-center shadow-float">
       <div className="text-callout font-semibold">{title}</div>
-      <div className={`mt-1 text-caption ${service ? "text-white/60" : "text-[#ffb340]"}`}>{text}</div>
+      <div className={`mt-1 text-caption ${service ? "text-white/60" : "text-warn"}`}>{text}</div>
       <div className="mt-4 flex justify-center gap-2">
-        <Button variant="ghost" size="sm" className="!text-white/70 hover:!bg-white/10" onClick={onCancel}>
+        <Button variant="ghost" size="sm" className="!text-white/70 hover:!bg-white/10" autoFocus onClick={onCancel}>
           Cancel
         </Button>
         <Button variant="primary" size="sm" onClick={onConfirm}>
@@ -1030,6 +1101,7 @@ function QualityMenu({ value, onChange, sharpen, onSharpen }: { value: string; o
     <div className="no-drag relative">
       <button
         title="Image quality"
+        aria-expanded={open}
         onClick={() => setOpen(!open)}
         className="flex h-9 items-center gap-1.5 rounded-full px-3 text-caption text-white/75 transition hover:bg-white/10 hover:text-white"
       >
@@ -1038,7 +1110,7 @@ function QualityMenu({ value, onChange, sharpen, onSharpen }: { value: string; o
         <ChevronDown size={14} />
       </button>
       {open && (
-        <div className="animate-fade absolute left-0 top-11 w-56 overflow-hidden rounded-xl border border-white/10 bg-[#272729] p-1 shadow-float" onMouseLeave={() => setOpen(false)}>
+        <div className="animate-fade absolute left-0 top-11 w-56 overflow-hidden rounded-xl border border-white/10 bg-tile p-1 shadow-float" onMouseLeave={() => setOpen(false)}>
           {QUALITY.map((q) => (
             <button
               key={q.value}
@@ -1075,7 +1147,7 @@ function QualityMenu({ value, onChange, sharpen, onSharpen }: { value: string; o
 
 function Overlay({ phase, name, peer, sessionKey: key, hostMissing, onLogin }: { phase: Phase; name: string; peer: string; sessionKey: string; hostMissing: string[]; onLogin: () => void }) {
   const [pw, setPw] = useState("");
-  const [remember, setRemember] = useState(true);
+  const [remember, setRemember] = useState(false);
   const close = async () => (await import("@tauri-apps/api/window")).getCurrentWindow().close();
   return (
     <div className="absolute inset-0 flex flex-col">
@@ -1094,7 +1166,9 @@ function Overlay({ phase, name, peer, sessionKey: key, hostMissing, onLogin }: {
           {phase.kind === "connecting" && (
             <div className="mt-8 flex flex-col items-center gap-4">
               <Spinner />
-              <div className="text-caption text-white/70">{phase.text}</div>
+              <div role="status" className="text-caption text-white/70">
+                {phase.text}
+              </div>
               <Button variant="ghost" size="sm" className="!text-white/60 hover:!bg-white/10" onClick={close}>
                 Cancel
               </Button>
@@ -1143,7 +1217,7 @@ function Overlay({ phase, name, peer, sessionKey: key, hostMissing, onLogin }: {
           )}
 
           {phase.kind === "error" && (
-            <div className="mt-7">
+            <div className="mt-7" role="alert">
               <div className="text-callout font-normal text-danger">{phase.title}</div>
               <div className="mt-1.5 text-caption leading-relaxed text-white/65">{phase.text}</div>
               <div className="mt-6 flex justify-center gap-2">
@@ -1188,7 +1262,7 @@ function FirstImage({ hostMissing }: { hostMissing: string[] }) {
 }
 
 function Spinner() {
-  return <div className="h-7 w-7 animate-spin rounded-full border-2 border-white/15 border-t-[#2997ff]" />;
+  return <div className="h-7 w-7 animate-spin rounded-full border-2 border-white/15 border-t-accent" />;
 }
 
 /** Over the dimmed last frame while the session reconnects on its own. */
@@ -1225,7 +1299,8 @@ function RecPill({ since }: { since: number }) {
   );
 }
 
-function ChatPanel({ msgs, onSend, onClose }: { msgs: { me: boolean; text: string }[]; onSend: (t: string) => void; onClose: () => void }) {
+/** `onSend` resolves to whether the message went out (a refused one stays in the field). */
+function ChatPanel({ msgs, onSend, onClose }: { msgs: { me: boolean; text: string }[]; onSend: (t: string) => Promise<boolean>; onClose: () => void }) {
   const [v, setV] = useState("");
   const end = useRef<HTMLDivElement>(null);
   // Braces: scrollIntoView returns a Promise in current WebView2, which React would call as cleanup.
@@ -1244,7 +1319,7 @@ function ChatPanel({ msgs, onSend, onClose }: { msgs: { me: boolean; text: strin
         {msgs.length === 0 && <div className="pt-10 text-center text-caption text-white/40">Messages appear on the remote screen.</div>}
         {msgs.map((m, i) => (
           <div key={i} className={`flex ${m.me ? "justify-end" : ""}`}>
-            <div className={`max-w-[80%] rounded-2xl px-3 py-1.5 text-caption ${m.me ? "bg-accent text-white" : "bg-white/10"}`}>{m.text}</div>
+            <div className={`max-w-[80%] rounded-2xl px-3 py-1.5 text-caption ${m.me ? "bg-accent text-on-accent" : "bg-white/10"}`}>{m.text}</div>
           </div>
         ))}
         <div ref={end} />
@@ -1253,12 +1328,12 @@ function ChatPanel({ msgs, onSend, onClose }: { msgs: { me: boolean; text: strin
         className="flex gap-2 border-t border-white/10 p-2"
         onSubmit={(e) => {
           e.preventDefault();
-          if (v.trim()) onSend(v.trim());
-          setV("");
+          const t = v.trim();
+          if (t) void onSend(t).then((ok) => ok && setV(""));
         }}
       >
-        <input value={v} onChange={(e) => setV(e.target.value)} placeholder="Message" className="h-9 flex-1 rounded-xl bg-white/5 px-3 text-caption text-white outline-none placeholder:text-white/35" />
-        <button aria-label="Send" className="grid h-9 w-9 place-items-center rounded-full bg-accent text-white">
+        <input value={v} onChange={(e) => setV(e.target.value)} placeholder="Message" aria-label="Message" className="h-9 flex-1 rounded-xl bg-white/5 px-3 text-caption text-white outline-none placeholder:text-white/35" />
+        <button aria-label="Send" className="grid h-9 w-9 place-items-center rounded-full bg-accent text-on-accent">
           <Send size={15} />
         </button>
       </form>

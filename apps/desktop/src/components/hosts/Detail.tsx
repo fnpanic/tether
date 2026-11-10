@@ -1,10 +1,11 @@
 // Right-hand panel for the host under the cursor: actions, name, tags, notes, facts, history.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Copy, Eye, FolderSync, History, Pin, PinOff, Trash2 } from "lucide-react";
 import { Button, IconButton, PlatformIcon } from "../ui";
 import { formatId, invoke } from "../../lib/ipc";
 import { label, osFamily, type Host, type Store } from "../../lib/hosts/model";
-import { actions, useHosts } from "../../lib/hosts/store";
+import { actions, useHosts, useReadOnly } from "../../lib/hosts/store";
+import { errorText } from "../../lib/policy";
 import { ago, OnlineDot, TagChip, TagInput } from "./bits";
 
 interface AuditRow {
@@ -41,17 +42,23 @@ export function Detail({
   const [name, setName] = useState(h.name);
   const [notes, setNotes] = useState(h.notes);
   const [audit, setAudit] = useState<AuditRow[] | string | null>(null);
-  useEffect(() => {
-    setName(h.name);
-    setNotes(h.notes);
-    setAudit(null);
-  }, [h.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const ro = useReadOnly();
+  // Mounted per host (key = id). What was typed and is not saved yet: saved on blur, and on unmount,
+  // because clicking another row removes this panel before the field loses the focus.
+  const edit = useRef<{ name?: string; notes?: string }>({});
+  const save = () => {
+    const e = edit.current;
+    edit.current = {};
+    if (e.name !== undefined) actions.setName(h.id, e.name);
+    if (e.notes !== undefined) actions.setNotes(h.id, e.notes);
+  };
+  useEffect(() => save, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadAudit = () => {
     setAudit("Loading…");
     invoke<AuditRow[]>("team_audit", { device: h.id, since: Math.floor(Date.now() / 1000) - 90 * 86400 })
       .then((r) => setAudit(r ?? []))
-      .catch((e) => setAudit(String(e)));
+      .catch((e) => setAudit(errorText(e)));
   };
   const why = canConnect ? undefined : "Your organisation does not allow connecting to other devices.";
   const history = entry?.history ?? [];
@@ -94,47 +101,52 @@ export function Detail({
           <Eye size={16} />
         </Button>
       </div>
-      <div className="mt-2 text-footnote text-faint">Enter connects · Shift+Enter files · Alt+Enter view only</div>
+      <div className="mt-2 text-footnote text-muted">Enter connects · Shift+Enter files · Alt+Enter view only</div>
 
-      <label className="mt-6 text-footnote font-semibold text-muted" htmlFor="host-name">
-        Name
+      <label className="mt-6 flex items-center justify-between text-footnote font-semibold text-muted" htmlFor="host-name">
+        Name {ro && <span className="font-normal">Managed by your team</span>}
       </label>
       <input
         id="host-name"
         value={name}
         placeholder={h.hostname || "Name this host"}
-        onChange={(e) => setName(e.target.value.slice(0, 64))}
-        onBlur={() => name !== h.name && actions.setName(h.id, name)}
+        disabled={ro}
+        onChange={(e) => setName((edit.current.name = e.target.value.slice(0, 64)))}
+        onBlur={save}
         onKeyDown={(e) => {
           e.stopPropagation();
           if (e.key === "Enter" || e.key === "Escape") (e.target as HTMLInputElement).blur();
         }}
-        className="mt-1 h-8 rounded-xl border border-hairline bg-parchment px-3 text-caption outline-none placeholder:text-faint focus-visible:border-focus"
+        className="mt-1 h-8 rounded-xl border border-hairline bg-parchment px-3 text-caption outline-none placeholder:text-faint focus-visible:border-focus disabled:text-muted"
       />
 
-      <div className="mt-5 text-footnote font-semibold text-muted">Tags</div>
+      <div className="mt-5 flex items-center justify-between text-footnote font-semibold text-muted">
+        Tags {ro && <span className="font-normal">Managed by your team</span>}
+      </div>
       <div className="mt-1.5 flex flex-wrap gap-1">
         {h.tags.map((t) => (
-          <TagChip key={t} tag={t} meta={meta} onRemove={() => actions.removeTags([h.id], [t])} />
+          <TagChip key={t} tag={t} meta={meta} onRemove={ro ? undefined : () => actions.removeTags([h.id], [t])} />
         ))}
         {h.auto.map((t) => (
           <TagChip key={t} tag={t} meta={meta} auto />
         ))}
       </div>
-      <div className="mt-2">
-        <TagInput inputId="detail-tag" known={known} onAdd={(t) => actions.addTags([h.id], [t])} placeholder="Add tag (site:berlin)" />
-      </div>
+      {!ro && (
+        <div className="mt-2">
+          <TagInput inputId="detail-tag" known={known} onAdd={(t) => actions.addTags([h.id], [t])} placeholder="Add tag (site:berlin)" />
+        </div>
+      )}
 
       <label className="mt-5 flex items-center justify-between text-footnote font-semibold text-muted" htmlFor="host-notes">
-        Notes <span className="font-normal text-faint">Only on this PC</span>
+        Notes <span className="font-normal">Only on this PC</span>
       </label>
       <textarea
         id="host-notes"
         value={notes}
         rows={4}
         placeholder="Anything worth remembering. Do not store passwords here."
-        onChange={(e) => setNotes(e.target.value.slice(0, 4000))}
-        onBlur={() => notes !== h.notes && actions.setNotes(h.id, notes)}
+        onChange={(e) => setNotes((edit.current.notes = e.target.value.slice(0, 4000)))}
+        onBlur={save}
         onKeyDown={(e) => {
           e.stopPropagation();
           if (e.key === "Escape") (e.target as HTMLTextAreaElement).blur();
@@ -168,7 +180,7 @@ export function Detail({
       <div className="mt-5 flex items-center gap-2 text-footnote font-semibold text-muted">
         <History size={13} /> Session history
       </div>
-      {history.length === 0 && <div className="mt-1 text-footnote text-faint">No sessions from this app yet.</div>}
+      {history.length === 0 && <div className="mt-1 text-footnote text-muted">No sessions from this app yet.</div>}
       <ul className="mt-1 space-y-0.5">
         {history.slice(0, 8).map((x) => (
           <li key={x.t + x.conn} className="flex justify-between text-footnote">
@@ -187,7 +199,7 @@ export function Detail({
             <div className="text-footnote text-muted">{audit}</div>
           ) : (
             <ul aria-label="Organisation log" className="space-y-0.5">
-              {audit.length === 0 && <li className="text-footnote text-faint">Nothing in the last 90 days.</li>}
+              {audit.length === 0 && <li className="text-footnote text-muted">Nothing in the last 90 days.</li>}
               {audit.slice(0, 20).map((r, i) => (
                 <li key={i} className="flex justify-between gap-2 text-footnote">
                   <span className="truncate text-ink-80" title={r.ip}>

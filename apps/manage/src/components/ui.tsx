@@ -1,5 +1,5 @@
 // Shared primitives, copied from apps/desktop/src/components/ui.tsx. Visual rules: /DESIGN.md.
-import { type ButtonHTMLAttributes, type ReactNode, useEffect, useRef, useState } from "react";
+import { type ButtonHTMLAttributes, type ReactNode, isValidElement, useEffect, useId, useRef, useState } from "react";
 import { Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy } from "lucide-react";
 
 type Variant = "primary" | "secondary" | "utility" | "pearl" | "ghost" | "danger";
@@ -11,7 +11,7 @@ export function Button({
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: "sm" | "md" | "lg" }) {
   const v: Record<Variant, string> = {
-    primary: "rounded-full bg-accent text-white hover:brightness-110",
+    primary: "rounded-full bg-accent text-on-accent hover:brightness-110",
     secondary: "rounded-full border border-accent text-accent hover:bg-accent/10",
     utility: "rounded-md bg-ink text-canvas hover:opacity-90",
     pearl: "rounded-xl border border-hairline bg-tile-2 text-ink-80 hover:bg-parchment",
@@ -46,15 +46,15 @@ export function Toggle({ checked, onChange, label, disabled }: { checked: boolea
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative h-6 w-10 shrink-0 rounded-full disabled:opacity-40 ${checked ? "bg-accent" : "bg-faint/45"}`}
+      className={`relative h-6 w-10 shrink-0 rounded-full disabled:opacity-40 ${checked ? "bg-accent" : "bg-faint"}`}
     >
-      <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all duration-150 ${checked ? "left-[18px]" : "left-0.5"}`} style={{ boxShadow: "0 1px 3px rgba(0,0,0,.25)" }} />
+      <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform duration-150 ${checked ? "translate-x-4" : ""}`} />
     </button>
   );
 }
 
-/** Selected item: filled accent, white text, semibold — readable at a glance in light and dark. */
-export const SELECTED = "bg-accent text-white font-semibold";
+/** Selected item: filled accent, on-accent text, semibold — readable at a glance in light and dark. */
+export const SELECTED = "bg-accent text-on-accent font-semibold";
 
 export function Segmented<T extends string>({
   value,
@@ -89,7 +89,7 @@ export function Segmented<T extends string>({
   );
 }
 
-type Tone = "ok" | "warn" | "danger" | "accent" | "muted";
+type Tone = "ok" | "warn" | "danger" | "ink" | "muted";
 
 /** Short status label. Status colours only as text and outline (DESIGN.md). */
 export function Badge({ tone = "muted", children, title }: { tone?: Tone; children: ReactNode; title?: string }) {
@@ -97,7 +97,8 @@ export function Badge({ tone = "muted", children, title }: { tone?: Tone; childr
     ok: "border-ok/50 text-ok",
     warn: "border-warn/60 text-warn",
     danger: "border-danger/50 text-danger",
-    accent: "border-accent/50 bg-accent/10 text-accent",
+    // A state that stands out without blue: blue means "you can act here" (DESIGN.md).
+    ink: "border-hairline text-ink",
     muted: "border-hairline text-muted",
   };
   return (
@@ -123,13 +124,21 @@ export function Select({ className = "", ...rest }: React.SelectHTMLAttributes<H
   return <select className={`h-9 ${field} ${className}`} {...rest} />;
 }
 
+/** Caption, control, hint. A `<label>` only around one text field or select: around a group of
+ *  buttons a click on the caption or hint would press the first one, so that is a named group
+ *  (a field inside such a group needs its own `aria-label`). */
 export function Label({ text, hint, children }: { text: string; hint?: string; children: ReactNode }) {
+  const id = useId();
+  const input = isValidElement(children) && (children.type === TextField || children.type === TextArea || children.type === Select);
+  const Tag = input ? "label" : "div";
   return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-caption font-semibold">{text}</span>
+    <Tag className="flex flex-col gap-1.5" {...(input ? {} : { role: "group", "aria-labelledby": id })}>
+      <span id={id} className="text-caption font-semibold">
+        {text}
+      </span>
       {children}
       {hint && <span className="text-footnote text-muted">{hint}</span>}
-    </label>
+    </Tag>
   );
 }
 
@@ -190,10 +199,27 @@ export function CopyField({ value, label }: { value: string; label: string }) {
   );
 }
 
+/** Sent when a `Modal` opened: a toast already showing moves above it again. */
+const MODAL_OPENED = "tether-modal-opened";
+
 /** Transient message at the bottom of the window. */
 export function useToast() {
   const [msg, setMsg] = useState<string | null>(null);
   const t = useRef<number>(0);
+  const el = useRef<HTMLDivElement>(null);
+  // A modal dialog is in the top layer, above any z-index: the toast goes there too (a popover),
+  // and again after a dialog that opened later. Without popover support it stays a fixed layer.
+  useEffect(() => {
+    const d = el.current;
+    if (!msg || !d?.showPopover) return;
+    const top = () => {
+      if (d.matches(":popover-open")) d.hidePopover();
+      d.showPopover();
+    };
+    top();
+    window.addEventListener(MODAL_OPENED, top);
+    return () => window.removeEventListener(MODAL_OPENED, top);
+  }, [msg]);
   const show = (m: string) => {
     setMsg(m);
     clearTimeout(t.current);
@@ -201,7 +227,7 @@ export function useToast() {
   };
   useEffect(() => () => clearTimeout(t.current), []);
   const node = msg ? (
-    <div role="status" className="pointer-events-none fixed inset-x-0 bottom-8 z-50 flex justify-center">
+    <div ref={el} popover="manual" role="status" className="pointer-events-none fixed inset-x-0 bottom-8 top-auto z-50 flex h-auto w-auto justify-center overflow-visible bg-transparent">
       <div className="animate-rise rounded-full bg-ink px-5 py-2.5 text-caption text-canvas shadow-float">{msg}</div>
     </div>
   ) : null;
@@ -211,31 +237,55 @@ export function useToast() {
 /**
  * Fits the window: at most its height minus a margin. `title` and `footer` (the action buttons)
  * always stay visible; the content between them scrolls.
+ * A native modal dialog: focus stays inside, the page behind is inert, and focus returns to what
+ * opened it. Escape and a click outside ask to close; without `onClose` (busy) it stays open.
+ * Named by `label`, else by its first `h2`. First focus: `data-autofocus`, else the first control.
  */
-export function Modal({ children, onClose, width = 420, title, footer }: { children?: ReactNode; onClose?: () => void; width?: number; title?: ReactNode; footer?: ReactNode }) {
+export function Modal({ children, onClose, width = 420, title, footer, label }: { children?: ReactNode; onClose?: () => void; width?: number; title?: ReactNode; footer?: ReactNode; label?: string }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const id = useId();
   useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose?.();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [onClose]);
+    const d = ref.current!;
+    const opener = document.activeElement as HTMLElement | null;
+    d.showModal();
+    window.dispatchEvent(new Event(MODAL_OPENED));
+    d.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+    const h = label ? null : d.querySelector("h2");
+    if (h) d.setAttribute("aria-labelledby", (h.id ||= id));
+    return () => {
+      d.close();
+      opener?.focus();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Shorter padding on short windows (1366 × 768 at 150 % is ~512 CSS px tall).
   const pad = "px-8 [@media(max-height:640px)]:px-6";
   const edge = "pt-8 [@media(max-height:640px)]:pt-5";
   const bottom = "pb-8 [@media(max-height:640px)]:pb-5";
   return (
-    <div className="animate-fade fixed inset-0 z-40 grid place-items-center bg-black/40 p-4" onMouseDown={onClose}>
-      <div
-        role="dialog"
-        aria-modal
-        style={{ width }}
-        className="animate-rise flex max-h-[calc(100vh-2rem)] max-w-[92vw] flex-col rounded-2xl border border-hairline bg-tile shadow-float"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
+    <dialog
+      ref={ref}
+      role="dialog"
+      aria-label={label}
+      style={{ width }}
+      className="animate-rise m-auto max-h-none max-w-[92vw] overflow-hidden rounded-2xl border border-hairline bg-tile text-ink shadow-float backdrop:animate-fade backdrop:bg-black/40"
+      onCancel={(e) => {
+        e.preventDefault();
+        onClose?.();
+      }}
+      // A second Escape closes a dialog whatever `cancel` said: follow it, or reopen one that is busy.
+      onClose={() => {
+        const d = ref.current;
+        if (d && !d.open) onClose ? onClose() : d.showModal();
+      }}
+      // Only the backdrop has the dialog itself as target (the content fills it).
+      onMouseDown={(e) => e.target === e.currentTarget && onClose?.()}
+    >
+      <div className="flex max-h-[calc(100vh-2rem)] flex-col">
         {title && <div className={`shrink-0 ${pad} ${edge}`}>{title}</div>}
         <div className={`min-h-0 flex-1 overflow-auto ${pad} ${title ? "pt-4" : edge} ${footer ? "pb-1" : bottom}`}>{children}</div>
         {footer && <div className={`shrink-0 ${pad} ${bottom} pt-4`}>{footer}</div>}
       </div>
-    </div>
+    </dialog>
   );
 }
 

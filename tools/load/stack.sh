@@ -47,7 +47,7 @@ C
   cd "$W/hb"
   setsid env ${HBBR_ENV:-} HEALTH_PORT=25121 "$BIN/hbbr" -p 25117 -k _ > "$W/hbbr.log" 2>&1 & echo $! > "$W/hbbr.pid"
   setsid env ${HBBS_ENV:-} HEALTH_PORT=25122 "$BIN/hbbs" -p 25116 -k _ -r 'ws://127.0.0.1:25119' > "$W/hbbs.log" 2>&1 & echo $! > "$W/hbbs.pid"
-  setsid env ${API_ENV:-} ADMIN_PUB_KEY= "$BIN/tether-api" --data "$W/api" --listen 127.0.0.1:25120 > "$W/api.log" 2>&1 & echo $! > "$W/api.pid"
+  setsid env RELAY_HOST=127.0.0.1,localhost ${API_ENV:-} ADMIN_PUB_KEY= "$BIN/tether-api" --data "$W/api" --listen 127.0.0.1:25120 > "$W/api.log" 2>&1 & echo $! > "$W/api.pid"
   if [ -z "${FRONT:-}" ] || [ "$FRONT" = caddy ]; then
     XDG_DATA_HOME="$W/caddy" XDG_CONFIG_HOME="$W/caddy" setsid env ${CADDY_ENV:-} "$CADDY" run --config "$W/Caddyfile" --adapter caddyfile > "$W/caddy.log" 2>&1 & echo $! > "$W/caddy.pid"
   else

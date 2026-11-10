@@ -47,11 +47,16 @@ impl App {
     }
     /// Write via temp file + rename so a crash never leaves a half-written key or policy file.
     fn write(&self, name: &str, data: &[u8]) -> R<()> {
+        use std::io::Write;
         let p = self.path(name);
         fs::create_dir_all(p.parent().unwrap()).map_err(err)?;
-        let tmp = p.with_extension("tmp");
-        fs::write(&tmp, data).map_err(err)?;
-        fs::rename(&tmp, &p).map_err(err)
+        let tmp = tmp_path(&p);
+        // Synced before the rename: after a power loss the name must not point at an empty file.
+        let r = fs::File::create(&tmp).and_then(|mut f| f.write_all(data).and_then(|_| f.sync_all())).and_then(|_| fs::rename(&tmp, &p));
+        if r.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        r.map_err(err)
     }
     fn settings(&self) -> Value {
         let mut s: Value = fs::read(self.path("settings.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
@@ -175,6 +180,13 @@ impl App {
     }
 }
 
+/// Temp file next to `p`, unique per call (process id + counter): two writes of the same file at
+/// once never share one.
+fn tmp_path(p: &std::path::Path) -> PathBuf {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    p.with_extension(format!("{}-{}.tmp", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
+}
+
 /// Outcome of one operation on one relay.
 #[derive(Serialize, Debug)]
 struct RelayResult {
@@ -261,11 +273,26 @@ fn keys_import(app: State<App>, path: String, passphrase: String) -> R<()> {
 fn settings_set(app: State<App>, settings: Value) -> R<()> {
     let server = settings.get("server").and_then(Value::as_str).unwrap_or("");
     for sv in server.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        if !sv.starts_with("https://") {
-            return Err(format!("Every server address must start with https:// ({sv})"));
-        }
+        server_ok(sv)?;
     }
     app.write("settings.json", &serde_json::to_vec_pretty(&settings).unwrap())
+}
+
+/// A relay address is `https://host[:port]` and nothing else: requests are signed for the host
+/// read from this text, so it must be the host the request really goes to (a backslash, `@`,
+/// query or fragment can make the two differ).
+fn server_ok(sv: &str) -> R<()> {
+    let bad = |why: &str| Err(format!("{sv} is not a relay address: {why}. Enter it like https://relay.example.org"));
+    if !sv.starts_with("https://") {
+        return bad("it must start with https://");
+    }
+    if sv.contains(|c: char| c.is_whitespace() || c.is_control() || matches!(c, '\\' | '@' | '?' | '#')) {
+        return bad("no spaces, \\, @, ? or #");
+    }
+    match reqwest::Url::parse(sv) {
+        Ok(u) if u.host_str().is_some_and(|h| !h.is_empty()) && u.username().is_empty() && u.password().is_none() && matches!(u.path(), "" | "/") => Ok(()),
+        _ => bad("only a host name and an optional port"),
+    }
 }
 
 /// Generic signed admin call for the simple JSON endpoints (status, devices, releases, diag…).
@@ -308,14 +335,19 @@ async fn devices_all(app: State<'_, App>) -> R<Value> {
 /// post to the first relay of their build, so the lists differ; the page merges and dedupes them.
 #[tauri::command]
 async fn audit_all(app: State<'_, App>, since: u64, limit: u32) -> R<Value> {
-    let (mut events, mut failed, mut answered) = (Vec::new(), Vec::new(), 0);
+    let (mut events, mut failed, mut truncated, mut answered) = (Vec::new(), Vec::new(), Vec::new(), 0);
     let servers = app.servers();
     let path = format!("/api/admin/audit?since={since}&limit={limit}");
-    let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", &path, Vec::new(), "application/json"))).await;
+    let key = app.admin_key()?;
+    // The relay cuts a large answer by size and says so in this header.
+    let got = futures_util::future::join_all(servers.iter().map(|sv| api::admin_quick_flag(sv, &key, &path, "X-Audit-Truncated"))).await;
     for (sv, r) in servers.iter().zip(got) {
         match r {
-            Ok(b) => {
+            Ok((b, cut)) => {
                 answered += 1;
+                if cut {
+                    truncated.push(sv.clone());
+                }
                 for mut e in serde_json::from_slice::<Vec<Value>>(&b).map_err(|_| format!("{sv}: unexpected audit list"))? {
                     e["relay"] = json!(sv);
                     events.push(e);
@@ -327,7 +359,7 @@ async fn audit_all(app: State<'_, App>, since: u64, limit: u32) -> R<Value> {
     if answered == 0 {
         return Err(failed.join("; "));
     }
-    Ok(json!({ "events": events, "failed": failed }))
+    Ok(json!({ "events": events, "failed": failed, "truncated": truncated }))
 }
 
 /// Writes a text export (Sessions CSV) to the path the save dialog returned.
@@ -426,6 +458,17 @@ fn serverkeys_rotation_set(app: State<App>, rotation: Value) -> R<()> {
     app.write("server-keys/rotation.json", &serde_json::to_vec_pretty(&rotation).unwrap())
 }
 
+/// The list must hold every key a relay signs with now (`signing`: one answer per relay asked):
+/// devices drop a relay whose key is not in the list they hold. `Ok(false)`: no relay reported
+/// its key, so nothing could be checked.
+fn check_signing(keys: &[ServerKey], signing: &[(String, R<String>)]) -> R<bool> {
+    let missing: Vec<String> = signing.iter().filter_map(|(sv, k)| k.as_ref().ok().filter(|k| !keys.iter().any(|x| &x.key == *k)).map(|k| format!("{sv} ({}…)", k.get(..8).unwrap_or(k)))).collect();
+    if !missing.is_empty() {
+        return Err(format!("Not published: the list lacks the key these relays sign with now, and devices would stop trusting them: {}. Keep that key in the list until the relays use another one.", missing.join(", ")));
+    }
+    Ok(signing.iter().any(|(_, k)| k.is_ok()))
+}
+
 /// Sign the key list and publish it to every relay, then read each one back.
 #[tauri::command]
 async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>, skip: Option<Vec<String>>) -> R<Value> {
@@ -434,7 +477,13 @@ async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>, skip: Opt
     // number, and a huge one would end rotations for good (devices never accept a lower serial).
     let vk = admin.verifying_key();
     let (servers, left) = app.chosen(&skip)?;
-    let live: Vec<u64> = futures_util::future::join_all(servers.iter().map(|sv| live_server_keys(sv, &vk))).await.iter().filter_map(verified_serial).collect();
+    let (live, signing) = futures_util::future::join(
+        futures_util::future::join_all(servers.iter().map(|sv| live_server_keys(sv, &vk))),
+        futures_util::future::join_all(servers.iter().map(|sv| signing_key(sv))),
+    )
+    .await;
+    let signing_checked = check_signing(&keys, &servers.iter().cloned().zip(signing).collect::<Vec<_>>())?;
+    let live: Vec<u64> = live.iter().filter_map(verified_serial).collect();
     let local = fs::read_dir(app.path("server-keys/published")).into_iter().flatten().flatten()
         .filter_map(|e| e.path().file_stem()?.to_str()?.parse::<u64>().ok());
     let serial = next_serial(live.into_iter().chain(local), "server key list")?;
@@ -462,7 +511,7 @@ async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>, skip: Opt
     let mut results = results;
     results.extend(left);
     app.write(&format!("server-keys/published/{}.json", list.serial), &doc)?;
-    Ok(json!({ "serial": list.serial, "relays": results }))
+    Ok(json!({ "serial": list.serial, "relays": results, "signing_checked": signing_checked }))
 }
 
 /// `id_ed25519` and `id_ed25519.pub` of a server key generated here, for the relays. The private
@@ -471,13 +520,34 @@ async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>, skip: Opt
 fn serverkeys_save_files(app: State<App>, public: String, folder: String) -> R<()> {
     let (secret, public) = app.keys.lock().unwrap().as_ref().ok_or("Unlock the keys first.")?.server_key_files(&public).ok_or("This key was not generated on this PC.")?;
     let dir = PathBuf::from(folder);
+    // Saving the same key again is fine; any other pair of that name (e.g. an SSH key) stays.
+    if key_files_of(&dir).is_some_and(|k| k != public) {
+        return Err(format!("{} already holds another key pair named id_ed25519. Pick an empty folder.", dir.display()));
+    }
     private::write(&dir.join("id_ed25519"), secret.as_bytes())?;
     fs::write(dir.join("id_ed25519.pub"), public).map_err(err)
 }
 
-/// Delete the key files "Save key files…" wrote into `folder` (only those two names).
+/// The public key of the `id_ed25519` pair in `dir` ("" when `.pub` is missing or unreadable);
+/// `None` when the folder has neither file.
+fn key_files_of(dir: &std::path::Path) -> Option<String> {
+    let public = fs::read_to_string(dir.join("id_ed25519.pub"));
+    if public.is_err() && !dir.join("id_ed25519").exists() && !dir.join("id_ed25519.pub").exists() {
+        return None;
+    }
+    Some(public.map(|p| p.trim().to_owned()).unwrap_or_default())
+}
+
+/// Delete the key files "Save key files…" wrote into `folder` (only those two names, and only
+/// when the `.pub` there is a server key of this vault: an SSH pair of the same name stays).
 #[tauri::command]
-fn serverkeys_delete_files(folder: String) -> R<()> {
+fn serverkeys_delete_files(app: State<App>, folder: String) -> R<()> {
+    let ours = app.keys.lock().unwrap().as_ref().ok_or("Unlock the keys first.")?.server_pubs();
+    match key_files_of(std::path::Path::new(&folder)) {
+        None => return Ok(()),
+        Some(k) if !ours.contains(&k) => return Err(format!("Nothing deleted: the id_ed25519 files in {folder} are not a server key saved from Tether Manage.")),
+        Some(_) => {}
+    }
     for name in ["id_ed25519", "id_ed25519.pub"] {
         match fs::remove_file(PathBuf::from(&folder).join(name)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("{name}: {e}")),
@@ -876,6 +946,9 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs, 
     if !a.minimum_version.is_empty() && !release::valid_version(&a.minimum_version) {
         return Err("Minimum version must look like 0.3.0.".into());
     }
+    if let Some(e) = minimum_above(&a.version, &a.minimum_version) {
+        return Err(e);
+    }
     let rollout = release::rollout(&a.rollout, if a.rollout_start == 0 { api::now() } else { a.rollout_start })?;
     let (dir, name) = release::target(&a.kind, &a.platform, &a.version)?;
     let data = fs::read(&a.file).map_err(|e| format!("Could not read the file: {e}"))?;
@@ -944,6 +1017,11 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs, 
         v2,
     };
     publish_upload(&app, &ui, &u, security, rollout, targets).await
+}
+
+/// A minimum above the release itself: every device would count as too old even after updating.
+fn minimum_above(version: &str, minimum: &str) -> Option<String> {
+    tether_trust::version::below_minimum(version, minimum).then(|| format!("The minimum version {minimum} is above this release ({version}): no device could reach it. Use {version} or lower."))
 }
 
 /// The publish sheet's Cancel for run `run` (the UI's id of one press of Publish): ends its
@@ -1074,7 +1152,7 @@ async fn publish_upload(app: &App, ui: &AppHandle, u: &Upload, security: bool, r
     // stay on the old release; those that see both relays take the higher serial).
     let uploaded: Vec<String> = servers.iter().zip(&errs).filter(|(_, e)| e.is_none()).map(|(s, _)| s.clone()).collect();
     let v2 = e2.map(|e2| (key.clone(), e2));
-    let index = publish_index(app, &u.channel, &servers, &uploaded, true, v2, move |r| {
+    let index = publish_index(app, &u.channel, &servers, &uploaded, true, false, v2, move |r| {
         r.insert(key, e);
     })
     .await;
@@ -1234,12 +1312,20 @@ async fn relay_indexes(app: &App, channel: &str, servers: &[String]) -> R<Vec<(S
 /// last point before a relay publishes anything. Unless switched off ([`INDEX_V1_ONLY`]) the same
 /// index with xz copies goes out as releases-v2.json too (same serial, after releases.json): `v2`
 /// is the new release's v2 entry, the others are carried over from the relays' current v2.
-async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[String], can_cancel: bool, v2: Option<(String, tether_trust::release::Entry)>, change: impl FnOnce(&mut BTreeMap<String, tether_trust::release::Entry>)) -> R<BTreeMap<String, R<()>>> {
+async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[String], can_cancel: bool, halt: bool, v2: Option<(String, tether_trust::release::Entry)>, change: impl FnOnce(&mut BTreeMap<String, tether_trust::release::Entry>)) -> R<BTreeMap<String, R<()>>> {
     let (live, unread) = fetch_indexes_why(app, channel, servers).await?;
     let live = usable_indexes(live, channel)?;
     let local_path = format!("releases/{channel}.serial");
     let local: u64 = fs::read_to_string(app.path(&local_path)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
     let base = live.iter().filter_map(|(_, i)| i.as_ref().map(|i| i.0.clone())).max_by_key(|i| i.serial);
+    let live_path = format!("releases/{channel}.live");
+    let sent = sent_serial(fs::read_to_string(app.path(&live_path)).ok().as_deref());
+    let all_read = unread.is_empty() && app.servers().iter().all(|sv| servers.contains(sv));
+    let stale = match stale_base(base.as_ref().map_or(0, |i| i.serial), sent, all_read, halt) {
+        Stale::Refuse(e) => return Err(e),
+        Stale::Warn(w) => w,
+        Stale::No => String::new(),
+    };
     let serial = next_serial(live.iter().filter_map(|(_, i)| i.as_ref().map(|i| i.0.serial)).chain([local]), "release index")?;
     let ix = release::next_index(base, channel, serial, api::now(), change)?;
     let doc = serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&ix).unwrap(), &app.admin_key()?)).unwrap();
@@ -1285,7 +1371,9 @@ async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[
     let reached: Vec<String> = reached.into_iter().filter(|sv| !gone.contains_key(sv)).collect();
     let (send, mut out) = index_targets(&reached, &missing);
     for (sv, e) in silent.into_iter().map(|sv| (sv.clone(), unread[&sv].clone())).chain(gone) {
-        out.insert(sv, Err(not_reachable(&e)));
+        // After a halt on an older base: said at each relay that may hold the newer index.
+        let warn = if unread.contains_key(&sv) { stale.as_str() } else { "" };
+        out.insert(sv, Err(not_reachable(&e) + warn));
     }
     if can_cancel && api::cancelled() {
         return Err(api::CANCELLED.into());
@@ -1308,8 +1396,44 @@ async fn publish_index(app: &App, channel: &str, servers: &[String], targets: &[
         }
     }))
     .await;
+    if put.iter().any(Result::is_ok) {
+        // The index is live: a failed note of its serial must not report a failed publish.
+        if let Err(e) = app.write(&live_path, serial.to_string().as_bytes()) {
+            eprintln!("{live_path} not written: {e}");
+        }
+    }
     out.extend(send.into_iter().zip(put));
     Ok(out)
+}
+
+/// The last serial a relay took from this PC (`releases/<channel>.live`); 0 while that file does
+/// not exist: the `.serial` file is no stand-in, it is written before any relay takes the index.
+fn sent_serial(live_file: Option<&str>) -> u64 {
+    live_file.and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+}
+
+#[derive(Debug, PartialEq)]
+enum Stale {
+    No,
+    /// A halt goes out anyway; the text is added to the result of each relay that did not answer.
+    Warn(String),
+    Refuse(String),
+}
+
+/// The next index is built on the newest one read (`base`, serial 0 = none). When this PC already
+/// got a newer one (`sent`) onto a relay and not every relay was read, that relay may still hold
+/// it: building on the older base would silently drop its releases and halts, so it is refused.
+/// With every relay read there is nothing newer left to build on. A halt is the safety action
+/// and always goes to the relays that answer.
+fn stale_base(base: u64, sent: u64, all_read: bool, halt: bool) -> Stale {
+    let read = if base == 0 { "none".to_owned() } else { format!("serial {base}") };
+    match (base < sent && !all_read, halt) {
+        (false, _) => Stale::No,
+        (true, true) => Stale::Warn(format!(" It may hold a newer release index (serial {sent}; the halt was built on the newest one read, {read}) in which this release is not halted. Halt it again when this relay answers, and check that no release is missing under Rollouts.")),
+        (true, false) => Stale::Refuse(format!(
+            "Not published: a relay that did not answer or was left out may hold a newer release index (serial {sent}; the newest one read has {read}). Building on the older one would drop its releases and halts. Do this again when that relay answers; if it is gone for good, take it out of the server list under Status and relays. Halt still works."
+        )),
+    }
 }
 
 /// The `/download/…` paths devices fetch from the relay that served `ix` (artifacts and packed copies).
@@ -1386,7 +1510,7 @@ async fn release_control(app: State<'_, App>, channel: String, key: String, acti
     let preset = preset.unwrap_or_default();
     let ramp = if action == "ramp" { Some(release::rollout(&preset, api::now())?) } else { None };
     let mut missing = false;
-    let per = publish_index(&app, &channel, &servers, &servers, false, None, |r| match r.get_mut(&key) {
+    let per = publish_index(&app, &channel, &servers, &servers, false, action == "halt", None, |r| match r.get_mut(&key) {
         None => missing = true,
         Some(e) => match action.as_str() {
             "halt" => e.halted = true,
@@ -1437,8 +1561,11 @@ async fn release_index_refresh(app: State<'_, App>) -> R<Vec<Value>> {
         if expires > api::now() + 15 * 86_400 {
             continue;
         }
-        let per = publish_index(&app, &ch, &servers, &servers, false, None, |_| {}).await?;
-        out.push(json!({ "channel": ch, "ok": per.values().all(Result::is_ok) }));
+        // One channel that cannot be re-signed now does not stop the others.
+        out.push(match publish_index(&app, &ch, &servers, &servers, false, false, None, |_| {}).await {
+            Ok(per) => json!({ "channel": ch, "ok": per.values().all(Result::is_ok) }),
+            Err(e) => json!({ "channel": ch, "ok": false, "error": e }),
+        });
     }
     Ok(out)
 }
@@ -1454,6 +1581,21 @@ fn cdn_state(app: State<App>) -> Value {
         "worker": s["cdn"]["worker"].as_str().unwrap_or(cdn::DEFAULT_WORKER),
         "credentials": k.as_ref().map(|k| k.cdn.as_ref().map(|c| c.account_id.clone())),
     })
+}
+
+/// Seal `creds` into the vault. The passphrase is checked against the vault on disk before
+/// anything changes, and a failed save puts the unlocked keys back as they were.
+fn cdn_store(app: &App, creds: keys::CdnCreds, pass: &str) -> R<()> {
+    let on_disk = fs::read(app.path("keys.json")).map_err(err)?;
+    Keys::open(&on_disk, pass).map_err(|_| "Wrong passphrase.".to_owned())?;
+    let mut k = app.keys.lock().unwrap();
+    let keys = k.as_mut().ok_or("Unlock the keys first.")?;
+    let before = keys.cdn.replace(creds);
+    let saved = keys.seal(pass).and_then(|sealed| app.write("keys.json", &sealed));
+    if saved.is_err() {
+        keys.cdn = before;
+    }
+    saved
 }
 
 /// Store the Cloudflare account API token and account id in the key vault (sealed with the
@@ -1473,14 +1615,7 @@ fn cdn_configure(app: State<App>, enabled: bool, base: String, worker: String, a
     };
     if let Some((token, account_id)) = creds {
         let pass = passphrase.filter(|p| !p.is_empty()).ok_or("Enter the key passphrase to store the Cloudflare token.")?;
-        let mut k = app.keys.lock().unwrap();
-        let keys = k.as_mut().ok_or("Unlock the keys first.")?;
-        keys.cdn = Some(keys::CdnCreds { account_id, token });
-        let sealed = keys.seal(&pass)?;
-        // The passphrase must be the vault's: check by opening what was just sealed is not enough.
-        let on_disk = fs::read(app.path("keys.json")).map_err(err)?;
-        Keys::open(&on_disk, &pass).map_err(|_| "Wrong passphrase.".to_owned())?;
-        app.write("keys.json", &sealed)?;
+        cdn_store(&app, keys::CdnCreds { account_id, token }, &pass)?;
     }
     if enabled && app.keys.lock().unwrap().as_ref().is_some_and(|k| k.cdn.is_none()) {
         return Err("Store the Cloudflare credentials first.".into());
@@ -1925,11 +2060,17 @@ async fn release_prune(app: State<'_, App>, keep: Option<usize>, delete: Vec<Pru
     if let Some(b) = plan["blocked"].as_array().filter(|b| !b.is_empty()) {
         return Ok(prune_blocked(&app.servers(), b));
     }
+    // Only what the plan computed just now offers: the sheet's list is a request, not the rule.
+    let delete = still_offered(delete, &offered(&plan));
     let out = prune_execute(&app, keep, &pin, &delete).await;
     if let Some(e) = none_ok(&out) {
         return Err(e);
     }
     Ok(out)
+}
+
+fn still_offered(delete: Vec<PruneVer>, offered: &[PruneVer]) -> Vec<PruneVer> {
+    delete.into_iter().filter(|d| offered.contains(d)).collect()
 }
 
 /// Setting "Clean up after each publish": the merged plan's offer, executed without a prompt.
@@ -2011,7 +2152,7 @@ async fn page_render(app: State<'_, App>, title: String, intro: String, technici
             }
             // The updater artifact latest.json points at; uploaded before latest.json by
             // release_publish, so it exists when the manifest does.
-            let artifact = m.as_ref().and_then(|m| Some(m["platforms"][platform]["url"].as_str()?.rsplit('/').next()?.to_owned()));
+            let artifact = m.as_ref().and_then(|m| published_artifact(m, kind, platform));
             let detail = match (kind, platform) {
                 ("technician", release::WINDOWS) => format!("Windows installer · version {version}"),
                 ("technician", _) => format!("Disk image for Apple silicon and Intel · version {version}"),
@@ -2030,6 +2171,15 @@ async fn page_render(app: State<'_, App>, title: String, intro: String, technici
         return Err("There is no stable release of the offered apps yet. Publish one first.".into());
     }
     Ok(release::download_page(&title, &intro, &sections))
+}
+
+/// The artifact file name in a relay's `latest.json`, only when it is exactly the name Manage
+/// publishes for that app, platform and version: the manifest is unsigned, and the name goes into
+/// the page's links and its copy-paste PowerShell command.
+fn published_artifact(m: &Value, kind: &str, platform: &str) -> Option<String> {
+    let version = m["version"].as_str().filter(|v| release::valid_version(v))?;
+    let name = m["platforms"][platform]["url"].as_str()?.rsplit('/').next()?;
+    (release::target(kind, platform, version).ok()?.1 == name).then(|| name.to_owned())
 }
 
 /// The first answer in relay order (a 404 is an answer: `None`); every relay's error when none answered.
@@ -2627,6 +2777,118 @@ mod tests {
         })
         .unwrap();
         serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&ix).unwrap(), key)).unwrap()
+    }
+
+    fn temp_app(name: &str) -> App {
+        let dir = std::env::temp_dir().join(format!("tether-manage-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        App { dir, keys: Mutex::new(None), diag: Mutex::new(None) }
+    }
+
+    #[test]
+    fn an_older_base_is_refused_only_while_a_relay_was_not_read() {
+        // The relay with serial 9 (a Halt) is silent or left out; the newest one read is 8.
+        let Stale::Refuse(e) = stale_base(8, 9, false, false) else { panic!("not refused") };
+        assert!(e.contains("serial 9") && e.contains("serial 8"), "{e}");
+        assert!(matches!(stale_base(0, 9, false, false), Stale::Refuse(_)), "no index read at all");
+        // First publish ever, base up to date, and a relay back after a long time (base = newest).
+        for (base, sent) in [(0, 0), (9, 9), (10, 9)] {
+            assert_eq!(stale_base(base, sent, false, false), Stale::No);
+        }
+        // Every relay answered: nothing newer is left anywhere (e.g. a relay was reinstalled).
+        assert_eq!(stale_base(8, 9, true, false), Stale::No);
+        // A halt is never refused: it goes out with a warning for the relays that did not answer.
+        let Stale::Warn(w) = stale_base(8, 9, false, true) else { panic!("a halt was refused") };
+        assert!(w.contains("serial 9") && w.contains("Halt it again"), "{w}");
+        assert_eq!(stale_base(9, 9, false, true), Stale::No);
+        // No .live file yet (after the upgrade): no refusal, whatever .serial says.
+        assert_eq!(sent_serial(None), 0);
+        assert_eq!(stale_base(8, sent_serial(None), false, false), Stale::No);
+        assert_eq!((sent_serial(Some("9\n")), sent_serial(Some("x"))), (9, 0));
+    }
+
+    #[test]
+    fn relay_addresses_are_a_host_and_nothing_else() {
+        for ok in ["https://relay.example.org", "https://relay.example.org/", "https://relay.example.org:8443", "https://10.0.0.5", "https://[::1]:443"] {
+            assert!(server_ok(ok).is_ok(), "{ok}");
+        }
+        // Signed for relay.example.com, sent to evil.com (a backslash is a slash to URL parsers).
+        for bad in [
+            "https://evil.com\\@relay.example.com", "https://user@relay.example.org", "https://user:pw@relay.example.org", "https://relay.example.org?x=1", "https://relay.example.org#x",
+            "https://relay.example.org/api", "https://relay example.org", "http://relay.example.org", "https://", "https:relay.example.org", "relay.example.org",
+        ] {
+            assert!(server_ok(bad).unwrap_err().contains("is not a relay address"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn download_page_takes_only_the_artifact_name_manage_publishes() {
+        let m = |v: &str, file: &str| json!({ "version": v, "platforms": { release::WINDOWS: { "url": format!("https://r/download/stable/technician/windows-x86_64/{file}"), "signature": "s" } } });
+        assert_eq!(published_artifact(&m("0.5.1", "Tether_0.5.1_x64-setup.exe"), "technician", release::WINDOWS).unwrap(), "Tether_0.5.1_x64-setup.exe");
+        // A quote would end the URL in the page's PowerShell command `iwr '<url>' …`.
+        assert_eq!(published_artifact(&m("0.5.1", "x';calc;'.exe"), "technician", release::WINDOWS), None);
+        assert_eq!(published_artifact(&m("0.5.1';calc;'", "Tether_0.5.1';calc;'_x64-setup.exe"), "technician", release::WINDOWS), None);
+        assert_eq!(published_artifact(&m("0.5.1", "Tether_0.5.0_x64-setup.exe"), "technician", release::WINDOWS), None, "another version's file");
+        assert_eq!(published_artifact(&json!({ "version": "0.5.1" }), "technician", release::WINDOWS), None);
+    }
+
+    #[test]
+    fn key_files_never_replace_or_delete_another_key_pair() {
+        let app = temp_app("keyfiles");
+        assert_eq!(key_files_of(&app.dir), None, "empty folder: save goes ahead");
+        // An SSH pair of the same name: its public key is not the server key being saved.
+        fs::write(app.path("id_ed25519"), "ssh-private").unwrap();
+        assert_eq!(key_files_of(&app.dir).unwrap(), "", "a private key alone is never ours");
+        fs::write(app.path("id_ed25519.pub"), "ssh-ed25519 AAAA me@pc\n").unwrap();
+        assert_eq!(key_files_of(&app.dir).unwrap(), "ssh-ed25519 AAAA me@pc");
+        fs::write(app.path("id_ed25519.pub"), "SERVERKEY\n").unwrap();
+        assert_eq!(key_files_of(&app.dir).unwrap(), "SERVERKEY", "the same key again: compared trimmed");
+        fs::remove_dir_all(&app.dir).unwrap();
+    }
+
+    #[test]
+    fn writes_use_their_own_temp_file_and_leave_none() {
+        let app = temp_app("write");
+        assert_ne!(tmp_path(&app.path("keys.json")), tmp_path(&app.path("keys.json")));
+        app.write("keys.json", b"one").unwrap();
+        app.write("keys.json", b"two").unwrap();
+        assert_eq!(fs::read(app.path("keys.json")).unwrap(), b"two");
+        assert_eq!(fs::read_dir(&app.dir).unwrap().count(), 1);
+        fs::remove_dir_all(&app.dir).unwrap();
+    }
+
+    #[test]
+    fn cdn_credentials_stay_unchanged_after_a_wrong_passphrase() {
+        let app = temp_app("cdn");
+        let k = Keys::generate().unwrap();
+        app.write("keys.json", &k.seal("correct horse").unwrap()).unwrap();
+        *app.keys.lock().unwrap() = Some(k);
+        let creds = || keys::CdnCreds { account_id: "acc".into(), token: "tok".into() };
+        assert_eq!(cdn_store(&app, creds(), "wrong horse").unwrap_err(), "Wrong passphrase.");
+        assert_eq!(app.keys.lock().unwrap().as_ref().unwrap().cdn, None, "not active in memory either");
+        cdn_store(&app, creds(), "correct horse").unwrap();
+        assert_eq!(Keys::open(&fs::read(app.path("keys.json")).unwrap(), "correct horse").unwrap().cdn, Some(creds()));
+        fs::remove_dir_all(&app.dir).unwrap();
+    }
+
+    #[test]
+    fn a_key_list_without_a_relays_signing_key_is_refused() {
+        let k = |key: &str| ServerKey { key: key.into(), not_before: 0, expires: 0 };
+        let relays = |b: R<String>| vec![("https://a".to_owned(), Ok("K2".to_owned())), ("https://b".to_owned(), b)];
+        // Cancel after the switch, then Generate: [K1, K3] while the relays sign with K2.
+        let e = check_signing(&[k("K1"), k("K3")], &relays(Ok("K2".into()))).unwrap_err();
+        assert!(e.contains("https://a") && e.contains("https://b"), "{e}");
+        assert_eq!(check_signing(&[k("K1"), k("K2")], &relays(Err("old hbbs".into()))), Ok(true));
+        assert_eq!(check_signing(&[k("K1")], &[("https://a".to_owned(), Err("down".into()))]), Ok(false), "nothing to check against");
+    }
+
+    #[test]
+    fn minimum_version_and_prune_list_are_checked_here() {
+        assert!(minimum_above("0.5.1", "0.5.2").unwrap().contains("0.5.2"));
+        assert!(minimum_above("0.5.1", "0.5.1").is_none() && minimum_above("0.5.1", "").is_none());
+        let v = |version: &str| PruneVer { channel: "stable".into(), dir: "technician/windows-x86_64".into(), version: version.into() };
+        assert_eq!(still_offered(vec![v("0.5.1"), v("0.5.9")], &[v("0.5.1"), v("0.5.2")]), [v("0.5.1")], "the published 0.5.9 is not deleted on request");
     }
 
     #[test]

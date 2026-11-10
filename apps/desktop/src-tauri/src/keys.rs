@@ -579,6 +579,10 @@ fn lock_modes() -> i32 {
     (on(VK_CAPITAL) as i32) << 1 | (on(VK_NUMLOCK) as i32) << 2
 }
 
+/// `session` event the hook sends to its session window on the escape chord (Session.tsx).
+#[cfg_attr(not(windows), allow(dead_code))]
+const LOCAL_ESCAPE_EVENT: &str = "local_escape";
+
 /// What the hook does with one key while it captures (pure, see the tests).
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
@@ -627,6 +631,14 @@ fn hook(ev: rdev::Event) -> Option<rdev::Event> {
         }
         HookAction::Escape => {
             s.released = true;
+            // The chord is swallowed here, so the page never sees it: tell that session window
+            // (it moves the keyboard focus to its toolbar). Not on the hook thread.
+            let key = key.clone();
+            std::thread::spawn(move || {
+                if let Some(sink) = crate::sink::get() {
+                    librustdesk::ui::UiSink::session_event(&*sink, &key, LOCAL_ESCAPE_EVENT, serde_json::json!({}));
+                }
+            });
             (s.mapper.release_all(), false)
         }
         HookAction::LocalAltTab => {

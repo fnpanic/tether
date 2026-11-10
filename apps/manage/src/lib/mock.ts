@@ -136,7 +136,7 @@ function resolve(b: Bundle | null, profile: string, device: string) {
       if (r.state !== "on") locked.push(id);
       if (r.state === "hidden") hidden.push(id);
     }
-  return { profile, serial: b?.serial ?? 0, group: g ?? null, values, locked, hidden, sources: ["defaults", "profile"] };
+  return { profile, serial: b?.serial ?? 0, group: g ?? null, values, locked, hidden, sources: ["defaults", "profile"], rejected: [] };
 }
 
 const words = (id: string, r?: Rule) => {
@@ -225,14 +225,14 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
     serverkeys_generate: () => "Qm9vbXRvd25OZXdTZXJ2ZXJLZXlGb3JQcmV2aWV3MDE=",
     serverkeys_publish: () => {
       skList = { serial: skList.serial + 1, keys: a.keys };
-      return { serial: skList.serial, relays: servers.map((s) => ok(s, { serial: skList.serial })) };
+      return { serial: skList.serial, relays: servers.map((s) => ok(s, { serial: skList.serial })), signing_checked: true };
     },
     keys_lock: () => (unlocked = false),
     settings_set: () => (servers = String(a.settings.server).split(",").map((s: string) => s.trim()).filter(Boolean)),
     admin: () => (a.path === "/api/admin/status" ? status(R1) : admin[a.path] ?? null),
     relays_check: () => servers.map((s) => (silent && s === R1 ? { server: s, ok: false, error: NO_ANSWER, detail: null } : ok(s, status(s)))),
     devices_all: () => ({ devices, failed: [] }),
-    audit_all: () => ({ events: audit.filter((e) => e.ts >= a.since), failed: [] }),
+    audit_all: () => ({ events: audit.filter((e) => e.ts >= a.since), failed: [], truncated: [] }),
     text_save: () => null,
     features: () => FEATURES,
     policy_draft: () => draft,

@@ -2,8 +2,11 @@ name: server
 on:
   push:
     branches: [main]
-    paths: [server/**, vendor/**, crates/**, patches/**, scripts/**, .github/workflows/server.yml]
+    paths: [server/**, vendor/**, crates/**, patches/**, scripts/**, tools/macbuild/**, .github/workflows/server.yml]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -22,6 +25,9 @@ jobs:
       - name: Test tether-trust
         working-directory: crates/tether-trust
         run: cargo test --release
+      # The Mac build runner and its client (stdlib + ssh-keygen, no network).
+      - name: Test tools/macbuild
+        run: python3 -m unittest discover -s tools/macbuild
       - name: Package
         run: |
           d=dist/tether-server

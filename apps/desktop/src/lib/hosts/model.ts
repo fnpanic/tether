@@ -134,6 +134,27 @@ export const MAX_TAGS = 32;
 export const MAX_NOTES = 4000;
 export const MAX_NAME = 64;
 
+export const MAX_QUERY = 1000;
+
+// A rule, saved search or tag colour as every path takes it (typed here, imported, shared by the
+// team): the same limits, and fields this version does not know stay (a newer app wrote them).
+export function cleanRule(raw: unknown): Omit<Rule, "id"> | null {
+  const r = raw as Partial<Rule> | null;
+  const tag = r && typeof r === "object" && typeof r.tag === "string" ? normTag(r.tag) : null;
+  return r && tag && typeof r.when === "string" && r.when.length <= MAX_QUERY ? { ...r, tag, when: r.when } : null;
+}
+
+export function cleanSearch(raw: unknown): Omit<SavedSearch, "id"> | null {
+  const s = raw as Partial<SavedSearch> | null;
+  const name = s && typeof s === "object" && typeof s.name === "string" ? s.name.trim().slice(0, MAX_NAME) : "";
+  return s && name && typeof s.query === "string" ? { ...s, name, query: s.query.slice(0, MAX_QUERY) } : null;
+}
+
+export function cleanTagMeta(raw: unknown): { color?: TagColor } {
+  const { color, ...rest } = (raw && typeof raw === "object" ? raw : {}) as { color?: unknown };
+  return TAG_COLORS.includes(color as TagColor) ? { ...rest, color: color as TagColor } : rest;
+}
+
 export function cleanTags(tags: unknown): string[] {
   if (!Array.isArray(tags)) return [];
   const out: string[] = [];

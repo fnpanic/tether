@@ -141,7 +141,8 @@ fn refresh_system_proxy() {
     match detected {
         Some(url) => {
             if d.get("proxy-url") != Some(&url) {
-                hbb_common::log::info!("using system proxy {url}");
+                // Without user:password: the diagnostics upload carries log tails.
+                hbb_common::log::info!("using system proxy {}", crate::commands::without_credentials(&url));
             }
             d.insert("proxy-url".to_owned(), url);
         }

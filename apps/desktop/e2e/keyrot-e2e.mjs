@@ -146,7 +146,7 @@ const pubkey = () => fetch(PROXY + "/rendezvous/pubkey", { signal: AbortSignal.t
 
 // ---- tether-api in WSL ----
 function startApi() {
-  const p = spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, API_BIN, "--data", `/tmp/keyrot-e2e-api-${process.pid}`, "--listen", "127.0.0.1:22130"], { stdio: "ignore" });
+  const p = spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, "RELAY_HOST=127.0.0.1,localhost", API_BIN, "--data", `/tmp/keyrot-e2e-api-${process.pid}`, "--listen", "127.0.0.1:22130"], { stdio: "ignore" });
   children.push(p);
 }
 const getJson = async (path) => {

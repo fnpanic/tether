@@ -43,6 +43,8 @@ struct Branding {
     diagnostics: bool,
     /// "Send to support" in the Help view (policy `diagnostics.upload`).
     diagnostics_upload: bool,
+    /// Policy `connect.chat`.
+    chat: bool,
     perms: Vec<Perm>,
     /// Custom app name (docs/api.md "Custom apps"), None for plain TetherQS.
     custom_app: Option<String>,
@@ -98,6 +100,7 @@ fn branding() -> Branding {
         consent_text: e.get("recording.consent-text").to_owned(),
         diagnostics: e.on("diagnostics.page"),
         diagnostics_upload: e.on("diagnostics.upload"),
+        chat: e.on("connect.chat"),
         perms: PERMS
             .iter()
             .filter(|(_, f, _)| !e.hidden.contains(*f))
@@ -185,6 +188,9 @@ fn cm_close(id: i32) {
 /// Reply to the technician's chat (shown in their session window's chat panel).
 #[tauri::command]
 fn cm_chat(id: i32, text: String) -> R<()> {
+    if !policy::current().on("connect.chat") {
+        return Err("Chat is turned off by your administrator.".into());
+    }
     if text.len() > 4096 {
         return Err("Message too long.".into());
     }
@@ -195,13 +201,47 @@ fn cm_chat(id: i32, text: String) -> R<()> {
 #[tauri::command]
 fn cm_permission(id: i32, name: String, enabled: bool) -> R<()> {
     let (_, feature, _) = PERMS.iter().find(|(n, _, _)| *n == name).ok_or("unknown permission")?;
-    let e = policy::current();
-    if enabled && (e.is_locked(feature) || e.hidden.contains(*feature)) && !e.on(feature) {
+    if enabled && denied(&policy::current(), feature) {
         return Err("Your administrator does not allow this.".into());
     }
     cm::switch_permission(id, name.clone(), enabled);
     sink::set_field(id, &name, enabled);
     Ok(())
+}
+
+/// Policy keeps this permission off: locked (or hidden) and off.
+fn denied(e: &tether_trust::policy::Effective, feature: &str) -> bool {
+    (e.is_locked(feature) || e.hidden.contains(feature)) && !e.on(feature)
+}
+
+/// `(connection, permission)`: what the connections hold although policy `e` denies it.
+pub(crate) fn to_revoke(e: &tether_trust::policy::Effective, clients: &[Value]) -> Vec<(i32, &'static str)> {
+    let off: Vec<&'static str> = PERMS.iter().filter(|(_, f, _)| denied(e, f)).map(|(n, _, _)| *n).collect();
+    let mut v = Vec::new();
+    for c in clients {
+        let Some(id) = c["id"].as_i64() else { continue };
+        v.extend(off.iter().filter(|n| c[**n] == true).map(|n| (id as i32, *n)));
+    }
+    v
+}
+
+/// A policy applied during a session takes what it denies from the running connections too (the
+/// switch in the window only greys out).
+pub fn revoke_denied(e: &tether_trust::policy::Effective) {
+    revoke(e, &sink::clients());
+}
+
+/// Take from `clients` (as the core announced them) what policy `e` denies.
+pub fn revoke(e: &tether_trust::policy::Effective, clients: &[Value]) {
+    for (id, name) in to_revoke(e, clients) {
+        hbb_common::log::info!("policy: {name} switched off for connection {id}");
+        cm::switch_permission(id, name.to_owned(), false);
+        sink::set_field(id, name, false);
+        // A running file transfer does not check the switch: end it.
+        if name == "file" && clients.iter().any(|c| c["id"] == id && c["is_file_transfer"] == true) {
+            cm::close(id);
+        }
+    }
 }
 
 /// Answer to `record_consent_request`: Allow grants this connection's recording permission,
@@ -242,12 +282,17 @@ async fn update_check() -> R<String> {
 }
 
 #[tauri::command]
-fn update_install() {
+fn update_install() -> R<()> {
+    // The update restarts TetherQS, which would end the session.
+    if sink::has_session() {
+        return Err("The update restarts TetherQS: end the session first.".into());
+    }
     std::thread::spawn(|| {
         if let Err(e) = update::install() {
             hbb_common::log::error!("update failed: {e}");
         }
     });
+    Ok(())
 }
 
 /// Everything known locally: shown at once, also without a network.
@@ -278,15 +323,10 @@ pub(crate) fn diagnostics() -> Diagnostics {
 }
 
 /// A proxy URL as shown (Help view, diagnostics bundle): no user name or password.
-fn without_credentials(url: &str) -> String {
-    match reqwest::Url::parse(url) {
-        Ok(mut u) => {
-            let _ = u.set_password(None);
-            let _ = u.set_username("");
-            u.to_string()
-        }
-        Err(_) => "(not a URL)".into(),
-    }
+pub(crate) fn without_credentials(url: &str) -> String {
+    // Not strippable (`user:pass@host` parses as scheme `user`): never shown as it is.
+    let strip = |mut u: reqwest::Url| (u.set_password(None).is_ok() && u.set_username("").is_ok()).then(|| u.to_string());
+    reqwest::Url::parse(url).ok().and_then(strip).unwrap_or_else(|| "(not a URL)".into())
 }
 
 /// Help view › Send to support: the diagnostics bundle for a ticket code.
@@ -351,4 +391,30 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         diag_upload,
         mac_fix,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tether_trust::policy::{resolve, Bundle, PROFILE_CUSTOMER};
+
+    #[test]
+    fn proxy_url_without_credentials() {
+        assert_eq!(without_credentials("http://alice:s3cret@proxy.corp:8080"), "http://proxy.corp:8080/");
+        assert_eq!(without_credentials("alice:s3cret@proxy"), "(not a URL)");
+    }
+
+    #[test]
+    fn a_policy_lock_takes_the_permission_from_running_connections() {
+        let b = Bundle::from_json(br#"{"serial":1,"issued_at":0,"profiles":{"customer":{"permission.clipboard":{"state":"off"},"permission.file-transfer":{"state":"locked"}}}}"#).unwrap();
+        let e = resolve(Some(&b), PROFILE_CUSTOMER, "dev", None);
+        let clients = [
+            json!({ "id": 1, "keyboard": true, "clipboard": true, "file": true, "audio": true }),
+            json!({ "id": 2, "keyboard": true, "clipboard": false }),
+        ];
+        // Only what is locked off and held: not the unlocked audio, not the locked-on file.
+        assert_eq!(to_revoke(&e, &clients), vec![(1, "clipboard")]);
+        assert!(to_revoke(&resolve(None, PROFILE_CUSTOMER, "dev", None), &clients).is_empty());
+    }
 }

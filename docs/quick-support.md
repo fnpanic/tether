@@ -7,6 +7,8 @@ ID and a one-time password; the technician connects to it from the Tether techni
 It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri bridge
 `src/tauri_ui`) with a different, minimal UI. It only receives sessions
 (`HARD_SETTINGS["conn-type"]="incoming"`, `disable-installation=Y`) and never connects out.
+It refuses a camera view and a remote terminal (`enable-camera` and `enable-terminal` forced to
+`N` in `security.rs`, as in the technician app).
 
 ## How customers use it
 
@@ -18,7 +20,13 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    *Connecting*, *Ready*, *Session active* or *Offline*.
 3. When the technician connects, an incoming-request card appears: who is connecting and which
    permissions they get (toggles; locked ones are greyed out by policy; audio is off by default).
-   **Accept** or **Decline**. The card says that Accept lets the technician in without a password
+   The card names the ID, says that the name is chosen by the other side and is not verified, and
+   says what is asked for (see and control this screen, transfer files, the camera, a command
+   line, or the network through this computer). **Accept** or **Decline**; Accept is never
+   pre-selected, so a key typed as the card appears accepts nothing. A request that arrives during
+   a session is shown above the running sessions' cards (their **Disconnect** stays reachable), and
+   an open Help view closes for a request or a session start.
+   The card says that Accept lets the technician in without a password
    (in `both` mode typing the one-time password works too); after Accept a message confirms it.
    With `security.approve-mode=password` sessions start without the card; with `click` the
    password is not shown at all. For a request or session the window moves to the bottom-right
@@ -41,7 +49,7 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    see [macos.md](macos.md#windows-and-the-dock).
 4. During the session the card shows the technician, elapsed time, indicators (Control,
    Transferring files, REC) and a red **Disconnect** button. Permissions can be revoked at any
-   time. With two or more technicians connected, each has its own card at full height and the
+   time; each switch shows what that connection really has. With two or more technicians connected, each has its own card at full height and the
    window scrolls between them; each card's switches change only that connection. A file transfer the technician opens from the session is part of it: no second request,
    no second card. The host admits it because it carries the accepted session's key and its
    random 128-bit companion secret (sent only inside the encrypted logins), and only while that
@@ -54,9 +62,13 @@ It runs the same RustDesk core as the technician app (`vendor/rustdesk`, Tauri b
    asks again: the host lets the same technician window back in with the same session key and
    companion secret after a dropped connection or a reloaded window (whether the session was
    accepted by click or by password), while the session runs and for up to 2 minutes after its
-   connection ended. **Disconnect** (or any other end by this computer) ends that at once; after
-   it, or after the 2 minutes, the technician needs a new Accept or the new password, and their
-   window says why. A remembered password that the host turns down is forgotten, and the
+   connection ended. The returning connection keeps the permissions the customer last set, and
+   the old connection, if it still runs, is closed: a session never runs on two connections.
+   **Disconnect** (or any other end by this computer) ends that at once, and so does the
+   technician closing the session; after either, or after the 2 minutes, the technician needs a
+   new Accept or the new password, and their window says why. A technician app released before
+   this change reports a reloaded session window to the host as a closed session, so it is asked
+   again after a reload (a dropped connection still comes back). A remembered password that the host turns down is forgotten, and the
    technician is asked for the current one instead of being told it was wrong.
 5. Closing the window ends support: the in-process host server stops with it.
 
@@ -149,8 +161,12 @@ At start the last verified policy (`%APPDATA%\Tether-QS\policy.json`) is applied
 starts. Then every `policy.refresh-minutes` (1 with `policy.fast-apply`): `GET /api/policy`,
 verify with `tether_trust::envelope::open_json` against the compiled-in `TETHER_ADMIN_PUB_KEY`
 (comma-separated for rotation), `Bundle::from_json`, reject a lower serial, cache, `resolve_with(…,
-"customer", <install uuid>, <custom app layer>, None)` (see Custom apps). Locked features with a core option become overrides, others
-defaults; `FLOOR` keys are never touched. After each check `POST /api/heartbeat` with profile
+"customer", <install uuid>, <custom app layer>, None)` (see Custom apps). The highest serial ever
+accepted is kept in `policy-serial` beside the cache, so an older signed policy does not come back
+when `policy.json` is missing or was replaced. A rule with a feature this TetherQS does not know or a value it finds invalid is
+skipped and logged (`policy <serial>: rules not applied: …`); the rest applies. Locked features with a core option become overrides, others
+defaults; `FLOOR` keys are never touched. A permission the new policy locks off is switched off for
+running connections and for connections that resume, and a running file-transfer connection is closed. After each check `POST /api/heartbeat` with profile
 `customer`. Release builds refuse to compile without the key; debug builds without it run on
 defaults and make no policy/heartbeat requests.
 
@@ -165,39 +181,55 @@ defaults and make no policy/heartbeat requests.
 | `security.approve-mode` | `click`: password hidden, accept only; `password`: no accept card; `both` |
 | `security.verification-method`, `security.temporary-password-length` | Core options |
 | `connect.incoming` | Off: incoming connections are closed by the backend |
-| `recording.consent-text` | Fallback text of the recording consent dialog |
+| `connect.chat` | Off: no Chat tab, the technician's messages are not shown and do not restore the window, replies are refused |
+| `recording.consent-text` | Text of the recording consent dialog; applied as soon as the policy arrives |
 | `update.*` | See below |
 | `policy.refresh-minutes`, `policy.fast-apply` | Policy check interval |
 | `diagnostics.page` | Show the Help/diagnostics view |
 
 ## Updates (portable, no installer)
 
-At start and every `update.check-hours` (if `update.enabled`; 15 minutes after a failed check),
-and when the customer clicks **Help → Check for updates**: fetch
-`https://<relay>/download/<update.channel>/customer/windows-x86_64/latest.json` (macOS:
-`…/customer/darwin-universal/latest.json`, a zipped `.app`, see [updates.md](updates.md)) (Tauri
-updater format, docs/api.md) from each server in turn; the first one with a release wins, an
-unreachable one or one without a release (`404`) passes on to the next. Help shows the result of
+At start (within a minute) and every `update.check-hours` (15 minutes after a failed check), and
+when the customer clicks **Help → Check for updates**, TetherQS reads the signed release index of
+its channel from every server: `https://<relay>/download/<update.channel>/releases-v2.json` and
+`…/releases.json` ([updates.md](updates.md), [update-design.md](update-design.md)). Each is
+verified against the compiled-in admin key; the highest serial over all servers wins and becomes
+the floor (`releases-<channel>.serial`), below which no index is accepted again. When no server
+has a valid one, the cached index is used. Its entry `customer/windows-x86_64` (macOS:
+`customer/darwin-universal`, a zipped `.app`) describes the release. The unsigned
+`…/customer/<platform>/latest.json` is not read by a build with an admin key
+(`REQUIRE_SIGNED_INDEX` in `crates/tether-trust/src/release.rs`). The check also runs with
+`update.enabled` off: then nothing is offered or downloaded ("Your organisation installs updates
+for you."), but a minimum version still blocks. Help shows the result of
 the last check ("… is up to date", "Version … is available", or "Check failed: <server>: <reason>").
 A TetherQS that was already running when a release was published sees it only at its next check:
-use **Check for updates** or restart it. If the version is newer:
+use **Check for updates** or restart it. If the version is newer and the staged rollout has
+reached this device:
 
-- The exe is downloaded (https only, ≤ 200 MiB) and its minisign signature is verified against the
-  compiled-in `TETHER_UPDATER_PUB_KEY` (Tauri format: `signature` is base64 of the `.sig` file text;
-  the key is base64 of the minisign public key file, a bare `RW…` key also works).
+- The exe is downloaded in the background (https only, ≤ 200 MiB) and its minisign signature is
+  verified against the compiled-in `TETHER_UPDATER_PUB_KEY` (Tauri format: `signature` is base64 of
+  the `.sig` file text; the key is base64 of the minisign public key file, a bare `RW…` key also
+  works). It waits as `update-<version>.staged` and counts as staged only when it verifies again:
+  a broken or foreign file is downloaded anew.
 - It is written to `TetherQS.exe.new` next to the running exe; the running exe is renamed to
   `TetherQS.exe.old` and the new one takes its name; then TetherQS restarts (same ID and password; see [ID](#id) for the one-time move from 0.5.29 on PCs that also run Tether)
   and deletes `.old` on the next start. If the folder is not writable the new exe goes to
   `%LOCALAPPDATA%\Tether-QS\TetherQS.exe` and is started from there.
 - `mandatory` (with a newer version), `minimumVersion` or policy `update.minimum-version` above the
   running version make the update **required**: the backend closes incoming connections and the
-  Accept button is disabled until it is installed.
+  Accept button is disabled until it is installed. A device below a minimum version (the
+  release's or the policy's) is offered the release whatever its place in the staged rollout or
+  `update.rollout = late`; a halted release is never offered.
 - `forced` (or a required update with policy `update.force`) installs automatically after
-  `update.restart-seconds`; otherwise the customer clicks **Update**. The button shows the download
+  `update.restart-seconds`, counted only while no session runs; otherwise the customer clicks
+  **Update**. TetherQS never replaces its exe while a session runs: a forced update waits for the
+  session to end again, and **Update** answers "The update restarts TetherQS: end the session
+  first." The button shows the download
   in percent (the relays serve a few hundred KB/s, so the 35 MB exe can take a minute or two).
 
-Publishing: upload `TetherQS.exe` and `TetherQS.exe.sig` (signed with the updater key, e.g.
-`tauri signer sign`), then `latest.json` with `platforms["windows-x86_64"] = {signature, url}`.
+Publishing: Tether Manage › Releases ([updates.md](updates.md#release-procedure)); it signs the
+exe with the updater key and writes the signed release index. A `latest.json` alone reaches no
+TetherQS built with an admin key.
 
 ## Custom apps (branded downloads)
 
@@ -223,8 +255,11 @@ In TetherQS (Windows):
 - Name, accent and welcome replace `customer.title`, `customer.accent-color` and
   `customer.welcome` (window title and title bar); the logo is shown in the title bar; the Help view
   lists the custom app name.
-- The settings layer is applied with `policy::resolve_with`: defaults < policy profile < **custom
-  app** < group < machine. Only customer-profile features are allowed in it.
+- The settings layer is applied with `policy::resolve_with`: defaults < policy profile <
+  **custom app** < group < machine. Its setting is ignored for every feature the profile locks
+  (`off`, `locked`, `hidden`), so it cannot unlock what the policy locks (the signed profile cannot
+  be revoked). The attached profile is opened leniently (`custom::open_app`): one setting this
+  TetherQS does not know or finds invalid is skipped, not the whole custom app. Only customer-profile features are allowed in it.
 - Self-update downloads and verifies the plain exe as usual, then writes it with this instance's
   profile attached unchanged (`custom::attach`, inside the signature like the relay does), so the
   customer keeps the branded, signed app (from TetherQS 0.5.30; 0.5.29 and earlier append it, so
@@ -270,8 +305,14 @@ that build only) and zips it as `dist/macos/TetherQS-<version>-universal.zip`; s
 - Recording consent works like in the technician app: the request arrives as
   `record_consent_request`, the customer's answer goes to the core via `cm_record_consent`
   (verified end to end: Deny → nothing recorded, Allow → playable file).
-- A manifest `minimumVersion` is only seen while `update.enabled` is on; the policy key
-  `update.minimum-version` is enforced either way.
+- A release's `minimumVersion` and the policy key `update.minimum-version` block sessions also
+  while `update.enabled` is off (the check still runs; nothing is offered or downloaded).
 - Starting TetherQS twice: the second instance finds the first one's IPC and exits.
+- Branding: text on a fill in the brand accent colour is black or white, whichever contrasts more
+  (`onAccent` in `apps/quick/src/color.ts`). Only fills get a contrasting text colour: a dark
+  brand colour is hard to read in the dark theme where the accent is used as text or icon colour
+  (links, the Help icon).
+- A connection that resumes after a network drop does not get back a permission that policy
+  locked off in the meantime (the same in the technician app).
 - Over-the-shoulder UAC with a different admin account works for the portable service (it runs as
   SYSTEM), but the customer must know those credentials.

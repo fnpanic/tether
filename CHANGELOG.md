@@ -6,6 +6,191 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### Review fixes (relays, apps, Tether Manage, tooling; not released, not deployed)
+
+About 100 findings of a code review, fixed on branch `review-fixes`. What is still open is in
+SECURITY.md "Known weaknesses" (W8, W14 to W18).
+
+#### Upgrade notes
+- **Order: relays first.** (1) First every relay: the new tether-api with `RELAY_HOST` set to the
+  host name(s) entered for it in Tether Manage (`/etc/tether/server.env`, which
+  `tether-api.service` reads now; `install.sh` writes it). (2) Then Tether Manage and the apps.
+  (3) Last `TETHER_SIG_V1=off` in `api.env`. New apps sign admin and team requests with
+  `Tether-Sig: v2`, which names the relay, and never fall back to v1: an old relay or one without
+  the right `RELAY_HOST` answers them with `401` (Tether Manage then says "Update the relay first"
+  or names the `RELAY_HOST` problem; the technician app says "This server must be updated before
+  team features work with this version of Tether." or "The server is not set up for this version
+  of Tether yet (RELAY_HOST)."). Until step 3 a captured v1 request can still be replayed at
+  another relay within 300 s. A relay address in Tether Manage must be `https://host` with an
+  optional port, nothing else.
+- **Building the relay** needs `server/patched/turn` (`build-relay.sh`, the Dockerfile and
+  `bootstrap.sh` copy it).
+- **Docker:** the containers run as uid 65532. New: `sudo install -d -m 0700 -o 65532 -g 65532 data`
+  before the first start. On an existing docker-compose relay run
+  `sudo chown -R 65532:65532 data && sudo chmod 0700 data` before `docker compose up -d` with the new
+  image; otherwise hbbs/hbbr cannot open their database and key and restart in a loop.
+- **Proxy configuration with tether-api:** roll out the new `Caddyfile` / `nginx.conf` together
+  with the new tether-api. tether-api closes an idle connection after 30 s; the proxies keep idle
+  connections to it for 20 s only.
+- **Kubernetes with `proxy.tls.secretName`:** the plain HTTP port answers only `/proxy-healthz` and
+  redirects everything else to https (308). A load-balancer health check on that port must use
+  that path, or check the TLS port.
+- **Released viewers** that reload their session window are asked again (password or Accept) by a
+  host with this change. A dropped connection still resumes.
+- **Stock RustDesk clients** that register over UDP again with a new key but the same machine uuid
+  (config wiped, reinstall) get `UUID_MISMATCH` and take a new ID. Tether clients register over
+  the WebSocket and are not affected.
+- **Macs with the old trust profile:** `certs/Trust Tether.mobileconfig` and
+  `certs/tether-codesign-macos.cer` held a certificate no release is signed with. Remove the old
+  profile and install the new one.
+- `hbbs`/`hbbr` started with `-k _` (hbbr also with `-k -`) now exit when `id_ed25519` exists but
+  cannot be read. Check owner and mode of the key files (`install.sh` corrects them).
+
+#### Security
+- **Relays: a UDP `RegisterPk` never changes a registered key** (`rendezvous_server.rs::register_pk`).
+  Before, a datagram with a forged source address and a host's uuid replaced the host's key; after
+  a second registration from the attacker's own IP the real host lost its ID. Over TCP/WebSocket
+  from the same IP the upstream rule stands (W8, open). A UDP `RegisterPk` or `RegisterPeer` also
+  no longer moves the signalling path or stored address of a host whose TCP/WebSocket connection
+  is open (all Tether hosts); for a host registered over UDP (stock clients) it still can (W17).
+- **Relays: the key check cannot be lost.** With `-k _`, a key file that cannot be read used to
+  mean "no key check" and a new `.pub` was written beside it. Now the server exits. A new private
+  key is created `0600`.
+- **Relays, TURN:** the nonce table is bounded at 200 000 (patched `turn` 0.10.0 in
+  `server/patched/turn`; upstream never removed unused nonces). Requests that are not
+  authenticated share 50/s, also those with an expired credential from another address. Send
+  indications and ChannelData are taken only from client addresses that authenticated (the 10 000
+  most recent ones). At most 16 allocations per client IP (`TURN_MAX_ALLOCATIONS_PER_IP`).
+- **Relays, hbbs:** every rendezvous write gives up after 5 s; a controller's punch socket has its
+  own writer task and a queue of 64, so the main loop never waits; rendezvous messages up to
+  512 KiB (TCP and WebSocket), SDP fields up to 64 KiB, `relay_server` up to 1024 bytes; the
+  `RegisterPk` limiter table is pruned every 3 s and holds at most 50 000 source IPs.
+- **Request signatures name the relay** (`Tether-Sig: v2 host=…`, `tether_trust::reqauth`). A
+  request signed for one relay is refused by another. Tether Manage and the technician app follow no
+  HTTP redirects.
+- **tether-api:** a request that is not POST/PUT and announces a body, and any upgrade request, gets
+  `400 unexpected request body` before anything is read. Each connection has a 30 s read timeout
+  (patched tiny_http), so stalled requests and idle keep-alive connections are dropped. Release and
+  diagnostics uploads have 4 slots each, so made-up release uploads no longer keep diagnostics
+  uploads out (they can still hold the 4 release slots, W16). The signature time of an upload is
+  checked against its start, and the nonce of a release upload is remembered for about 70 minutes,
+  so a captured upload cannot be replayed as a slow one. `GET /api/admin/audit` answers at most about 8 MiB
+  (`X-Audit-Truncated: 1`; the Sessions page of Tether Manage says which relay cut its answer). Per-IP limits count an IPv6
+  client by its /64 and a mapped IPv4 address (`::ffff:a.b.c.d`) as that IPv4 address.
+  `PUT /api/admin/policy` validates strictly. Caddy buffers request bodies up to
+  600 KiB on `/api/*`, `/q/*` and the release index.
+- **Core: the server and its key can no longer come from the exe file name, the environment variable
+  `RUSTDESK_APPNAME` or a `custom.txt` beside the exe** (upstream custom-client mechanisms).
+- **Core: the resume ticket no longer skips 2FA** and is tied to the session: valid while the
+  connection runs (the old connection is closed when the new one is in) and for 120 s after it
+  dropped, not after either side ended the session. The resumed connection keeps the permissions
+  the host user last set.
+- **Core: file transfer cannot reach Tether's own files by a detour.** It refuses to list, read,
+  write, rename or delete the configuration (every user's, and the service's copy) and the
+  installation. A folder above the configuration can be browsed but not downloaded as a whole,
+  renamed or removed. This computer's own administrative shares (`\\localhost\C$\…`) are checked
+  as the drive they are; other paths through its own shares or a device path are refused. Still
+  open: a junction inside an allowed folder that points into the configuration is followed by a
+  recursive download.
+- **Both apps: no camera view and no remote terminal on a Tether host** (`enable-camera = N`,
+  `enable-terminal = N`, forced). `allow-auto-record-outgoing = N` is now forced where the core
+  reads it.
+- **Desktop: the background service refuses new sessions** while policy `connect.incoming` is off
+  or the policy's minimum version is above its own, also at the logon screen ("This device does not
+  accept incoming sessions (set by its organisation)." / "This device must be updated before it
+  accepts sessions."). Running sessions are not ended.
+- **Policy:** a custom app can no longer unlock what the policy locks. The order stays defaults <
+  profile < custom app < group < machine, but a custom app's setting is ignored for every feature
+  the profile locks (off, locked or hidden). A policy that locks a permission off also takes it
+  from running sessions and from sessions that resume, and a running file-transfer connection is
+  closed when file transfer is locked off (both apps). `connect.chat` is enforced in both apps.
+  TetherQS keeps a policy serial floor like the desktop app.
+- **Updates:** a device below a release's or the policy's minimum version is offered the release
+  whatever its place in a staged rollout (never a halted release; both apps). TetherQS never swaps its exe while a session
+  runs ("The update restarts TetherQS: end the session first.") and checks a staged download before
+  it counts as staged.
+- **Desktop app shell:** commands that change the machine's security (permanent password, 2FA,
+  options, installing the service, saving the hosts store and team tags) are accepted from the main
+  window only. `cm_permission` takes known permission names only and cannot switch on what policy
+  keeps off. `session_start` runs the same checks as `open_session`. Passwords up to 128 bytes, chat
+  and typed text up to 4096.
+- **Connection prompt (both apps):** Accept and Allow are never pre-selected. The request names the
+  ID, says the name is not verified, and says what is asked for. Another request or a chat message
+  never changes the shown request, and a waiting request is never shown by itself when the shown
+  connection ends (desktop). A repeated recording request is shown at most once per
+  10 s.
+- **Diagnostics:** a proxy's user name and password no longer reach the log.
+- **Team member key file:** generated only when missing (an unreadable file is reported, never
+  replaced), written `0600` on Unix to a temp file and linked into place without replacing, so an
+  existing key is never replaced.
+- **Tether Manage:** refuses to publish a key list that lacks the key a relay signs with; refuses to
+  publish, resume, offer to everyone or re-sign a release index on an older base while a relay did
+  not answer or was left out (it remembers the last accepted serial per channel in
+  `releases/<channel>.live`; the check starts with the first successful publish after updating
+  Manage). A halt is never refused: it goes to the relays that answer, and the result names each
+  relay that did not (halt again when it answers);
+  the download page links a release only when the file name in `latest.json` is exactly the name
+  Manage publishes; CDN credentials become active only after the passphrase was verified.
+- **Deployment:** `tether-ddns.service` runs as a dynamic user with the token on stdin; the Docker
+  containers run as uid 65532; the Helm chart has `proxy.trustedProxies` (strict) and
+  `proxy.service.externalTrafficPolicy`, redirects http to https when `proxy.tls.secretName` is
+  set, and gives the api container `RELAY_HOST`.
+- **Tooling:** `scripts/bootstrap.sh` checks the upstream commits, not only the tags.
+  `tools/vm/broker.ps1` runs scripts only when file and folder belong to Administrators/SYSTEM and
+  nobody else can write them. CI keeps the signing secrets out of the workflow-wide environment.
+  The trust scripts pin the certificate fingerprint and download over https only.
+- **Known and not fixed:** Windows Mouse Keys and the On-Screen Keyboard get past the own-window
+  guard (W18). The recording upload token is public and must be write-only (W15).
+
+#### Fixed
+- Desktop: file transfer asks before it overwrites a file. "Remember password" is off by default in
+  both login forms. Permission switches show the connection's real state.
+- Desktop: Ctrl+Alt+Home also moves the keyboard to the session toolbar (Tab, arrows and Enter work
+  locally; Escape closes a menu, then gives the keyboard back to the remote computer; a click into
+  the picture does too). The toolbar then shows "Keyboard: this window, Esc to return"; keys
+  pressed in that mode are never sent to the remote computer. docs/keyboard.md.
+- Desktop: a host list file that is damaged, cannot be read or was saved by a newer version is never
+  overwritten (a banner above the list says so and what to do). Query nesting deeper than 200 gives
+  "Too many nested brackets". Shortcuts act only when no dialog is open; a focused button keeps
+  Enter and Space. Lock in "Open sessions" asks first.
+- TetherQS: text on a brand accent colour is black or white, whichever contrasts more.
+- Toasts shown while a dialog is open appear above it (all three apps).
+- Desktop: group policy reaches the Windows service once the signed-in user has opened Tether.
+- Policy: in the apps one rule never fails the whole policy. A rule with an unknown feature or a bad
+  value is skipped and logged (`policy rules not applied`); a rule with a state or field from a
+  newer Tether Manage is skipped silently; the rest applies. An unparsable `update.minimum-version`
+  or `update.channel` is such a skipped rule (the channel falls back to `stable`); Tether Manage
+  and the relay still refuse to publish one. One invalid rule in a machine policy or custom app
+  no longer drops the whole layer. TetherQS applies the admin's recording consent text as soon as
+  the policy arrives.
+- Uninstall with "Delete the application data" removes `%APPDATA%\Tether` of the signed-in user and
+  of the elevating administrator and the service's copy (other users' profiles keep theirs). The
+  installer runs `sc`, `netsh` and PowerShell by full path.
+- TetherQS: a new request appears above the running sessions' cards and Help closes.
+- Tether Manage: rollout controls act on the shown channel and show which relay failed; a release's
+  minimum version cannot be above its own version; publishing the download page says when only some
+  relays took it; clean-up deletes only versions the freshly computed plan offers; the key vault is
+  written with fsync before the rename; unpublished team roster changes are kept while Manage is
+  open, and reload asks before it discards them; cancelling a key rotation after a relay switched
+  asks first; "Save key files" refuses a folder that already holds another `id_ed25519` pair, and
+  "Delete key files" deletes only a pair that is a server key of the vault.
+- tether-api: a failed write of `nonces.json` no longer fails admin requests.
+- `server/install.sh`: the nginx switch works on a fresh node and writes `server.env` only after
+  the proxy configuration passed; the firewall rules go before the first REJECT rule; it ends with
+  an error when a service does not stay up. `rotate-key.sh rollback` refuses a second run.
+- nginx serves `releases-v2.json` through tether-api and has no `gzip_static` any more.
+- `scripts/vtscan.py` reports ERROR (exit 2) when VirusTotal has no result.
+- `certs/Trust Tether.mobileconfig` and `certs/tether-codesign-macos.cer` hold the release
+  certificate. New: `certs/Remove Tether certificate.cmd` and `trust-windows-cert.ps1 -Remove`.
+
+#### Changed
+- Key rotation commands (docs/key-rotation.md and the ones Tether Manage prints): the new private
+  key is staged in a 0700 folder in the login user's home (`~/tether-key`), not in `/tmp`, and is
+  removed also when the switch fails.
+- SECURITY.md and docs/encryption.md: W8 described as it is (the real host does not get its key
+  back once the attacker registered from its own IP); new entries W14 to W18.
+- CI runs the full desktop, TetherQS, Tether Manage and macbuild tests.
+
 ### Added
 - **Copy and paste files between macOS and Windows** (Tether 0.5.35 and TetherQS 0.5.33 for macOS; 0.5.34/0.5.32 were already published without it; docs/macos.md
   "Files through the clipboard"). Copy files in Finder, paste them in Explorer on the other side, and the

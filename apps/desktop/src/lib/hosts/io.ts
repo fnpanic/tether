@@ -1,6 +1,6 @@
 // Import/export of the host store (docs/advanced.md#import-and-export). Exports leave out notes
 // unless asked (they may hold passwords or customer details); nothing else in the store is secret.
-import { cleanTags, MAX_NAME, MAX_NOTES, newId, normTag, STORE_VERSION, TAG_COLORS, type HostEntry, type Store, type TagColor } from "./model";
+import { cleanRule, cleanSearch, cleanTagMeta, cleanTags, MAX_NAME, MAX_NOTES, newId, normTag, STORE_VERSION, type HostEntry, type Store } from "./model";
 
 export interface ExportOpts {
   notes: boolean;
@@ -126,15 +126,15 @@ export function parseImport(text: string): Imported {
       const d = doc as Partial<Store>;
       for (const [k, v] of Object.entries(d.tags ?? {})) {
         const n = normTag(k);
-        const color = (v as { color?: string })?.color;
-        if (n) out.tags[n] = TAG_COLORS.includes(color as TagColor) ? { color: color as TagColor } : {};
+        if (n && n !== "__proto__") out.tags[n] = cleanTagMeta(v);
       }
-      for (const r of Array.isArray(d.rules) ? d.rules : []) {
-        const tag = normTag(String(r?.tag ?? ""));
-        if (tag && typeof r.when === "string" && r.when.length <= 1000) out.rules.push({ id: newId(), tag, when: r.when, ...(r.off ? { off: true } : {}) });
+      for (const raw of Array.isArray(d.rules) ? d.rules : []) {
+        const r = cleanRule(raw);
+        if (r) out.rules.push({ ...r, id: newId() });
       }
-      for (const s of Array.isArray(d.searches) ? d.searches : []) {
-        if (typeof s?.name === "string" && typeof s.query === "string" && s.name.trim()) out.searches.push({ id: newId(), name: s.name.trim().slice(0, 64), query: s.query.slice(0, 1000) });
+      for (const raw of Array.isArray(d.searches) ? d.searches : []) {
+        const s = cleanSearch(raw);
+        if (s) out.searches.push({ ...s, id: newId() });
       }
     }
     return out;

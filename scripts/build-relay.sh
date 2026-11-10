@@ -11,7 +11,9 @@ export CC_x86_64_unknown_linux_musl=musl-gcc
 T=x86_64-unknown-linux-musl
 mkdir -p "$OUT/bin"
 # db_v2.sqlite3 is the schema sqlx checks queries against at compile time: copy it, skip only -wal/-shm.
-rsync -a --delete --exclude target --exclude .git --exclude '*.sqlite3-*' --exclude src/version.rs "$SRC/vendor/rustdesk-server/" "$OUT/rustdesk-server/"
+rsync -a --delete --exclude target --exclude .git --exclude '*.sqlite3-*' --exclude src/version.rs --exclude /patched "$SRC/vendor/rustdesk-server/" "$OUT/rustdesk-server/"
+# The patched turn crate ([patch.crates-io] in rustdesk-server's Cargo.toml).
+rsync -a --delete "$SRC/server/patched/" "$OUT/rustdesk-server/patched/"
 mkdir -p "$OUT/server" "$OUT/crates"
 rsync -a --delete --exclude target "$SRC/server/api/" "$OUT/server/api/"
 rsync -a --delete --exclude target "$SRC/crates/tether-trust/" "$OUT/crates/tether-trust/"

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import qrcode from "qrcode-generator";
 import { Activity, Info, KeyRound, Lock, Monitor, Moon, Network, Palette, Shield, Sun, Video, X } from "lucide-react";
 import { api, type Status } from "../lib/ipc";
@@ -6,7 +6,7 @@ import { errorText, isHidden, isLocked, isOn, usePolicy } from "../lib/policy";
 import { Diagnostics } from "./Diagnostics";
 import { updateApi, updateLine, type UpdateStatus } from "../components/UpdateCard";
 import { getThemePref, setThemePref, type ThemePref } from "../lib/theme";
-import { Button, IconButton, Segmented, TextField, Toggle } from "../components/ui";
+import { Button, IconButton, Modal, SELECTED, Segmented, TextField, Toggle, useToast } from "../components/ui";
 import { useMode } from "../lib/mode";
 import { passwordStrength } from "../lib/security";
 import { recordingsApi, retentionText, uploadText, type RecordingsState } from "../lib/recordings";
@@ -23,14 +23,22 @@ const NAV: { id: Section; label: string; icon: typeof Shield }[] = [
   { id: "about", label: "About", icon: Info },
 ];
 
+/** The Settings dialog's toast, for the option controls inside it. */
+const Notify = createContext<(m: string) => void>(() => {});
+
 function useOption(key: string, def = "") {
   const [v, setV] = useState(def);
+  const notify = useContext(Notify);
   useEffect(() => {
     api.getOption(key).then((x) => setV(x || def)).catch(() => {});
   }, [key, def]);
   const set = (nv: string) => {
     setV(nv);
-    api.setOption(key, nv === def ? "" : nv);
+    // Refused (policy, disk): say why and show the value that is still in force.
+    api.setOption(key, nv === def ? "" : nv).catch((e) => {
+      notify(errorText(e));
+      api.getOption(key).then((x) => setV(x || def)).catch(() => {});
+    });
   };
   return [v, set] as const;
 }
@@ -200,6 +208,7 @@ function TwoFactor() {
   const [uri, setUri] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const [ask, setAsk] = useState(false);
   useEffect(() => {
     api.tfaEnabled().then(setEnabled).catch(() => setEnabled(false));
   }, []);
@@ -207,17 +216,31 @@ function TwoFactor() {
   return (
     <Row title="Two-factor authentication" desc="Incoming sessions also need a 6-digit code from an authenticator app.">
       {enabled ? (
-        <Button
-          size="sm"
-          variant="danger"
-          onClick={async () => {
-            if (!confirm("Turn off two-factor authentication?")) return;
-            await api.tfaDisable();
-            setEnabled(false);
-          }}
-        >
-          Turn off
-        </Button>
+        <div className="flex flex-col items-end gap-1">
+          {ask ? (
+            <div className="flex items-center gap-2">
+              <span className="text-footnote text-muted">Turn off two-factor authentication?</span>
+              <Button size="sm" variant="ghost" onClick={() => setAsk(false)}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => {
+                  setAsk(false);
+                  api.tfaDisable().then(() => (setEnabled(false), setErr(null)), (e) => setErr(errorText(e)));
+                }}
+              >
+                Turn off
+              </Button>
+            </div>
+          ) : (
+            <Button size="sm" variant="danger" onClick={() => setAsk(true)}>
+              Turn off
+            </Button>
+          )}
+          {err && <div className="text-footnote text-danger">{err}</div>}
+        </div>
       ) : uri ? (
         <form
           className="flex w-[280px] flex-col items-start gap-3"
@@ -229,7 +252,7 @@ function TwoFactor() {
               setUri(null);
               setErr(null);
             } catch (x) {
-              setErr(String(x));
+              setErr(errorText(x));
             }
           }}
         >
@@ -260,9 +283,12 @@ function TwoFactor() {
           </div>
         </form>
       ) : (
-        <Button size="sm" variant="secondary" disabled={enabled === null} onClick={async () => setUri(await api.tfaBegin())}>
-          Set up
-        </Button>
+        <div className="flex flex-col items-end gap-1">
+          <Button size="sm" variant="secondary" disabled={enabled === null} onClick={() => api.tfaBegin().then((u) => (setErr(null), setUri(u)), (e) => setErr(errorText(e)))}>
+            Set up
+          </Button>
+          {err && <div className="text-footnote text-danger">{err}</div>}
+        </div>
       )}
     </Row>
   );
@@ -479,26 +505,18 @@ export function Settings({ onClose, status }: { onClose: () => void; status: Sta
   const [sec, setSec] = useState<Section>("security");
   const eff = usePolicy();
   const nav = NAV.filter((n) => n.id !== "diagnostics" || isOn(eff, "diagnostics.page"));
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [onClose]);
+  const toast = useToast();
   return (
-    <div className="animate-fade fixed inset-0 z-30 flex bg-black/40" onMouseDown={onClose}>
-      <div
-        className="animate-rise m-auto flex h-[min(600px,92vh)] w-[min(860px,94vw)] overflow-hidden rounded-2xl border border-hairline bg-tile shadow-float"
-        onMouseDown={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-label="Settings"
-      >
+    <Modal label="Settings" onClose={onClose} width="min(860px,94vw)" className="flex h-[min(600px,92vh)] overflow-hidden rounded-2xl">
+      <Notify.Provider value={toast.show}>
         <nav className="flex w-56 shrink-0 flex-col gap-0.5 border-r border-hairline bg-parchment p-3">
           <div className="px-3 pb-3 pt-2 text-callout font-semibold">Settings</div>
           {nav.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => setSec(id)}
-              className={`flex items-center gap-2.5 h-9 rounded-md px-3 text-left text-caption transition ${sec === id ? "bg-accent/12 text-ink" : "text-muted hover:bg-tile-2 hover:text-ink"}`}
+              aria-current={sec === id || undefined}
+              className={`flex items-center gap-2.5 h-9 rounded-md px-3 text-left text-caption transition ${sec === id ? SELECTED : "text-muted hover:bg-tile-2 hover:text-ink"}`}
             >
               <Icon size={16} />
               {label}
@@ -522,7 +540,8 @@ export function Settings({ onClose, status }: { onClose: () => void; status: Sta
             {sec === "about" && <About status={status} />}
           </div>
         </div>
-      </div>
-    </div>
+        {toast.node}
+      </Notify.Provider>
+    </Modal>
   );
 }

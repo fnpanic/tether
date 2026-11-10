@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, FolderOpen, Loader2, Play, TriangleAlert, X } from "lucide-react";
 import { Button, IconButton } from "./ui";
 import { onRecordings, recordingsApi, reduceCard, type SavedCard } from "../lib/recordings";
-import { usePolicy } from "../lib/policy";
+import { errorText, usePolicy } from "../lib/policy";
 
 export function RecordingSaved({ onChange }: { onChange?: () => void }) {
   const [card, setCard] = useState<SavedCard | null>(null);
@@ -26,7 +26,7 @@ export function RecordingSaved({ onChange }: { onChange?: () => void }) {
   if (!card) return null;
   const f = card.files[0];
   const target = eff?.values["recording.upload-target"] || "the server";
-  const act = (p: Promise<unknown>) => p.catch((e) => setErr(String(e)));
+  const act = (p: Promise<unknown>) => p.catch((e) => setErr(errorText(e)));
   return (
     <div role="status" data-testid="recording-saved" className="animate-rise fixed bottom-6 right-6 z-50 w-[360px] max-w-[calc(100vw-48px)] rounded-2xl border border-hairline bg-tile p-5 text-ink shadow-float">
       <div className="flex items-start gap-3">

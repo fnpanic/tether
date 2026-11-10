@@ -66,6 +66,8 @@ case "${1:-}" in
   rollback)
     [ -f "$DATA/id_ed25519.old" ] || die "no id_ed25519.old to roll back to"
     newpub="$(pub_of "$DATA/id_ed25519")"
+    # A second rollback would take the old key for the new one and drop the new one from KEYS_ACCEPT.
+    [ "$(pub_of "$DATA/id_ed25519.old")" != "$newpub" ] || die "already rolled back: id_ed25519.old is the signing key"
     install -m 0600 "$DATA/id_ed25519.old" "$DATA/id_ed25519"
     pub_of "$DATA/id_ed25519" >"$DATA/id_ed25519.pub"
     own "$DATA/id_ed25519" "$DATA/id_ed25519.pub"

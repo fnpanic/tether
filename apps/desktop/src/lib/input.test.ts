@@ -1,6 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { lockModes, mouseMask, MOUSE, wheelSteps } from "./input";
+import { lockModes, mouseMask, MOUSE, remoteKey, wheelSteps } from "./input";
 import { formatId } from "./ipc";
+
+describe("remoteKey (keyboard local to the session toolbar)", () => {
+  it("every press sent to the remote gets its release, and nothing typed while local is sent", () => {
+    const held = new Set<string>();
+    const sent: string[] = [];
+    const key = (local: boolean, code: string, down: boolean) => remoteKey(held, local, code, down) && sent.push(code + (down ? "+" : "-"));
+    // Ctrl+Alt down go out, Home (the chord) starts local mode: Home is local, Ctrl/Alt still get their release.
+    key(false, "ControlLeft", true);
+    key(false, "AltLeft", true);
+    key(true, "Home", true);
+    key(true, "Home", false);
+    key(true, "AltLeft", false);
+    key(true, "ControlLeft", false);
+    // Shift+Tab and arrows on the toolbar.
+    for (const [c, d] of [["ShiftLeft", true], ["Tab", true], ["Tab", false], ["ShiftLeft", false], ["ArrowRight", true], ["ArrowRight", false]] as const) key(true, c, d);
+    // Escape ends local mode while still down; its release comes after.
+    key(true, "Escape", true);
+    key(false, "Escape", false);
+    expect(held.size).toBe(0);
+    // Back on the remote: the same keys are sent whole.
+    const again = ["ShiftLeft", "Tab", "ArrowRight", "KeyX", "Home", "Escape"];
+    for (const c of again) (key(false, c, true), key(false, c, false));
+    expect(sent).toEqual(["ControlLeft+", "AltLeft+", "AltLeft-", "ControlLeft-", ...again.flatMap((c) => [c + "+", c + "-"])]);
+  });
+  it("a release missed while local does not swallow the next real one", () => {
+    const held = new Set(["KeyA"]); // pressed while local, released while another window had the focus
+    expect(remoteKey(held, false, "KeyA", true)).toBe(true);
+    expect(remoteKey(held, false, "KeyA", false)).toBe(true);
+  });
+});
 import { parsePacket, renderSize, widenTo } from "./video";
 
 describe("input encoding", () => {

@@ -12,6 +12,8 @@ export interface Effective {
   locked: string[];
   hidden: string[];
   sources: string[];
+  /** Policy entries the backend refused to apply. */
+  rejected?: string[];
 }
 
 export const usePolicyStore = create<{ eff: Effective | null; set: (e: Effective | null) => void }>((set) => ({

@@ -129,7 +129,7 @@ function LiveView({ features, lang }: { features: Feature[]; lang: Lang }) {
               <tr key={r.id}>
                 <td>
                   <p className={r.hidden ? "text-faint line-through" : ""}>{name(r.id)}</p>
-                  <p className="font-mono text-footnote text-faint">{r.id}</p>
+                  <p className="font-mono text-footnote text-muted">{r.id}</p>
                 </td>
                 <td>
                   <span className="flex items-center gap-1.5 font-mono">
@@ -137,8 +137,8 @@ function LiveView({ features, lang }: { features: Feature[]; lang: Lang }) {
                     {r.hidden ? <EyeOff size={12} className="text-muted" aria-label="Hidden" /> : r.locked && <Lock size={12} className="text-muted" aria-label="Locked" />}
                   </span>
                 </td>
-                <td>{r.source === "profile" ? <Badge tone="accent">Profile</Badge> : <Badge>Default</Badge>}</td>
-                <td>{d === undefined || d === r.value ? <span className="text-muted">same</span> : <span className="font-mono font-semibold text-accent">{shown(d)}</span>}</td>
+                <td>{r.source === "profile" ? <Badge tone="ink">Profile</Badge> : <Badge>Default</Badge>}</td>
+                <td>{d === undefined || d === r.value ? <span className="text-muted">same</span> : <span className="font-mono font-semibold">{shown(d)}</span>}</td>
               </tr>
             );
           })}
@@ -249,7 +249,7 @@ export function Policy() {
         className={`flex h-8 items-center gap-2 rounded-full border px-3.5 text-caption ${active ? `border-accent ${SELECTED}` : "border-hairline text-ink-80 hover:bg-tile-2"}`}
       >
         {label}
-        <span className={`text-footnote ${active ? "text-white/80" : "text-muted"}`}>{sub}</span>
+        <span className={`text-footnote ${active ? "text-on-accent/80" : "text-muted"}`}>{sub}</span>
       </button>
     );
   };
@@ -349,7 +349,7 @@ export function Policy() {
             }}
           >
             <Label text="Name" hint={draft.groups[newGroup.name.trim()] ? "A group with this name exists." : "1–64 characters."}>
-              <TextField autoFocus maxLength={64} value={newGroup.name} onChange={(e) => setNewGroup({ ...newGroup, name: e.target.value })} />
+              <TextField data-autofocus maxLength={64} value={newGroup.name} onChange={(e) => setNewGroup({ ...newGroup, name: e.target.value })} />
             </Label>
             <Label text="Profile">
               <Select value={newGroup.profile} onChange={(e) => setNewGroup({ ...newGroup, profile: e.target.value })}>

@@ -13,7 +13,7 @@ use serde_json::Value;
 use tether_trust::{reqauth, team::Roster, VerifyingKey};
 use tiny_http::Request;
 
-use crate::{audit, client_ip, header, json, load_json, mkdirs, now, rate_ok, text, App, Body, Resp, LIMIT_SMALL};
+use crate::{audit, header, json, load_json, mkdirs, now, rate_ok, text, App, Body, Resp, LIMIT_SMALL};
 
 pub const LIMIT_ROSTER: u64 = 64 << 10;
 const LIMIT_TAGS: u64 = 512 << 10;
@@ -148,7 +148,7 @@ impl App {
     /// Index of the roster member whose key signed the request. Same rules and nonce cache as
     /// `App::auth`.
     fn member_auth(&mut self, rq: &Request, method: &str, url: &str, body: &[u8]) -> Result<usize, Resp> {
-        let ip = client_ip(rq);
+        let ip = crate::rate_ip(rq);
         let t = now();
         if self.team.fail_hits.get(&ip).is_some_and(|h| t < h.0 + 60 && h.1 >= FAIL_PER_MIN) {
             return Err(text(429, "too many failed requests"));
@@ -159,10 +159,12 @@ impl App {
             }
             let sig = header(rq, reqauth::HEADER).ok_or_else(|| "missing signature".to_owned())?;
             let mut err = String::new();
+            // Once, not per roster key (up to 500, under the state lock).
+            let digest = reqauth::body_digest(body);
             for (i, key) in self.team.keys.iter().enumerate() {
                 let nonces = &mut self.nonces;
-                let unused = |n: &str| nonces.insert(n.to_owned(), t).is_none();
-                match reqauth::verify_request(&sig, key, method, url, body, t, unused) {
+                let unused = |n: &str| !nonces.contains_key(n) && nonces.insert(n.to_owned(), t).is_none();
+                match reqauth::verify_request_for(&sig, key, crate::sig_relay(), method, url, &digest, t, unused) {
                     Ok(()) => return Ok(i),
                     Err(e) if err.is_empty() || e != "signature does not match" => err = e,
                     Err(_) => {}
@@ -172,8 +174,7 @@ impl App {
         })();
         match r {
             Ok(i) => {
-                let nonces = self.nonces.clone();
-                self.save("nonces.json", &nonces).map_err(crate::internal)?;
+                self.save_nonces();
                 Ok(i)
             }
             Err(e) => {
@@ -200,6 +201,6 @@ impl App {
             return Err(text(400, "device required"));
         }
         let dir = self.audit.dir.clone();
-        self.defer(move |_| Ok(json(&audit::read(&dir, since, limit, &device))))
+        self.defer(move |_| Ok(audit::response(&dir, since, limit, &device)))
     }
 }

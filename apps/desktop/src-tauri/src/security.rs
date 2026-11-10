@@ -1,7 +1,7 @@
 //! Security and privacy policy, applied in every process role before the core starts.
 //! Rationale for each setting: /SECURITY.md.
 
-use hbb_common::config::{DEFAULT_SETTINGS, OVERWRITE_SETTINGS};
+use hbb_common::config::{DEFAULT_SETTINGS, OVERWRITE_LOCAL_SETTINGS, OVERWRITE_SETTINGS};
 
 /// Forced: users and remote peers cannot change these.
 pub(crate) const ENFORCED: &[(&str, &str)] = &[
@@ -18,10 +18,16 @@ pub(crate) const ENFORCED: &[(&str, &str)] = &[
     // No session recordings written to disk unless the user starts one explicitly.
     ("allow-auto-record-incoming", "N"),
     ("allow-auto-record-outgoing", "N"),
+    // No camera view and no remote terminal on a Tether host: the app has no consent UI for them.
+    ("enable-camera", "N"),
+    ("enable-terminal", "N"),
     // Tether has no "stop service" control. The core's --uninstall-service (run by every
     // upgrade's old uninstaller) writes stop-service=Y, which would keep the app offline for good.
     ("stop-service", "N"),
 ];
+
+/// Forced where the core reads them from the local config (`LocalConfig`).
+pub(crate) const ENFORCED_LOCAL: &[(&str, &str)] = &[("allow-auto-record-outgoing", "N")];
 
 /// Secure defaults the user may relax deliberately in Settings.
 const DEFAULTS: &[(&str, &str)] = &[
@@ -46,6 +52,11 @@ pub fn enforce() {
     let mut o = OVERWRITE_SETTINGS.write().unwrap();
     for (k, v) in ENFORCED {
         o.insert((*k).to_owned(), (*v).to_owned());
+    }
+    drop(o);
+    let mut l = OVERWRITE_LOCAL_SETTINGS.write().unwrap();
+    for (k, v) in ENFORCED_LOCAL {
+        l.insert((*k).to_owned(), (*v).to_owned());
     }
 }
 
@@ -162,5 +173,10 @@ mod tests {
         apply_policy();
         assert_eq!(OVERWRITE_SETTINGS.read().unwrap().get("enable-check-update").map(String::as_str), Some("N"));
         assert_eq!(DEFAULT_SETTINGS.read().unwrap().get("temporary-password-length").map(String::as_str), Some("10"));
+        for k in ["enable-camera", "enable-terminal"] {
+            assert_eq!(OVERWRITE_SETTINGS.read().unwrap().get(k).map(String::as_str), Some("N"), "{k}");
+            assert_eq!(hbb_common::config::Config::get_option(k), "N");
+        }
+        assert_eq!(hbb_common::config::LocalConfig::get_option("allow-auto-record-outgoing"), "N");
     }
 }

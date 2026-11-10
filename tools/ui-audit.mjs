@@ -54,7 +54,7 @@ const PERMS = [["keyboard", "Control mouse and keyboard"], ["clipboard", "Use th
 const qclient = (id, o = {}) => ({ id, peer_id: String(100000000 + id), name: "Thomas", authorized: true, is_file_transfer: false, keyboard: true, clipboard: true, file: true, audio: true, restart: true, block_input: false, ...o });
 const qstate = (o = {}, b = {}, u = {}) => ({
   id: "731204986", password: "k7x9q2", status: 1, version: "0.5.26", elevated: false, blocked: false, mac: null,
-  branding: { title: "Tether Support", accent: "#0071e3", welcome: "Tell your technician the ID and password below.", elevate: true, approve_mode: "", consent_text: "Your technician wants to record this session.", diagnostics: true, perms: PERMS, custom_app: null, logo: "", ...b },
+  branding: { title: "Tether Support", accent: "#0071e3", welcome: "Tell your technician the ID and password below.", elevate: true, chat: true, approve_mode: "", consent_text: "Your technician wants to record this session.", diagnostics: true, perms: PERMS, custom_app: null, logo: "", ...b },
   update: { available: null, notes: "", required: false, forced_at: null, installing: false, error: null, last_check: "Checked today 09:12: up to date", progress: null, serial: 1, stale: false, phase: "", waiting_idle: false, ...u },
   clients: [], ...o,
 });

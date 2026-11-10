@@ -65,10 +65,16 @@ const Q_IP_PER_MIN: u32 = 30;
 
 /// Requests served at once; more get 503. Each holds at most one in-memory body (LIMIT_PAGE).
 const MAX_WORKERS: usize = 32;
-/// Longest wait for one read or write on a client connection.
+/// Longest wait for one read or write on a client connection, the next request on a kept-alive
+/// one included (the patched tiny_http starts every connection with the same read timeout).
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
-/// Large uploads (release, diagnostics) read at once; more get 503 with Retry-After, so slow
-/// uploads never hold more than these of the MAX_WORKERS (heartbeats keep the rest).
+/// Large uploads read at once, per kind (release, diagnostics); more get 503 with Retry-After, so
+/// slow uploads never hold more than 2 * MAX_UPLOADS of the MAX_WORKERS (heartbeats keep the
+/// rest). Two pools: a release upload gets its slot on an unverified signature header (the
+/// signature covers the body), which must not keep ticketed diagnostics uploads out.
+// shortcut: a made-up Tether-Sig header with a slow body still holds a release slot (up to about
+// 55 min each), blocking release uploads only; sign the body hash in a header and verify it
+// before the body if that is ever abused.
 const MAX_UPLOADS: usize = 4;
 /// A body read that averages under MIN_RATE bytes/s once MIN_RATE_AFTER has passed is aborted.
 const MIN_RATE: u64 = 16 << 10;
@@ -76,7 +82,8 @@ const MIN_RATE_AFTER: Duration = Duration::from_secs(30);
 
 static STOP: AtomicBool = AtomicBool::new(false);
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
-static UPLOADS: AtomicUsize = AtomicUsize::new(0);
+static RELEASE_UPLOADS: AtomicUsize = AtomicUsize::new(0);
+static DIAG_UPLOADS: AtomicUsize = AtomicUsize::new(0);
 
 type Resp = Response<Box<dyn Read + Send>>;
 type Later = Box<dyn FnOnce(&Mutex<App>) -> Result<Resp, Resp> + Send>;
@@ -274,22 +281,22 @@ impl<R: Read> Read for Deadline<R> {
     }
 }
 
-/// One of the MAX_UPLOADS upload slots, released on drop.
-struct UploadSlot;
+/// One of the MAX_UPLOADS upload slots of a pool, released on drop.
+struct UploadSlot(&'static AtomicUsize);
 
 impl UploadSlot {
-    fn take() -> Option<Self> {
-        if UPLOADS.fetch_add(1, Ordering::SeqCst) < MAX_UPLOADS {
-            return Some(UploadSlot);
+    fn take(pool: &'static AtomicUsize) -> Option<Self> {
+        if pool.fetch_add(1, Ordering::SeqCst) < MAX_UPLOADS {
+            return Some(UploadSlot(pool));
         }
-        UPLOADS.fetch_sub(1, Ordering::SeqCst);
+        pool.fetch_sub(1, Ordering::SeqCst);
         None
     }
 }
 
 impl Drop for UploadSlot {
     fn drop(&mut self) {
-        UPLOADS.fetch_sub(1, Ordering::SeqCst);
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -305,11 +312,11 @@ fn with_socket(peer: SocketAddr, f: impl Fn(&TcpStream)) {
     }
 }
 
-/// Sets (or with `None` clears) the read and write timeouts of a request's socket.
-fn set_io_timeouts(peer: SocketAddr, t: Option<Duration>) {
+/// Sets the read and write timeouts of a request's socket.
+fn set_io_timeouts(peer: SocketAddr, t: Duration) {
     with_socket(peer, |s| {
-        let _ = s.set_read_timeout(t);
-        let _ = s.set_write_timeout(t);
+        let _ = s.set_read_timeout(Some(t));
+        let _ = s.set_write_timeout(Some(t));
     });
 }
 
@@ -424,6 +431,26 @@ fn client_ip(rq: &Request) -> String {
     peer.map(|ip| ip.to_string()).unwrap_or_default()
 }
 
+/// The client as the per-IP rate limits count it: an IPv6 client has a whole /64 to send from.
+pub(crate) fn rate_ip(rq: &Request) -> String {
+    let ip = client_ip(rq);
+    match ip.parse::<std::net::Ipv6Addr>() {
+        Ok(a) => match a.to_ipv4_mapped() {
+            // `::ffff:1.2.3.4` from a proxy is that IPv4 client, not part of one shared /64.
+            Some(v4) => v4.to_string(),
+            None => std::net::Ipv6Addr::from(u128::from(a) & (!0 << 64)).to_string(),
+        },
+        Err(_) => ip,
+    }
+}
+
+/// True if the request announces a body its route does not take (only POST and PUT routes take
+/// one), or an upgrade (tiny_http then hands out the rest of the connection as the body).
+fn unwanted_body(rq: &Request) -> bool {
+    header(rq, "Connection").is_some_and(|v| v.to_ascii_lowercase().contains("upgrade"))
+        || (!matches!(rq.method().as_str(), "POST" | "PUT") && (rq.body_length().is_some_and(|n| n > 0) || header(rq, "Transfer-Encoding").is_some()))
+}
+
 fn read_body(rq: &mut Request, limit: u64) -> Result<Vec<u8>, Resp> {
     if rq.body_length().is_some_and(|n| n as u64 > limit) {
         return Err(too_large());
@@ -484,14 +511,28 @@ fn body_to_file(rq: &mut Request, data: &Path, limit: u64, mode: u32) -> Result<
     }
 }
 
+/// What this relay accepts as request signature (api.env): v2 signatures name the relay they are
+/// for, which must be one of `RELAY_HOST` (this relay's public host names, comma-separated; not
+/// set: no v2); v1 signatures (older apps, not bound to a relay) until `TETHER_SIG_V1=off`.
+pub(crate) fn sig_relay() -> reqauth::Relay<'static> {
+    static CONF: std::sync::OnceLock<(Vec<String>, bool)> = std::sync::OnceLock::new();
+    let (hosts, v1) = CONF.get_or_init(|| {
+        let hosts = std::env::var("RELAY_HOST").unwrap_or_default().split(',').map(reqauth::host_of).filter(|h| !h.is_empty()).collect();
+        (hosts, std::env::var("TETHER_SIG_V1").map_or(true, |v| v.trim() != "off"))
+    });
+    reqauth::Relay { hosts, v1: *v1 }
+}
+
 /// The admin signature of a request under any of `keys`. Needs no state, so a large body is
 /// checked before the state lock; the returned nonce still goes through `App::use_nonce`.
 fn verify_sig(keys: &[VerifyingKey], rq: &Request, method: &str, url: &str, body: &[u8], t: u64) -> Result<String, Resp> {
     let sig = header(rq, reqauth::HEADER).ok_or_else(|| text(401, "missing signature"))?;
     let mut err = String::new();
+    // Once, not per key: the body may be a 200 MiB upload.
+    let digest = reqauth::body_digest(body);
     for key in keys {
         let mut nonce = String::new();
-        match reqauth::verify_request(&sig, key, method, url, body, t, |n| {
+        match reqauth::verify_request_for(&sig, key, sig_relay(), method, url, &digest, t, |n| {
             nonce = n.to_owned();
             true
         }) {
@@ -507,22 +548,24 @@ fn verify_sig(keys: &[VerifyingKey], rq: &Request, method: &str, url: &str, body
 /// Reads the body a route takes, before any state is locked: the large uploads to a temp file,
 /// everything else into memory up to the largest in-memory limit (LIMIT_PAGE); each handler
 /// still applies its own limit. An upload is first checked as far as it can be without its body
-/// and needs one of the MAX_UPLOADS slots; a release upload's signature is verified here.
+/// and needs one of its kind's MAX_UPLOADS slots; a release upload's signature is verified here.
 fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<Body, Resp> {
     let url = rq.url().to_owned();
     let path = url.split('?').next().unwrap_or("");
-    let (limit, mode, keys) = match (rq.method().as_str(), path) {
-        ("PUT", p) if p.starts_with("/api/admin/release/") => (LIMIT_RELEASE, 0o640, Some(lock(app).release_precheck(rq, p)?)),
+    let (limit, mode, keys, pool) = match (rq.method().as_str(), path) {
+        ("PUT", p) if p.starts_with("/api/admin/release/") => (LIMIT_RELEASE, 0o640, Some(lock(app).release_precheck(rq, p)?), &RELEASE_UPLOADS),
         ("POST", p) if p.starts_with("/api/diag/") => {
             lock(app).open_ticket(&p["/api/diag/".len()..], now())?;
-            (LIMIT_DIAG, 0o600, None)
+            (LIMIT_DIAG, 0o600, None, &DIAG_UPLOADS)
         }
         _ => return read_body(rq, LIMIT_PAGE).map(Body::Mem),
     };
-    let _slot = UploadSlot::take().ok_or_else(|| text(503, "too many uploads at once, retry later").with_header(hdr("Retry-After", "30")))?;
+    let _slot = UploadSlot::take(pool).ok_or_else(|| text(503, "too many uploads at once, retry later").with_header(hdr("Retry-After", "30")))?;
+    // The timestamp was current when the upload began (precheck); a slow upload may outlast the skew.
+    let t = now();
     let mut body = body_to_file(rq, data, limit, mode)?;
     if let (Some(keys), Body::File { path, nonce, .. }) = (keys, &mut body) {
-        *nonce = Some(with_mapped(path, |b| verify_sig(&keys, rq, "PUT", &url, b, now())).map_err(internal)??);
+        *nonce = Some(with_mapped(path, |b| verify_sig(&keys, rq, "PUT", &url, b, t)).map_err(internal)??);
     }
     Ok(body)
 }
@@ -531,28 +574,39 @@ fn lock(app: &Mutex<App>) -> MutexGuard<'_, App> {
     app.lock().unwrap_or_else(|e| e.into_inner()) // a panicked request leaves the state usable
 }
 
+/// For a response sent without reading (all of) the body: tiny_http would read the rest after
+/// the response, holding its caller for as long as a slow client keeps sending.
+fn refuse(peer: Option<SocketAddr>, resp: Resp) -> Resp {
+    if let Some(p) = peer {
+        with_socket(p, |s| {
+            let _ = s.shutdown(Shutdown::Read);
+        });
+    }
+    resp.with_header(hdr("Connection", "close"))
+}
+
 /// One request on its own worker thread. Only routing holds the state lock; the body is read
 /// before it, file work a handler deferred (`App::defer`) and the response written after it,
 /// each read and write bounded by IO_TIMEOUT.
 fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
     let (start, endpoint) = (Instant::now(), metrics::endpoint(rq.method().as_str(), rq.url()));
     let peer = rq.remote_addr().copied();
-    if endpoint == metrics::METRICS {
+    if let Some(p) = peer {
+        set_io_timeouts(p, IO_TIMEOUT);
+    }
+    let resp = if unwanted_body(&rq) {
+        Err(text(400, "unexpected request body"))
+    } else if endpoint == metrics::METRICS {
         let page = match peer {
             Some(p) if p.ip().is_loopback() => lock(app).metrics_now(),
             _ => None,
         };
-        let _ = rq.respond(match page {
+        Ok(match page {
             Some(now) => text(200, &metrics::render(&now, data)).with_header(hdr("Content-Type", "text/plain; version=0.0.4")),
             None => not_found(),
-        });
-        return;
-    }
-    if let Some(p) = peer {
-        set_io_timeouts(p, Some(IO_TIMEOUT));
-    }
-    let resp = match read_request_body(app, &mut rq, data) {
-        Ok(body) => {
+        })
+    } else {
+        read_request_body(app, &mut rq, data).map(|body| {
             let (r, later) = {
                 let mut a = lock(app);
                 let r = a.route(&mut rq, &body);
@@ -563,24 +617,17 @@ fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
                 (r, _) => r,
             }
             .unwrap_or_else(|e| e)
-        }
-        Err(e) => {
-            // Refused before (all of) the body was read: tiny_http would read the rest after the
-            // response, holding this worker for as long as a slow client keeps sending.
-            if let Some(p) = peer {
-                with_socket(p, |s| {
-                    let _ = s.shutdown(Shutdown::Read);
-                });
-            }
-            e.with_header(hdr("Connection", "close"))
-        }
+        })
     };
+    // Err: refused before (all of) the body was read.
+    let resp = resp.unwrap_or_else(|e| refuse(peer, e));
     let code = resp.status_code().0;
+    // The timeouts stay: tiny_http reads the next request's head and a small body on its own
+    // thread, and an idle kept-alive connection is closed after IO_TIMEOUT (the proxy reconnects).
     let _ = rq.respond(resp);
-    if let Some(p) = peer {
-        set_io_timeouts(p, None); // an idle keep-alive connection from the proxy may wait
+    if endpoint != metrics::METRICS {
+        metrics::observe(endpoint, code, start.elapsed());
     }
-    metrics::observe(endpoint, code, start.elapsed());
 }
 
 fn disk_free(p: &Path) -> u64 {
@@ -836,16 +883,26 @@ impl App {
 
     fn auth(&mut self, rq: &Request, method: &str, url: &str, body: &[u8]) -> Result<(), Resp> {
         let nonce = verify_sig(&self.keys, rq, method, url, body, now())?;
-        self.use_nonce(nonce)
+        self.use_nonce(nonce, 0)
     }
 
-    /// Replay check of a verified signature's nonce.
-    fn use_nonce(&mut self, nonce: String) -> Result<(), Resp> {
-        if self.nonces.insert(nonce, now()).is_some() {
+    /// Replay check of a verified signature's nonce, remembered `keep` s longer than
+    /// NONCE_TTL_SECS (stored as seen that much later; a refused replay does not renew it).
+    fn use_nonce(&mut self, nonce: String, keep: u64) -> Result<(), Resp> {
+        if self.nonces.contains_key(&nonce) {
             return Err(text(401, "replayed request"));
         }
-        // Persisted so a restart does not reopen the replay window.
-        self.save("nonces.json", &self.nonces).map_err(internal)
+        self.nonces.insert(nonce, now() + keep);
+        self.save_nonces();
+        Ok(())
+    }
+
+    /// Persisted so a restart does not reopen the replay window. A failed save (disk full) is
+    /// only logged: the nonce still blocks replays in memory, and deletes that free space must work.
+    pub(crate) fn save_nonces(&self) {
+        if let Err(e) = self.save("nonces.json", &self.nonces) {
+            eprintln!("error: nonces.json: {e}");
+        }
     }
 
     /// The checks a release upload must pass before its body is read (the signature covers the
@@ -938,7 +995,7 @@ impl App {
         match self.devices.get(&hb.uuid) {
             Some(d) if t < d.last_seen + HB_UUID_INTERVAL => return Err(text(429, "heartbeat too frequent")),
             Some(_) => {}
-            None if !rate_ok(&mut self.ip_hits, client_ip(rq), t, HB_IP_PER_MIN) => return Err(text(429, "too many requests")),
+            None if !rate_ok(&mut self.ip_hits, rate_ip(rq), t, HB_IP_PER_MIN) => return Err(text(429, "too many requests")),
             None => {}
         }
         if !self.devices.contains_key(&hb.uuid) && self.devices.len() >= MAX_DEVICES {
@@ -981,7 +1038,7 @@ impl App {
     fn audit_post(&mut self, rq: &mut Request, body: &Body, kind: &str) -> Result<Resp, Resp> {
         let t = now();
         let src = client_ip(rq);
-        if !rate_ok(&mut self.audit_ip_hits, src.clone(), t, audit::IP_PER_MIN) {
+        if !rate_ok(&mut self.audit_ip_hits, rate_ip(rq), t, audit::IP_PER_MIN) {
             return Err(text(429, "too many requests"));
         }
         let body = body.bytes(audit::LIMIT)?;
@@ -1016,7 +1073,7 @@ impl App {
             }
         }
         let dir = self.audit.dir.clone();
-        self.defer(move |_| Ok(json(&audit::read(&dir, since, limit, &device))))
+        self.defer(move |_| Ok(audit::response(&dir, since, limit, &device)))
     }
 
     fn diag_upload(&mut self, body: &Body, ticket: &str) -> Result<Resp, Resp> {
@@ -1121,6 +1178,8 @@ impl App {
     fn put_policy(&mut self, body: &[u8]) -> Result<Resp, Resp> {
         let payload = envelope::open_json(body, &self.keys).map_err(|e| text(400, &e))?;
         let bundle = Bundle::from_json(&payload).map_err(|e| text(400, &e))?;
+        // from_json tolerates what a newer app may know; what is published here must be exact.
+        bundle.validate().map_err(|e| text(400, &e))?;
         if self.policy_serial.is_some_and(|s| bundle.serial <= s) {
             return Err(text(409, "serial must be greater than the current policy's"));
         }
@@ -1292,7 +1351,7 @@ impl App {
     /// `/q/<token>/mac`, and `/q/m/<mac id>` (the signed profile of a macOS custom app). One rate
     /// limit for all of them.
     fn q(&mut self, rq: &Request, rest: &str) -> Result<Resp, Resp> {
-        if !rate_ok(&mut self.q_hits, client_ip(rq), now(), Q_IP_PER_MIN) {
+        if !rate_ok(&mut self.q_hits, rate_ip(rq), now(), Q_IP_PER_MIN) {
             return Err(text(429, "too many requests"));
         }
         if let Some(id) = rest.strip_prefix("m/") {
@@ -1353,17 +1412,20 @@ impl App {
 
     /// The signature over the body was verified before the state lock (`read_request_body`).
     fn put_release(&mut self, body: &Body, dest: &Path) -> Result<Resp, Resp> {
-        let Body::File { path: tmp, nonce: Some(nonce), .. } = body else { return Err(internal("release upload not verified")) };
-        self.use_nonce(nonce.clone())?;
+        let Body::File { path: tmp, len, nonce: Some(nonce) } = body else { return Err(internal("release upload not verified")) };
+        // A replay that began while the timestamp was current may still be sending for as long
+        // as a body may take (`Deadline`), so the nonce is kept that much longer, plus the skew.
+        self.use_nonce(nonce.clone(), 60 + LIMIT_RELEASE / (64 << 10) + reqauth::MAX_SKEW_SECS)?;
         let index = self.index_channel(dest);
         let mut new_index = None;
         if let Some(ch) = &index {
+            // Before it is read into memory (under the state lock): an upload may be 200 MiB.
+            if *len > release::MAX_INDEX as u64 {
+                return Err(too_large());
+            }
             // The signed release index: verified like a policy, serials only go up. The same
             // document again (Manage's "publish to missing relays") is accepted unchanged.
             let raw = fs::read(tmp).map_err(internal)?;
-            if raw.len() > release::MAX_INDEX {
-                return Err(too_large());
-            }
             let ix = release::Index::open(&raw, &self.keys, &ch.0).map_err(|e| text(400, &e))?;
             if let Some((cur, _)) = self.index_map(&ch.1).get(&ch.0) {
                 if ix.serial < *cur || (ix.serial == *cur && fs::read(dest).ok().as_deref() != Some(&raw[..])) {
@@ -1676,6 +1738,9 @@ fn main() {
     if keys.is_empty() {
         eprintln!("warning: ADMIN_PUB_KEY is empty; admin endpoints are disabled");
     }
+    if sig_relay().hosts.is_empty() {
+        eprintln!("warning: RELAY_HOST is not set; v2 request signatures (current apps) are refused");
+    }
     // AUDIT_RETENTION_DAYS (default 90, 0 = do not store) and AUDIT_MAX_MB (default 50), api.env.
     let env_num = |k: &str, d: u64| match std::env::var(k) {
         Ok(v) if !v.trim().is_empty() => v.trim().parse().unwrap_or_else(|_| {
@@ -1709,7 +1774,9 @@ fn main() {
     while !STOP.load(Ordering::SeqCst) {
         match server.recv_timeout(Duration::from_secs(1)) {
             Ok(Some(rq)) if busy.load(Ordering::SeqCst) >= MAX_WORKERS => {
-                let _ = rq.respond(text(503, "busy"));
+                // This thread takes every request: it must not read a refused one's body.
+                let resp = refuse(rq.remote_addr().copied(), text(503, "busy"));
+                let _ = rq.respond(resp);
                 metrics::BUSY_REJECTED.fetch_add(1, Ordering::Relaxed);
             }
             Ok(Some(rq)) => {

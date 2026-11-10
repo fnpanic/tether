@@ -1,6 +1,7 @@
 // TetherQS: one 420×560 window. Visual rules: /DESIGN.md.
 import { type ButtonHTMLAttributes, type ReactNode, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, Copy, Eye, EyeOff, FolderSync, HelpCircle, Keyboard, Minus, RefreshCw, Send, ShieldAlert, ShieldCheck, X } from "lucide-react";
+import { onAccent } from "./color";
 import { api, type Client, type Diagnostics, formatId, type Probe, inTauri, onCm, type State } from "./ipc";
 
 type Consent = { conn_id: number; peer_name: string; text: string };
@@ -22,9 +23,13 @@ export function App() {
   const since = useRef(new Map<number, number>());
 
   const refresh = () => api.state().then(setS).catch(() => {});
+  const toastTimer = useRef(0);
+  const toastEl = useRef<HTMLDivElement>(null);
   const say = (m: string) => {
     setToast(m);
-    setTimeout(() => setToast(null), 2500);
+    // An earlier message's timer must not hide this one.
+    clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 2500);
   };
 
   useEffect(() => {
@@ -49,10 +54,30 @@ export function App() {
   useEffect(() => {
     if (!s) return;
     const r = document.documentElement.style;
-    r.setProperty("--accent", s.branding.accent);
-    r.setProperty("--focus", s.branding.accent);
+    // The brand colour can be anything: its text is black or white, whichever reads better, in
+    // both themes. Not a colour: the theme's own accent.
+    const on = onAccent(s.branding.accent);
+    for (const [k, v] of [["--accent", s.branding.accent], ["--focus", s.branding.accent], ["--on-accent", on]] as const) {
+      if (on) r.setProperty(k, v);
+      else r.removeProperty(k);
+    }
     document.title = s.branding.title;
   }, [s?.branding.accent, s?.branding.title]);
+
+  // A request or a session start must be seen (Accept, Disconnect): leave the Help view.
+  const sessions = s?.clients.map((c) => `${c.id}:${c.authorized}`).join() ?? "";
+  useEffect(() => {
+    if (sessions) setHelp(false);
+  }, [sessions]);
+
+  // Into the top layer, above the consent dialog; again when the dialog opens after the toast
+  // (its own effect ran first). Without popover support (older macOS): a plain fixed element.
+  useEffect(() => {
+    const el = toastEl.current;
+    if (!el?.showPopover) return;
+    if (el.matches(":popover-open")) el.hidePopover();
+    el.showPopover();
+  }, [toast, consent]);
 
   if (!s) return <div className="h-full bg-canvas" />;
 
@@ -71,18 +96,19 @@ export function App() {
           <Help customApp={s.branding.custom_app} upload={s.branding.diagnostics_upload} status={s.status} lastCheck={s.update.last_check} stale={s.update.stale} onBack={() => setHelp(false)} />
         ) : (
           <>
-            <UpdateBanner s={s} />
+            <UpdateBanner s={s} onError={say} />
             <MacBanner s={s} onError={say} />
-            {pending ? (
-              <Request c={pending} s={s} onError={say} />
-            ) : active.length ? (
-              // Several sessions: the cards keep their full height and the list scrolls (squeezed
-              // into the window, each card's permission list shrank to nothing).
-              <div className="-mx-2 flex min-h-0 flex-1 flex-col overflow-y-auto px-2">
+            {/* Above the sessions, never instead of them: their Disconnect stays reachable. */}
+            {pending && <Request key={pending.id} c={pending} s={s} onError={say} />}
+            {active.length > 0 && (
+              // Several cards: they keep their full height and the list scrolls (squeezed into the
+              // window, each card's permission list shrank to nothing); below a request the whole
+              // view scrolls.
+              <div className={`-mx-2 flex flex-col px-2 ${pending ? "shrink-0" : "min-h-0 flex-1 overflow-y-auto"}`}>
               {active.map((c) => (
                 <InSession
                   key={c.id}
-                  stacked={active.length > 1}
+                  stacked={active.length > 1 || !!pending}
                   c={c}
                   files={companions(c)}
                   s={s}
@@ -99,9 +125,8 @@ export function App() {
                 />
               ))}
               </div>
-            ) : (
-              <Idle s={s} onCopied={say} />
             )}
+            {!pending && !active.length && <Idle s={s} onCopied={say} />}
             <Footer s={s} onError={say} />
           </>
         )}
@@ -122,7 +147,7 @@ export function App() {
         />
       )}
       {toast && (
-        <div role="status" className="pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center px-6">
+        <div ref={toastEl} popover="manual" role="status" className="pointer-events-none fixed inset-x-0 bottom-6 top-auto z-50 flex w-full justify-center overflow-visible bg-transparent px-6">
           <div className="animate-rise rounded-full bg-ink px-5 py-2.5 text-center text-caption text-canvas shadow-float">{toast}</div>
         </div>
       )}
@@ -147,7 +172,7 @@ function TitleBar({ title, logo, onHelp, helpOpen }: { title: string; logo: stri
       <button aria-label="Minimize" className={btn} onClick={async () => (await win()).minimize()}>
         <Minus size={15} />
       </button>
-      <button aria-label="Close" className={`${btn} hover:!bg-danger hover:!text-white`} onClick={async () => (await win()).close()}>
+      <button aria-label="Close" className={`${btn} hover:!bg-danger hover:!text-white dark:hover:!text-black`} onClick={async () => (await win()).close()}>
         <X size={16} />
       </button>
     </div>
@@ -156,11 +181,12 @@ function TitleBar({ title, logo, onHelp, helpOpen }: { title: string; logo: stri
 
 function Button({ variant = "pearl", className = "", ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "pearl" | "secondary" | "disconnect" }) {
   const v = {
-    primary: "rounded-full bg-accent text-white hover:brightness-110",
+    primary: "rounded-full bg-accent text-on-accent hover:brightness-110",
     secondary: "rounded-full border border-accent text-accent hover:bg-accent/10",
     pearl: "rounded-xl border border-hairline bg-tile-2 text-ink-80 hover:bg-parchment",
-    // DESIGN.md: the in-session disconnect is the one red control.
-    disconnect: "rounded-full bg-danger text-white hover:brightness-110",
+    // DESIGN.md: the in-session disconnect is the one red control. Not on-accent (that follows
+    // the brand colour): white on the light theme's red, black on the dark theme's.
+    disconnect: "rounded-full bg-danger text-white dark:text-black hover:brightness-110",
   }[variant];
   return <button className={`inline-flex h-11 select-none items-center justify-center gap-2 px-[22px] text-callout disabled:pointer-events-none disabled:opacity-40 ${v} ${className}`} {...rest} />;
 }
@@ -173,9 +199,9 @@ function Toggle({ checked, onChange, label, disabled }: { checked: boolean; onCh
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative h-6 w-10 shrink-0 rounded-full disabled:opacity-40 ${checked ? "bg-accent" : "bg-hairline"}`}
+      className={`relative h-6 w-10 shrink-0 rounded-full disabled:opacity-40 ${checked ? "bg-accent" : "bg-faint"}`}
     >
-      <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all duration-150 ${checked ? "left-[18px]" : "left-0.5"}`} style={{ boxShadow: "0 1px 3px rgba(0,0,0,.25)" }} />
+      <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform duration-150 ${checked ? "translate-x-4" : ""}`} />
     </button>
   );
 }
@@ -218,7 +244,7 @@ function Idle({ s, onCopied }: { s: State; onCopied: (m: string) => void }) {
       <Card>
         <div className="text-footnote text-muted">Your ID</div>
         <div className="mt-1 flex items-center gap-2">
-          <span data-testid="qs-id" className="flex-1 select-text font-mono text-[34px] font-semibold leading-tight tracking-tight">
+          <span data-testid="qs-id" className="flex-1 select-text font-mono text-title font-semibold">
             {s.id ? formatId(s.id) : "—"}
           </span>
           {s.id && <CopyButton text={s.id} label="ID" onCopied={onCopied} />}
@@ -254,19 +280,24 @@ function Idle({ s, onCopied }: { s: State; onCopied: (m: string) => void }) {
 
 function Avatar({ c }: { c: Client }) {
   const initials = (c.name || c.peer_id).replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase();
-  return <div className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-accent text-callout font-semibold text-white">{initials}</div>;
+  return <div className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-accent text-callout font-semibold text-on-accent">{initials}</div>;
 }
 
 function Perms({ c, s, onError, also = [] }: { c: Client; s: State; onError: (m: string) => void; also?: Client[] }) {
   return (
     <div className="mt-3 space-y-0.5">
-      {s.branding.perms.map((p) => (
+      {s.branding.perms.map((p) => {
+        // What the connection has, not what policy defaults to. Locked off by policy: no switching
+        // on, but one that is on all the same can still be switched off.
+        const on = !!c[p.name];
+        const off = p.locked && !p.allowed && !on;
+        return (
         <div key={p.name} className="flex h-9 items-center gap-3 rounded-md px-1">
-          <span className={`flex-1 text-caption ${p.locked && !p.allowed ? "text-faint" : ""}`}>{p.label}</span>
+          <span className={`flex-1 text-caption ${off ? "text-faint" : ""}`}>{p.label}</span>
           <Toggle
             label={p.label}
-            checked={!!c[p.name] && p.allowed}
-            disabled={p.locked && !p.allowed}
+            checked={on}
+            disabled={off}
             onChange={(v) => {
               [c, ...also].forEach((x) => api.permission(x.id, p.name, v).catch((e) => onError(String(e))));
               // A running file transfer does not check the switch: Files off ends it.
@@ -274,12 +305,22 @@ function Perms({ c, s, onError, also = [] }: { c: Client; s: State; onError: (m:
             }}
           />
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
 function Request({ c, s, onError }: { c: Client; s: State; onError: (m: string) => void }) {
+  const what = c.is_file_transfer
+    ? "transfer files with this computer"
+    : c.is_view_camera
+      ? "see this computer's camera"
+      : c.is_terminal
+        ? "open a command line on this computer"
+        : c.port_forward
+          ? `reach the network through this computer (${c.port_forward})`
+          : "see and control this screen";
   return (
     // Not min-h-0: the card never shrinks below the permission list's minimum; the column scrolls.
     <Card className="mt-2 flex flex-1 flex-col !p-5">
@@ -292,10 +333,10 @@ function Request({ c, s, onError }: { c: Client; s: State; onError: (m: string) 
           <div className="font-mono text-footnote text-muted">ID {formatId(c.peer_id)}</div>
         </div>
       </div>
-      <div className="mt-3 flex items-start gap-2 rounded-xl bg-warn/10 px-3 py-2.5 text-caption">
+      <div data-testid="qs-request-text" className="mt-3 flex items-start gap-2 rounded-xl border border-hairline bg-parchment px-3 py-2.5 text-caption">
         <ShieldAlert size={16} className="mt-0.5 shrink-0 text-warn" />
         <span>
-          <b className="font-semibold">{c.name || "Someone"}</b> {c.is_file_transfer ? "wants to transfer files with this computer." : "wants to see and control this screen."} Only accept if you know this person.
+          <b className="font-semibold">{c.name || "Someone"}</b> (ID {formatId(c.peer_id)}) wants to {what}. The name is chosen by the other side and is not verified. Only accept if you expect this.
         </span>
       </div>
       <p className="mt-2 text-footnote text-muted">
@@ -309,7 +350,8 @@ function Request({ c, s, onError }: { c: Client; s: State; onError: (m: string) 
         <Button className="flex-1" onClick={() => api.close(c.id)}>
           Decline
         </Button>
-        <Button variant="primary" className="flex-1" autoFocus disabled={s.blocked} onClick={() =>
+        {/* No autoFocus: the window takes the focus when a request arrives, and a key typed at that moment must not accept. */}
+        <Button variant="primary" className="flex-1" disabled={s.blocked} onClick={() =>
             api.authorize(c.id).then(
               () => onError(`Accepted: ${c.name || formatId(c.peer_id)} is now connected`),
               (e) => onError(String(e)),
@@ -336,8 +378,8 @@ function useElapsed(since: number) {
 function Indicator({ on, icon, label, tone = "accent" }: { on: boolean; icon?: ReactNode; label: string; tone?: "accent" | "danger" }) {
   if (!on) return null;
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-sm px-2 py-1 text-footnote ${tone === "danger" ? "bg-danger/10 text-danger" : "bg-accent/10 text-accent"}`}>
-      {icon ?? <span className="h-1.5 w-1.5 rounded-full bg-danger" />}
+    <span className="inline-flex items-center gap-1.5 rounded-sm border border-hairline bg-parchment px-2 py-1 text-footnote">
+      <span className={`inline-flex ${tone === "danger" ? "text-danger" : "text-accent"}`}>{icon ?? <span className="h-1.5 w-1.5 rounded-full bg-current" />}</span>
       {label}
     </span>
   );
@@ -350,12 +392,13 @@ function InSession({ c, files, s, since, rec, onError, msgs, onSend, stacked }: 
   const incoming = msgs.filter((m) => !m.me).length;
   // Each message from the technician opens the chat (the backend restores the window).
   useEffect(() => {
-    if (incoming) setView("chat");
+    if (incoming && chat) setView("chat");
   }, [incoming]);
   useEffect(() => {
     if (view === "chat") setSeen(msgs.length);
   }, [view, msgs.length]);
   const unread = msgs.slice(seen).filter((m) => !m.me).length;
+  const chat = s.branding.chat;
   return (
     <Card className={`mt-2 flex flex-col !p-5 ${stacked ? "shrink-0" : "min-h-0 flex-1"}`}>
       <div className="flex items-center gap-3">
@@ -364,7 +407,9 @@ function InSession({ c, files, s, since, rec, onError, msgs, onSend, stacked }: 
           <div className="truncate text-callout font-semibold" title={c.name || undefined}>
             {c.name || formatId(c.peer_id)}
           </div>
-          <div className="text-footnote text-muted">is connected · {elapsed}</div>
+          <div className="text-footnote text-muted">
+            <span data-testid="qs-session-id" className="font-mono">ID {formatId(c.peer_id)}</span> · connected · {elapsed}
+          </div>
         </div>
       </div>
       <div className="mt-3 flex flex-wrap gap-1.5">
@@ -373,25 +418,25 @@ function InSession({ c, files, s, since, rec, onError, msgs, onSend, stacked }: 
         {/* Set once the user allowed it; the technician may record from then on. */}
         <Indicator on={rec} label="Recording allowed" tone="danger" />
       </div>
-      <div className="mt-3 flex gap-1 rounded-full bg-parchment p-1">
+      {chat && <div className="mt-3 flex gap-1 rounded-full bg-parchment p-1">
         {(["perm", "chat"] as const).map((v) => (
           <button
             key={v}
             data-testid={`qs-tab-${v}`}
             aria-pressed={view === v}
             onClick={() => setView(v)}
-            className={`inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-full text-caption ${view === v ? "bg-tile text-ink shadow-sm" : "text-muted hover:text-ink"}`}
+            className={`inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-full text-caption ${view === v ? "bg-accent font-semibold text-on-accent" : "text-muted hover:text-ink"}`}
           >
             {v === "perm" ? "Permissions" : "Chat"}
             {v === "chat" && unread > 0 && (
-              <span data-testid="qs-chat-unread" aria-label={`${unread} unread`} className="grid h-4 min-w-4 place-items-center rounded-full bg-danger px-1 text-[10px] font-semibold leading-none text-white">
+              <span data-testid="qs-chat-unread" aria-label={`${unread} unread`} className="grid h-4 min-w-4 place-items-center rounded-full bg-danger px-1 text-footnote font-semibold leading-none text-white dark:text-black">
                 {unread}
               </span>
             )}
           </button>
         ))}
-      </div>
-      {view === "perm" ? (
+      </div>}
+      {view === "perm" || !chat ? (
         <div className={stacked ? "" : "min-h-0 flex-1 overflow-y-auto"}>
           <Perms c={c} s={s} onError={onError} also={files} />
         </div>
@@ -420,7 +465,7 @@ function Chat({ msgs, onSend }: { msgs: Msg[]; onSend: (t: string) => void }) {
         {msgs.length === 0 && <div className="pt-6 text-center text-caption text-muted">Messages from your technician appear here.</div>}
         {msgs.map((m, i) => (
           <div key={i} className={`flex ${m.me ? "justify-end" : ""}`}>
-            <div data-testid="qs-chat-msg" data-me={m.me} className={`max-w-[80%] select-text whitespace-pre-wrap break-words rounded-2xl px-3 py-1.5 text-caption ${m.me ? "bg-accent text-white" : "bg-parchment"}`}>
+            <div data-testid="qs-chat-msg" data-me={m.me} className={`max-w-[80%] select-text whitespace-pre-wrap break-words rounded-2xl px-3 py-1.5 text-caption ${m.me ? "bg-accent text-on-accent" : "bg-parchment"}`}>
               {m.text}
             </div>
           </div>
@@ -442,9 +487,9 @@ function Chat({ msgs, onSend }: { msgs: Msg[]; onSend: (t: string) => void }) {
           onChange={(e) => setV(e.target.value)}
           placeholder="Reply"
           maxLength={4096}
-          className="h-9 min-w-0 flex-1 rounded-xl border border-hairline bg-parchment px-3.5 text-caption outline-none focus-visible:border-focus"
+          className="h-9 min-w-0 flex-1 rounded-xl border border-hairline bg-parchment px-3.5 text-caption focus-visible:border-focus focus-visible:outline-offset-0"
         />
-        <button aria-label="Send" className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-accent text-white">
+        <button aria-label="Send" className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-accent text-on-accent">
           <Send size={15} />
         </button>
       </form>
@@ -458,8 +503,11 @@ function MacBanner({ s, onError }: { s: State; onError: (m: string) => void }) {
   if (!m || (m.screen && m.accessibility)) return null;
   const fix = (w: "screen" | "accessibility") => api.macFix(w).catch((e) => onError(String(e)));
   return (
-    <div role="alert" data-testid="qs-mac-perms" className="mb-2 rounded-xl border border-warn/40 bg-warn/10 px-3 py-2.5 text-caption">
-      <div className="font-semibold">{m.screen ? "Your technician cannot control this Mac yet" : "Your technician cannot see this screen yet"}</div>
+    <div role="alert" data-testid="qs-mac-perms" className="mb-2 rounded-xl border border-hairline bg-parchment px-3 py-2.5 text-caption">
+      <div className="flex items-center gap-2 font-semibold">
+        <Dot tone="warn" />
+        {m.screen ? "Your technician cannot control this Mac yet" : "Your technician cannot see this screen yet"}
+      </div>
       <div className="mt-0.5 text-footnote text-muted">
         Click Fix, switch TetherQS on in System Settings, then choose Quit &amp; Reopen. A switch that is already on can belong to an older version; Fix clears it.
       </div>
@@ -479,7 +527,7 @@ function MacBanner({ s, onError }: { s: State; onError: (m: string) => void }) {
   );
 }
 
-function UpdateBanner({ s }: { s: State }) {
+function UpdateBanner({ s, onError }: { s: State; onError: (m: string) => void }) {
   const u = s.update;
   const [now, setNow] = useState(Date.now() / 1000);
   useEffect(() => {
@@ -499,7 +547,7 @@ function UpdateBanner({ s }: { s: State }) {
         {u.error && <div className="text-footnote text-danger">{u.error}</div>}
       </div>
       {u.available && (
-        <button className="shrink-0 text-caption text-accent disabled:opacity-40" disabled={u.installing} onClick={() => api.installUpdate()}>
+        <button className="shrink-0 text-caption text-accent disabled:opacity-40" disabled={u.installing} onClick={() => api.installUpdate().catch((e) => onError(String(e)))}>
           {u.installing ? (u.progress?.[1] ? `Updating… ${Math.floor((100 * u.progress[0]) / u.progress[1])} %` : "Updating…") : "Update"}
         </button>
       )}
@@ -512,7 +560,7 @@ function Footer({ s, onError }: { s: State; onError: (m: string) => void }) {
     s.clients.some((c) => c.authorized) ? (["ok", "Session active"] as const) : s.status === 1 ? (["ok", "Ready"] as const) : s.status === 0 ? (["warn", "Connecting"] as const) : (["danger", "Offline"] as const);
   return (
     <div className="mt-auto flex items-center gap-3 pt-4">
-      <div data-testid="qs-status" className="inline-flex items-center gap-2 rounded-full bg-parchment px-3 py-1.5 text-footnote">
+      <div data-testid="qs-status" className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-full bg-parchment px-3 py-1.5 text-footnote">
         <Dot tone={pill[0]} />
         {pill[1]}
       </div>
@@ -523,13 +571,12 @@ function Footer({ s, onError }: { s: State; onError: (m: string) => void }) {
             <ShieldCheck size={14} className="text-ok" /> Admin access on
           </span>
         ) : (
-          <button
-            className="inline-flex items-center gap-1.5 text-caption text-accent"
-            title="Lets your technician handle admin prompts (UAC). Windows asks you once."
-            onClick={() => api.elevate().catch((e) => onError(String(e)))}
-          >
-            <ShieldCheck size={14} /> Allow admin access
-          </button>
+          <div className="flex min-w-0 flex-col items-end gap-0.5 text-right">
+            <button className="inline-flex items-center gap-1.5 text-caption text-accent" onClick={() => api.elevate().catch((e) => onError(String(e)))}>
+              <ShieldCheck size={14} /> Allow admin access
+            </button>
+            <span className="text-footnote text-muted">Lets your technician handle admin prompts (UAC). Windows asks you once.</span>
+          </div>
         ))}
     </div>
   );
@@ -642,7 +689,7 @@ function SendDiagnostics() {
           value={code}
           onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))}
           placeholder="Ticket code"
-          className="h-9 min-w-0 flex-1 rounded-xl border border-hairline bg-parchment px-3.5 font-mono text-caption tracking-wider outline-none focus-visible:border-focus"
+          className="h-9 min-w-0 flex-1 rounded-xl border border-hairline bg-parchment px-3.5 font-mono text-caption tracking-wider focus-visible:border-focus focus-visible:outline-offset-0"
         />
         <Button variant="primary" className="!h-9" type="submit" disabled={busy || code.length !== 8}>
           {busy ? "Sending…" : "Send"}
@@ -687,23 +734,38 @@ function UpdateCheck({ last, stale }: { last: string | null; stale?: boolean }) 
 }
 
 function ConsentDialog({ c, fallback, onAnswer }: { c: Consent; fallback: string; onAnswer: (allow: boolean) => void }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  // Native modal: focus moves in and stays in, the page behind is inert.
+  useEffect(() => {
+    if (!ref.current?.open) ref.current?.showModal();
+  }, []);
   return (
-    <div className="animate-fade fixed inset-0 z-40 grid place-items-center bg-black/40 px-6">
-      <div role="dialog" aria-modal className="animate-rise w-full rounded-2xl border border-hairline bg-tile p-8 shadow-float">
-        <div className="mb-1 inline-flex items-center gap-2 text-footnote text-danger">
-          <span className="h-1.5 w-1.5 rounded-full bg-danger" /> Recording
-        </div>
-        <div className="text-headline font-semibold">{c.peer_name || "Your technician"}</div>
-        <p className="mt-2 text-callout text-ink-80">{c.text || fallback}</p>
-        <div className="mt-6 flex gap-2">
-          <Button className="flex-1" onClick={() => onAnswer(false)}>
-            Don't allow
-          </Button>
-          <Button variant="primary" className="flex-1" onClick={() => onAnswer(true)}>
-            Allow
-          </Button>
-        </div>
+    <dialog
+      ref={ref}
+      aria-labelledby="qs-consent-title"
+      className="animate-rise m-auto w-[calc(100%-3rem)] max-w-none rounded-2xl border border-hairline bg-tile p-8 text-ink shadow-float backdrop:bg-black/40"
+      // Escape answers "Don't allow"; the dialog never closes without an answer.
+      onCancel={(e) => {
+        e.preventDefault();
+        onAnswer(false);
+      }}
+    >
+      <div className="mb-1 inline-flex items-center gap-2 text-footnote text-danger">
+        <span className="h-1.5 w-1.5 rounded-full bg-danger" /> Recording
       </div>
-    </div>
+      <div id="qs-consent-title" className="text-headline font-semibold">
+        {c.peer_name || "Your technician"}
+      </div>
+      <p className="mt-2 text-callout text-ink-80">{c.text || fallback}</p>
+      <div className="mt-6 flex gap-2">
+        {/* First in the dialog, so it gets the focus: a key typed as the question appears must not allow. */}
+        <Button className="flex-1" autoFocus onClick={() => onAnswer(false)}>
+          Don't allow
+        </Button>
+        <Button variant="primary" className="flex-1" onClick={() => onAnswer(true)}>
+          Allow
+        </Button>
+      </div>
+    </dialog>
   );
 }

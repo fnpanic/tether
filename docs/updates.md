@@ -87,6 +87,11 @@ Set when publishing in Tether Manage › Releases (decision D4):
   ramp at 100 %.
 - A mandatory release blocks sessions only on devices its rollout reached; minimum versions always
   block.
+- A device below a release's minimum version or below the policy's `update.minimum-version` is
+  blocked until it updates, so the release is offered to it at once, whatever its bucket and also
+  with `update.rollout = late`, in both apps (`must_update` in
+  `apps/desktop/src-tauri/src/update.rs`, `eligible` in `apps/quick/src-tauri/src/update.rs`). A
+  halted release is never offered this way.
 
 ## Policy keys
 
@@ -98,7 +103,7 @@ Set when publishing in Tether Manage › Releases (decision D4):
 | `update.minimum-version` | – | Versions below it cannot be used for sessions |
 | `update.force` | `N` | Install *required* updates automatically |
 | `update.restart-seconds` | `60` | Countdown before a forced update installs and restarts (runs only while no session is open) |
-| `update.rollout` | `default` | `early`, `default` or `late` in staged rollouts |
+| `update.rollout` | `default` | `early`, `default` or `late` in staged rollouts (a device below a release's minimum version gets that release at once, see above) |
 
 ## Update modes
 
@@ -165,8 +170,15 @@ hints) and on **Help → Check for updates**. If the device is eligible for a ne
    next start.
 
 If the folder of the exe is not writable, the new exe goes to the fallback folder
-`%LOCALAPPDATA%\Tether-QS\TetherQS.exe` and is started from there. A forced update waits until no
-session is open. No admin rights are needed.
+`%LOCALAPPDATA%\Tether-QS\TetherQS.exe` and is started from there. No admin rights are needed.
+
+TetherQS never swaps its exe while a session is open (the restart would end the session). The
+**Update** button then answers "The update restarts TetherQS: end the session first." A forced
+update waits until no session is open; the install checks once more right before the swap, and
+when a session began while it re-checked the index or downloaded, it waits for the end of that
+session again. A download kept for the install (`update-<version>.staged` in the fallback folder)
+counts as staged only when it still verifies against the index entry; a broken or foreign file is
+downloaded again.
 
 On macOS TetherQS downloads `TetherQS-<version>-universal.zip` (verified the same way), unpacks it
 with `ditto` into `TetherQS.app.new` and swaps it in like the exe.
@@ -237,7 +249,9 @@ Set up once:
    Keep it in `C:\vms\cloudflare\cf.env` (`CLOUDFLARE_API_TOKEN=…`, `CLOUDFLARE_ACCOUNT_ID=…`).
 2. Tether Manage › Releases › Download CDN: address `https://tether-dl.thomas-schend.workers.dev`,
    worker `tether-dl`, **Choose…** `cf.env`, key passphrase, **Save**, then switch it on. The token
-   is sealed in the key vault (format 2) and never shown again.
+   is sealed in the key vault (format 2) and never shown again. The passphrase is checked against
+   the vault first: with a wrong one ("Wrong passphrase.") nothing is stored and the credentials do
+   not become active.
 3. The next publish creates the Worker (the first upload creates the script `tether-dl`; it runs
    only for paths without an asset and answers 404/405). Check:
    `curl -I https://tether-dl.thomas-schend.workers.dev/stable/technician/windows-x86_64/Tether_<v>_x64-setup.exe`.

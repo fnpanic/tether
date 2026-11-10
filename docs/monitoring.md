@@ -75,7 +75,7 @@ IP, key or token; label values come from fixed sets, except `relay`, which comes
 | `hbbs_register_peer_total` | counter | `transport` = `udp` / `tcp` / `ws` | RegisterPeer messages (UDP includes hbbs's own self-test, 1/s) |
 | `hbbs_register_pk_total` | counter | `result` = `ok`, `uuid_mismatch`, `too_frequent`, … | RegisterPk answers |
 | `hbbs_punch_hole_total` | counter | `result` = `ok`, `lan`, `offline`, `id_not_exist`, `key_mismatch` | connection requests from viewers |
-| `hbbs_ip_blocked_total` | counter | `reason` = `rate` / `ids` | RegisterPk refused by the per-IP brute-force guard (> 30/min, > 300 IDs/day) |
+| `hbbs_ip_blocked_total` | counter | `reason` = `rate` / `ids` | RegisterPk refused by the per-IP brute-force guard (> 30/min, > 300 IDs/day; `rate` also counts a new source IP refused while the guard's table is full at 50 000 IPs) |
 | `hbbs_relay_healthy` | gauge | `relay`, `role` = `primary` / `backup` | 1 if the relay passed the last 3 s health check |
 | `hbbs_relay_sessions` | gauge | `relay`, `role` | sessions the relay reported in that check |
 | `hbbs_relay_assigned_total` | counter | `relay`, `role` (`relay="none"`: none available) | relay handed out with a punch hole / relay response |
@@ -83,9 +83,9 @@ IP, key or token; label values come from fixed sets, except `relay`, which comes
 | `hbbs_relay_failover_transitions_total` | counter | `to` = `backup` / `primary` | switches |
 | `hbbs_relay_checks_total` | counter | | health rounds (only with more than one relay) |
 | `hbbs_turn_enabled`, `hbbs_turn_allocations`, `hbbs_turn_allocations_max` | gauge | | TURN on, open allocations, `TURN_MAX_ALLOCATIONS` |
-| `hbbs_turn_allocations_total`, `hbbs_turn_allocations_refused_total` | counter | | allocations made / refused at the cap |
+| `hbbs_turn_allocations_total`, `hbbs_turn_allocations_refused_total` | counter | | allocations made / refused at `TURN_MAX_ALLOCATIONS` or at the limit per client IP (`TURN_MAX_ALLOCATIONS_PER_IP`, default 16) |
 | `hbbs_turn_requests_total` | counter | | TURN control datagrams taken |
-| `hbbs_turn_dropped_total` | counter | `reason` = `unauth_rate`, `queue_full`, `bandwidth_to_peer`, `bandwidth_from_peer` | datagrams dropped by the rate limit, a full queue or the per-allocation bandwidth cap |
+| `hbbs_turn_dropped_total` | counter | `reason` = `unauth_rate`, `queue_full`, `bandwidth_to_peer`, `bandwidth_from_peer` | datagrams dropped: requests that are not authenticated over the rate limit (50/s), a full queue, the per-allocation bandwidth cap |
 | `hbbs_turn_bytes_total` | counter | `direction` = `to_peer` / `from_peer` | bytes relayed by TURN |
 
 Not measured: lock wait times (not cheap to do without touching every lock site).

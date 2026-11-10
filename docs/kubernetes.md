@@ -49,7 +49,7 @@ Use the production key pair (the same as on the VMs) or clients will not trust t
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `publicUrl` | `wss://relay.example.com` | Base URL clients reach the proxy at; relay URLs handed out are `<publicUrl>/ws/relay/<n>`. |
+| `publicUrl` | `wss://relay.example.com` | Base URL clients reach the proxy at; relay URLs handed out are `<publicUrl>/ws/relay/<n>`. Its host name is also what the api container gets as `RELAY_HOST`: tether-api accepts signed requests (v2) only for that name ([api.md](api.md#admin-endpoints-signed-requests)). |
 | `key.existingSecret` / `key.privateKey` | – | Secret with key `id_ed25519`, or the key itself. Required. |
 | `key.accept` | – | More public keys hbbs and hbbr accept (`KEYS_ACCEPT`, comma-separated) during a server key rotation ([key-rotation.md](key-rotation.md)). |
 | `hbbs.replicas` | 2 | Independent rendezvous servers at `/ws/id/<n>`. |
@@ -60,7 +60,9 @@ Use the production key pair (the same as on the VMs) or clients will not trust t
 | `hbbr.drainSeconds` | 3600 | Drain window. `terminationGracePeriodSeconds` = drain + 30. |
 | `hbbr.env` | `{}` | `TOTAL_BANDWIDTH`, `SINGLE_BANDWIDTH`, `LIMIT_SPEED` (Mb/s). |
 | `proxy.enabled` | true | Caddy front end. Off: use your own ingress (`examples/ingress-nginx.yaml`, timeouts 3600 s). |
-| `proxy.service.*` | ClusterIP :80 | `LoadBalancer`/`NodePort`. TLS on `tlsPort` when `proxy.tls.secretName` is set (e.g. cert-manager). |
+| `proxy.service.*` | ClusterIP :80 | `LoadBalancer`/`NodePort`. TLS on `tlsPort` when `proxy.tls.secretName` is set (e.g. cert-manager); With `proxy.tls.secretName` set, the plain HTTP port answers only `/proxy-healthz` (200 `ok`) and redirects everything else to https with a 308: a load-balancer or ingress health check on that port must use the path `/proxy-healthz`, or check the TLS port instead. |
+| `proxy.service.externalTrafficPolicy` | `""` (cluster default, `Cluster`) | `Local` (LoadBalancer/NodePort) keeps the client IP for the per-IP limits and the audit log; with `Cluster` the proxy sees a node's address. With `Local` the load balancer must health-check the nodes. |
+| `proxy.trustedProxies` | `[]` | Address ranges of a load balancer or ingress in front that hides the client IP and reports it in `X-Forwarded-For`, e.g. `["10.0.0.0/8"]`. Rendered as Caddy `trusted_proxies static …` with `trusted_proxies_strict`: the client is the last address a trusted proxy added, not the first in the header. Empty: the connecting peer is the client. Never list ranges clients can connect from: they could then name any address as theirs. |
 | `api.enabled` | false | tether-api + file server sidecar on a PVC (`api.persistence.size` 5Gi; uploads need 2 GiB free). |
 | `podDisruptionBudget.maxUnavailable` | 1 | For hbbs and hbbr (node drains evict one pod at a time). |
 | `*.resources` | 50m/32Mi requests, 1 CPU/256Mi limits | Sized for small nodes; for 10 000 devices / 3 000 sessions use `examples/scale-10k.yaml` (hbbs 768Mi, proxy 3Gi, 4 hbbr; [scaling.md](scaling.md)). |

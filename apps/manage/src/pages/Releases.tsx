@@ -7,10 +7,10 @@ import { api, bytes, host, inTauri, invoke, target, when, type RelayResult } fro
 import { idle, percent, track, type Progress } from "../lib/progress";
 import { mockListen } from "../lib/mock";
 import { pageHtml } from "../lib/page-template";
-import { PublishSheet } from "../components/publish";
+import { PublishSheet, RelayResults } from "../components/publish";
 import { CleanupSheet } from "../components/cleanup";
-import { customFields, customRollout, defaultCustom, describeRamp, groupReleases, rampSteps, rolloutProblem, rolloutState, releaseToast, Tally, type CustomRamp, type IndexView, type ReleaseGroup } from "../lib/releases";
-import { Badge, Button, Card, ErrorText, IconButton, Label, PageHeader, Segmented, Sub, Table, TextArea, TextField, Toggle } from "../components/ui";
+import { customFields, customRollout, defaultCustom, describeRamp, groupReleases, minimumProblem, rampSteps, rolloutProblem, rolloutState, releaseToast, Tally, type CustomRamp, type IndexView, type ReleaseGroup } from "../lib/releases";
+import { Badge, Button, Card, ErrorText, IconButton, Label, Modal, PageHeader, Segmented, Sub, Table, TextArea, TextField, Toggle } from "../components/ui";
 
 interface Release {
   channel: string;
@@ -381,7 +381,7 @@ function LatestBuilds({ onDone }: { onDone: () => void }) {
         <div className="grid grid-cols-[minmax(0,1fr)_160px] gap-x-6 gap-y-4">
           <Label text="Build folder" hint="Searched two levels deep, e.g. dist with windows, quick and macos inside. Remembered for next time.">
             <div className="flex gap-2">
-              <TextField readOnly value={folder} placeholder="No folder chosen" />
+              <TextField readOnly aria-label="Build folder" value={folder} placeholder="No folder chosen" />
               <Button onClick={choose}>Choose…</Button>
               <IconButton label="Scan again" onClick={() => scan()}>
                 <RefreshCw size={16} />
@@ -619,15 +619,15 @@ export function Releases() {
             }
           >
             <div className="flex gap-2">
-              <TextField readOnly value={file} placeholder="No file chosen" />
+              <TextField readOnly aria-label="File" value={file} placeholder="No file chosen" />
               <Button onClick={pick}>Choose…</Button>
             </div>
           </Label>
           <Label text="App">
-            <Segmented<Kind> value={kind} onChange={setKind} options={[{ value: "technician", label: "Technician app" }, { value: "customer", label: "Customer module" }]} />
+            <Segmented<Kind> label="App" value={kind} onChange={setKind} options={[{ value: "technician", label: "Technician app" }, { value: "customer", label: "Customer module" }]} />
           </Label>
           <Label text="Platform">
-            <Segmented<Platform> value={platform} onChange={setPlatform} options={[{ value: "windows-x86_64", label: "Windows" }, { value: "darwin-universal", label: "macOS" }]} />
+            <Segmented<Platform> label="Platform" value={platform} onChange={setPlatform} options={[{ value: "windows-x86_64", label: "Windows" }, { value: "darwin-universal", label: "macOS" }]} />
           </Label>
           <Label text="Version">
             <TextField value={version} onChange={(e) => setVersion(e.target.value)} placeholder="0.3.1" />
@@ -654,16 +654,19 @@ export function Releases() {
             </div>
             <Toggle label="Forced" checked={forced} onChange={setForced} />
           </div>
-          <Label text="Minimum version" hint="Older versions are blocked. Leave empty for none.">
-            <TextField value={minimumVersion} onChange={(e) => setMinimumVersion(e.target.value)} placeholder="0.3.0" />
-          </Label>
+          <div className="flex flex-col gap-1.5">
+            <Label text="Minimum version" hint="Older versions are blocked. Leave empty for none.">
+              <TextField value={minimumVersion} onChange={(e) => setMinimumVersion(e.target.value)} placeholder="0.3.0" />
+            </Label>
+            <ErrorText error={minimumProblem(version, minimumVersion)} />
+          </div>
           <Label text="Rollout" hint={rampText(rollout, security)}>
             <RolloutPicker value={rollout} onChange={setRollout} />
           </Label>
           <SecurityToggle checked={security} onChange={setSecurity} />
         </div>
         <div className="mt-6 flex justify-end">
-          <Button variant="primary" size="lg" disabled={!file || !version.trim() || !!rolloutProblem(ramp)} onClick={() => setReviewing(true)}>
+          <Button variant="primary" size="lg" disabled={!file || !version.trim() || !!rolloutProblem(ramp) || !!minimumProblem(version, minimumVersion)} onClick={() => setReviewing(true)}>
             Review and publish…
           </Button>
         </div>
@@ -797,17 +800,26 @@ function Rollouts() {
   const [view, setView] = useState<IndexView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState("");
+  const [results, setResults] = useState<{ title: string; results: RelayResult[] } | null>(null);
   const load = (ch = channel) => invoke<IndexView>("release_index", { channel: ch.trim() }).then(setView, (e) => setError(e.message));
   useEffect(() => void load(), []);
   const control = async (key: string, action: string, preset?: string) => {
-    const what = action === "halt" ? "Halt" : action === "resume" ? "Resume" : "Restart the rollout of";
-    if (!(await ask(`${what} ${key} on ${channel}? A new signed release index goes to every relay. Halting reaches devices in about 1 minute; devices that installed it keep it.`, { title: "Rollout", kind: "warning" }))) return;
+    if (!view) return;
+    // The channel of the table the button is in: the field may hold another one by now.
+    const ch = view.channel;
+    const everyone = action === "ramp" && preset === "now";
+    const what = action === "halt" ? "Halt" : action === "resume" ? "Resume" : everyone ? "Everyone now for" : "Restart the rollout of";
+    const effect = everyone ? "The release goes to 100 % of the devices at once." : "Halting reaches devices in about 1 minute; devices that installed it keep it.";
+    if (!(await ask(`${everyone ? `Offer ${key} on ${ch} to everyone now` : `${what} ${key} on ${ch}`}? A new signed release index goes to every relay. ${effect}`, { title: "Rollout", kind: "warning" }))) return;
     setBusy(key);
+    setError(null);
     try {
-      await invoke<RelayResult[]>("release_control", { channel: channel.trim(), key, action, preset });
+      const r = await invoke<RelayResult[]>("release_control", { channel: ch, key, action, preset });
       // The download page is built when it is published: it keeps linking a halted release.
-      toast(action === "halt" && channel.trim() === "stable" ? `Halt ${key}: done. Publish the download page again so it no longer offers this release.` : `${what} ${key}: done`);
-      await load();
+      const page = action === "halt" && ch === "stable" ? " Publish the download page again so it no longer offers this release." : "";
+      if (r.every((x) => x.ok)) toast(`${what} ${key}: done.${page}`);
+      else setResults({ title: `${what} ${key}: not on every relay`, results: r });
+      await load(ch);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -872,6 +884,18 @@ function Rollouts() {
           );
         })}
       </Table>
+      {results && (
+        <Modal onClose={() => setResults(null)} width={560}>
+          <h2 className="mb-3 text-headline font-semibold">{results.title}</h2>
+          <p className="mb-3 text-caption text-muted">Devices that ask a relay marked failed still get its old release index. Do it again once that relay answers.</p>
+          <RelayResults results={results.results} ok={() => "Release index updated"} />
+          <div className="mt-6 flex justify-end">
+            <Button variant="primary" onClick={() => setResults(null)}>
+              Done
+            </Button>
+          </div>
+        </Modal>
+      )}
       <CdnSettings />
     </section>
   );
@@ -919,12 +943,12 @@ function CdnSettings() {
         </Label>
         <Label text="Credentials file" hint="cf.env with CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID; stored sealed with the key passphrase.">
           <div className="flex gap-2">
-            <TextField readOnly value={envFile} placeholder="No file chosen" />
+            <TextField readOnly aria-label="Credentials file" value={envFile} placeholder="No file chosen" />
             <Button onClick={async () => { const f = await open({ filters: [{ name: "Env file", extensions: ["env", "txt"] }] }); if (typeof f === "string") setEnvFile(f); }}>Choose…</Button>
           </div>
         </Label>
         <Label text="Key passphrase">
-          <TextField type="password" value={pass} onChange={(e) => setPass(e.target.value)} />
+          <TextField type="password" autoComplete="current-password" value={pass} onChange={(e) => setPass(e.target.value)} />
         </Label>
       </div>
       <ErrorText error={error} />

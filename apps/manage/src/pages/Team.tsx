@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useApp } from "../App";
-import { host, invoke, type RelayResult } from "../lib/ipc";
+import { host, inTauri, invoke, type RelayResult } from "../lib/ipc";
 import { fingerprint, keyProblem, nameProblem, parseKey, sameRoster, type Member, type Roster } from "../lib/team";
 import { PublishSheet } from "../components/publish";
 import { Badge, Button, ErrorText, IconButton, Label, Modal, PageHeader, Table, TextArea, TextField, Toggle } from "../components/ui";
@@ -77,7 +78,7 @@ function AddMember({ members, onAdd, onClose }: { members: Member[]; onAdd: (m: 
     >
       <div className="flex flex-col gap-4">
         <Label text="Name" hint="Shown to the team as the author of tag changes. 1–64 characters.">
-          <TextField autoFocus maxLength={64} value={name} onChange={(e) => setName(e.target.value)} placeholder="Anna Berger" />
+          <TextField data-autofocus maxLength={64} value={name} onChange={(e) => setName(e.target.value)} placeholder="Anna Berger" />
         </Label>
         <ErrorText error={nameErr} />
         <Label text="Public key" hint="44 characters, ends with =.">
@@ -97,31 +98,45 @@ function AddMember({ members, onAdd, onClose }: { members: Member[]; onAdd: (m: 
 export function Team() {
   const { state } = useApp();
   const [loaded, setLoaded] = useState<Loaded | null>(null);
-  const [draft, setDraft] = useState<Roster | null>(null);
+  // In the app's state: unpublished changes are still here after a visit to another page.
+  const { teamDraft: draft, setTeamDraft: setDraft } = useApp();
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const fps = useFingerprints(draft?.members.map((m) => m.key) ?? []);
 
-  const load = () => {
+  const load = (discard = false) => {
     setError(null);
     invoke<Loaded>("team_load").then(
       (l) => {
         setLoaded(l);
-        setDraft(l.roster);
+        setDraft((d) => (discard || !d ? l.roster : d));
       },
       (e) => setError(e.message),
     );
   };
-  useEffect(load, [state.settings.server]);
+  // Another server list: the kept draft belongs to the old one.
+  const server = useRef(state.settings.server);
+  useEffect(() => {
+    load(server.current !== state.settings.server);
+    server.current = state.settings.server;
+  }, [state.settings.server]);
 
   const dirty = !!(loaded && draft && !sameRoster(loaded.roster, draft));
+  // Only changes are kept on leaving: an unchanged copy would hide what the relays hold next time.
+  const changed = useRef(false);
+  changed.current = !!draft && (!loaded || dirty);
+  useEffect(() => () => void (changed.current || setDraft(null)), []);
+  const reloadAll = async () => {
+    if (dirty && inTauri && !(await ask("Load the roster from the relays? Your unpublished changes to the team are discarded.", { title: "Reload", kind: "warning" }))) return;
+    load(true);
+  };
   const set = (i: number, m: Partial<Member>) => draft && setDraft({ members: draft.members.map((x, j) => (j === i ? { ...x, ...m } : x)) });
 
   return (
     <>
       <PageHeader title="Team" sub="Technicians who sign in to the relays with their own key: device list without IP addresses, shared tags, and session history if allowed.">
-        <IconButton label="Reload from the relays" onClick={load}>
+        <IconButton label="Reload from the relays" onClick={reloadAll}>
           <RefreshCw size={16} />
         </IconButton>
         <Button onClick={() => setAdding(true)} disabled={!draft}>
@@ -148,7 +163,7 @@ export function Team() {
       )}
       {dirty && (
         <p className="mb-3 text-caption text-muted">
-          <Badge tone="accent">Draft</Badge> Changes stay on this PC until you publish them.
+          <Badge tone="ink">Draft</Badge> Not published yet. The changes are kept until you publish or reload; closing Tether Manage discards them.
         </p>
       )}
       {draft && (

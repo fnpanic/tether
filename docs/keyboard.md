@@ -59,12 +59,33 @@ the context-menu key, and Alt+Tab if **Send Alt+Tab** is on.
   (another window, minimized, closed), when a text field in the window (chat) gets the focus, and
   when the setting is turned off.
 - **Local escape: Ctrl+Alt+Home** gives the keys back to this PC (the hook is removed) until you
-  click into the remote picture again or the window gets the focus again.
+  click into the remote picture again or the window gets the focus again. It also moves the
+  keyboard to the session toolbar, see [Local keyboard](#local-keyboard-ctrlalthome).
 - **Alt+Tab** with *Send Alt+Tab* off (default): switches windows on this PC. The remote Alt is
   released, the hook removed, and Alt+Tab handed to Windows.
 - Ctrl+Alt+Del and Win+L are always handled by Windows itself (no program can capture them); use
   **Remote actions → Send Ctrl+Alt+Del**.
 - Caps Lock and Num Lock also toggle locally; their state goes with every key.
+
+## Local keyboard (Ctrl+Alt+Home)
+
+Every key typed in a session window goes to the remote computer, so the toolbar could only be
+used with the mouse. **Ctrl+Alt+Home** switches the keyboard to this window (all platforms, with
+or without the hook):
+
+- The toolbar is shown and its first button gets the focus; a short message says so ("The
+  keyboard now works this toolbar. Esc gives it back to the remote computer."). No key reaches
+  the remote computer while this lasts: keys pressed in that mode are never sent, neither press
+  nor release; keys that were already down get their release. While the keyboard is local the
+  toolbar shows "Keyboard: this window, Esc to return".
+- **Tab** and the **arrow keys** move along the toolbar and through an open menu, **Enter** /
+  **Space** press the focused button.
+- **Escape** closes an open confirmation (lock, restart) first, then an open menu, then gives the
+  keyboard back to the remote computer. A click into the picture gives it back too.
+- With **Send system keys** on (Windows) the hook swallows the chord, so the page never sees it:
+  the hook tells that session window through the `session` event `local_escape`
+  (`LOCAL_ESCAPE_EVENT` in `keys.rs`, handled in `Session.tsx`). Without the hook the page sees
+  the chord itself.
 
 ## Keys that stayed pressed ("keyboard only partly works")
 
@@ -109,7 +130,10 @@ the next Mac build).
 2. **Alt+Tab**: switches windows on this PC. Back in the session (click or Alt+Tab), type: no key
    is stuck (letters are letters, not Alt shortcuts). Turn on **Keyboard → Send Alt+Tab**: Alt+Tab
    now switches on the remote PC.
-3. **Ctrl+Alt+Home**, then Win: the local Start menu opens. Click into the picture: Win goes to
+3. **Ctrl+Alt+Home**: the toolbar appears with its first button focused and the message "The
+   keyboard now works this toolbar…". Tab / arrow keys move along it, Enter opens a menu, Escape
+   closes the menu, a second Escape returns the keyboard (typing reaches the remote PC again).
+   **Ctrl+Alt+Home**, then Win: the local Start menu opens. Click into the picture: Win goes to
    the remote again.
 4. Open the chat and type in its field: the text appears in the field, nothing on the remote PC.
 5. Turn off **Keyboard → Send system keys**: Win opens the local Start menu.

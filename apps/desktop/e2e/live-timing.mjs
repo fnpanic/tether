@@ -35,7 +35,7 @@ const kill = (pid) => { try { execFileSync("taskkill", ["/PID", String(pid), "/T
 
 for (const [port, d] of [[22150, "a"], [22160, "b"]]) {
   mkdirSync(join(work, d));
-  children.push(spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, `${BIN}/tether-api`, "--data", wslPath(join(work, d)), "--listen", `127.0.0.1:${port}`], { stdio: "ignore" }));
+  children.push(spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, "RELAY_HOST=127.0.0.1,localhost", `${BIN}/tether-api`, "--data", wslPath(join(work, d)), "--listen", `127.0.0.1:${port}`], { stdio: "ignore" }));
 }
 // Relay B behind a proxy that can answer late.
 const proxy = createServer((req, res) => {

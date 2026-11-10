@@ -15,6 +15,8 @@ export function Sessions() {
   const [range, setRange] = useState<Range>("7");
   const [events, setEvents] = useState<AuditEvent[] | null>(null);
   const [failed, setFailed] = useState<string[]>([]);
+  // Relays that cut their answer by size (response header X-Audit-Truncated).
+  const [cut, setCut] = useState<string[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [q, setQ] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -24,10 +26,11 @@ export function Sessions() {
     setError(null);
     setEvents(null);
     const since = Math.floor(Date.now() / 1000) - +range * 86400;
-    invoke<{ events: AuditEvent[]; failed: string[] }>("audit_all", { since, limit: LIMIT }).then(
+    invoke<{ events: AuditEvent[]; failed: string[]; truncated?: string[] }>("audit_all", { since, limit: LIMIT }).then(
       (r) => {
         setEvents(r.events);
         setFailed(r.failed);
+        setCut(r.truncated ?? []);
       },
       (e) => setError(e.message),
     );
@@ -90,6 +93,7 @@ export function Sessions() {
           <>
             Showing <span className="font-semibold text-ink">{rows.length}</span> of {all.length} events
             {all.length >= LIMIT && ` · only the newest ${LIMIT} per relay; pick a shorter range`}
+            {all.length < LIMIT && cut.length > 0 && ` · ${cut.map(host).join(", ")} sent only the newest records (answer cut by size); pick a shorter range`}
             {q && (
               <button className="ml-2 text-accent" onClick={() => setQ("")}>
                 Clear search
@@ -117,7 +121,7 @@ export function Sessions() {
               </td>
               <td>
                 <p className="whitespace-nowrap font-mono">{r.id || "–"}</p>
-                {d && <p className="text-footnote text-faint">{d.os}</p>}
+                {d && <p className="text-footnote text-muted">{d.os}</p>}
                 <div title={r.src ? `Host posted from ${r.src}` : undefined}>
                   <Sub mono>{r.ip || "–"}</Sub>
                 </div>

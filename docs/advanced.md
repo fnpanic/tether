@@ -59,7 +59,7 @@ Tether Manage stays the administrator's tool: it holds the admin key; the techni
 | Tag rules | "Hosts matching *search* get *tag*": e.g. `os:mac` → `platform:mac`, `host:BER-` → `site:berlin`, `ver:<0.5.21 is:org` → `update:needed`. Rule tags show as dashed chips, are searchable like any tag, and follow the hosts as they change. Rules see stored tags only (no chains, no loops). |
 | Per host | Name, private notes (only on this PC), pin, session history from this app, and with the Team audit flag the organisation's session log of that host (last 90 days). |
 | Actions | Connect, Transfer files, View only (from the panel, the keyboard, the palette or a double click); Copy ID; remove (store entry and the core's recent entry). |
-| Open sessions | Every session window of the app: bring to front; for remote-control sessions send Ctrl+Alt+Del, lock the screen, restart (asks first). |
+| Open sessions | Every session window of the app: bring to front; for remote-control sessions send Ctrl+Alt+Del, lock the screen, restart (lock and restart ask first). |
 | Import / export | JSON (everything: names, tags, pins, colours, rules, saved searches) or CSV (`id,name,tags,pinned[,notes]`, `,` or `;`). Notes only when you tick "Include notes". Import adds tags, replaces names and notes present in the file, skips invalid IDs with a reason. |
 | Team | Share tags, names, rules and saved searches; see the organisation's devices. See [Team sync](#team-sync). |
 
@@ -75,7 +75,7 @@ Tether Manage stays the administrator's tool: it holds the admin key; the techni
   decode for a dashboard is not cheap. The sessions panel lists and controls them instead.
 - **Wake-on-LAN.** Upstream sends it only to peers found by LAN discovery (with their MAC), which
   Tether's 443-only networking turns off. **Terminal** sessions: not supported by the session
-  window yet.
+  window, and every Tether host refuses them (`enable-terminal` is forced to `N`).
 
 ## Keyboard
 
@@ -96,6 +96,11 @@ Tether Manage stays the administrator's tool: it holds the admin key; the techni
 | Delete | Remove from the list (asks) |
 | Esc | Clear the selection, then the search |
 | ? | Shortcuts and search syntax |
+
+The shortcuts act only while no dialog (palette, Settings, Recordings, any other dialog) is open.
+A focused button keeps Enter and Space (Enter on a focused **Add host** presses that button and
+opens no session; a select or radio group also keeps its arrow keys); all other shortcuts work
+wherever the focus is.
 
 ## Query syntax
 
@@ -118,7 +123,8 @@ Space means AND. Every part is case-insensitive.
 | `seen:<7d` `seen:>30d` | Last activity (session from this PC or heartbeat), units `m h d w` |
 
 A query that cannot be read completely still filters by what could be read; the box says what was
-ignored ("Missing )").
+ignored ("Missing )"). Brackets and NOTs nest at most 200 deep; deeper nesting is ignored with
+"Too many nested brackets".
 
 ## Data model
 
@@ -138,6 +144,15 @@ on a worker thread):
   "team": { "enabled": true, "showOrg": true, "rev": 12, "base": { "…": "last synced shared doc" }, "synced": 1793973900000 }
 }
 ```
+
+If `hosts.json` cannot be read, is damaged or was saved by a newer version of Tether (`v` above
+this version's), the file is not written in that run, so the first save cannot destroy it. A
+banner above the list says so and what to do: "The host list (hosts.json in Tether's config
+folder) is damaged, so it was not loaded and changes are not saved. Restore the file from a
+backup, or rename or delete it and restart Tether to start a new list."; "… was saved by a newer
+version of Tether: it is shown, but changes are not saved. Update Tether to change it."; "… could
+not be read just now: … Changes are not saved. Close this window and open it again, or restart
+Tether, to try again." Only a missing or empty file starts a new list.
 
 Not stored: peers (read from the core with `hosts_peers` each time), org devices (`team_devices`),
 online status. Code: `apps/desktop/src/lib/hosts/` (model, query, rules, io, sync, store),
@@ -164,13 +179,18 @@ Online status reveals no more than before: any client could already ask hbbs abo
 Technicians never hold the admin key. Instead:
 
 1. The technician app creates its own Ed25519 key on first use (`team-key` in the config folder,
-   0600 on macOS/Linux; never sent anywhere, never shown to the webview). **Team** in the Hosts
+   created 0600 on macOS/Linux; never sent anywhere, never shown to the webview). It is generated
+   only when the file is missing: a damaged or unreadable file is reported ("The team key file is
+   damaged." / "The team key file cannot be read: …") and never replaced, because a new key would
+   no longer be the enrolled one. A new key is written to a temp file and linked into place
+   without replacing, so a key that appeared meanwhile stays. **Team** in the Hosts
    window shows the public key and its fingerprint (`9F3A-12B0-C4D1-77E2`).
 2. The administrator adds name + key in Tether Manage → **Team** (comparing the fingerprint read out
    by the technician), chooses *Can edit shared tags* and *Can read session history*, and publishes
    the roster to every relay ([management.md](management.md), [api.md](api.md#team-technician-endpoints)).
-3. The app signs each `/api/team/*` request with its key (`Tether-Sig`, the scheme admin requests
-   use; timestamp ±300 s, single-use nonce). Revoking = publishing the roster without the key.
+3. The app signs each `/api/team/*` request with its key (`Tether-Sig` v2, the scheme admin requests
+   use: made for the relay it goes to, timestamp ±300 s, single-use nonce; [api.md](api.md)) and
+   follows no HTTP redirect. Revoking = publishing the roster without the key.
 
 What is shared: per-host names and tags, tag colours, rules and saved searches (the *shared doc*).
 Notes, pins, history and the team settings stay on the PC. Organisation devices come from the
@@ -183,7 +203,14 @@ different tags never lose each other's work; a field changed on both sides keeps
 entry deleted on one side and untouched on the other is deleted. The write sends `If-Match: <rev>`;
 on `409` the app merges again with the doc that won and retries (up to 3 times). Sync runs 2.5 s
 after a shared change, every 5 minutes and on **Sync now**. Members without the write flag take the
-team's doc as it is (their local edits are replaced on the next sync).
+team's doc as it is. For them the shared fields (names, tags, tag colours, rules, saved searches)
+cannot be changed in the app and show "Managed by your team"; pins and notes stay theirs. An
+import brings only pins and notes for them.
+
+Shared rules, saved searches and tag colours have the same limits as an import. A shared doc is read with the limits of an import, because every member renders what one member
+wrote: IDs of 1 to 64 characters of `A-Z a-z 0-9 _ . @ : -`, valid tags only, known colours only,
+at most 500 rules and 500 saved searches, each query at most 1000 characters, at most 5000 tag
+entries. Anything else is dropped.
 
 With several relays the app reads and writes the first relay that answers (as for the policy); the
 relays do not copy the shared doc between each other, and organisation devices are those that
@@ -199,7 +226,8 @@ heartbeat to that relay.
   view-only without the badge (host ignored all input; fixed 2026-11-08).
 - **Policy.** `connect.outgoing` off disables every connect action (the backend refuses as before)
   and the online query.
-- **Webview boundary.** Store writes are validated (JSON object, size) and atomic; IDs are validated
+- **Webview boundary.** Store writes are validated (JSON object, size) and atomic, and
+  `hosts_store_save` and `team_tags_put` are accepted from the main window only; IDs are validated
   before any query; export/import go through a native file dialog the user drives, with fixed
   extensions and size limits; the team key stays in the backend.
 - **Exports.** Notes are excluded by default; CSV cells that a spreadsheet would run as a formula

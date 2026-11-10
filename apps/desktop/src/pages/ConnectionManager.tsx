@@ -1,15 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Clipboard, FolderSync, Keyboard, MessageSquare, Mic, RotateCcw, Send, ShieldAlert, Video } from "lucide-react";
 import { formatId, invoke, subscribe } from "../lib/ipc";
-import { Button, Logo, Modal, Segmented, TitleBar, Toggle } from "../components/ui";
+import { Button, Logo, Modal, Segmented, StatusDot, TitleBar, Toggle, useToast } from "../components/ui";
+import { errorText, isOn, usePolicy } from "../lib/policy";
+import { cmAdd, cmEmpty, cmNote, cmRemove, cmShow, requestText, type CmClient, type CmState } from "../lib/cm";
 
-interface Client {
-  id: number;
-  peer_id: string;
-  name: string;
-  authorized: boolean;
+/** The core's `Client` (ui_cm_interface.rs), as sent with `add_connection`. */
+interface Client extends CmClient {
   disconnected?: boolean;
-  is_file_transfer: boolean;
   keyboard: boolean;
   clipboard: boolean;
   audio: boolean;
@@ -38,8 +36,9 @@ function useElapsed(since: number) {
 }
 
 export function ConnectionManager() {
-  const [clients, setClients] = useState<Client[]>([]);
-  const [active, setActive] = useState<number | null>(null);
+  const [cm, setCm] = useState<CmState<Client>>(cmEmpty);
+  const { clients, active } = cm;
+  const setClients = (f: (cs: Client[]) => Client[]) => setCm((s) => ({ ...s, clients: f(s.clients) }));
   const [since] = useState(() => new Map<number, number>());
   const [chat, setChat] = useState<Record<number, { me: boolean; text: string }[]>>({});
   const [consents, setConsents] = useState<ConsentRequest[]>([]);
@@ -55,17 +54,16 @@ export function ConnectionManager() {
       const p = e.payload;
       if (e.name === "add_connection") {
         if (!since.has(p.id)) since.set(p.id, Date.now());
-        setClients((cs) => [...cs.filter((c) => c.id !== p.id), p]);
-        setActive(p.id);
+        setCm((s) => cmAdd(s, p));
       } else if (e.name === "remove_connection") {
-        setClients((cs) => cs.filter((c) => c.id !== p.id));
+        setCm((s) => cmRemove(s, p.id));
         setConsents((cs) => cs.filter((c) => c.conn_id !== p.id));
       } else if (e.name === "record_consent_request") {
         setConsents((cs) => [...cs.filter((c) => c.conn_id !== p.conn_id), p]);
       } else if (e.name === "chat") {
         // The backend sink restores the window and flashes the taskbar (no focus change).
         setChat((c) => ({ ...c, [p.id]: [...(c[p.id] ?? []), { me: false, text: p.text }] }));
-        setActive(p.id);
+        setCm((s) => cmNote(s, p.id));
       }
     });
     (async () => {
@@ -74,15 +72,14 @@ export function ConnectionManager() {
       const initial = await invoke<Client[]>("cm_clients").catch(() => []);
       if (initial?.length) {
         initial.forEach((c) => since.set(c.id, Date.now()));
-        setClients(initial);
-        setActive(initial[initial.length - 1].id);
+        setCm((s) => initial.reduce(cmAdd, s));
       }
     })().catch(() => {});
     return sub.off;
   }, [since]);
 
-  const c = clients.find((x) => x.id === active) ?? clients[clients.length - 1];
-  if (!c) {
+  const c = clients.find((x) => x.id === active);
+  if (!clients.length) {
     return (
       <div className="flex h-full flex-col">
         <TitleBar>
@@ -97,22 +94,30 @@ export function ConnectionManager() {
     <div className="flex h-full flex-col">
       <TitleBar>
         <Logo size={20} />
-        <span className="text-caption font-semibold">{c.authorized ? "Session active" : "Incoming connection"}</span>
+        <span className="text-caption font-semibold">{c?.authorized ? "Session active" : "Incoming connection"}</span>
       </TitleBar>
-      {clients.length > 1 && (
+      {(clients.length > 1 || !c) && (
         <div className="flex gap-1 overflow-x-auto px-3 pb-2">
           {clients.map((x) => (
             <button
               key={x.id}
-              onClick={() => setActive(x.id)}
-              className={`shrink-0 rounded-lg px-2.5 py-1 text-footnote ${x.id === c.id ? "bg-accent/15 text-accent" : "text-muted hover:bg-parchment"}`}
+              onClick={() => setCm((s) => cmShow(s, x.id))}
+              aria-current={x.id === c?.id || undefined}
+              className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1 text-footnote ${x.id === c?.id ? "bg-accent/15 text-accent" : "text-muted hover:bg-parchment"}`}
             >
+              {cm.attention.includes(x.id) && <StatusDot tone="warn" />}
               {x.name || formatId(x.peer_id)}
+              {cm.attention.includes(x.id) && <span className="sr-only">{x.authorized ? " (new message)" : " (asks to connect)"}</span>}
             </button>
           ))}
         </div>
       )}
-      <ClientView key={c.id} c={c} since={since.get(c.id) ?? Date.now()} msgs={chat[c.id] ?? []} onMsg={(m) => setChat((x) => ({ ...x, [c.id]: [...(x[c.id] ?? []), m] }))} />
+      {c ? (
+        <ClientView key={c.id} c={c} since={since.get(c.id) ?? Date.now()} msgs={chat[c.id] ?? []} onMsg={(m) => setChat((x) => ({ ...x, [c.id]: [...(x[c.id] ?? []), m] }))} />
+      ) : (
+        // The shown connection ended and only requests are left: none is put under the pointer.
+        <div className="grid flex-1 place-items-center px-6 text-center text-caption text-muted">The connection ended. Choose a waiting request above.</div>
+      )}
       {consents[0] && <RecordConsent r={consents[0]} onAnswer={(allow) => answerConsent(consents[0], allow)} />}
     </div>
   );
@@ -140,7 +145,7 @@ function RecordConsent({ r, onAnswer }: { r: ConsentRequest; onAnswer: (allow: b
           <Button className="flex-1" onClick={() => onAnswer(false)}>
             Deny
           </Button>
-          <Button variant="primary" className="flex-1" autoFocus onClick={() => onAnswer(true)}>
+          <Button variant="primary" className="flex-1" onClick={() => onAnswer(true)}>
             Allow
           </Button>
         </div>
@@ -155,6 +160,8 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
   const [text, setText] = useState("");
   const [tab, setTab] = useState<"perm" | "chat">("perm");
   const [seen, setSeen] = useState(0);
+  const toast = useToast();
+  const chatOn = isOn(usePolicy(), "connect.chat");
   const end = useRef<HTMLDivElement>(null);
   const incoming = msgs.filter((m) => !m.me).length;
   useEffect(() => {
@@ -162,8 +169,8 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
   }, [c]);
   // Each message from the technician opens the chat (the backend restores the window).
   useEffect(() => {
-    if (incoming) setTab("chat");
-  }, [incoming]);
+    if (incoming && chatOn) setTab("chat");
+  }, [incoming, chatOn]);
   // Braces: scrollIntoView may return a Promise, which React would call as cleanup.
   useEffect(() => {
     end.current?.scrollIntoView({ block: "end" });
@@ -176,8 +183,8 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
 
   return (
     <div className="flex min-h-0 flex-1 flex-col px-5 pb-5">
-      <div className="animate-rise flex items-center gap-3 rounded-2xl border border-hairline bg-tile p-4">
-        <div className="grid h-12 w-12 place-items-center rounded-full bg-accent text-callout font-semibold text-white">{initials}</div>
+      <div className="animate-rise flex shrink-0 items-center gap-3 rounded-2xl border border-hairline bg-tile p-4">
+        <div className="grid h-12 w-12 place-items-center rounded-full bg-accent text-callout font-semibold text-on-accent">{initials}</div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-callout font-semibold" title={c.name || undefined}>
             {c.name || "Unknown"}
@@ -187,16 +194,9 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
         {c.authorized && <div className="rounded-lg bg-ok/15 px-2 py-1 font-mono text-footnote text-ok">{elapsed}</div>}
       </div>
 
-      {!c.authorized && (
-        <div className="mt-3 flex items-start gap-2 rounded-xl bg-warn/10 px-3 py-2.5 text-caption text-ink">
-          <ShieldAlert size={16} className="mt-0.5 shrink-0 text-warn" />
-          <span>
-            {c.is_file_transfer ? "wants to transfer files with this computer." : "wants to see and control this screen."} Only accept if you know this person.
-          </span>
-        </div>
-      )}
-
-      <div className="mt-4 flex justify-center">
+      {toast.node}
+      {/* Chat turned off by the organisation: no tab for it. */}
+      <div className={`mt-4 flex shrink-0 justify-center ${chatOn ? "" : "hidden"}`}>
         <Segmented
           value={tab}
           onChange={setTab}
@@ -207,8 +207,17 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
         />
       </div>
 
-      <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
-        {tab === "perm" ? (
+      {/* The request text scrolls with the list: Decline and Accept below always stay in view. */}
+      <div className="mt-3 flex min-h-0 flex-1 flex-col overflow-y-auto">
+        {!c.authorized && (
+          <div className="mb-3 flex shrink-0 items-start gap-2 rounded-xl bg-warn/10 px-3 py-2.5 text-caption text-ink">
+            <ShieldAlert size={16} className="mt-0.5 shrink-0 text-warn" />
+            <span>
+              {requestText(c, formatId(c.peer_id))} Accept only if you expect it; End session stops it at any time.
+            </span>
+          </div>
+        )}
+        {tab === "perm" || !chatOn ? (
           <div className="space-y-1">
             {PERMS.map(({ key, perm: name, label, icon: Icon }) => (
               <div key={name} className="flex items-center gap-3 rounded-xl px-2 py-2 hover:bg-parchment">
@@ -219,14 +228,18 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
                   checked={!!perm[key]}
                   onChange={(v) => {
                     setPerm({ ...perm, [key]: v });
-                    invoke("cm_permission", { id: c.id, name, enabled: v });
+                    // Refused (policy): the switch goes back and says why.
+                    invoke("cm_permission", { id: c.id, name, enabled: v }).catch((e) => {
+                      setPerm((p) => ({ ...p, [key]: !v }));
+                      toast.show(errorText(e));
+                    });
                   }}
                 />
               </div>
             ))}
           </div>
         ) : (
-          <div className="flex h-full flex-col">
+          <div className="flex min-h-40 flex-1 flex-col">
             <div className="flex-1 space-y-2 overflow-y-auto">
               {msgs.length === 0 && (
                 <div className="flex flex-col items-center pt-8 text-caption text-muted">
@@ -236,7 +249,7 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
               )}
               {msgs.map((m, i) => (
                 <div key={i} className={`flex ${m.me ? "justify-end" : ""}`}>
-                  <div className={`max-w-[80%] rounded-2xl px-3 py-1.5 text-caption ${m.me ? "bg-accent text-white" : "bg-parchment"}`}>{m.text}</div>
+                  <div className={`max-w-[80%] rounded-2xl px-3 py-1.5 text-caption ${m.me ? "bg-accent text-on-accent" : "bg-parchment"}`}>{m.text}</div>
                 </div>
               ))}
               <div ref={end} />
@@ -245,14 +258,17 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
               className="mt-2 flex gap-2"
               onSubmit={(e) => {
                 e.preventDefault();
-                if (!text.trim()) return;
-                invoke("cm_chat", { id: c.id, text: text.trim() });
-                onMsg({ me: true, text: text.trim() });
-                setText("");
+                const t = text.trim();
+                if (!t) return;
+                // Shown and cleared only once it was sent (too long, or chat turned off: the text stays).
+                invoke("cm_chat", { id: c.id, text: t }).then(
+                  () => (onMsg({ me: true, text: t }), setText("")),
+                  (e) => toast.show(errorText(e)),
+                );
               }}
             >
-              <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Message" className="h-9 flex-1 rounded-xl border border-hairline bg-parchment px-3.5 text-caption outline-none focus-visible:border-focus" />
-              <button aria-label="Send" className="grid h-9 w-9 place-items-center rounded-full bg-accent text-white">
+              <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Message" aria-label="Message" className="h-9 flex-1 rounded-xl border border-hairline bg-parchment px-3.5 text-caption outline-none focus-visible:border-focus" />
+              <button aria-label="Send" className="grid h-9 w-9 place-items-center rounded-full bg-accent text-on-accent">
                 <Send size={15} />
               </button>
             </form>
@@ -260,7 +276,7 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
         )}
       </div>
 
-      <div className="mt-4 flex gap-2">
+      <div className="mt-4 flex shrink-0 gap-2">
         {c.authorized ? (
           <Button variant="danger" size="lg" className="flex-1" onClick={() => invoke("cm_close", { id: c.id })}>
             End session
@@ -270,7 +286,8 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
             <Button size="lg" className="flex-1" onClick={() => invoke("cm_close", { id: c.id })}>
               Decline
             </Button>
-            <Button variant="primary" size="lg" className="flex-1" autoFocus onClick={() => invoke("cm_authorize", { id: c.id })}>
+            {/* No initial focus: a key press meant for another window must not accept. */}
+            <Button variant="primary" size="lg" className="flex-1" onClick={() => invoke("cm_authorize", { id: c.id })}>
               Accept
             </Button>
           </>

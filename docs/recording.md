@@ -61,14 +61,15 @@ for a key frame when recording starts so each file begins with one.
 | `recording.folder` | `%USERPROFILE%\Videos\Tether` | Where recordings are written. `%VAR%` is expanded. When the feature is not locked, a folder picked in Settings → Recording (local option `tether-recording-folder`) wins. |
 | `recording.upload` | `none` | `none`, `unc` (copy to a share or local folder) or `https-put`. |
 | `recording.upload-target` | | UNC/local folder, or base HTTPS URL (the file is PUT to `<target>/<filename>`). |
-| `recording.upload-token` | | Bearer token for `https-put`. |
+| `recording.upload-token` | | Bearer token for `https-put`. Not a secret: see [Storage, upload and retention](#storage-upload-and-retention). |
 | `recording.keep-local` | `Y` | `N` deletes the local file after a successful upload. |
 | `recording.max-days` | `0` | Delete local recordings older than this many days (`0` = never). |
 | `recording.consent-text` | "The technician wants to record this session. Allow?" | Question shown to the remote user. |
 | `connect.reconnect-minutes` | `10` | How long a dropped session keeps reconnecting (see below). |
 
 The core options `allow-auto-record-incoming/outgoing` stay in the policy floor: Tether never records
-silently, `always` still goes through consent.
+silently, `always` still goes through consent. `allow-auto-record-outgoing` is forced to `N` in the
+local settings map, which is where the core reads it (`ENFORCED_LOCAL` in both apps' `security.rs`).
 
 ### Consent
 
@@ -90,8 +91,12 @@ silently, `always` still goes through consent.
    permission as off again; the viewer shows "Recording declined by the other party".
 5. The host can revoke at any time with the "Record the session" toggle; the viewer's recorder stops.
 
-Apps embedding the CM call `cm::set_record_consent_text` once (the desktop app does it via
-`cm_record_consent_init` from `recording.consent-text`).
+Apps embedding the CM call `cm::set_record_consent_text` (the desktop app does it via
+`cm_record_consent_init` from `recording.consent-text`; TetherQS each time a policy is applied, so
+the admin's wording is used as soon as the policy arrives).
+
+A viewer that keeps asking is shown to the host user at most once per 10 s per connection
+(`record_request_due` in `server/connection.rs`); the other requests are dropped.
 
 Limits: consent needs an interactive user on the host (an unattended host never answers, so nothing
 is recorded). A modified viewer could still capture the frames it receives; consent is enforced by
@@ -104,6 +109,10 @@ Tether's own viewer. A reconnect is a new connection and asks again.
   the recordings closed since the recording started into a small queue
   (`<config dir>/recording-uploads.json`) and uploads them. Failed uploads stay queued and are
   retried on the next run. UNC copies go to `<name>.part` first and are renamed when complete.
+- The upload token (`recording.upload-token`) reaches the apps in the policy bundle. `GET /api/policy`
+  needs no authentication, so anyone who can reach the relay can read the token. Give it write-only
+  rights on the target: create (PUT) only, no list, no read, no overwrite. A token that can read or
+  list would expose every uploaded recording.
 - After a successful upload the local file is deleted if `recording.keep-local = N`.
 - Files older than `recording.max-days` are deleted from the folder, except files still waiting for
   upload.

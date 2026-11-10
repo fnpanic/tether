@@ -6,7 +6,8 @@
 # after the job). Prints the job id; then: python tools/macbuild/macbuild.py wait --user tether <id>
 # Env: TETHER_KEYS_ENV (default C:/vms/mac59/keys.env), MACSIGN (default C:/vms/macsign),
 # MAC_ARCH=universal (release build: Intel + Apple silicon; default arm64 for test builds),
-# TETHER_DIAG_CHECK=1 (also run diagcheck.sh: both apps' diagnostics zip, checked for secrets).
+# TETHER_DIAG_CHECK=1 (also run diagcheck.sh: both apps' diagnostics zip, checked for secrets),
+# ALLOW_DIRTY=1 (test builds only: submit although apps/crates/patches/scripts differ from HEAD).
 # --diag-upload: instead of the build, diagupload.sh (debug builds of both apps upload diagnostics
 # to a local test relay with a throw-away admin key; keys.env only, no signing secrets).
 set -euo pipefail
@@ -24,6 +25,13 @@ for a in "$@"; do
   esac
 done
 for f in "$KEYS" $([ $JOB = build ] && echo "$SIGN/cs.p12 $SIGN/p12.pass"); do [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }; done
+# The UIs are built from the working tree, the rest from HEAD: both must be the same source.
+dirty=$(git -C "$R" status --porcelain -- apps crates patches scripts)
+if [ -n "$dirty" ] && [ -z "${ALLOW_DIRTY:-}" ]; then
+  echo "uncommitted changes (commit or stash them, or ALLOW_DIRTY=1 for a test build):" >&2
+  echo "$dirty" | head -20 >&2
+  exit 1
+fi
 LOCK=/c/vms/night/buildlock.sh
 run() { if [ -f "$LOCK" ]; then bash "$LOCK" "$@"; else "$@"; fi; }
 if [ -z "${SKIP_UI_BUILD:-}" ]; then

@@ -5,10 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# Not root: systemd reads the root-only file below itself.
+DynamicUser=yes
 # /etc/tether/duckdns.env (mode 0600): DUCKDNS_DOMAIN=<name without .duckdns.org>, DUCKDNS_TOKEN=<token>
 EnvironmentFile=/etc/tether/duckdns.env
 # Empty ip= makes DuckDNS use the request's source address, i.e. this host's public IP.
-ExecStart=/bin/sh -c 'r=$(curl -fsS --max-time 20 "https://www.duckdns.org/update?domains=$DUCKDNS_DOMAIN&token=$DUCKDNS_TOKEN&ip="); echo "duckdns: $r"; [ "$r" = OK ]'
+# curl reads the URL from stdin (-K -, written by the shell's own echo): the token is in no
+# command line, which every local user could read.
+ExecStart=/bin/sh -c 'r=$(echo "url = https://www.duckdns.org/update?domains=$DUCKDNS_DOMAIN&token=$DUCKDNS_TOKEN&ip=" | curl -fsS --max-time 20 -K -); echo "duckdns: $r"; [ "$r" = OK ]'
 TimeoutStartSec=60
 NoNewPrivileges=true
 ProtectSystem=strict

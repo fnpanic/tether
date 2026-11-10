@@ -142,6 +142,46 @@ fn admin_auth() {
     assert_eq!(open.req("GET", "/api/policy", &[], b"").status, 404);
 }
 
+/// v2 signatures name the relay they are for (`RELAY_HOST`); v1 passes until `TETHER_SIG_V1=off`.
+#[test]
+fn signature_v2_is_bound_to_this_relay() {
+    let k = generate_key();
+    let pk = key_to_b64(&k.verifying_key());
+    let send = |s: &Srv, sig: &str, path: &str| {
+        let r = s.req("GET", path, &[(reqauth::HEADER, sig)], b"");
+        (r.status, String::from_utf8_lossy(&r.body).into_owned())
+    };
+    let v2 = |relay: &str, path: &str| reqauth::sign_request_for(&k, relay, "GET", path, b"", now());
+    let v1 = |path: &str| reqauth::sign_request(&k, "GET", path, b"", now());
+    const STATUS: &str = "/api/admin/status";
+
+    let s = start_env(&pk, &[("RELAY_HOST", "Relay-A.example.com, alias.example.com:443")], |_| {});
+    assert_eq!(send(&s, &v2("https://relay-a.example.com", STATUS), STATUS).0, 200);
+    assert_eq!(send(&s, &v2("https://alias.example.com", STATUS), STATUS).0, 200);
+    assert_eq!(send(&s, &v2("https://relay-b.example.com", STATUS), STATUS), (401, "request signed for another relay".to_owned()));
+    // What relay B saw cannot be passed off as made for this relay, nor as v1.
+    let seen = v2("https://relay-b.example.com", STATUS);
+    assert_eq!(send(&s, &seen.replace("relay-b", "relay-a"), STATUS), (401, "signature does not match".to_owned()));
+    assert_eq!(send(&s, &seen.replace("v2 host=relay-b.example.com ", "v1 "), STATUS), (401, "signature does not match".to_owned()));
+    assert_eq!(send(&s, &v1(STATUS), STATUS).0, 200, "v1 is accepted by default");
+    // Team members: the same rules.
+    let roster = format!(r#"{{"members":[{{"name":"Anna","key":"{pk}","write":false,"audit":false}}]}}"#);
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/team", roster.as_bytes()).status, 204);
+    assert_eq!(send(&s, &v2("relay-a.example.com", "/api/team/me"), "/api/team/me").0, 200);
+    assert_eq!(send(&s, &v2("relay-b.example.com", "/api/team/me"), "/api/team/me"), (401, "request signed for another relay".to_owned()));
+
+    let strict = start_env(&pk, &[("RELAY_HOST", "relay-a.example.com"), ("TETHER_SIG_V1", "off")], |_| {});
+    assert_eq!(send(&strict, &v2("relay-a.example.com", STATUS), STATUS).0, 200);
+    let (code, why) = send(&strict, &v1(STATUS), STATUS);
+    assert!(code == 401 && why.contains("switched off"), "{code} {why}");
+
+    // A relay that does not know its own name: no v2, v1 as before.
+    let unnamed = start(&pk);
+    let (code, why) = send(&unnamed, &v2("relay-a.example.com", STATUS), STATUS);
+    assert!(code == 401 && why.contains("RELAY_HOST"), "{code} {why}");
+    assert_eq!(send(&unnamed, &v1(STATUS), STATUS).0, 200);
+}
+
 #[test]
 fn policy_publish_and_fetch() {
     let (s, k) = admin_server();
@@ -1361,4 +1401,178 @@ fn failed_index_rename_keeps_the_serial() {
     assert_eq!(s.req("GET", "/download/stable/releases.json", &[], b"").header("ETag"), Some("\"1\""));
     assert_eq!(s.admin(&k, "PUT", p, &index_doc(&k, "stable", 2)).status, 204);
     assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").json()["release_indexes"]["stable"]["serial"], 2);
+}
+
+/// GET and DELETE routes take no body, and nothing upgrades: such a request is refused at once
+/// instead of holding one of the 32 workers until its body arrived or timed out.
+#[test]
+fn unexpected_bodies_do_not_hold_workers() {
+    let s = start("");
+    let mut held = Vec::new();
+    for i in 0..33 {
+        let mut c = match i {
+            0 => partial_upload(&s, "POST", "/api/heartbeat", &[("Connection", "Upgrade")], 2000),
+            1 => partial_upload(&s, "DELETE", "/api/admin/custom/x", &[], 2000),
+            _ => partial_upload(&s, "GET", "/api/policy", &[], 2000),
+        };
+        let got = head_of(&mut c, Duration::from_secs(3)).unwrap_or_default();
+        assert!(got.starts_with("HTTP/1.1 400") && got.contains("Connection: close"), "request {i}: {got}");
+        held.push(c);
+    }
+    assert_eq!(s.req("GET", "/api/policy", &[], b"").status, 404);
+}
+
+/// With all workers taken, the `503 busy` answer is written by the thread that takes every
+/// request: it must not wait for the refused request's body.
+#[test]
+fn busy_answer_does_not_wait_for_the_body() {
+    let s = start("");
+    let _stalled: Vec<TcpStream> = (0..32).map(|_| stalled_client(&s)).collect();
+    std::thread::sleep(Duration::from_millis(500));
+    let mut one_more = stalled_client(&s);
+    let got = head_of(&mut one_more, Duration::from_secs(5)).unwrap_or_default();
+    assert!(got.starts_with("HTTP/1.1 503"), "{got}");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|sc| {
+        sc.spawn(|| tx.send(s.req("GET", "/api/policy", &[], b"").status));
+        let got = rx.recv_timeout(Duration::from_secs(5));
+        drop(one_more); // unblocks a waiting server, so the scope can end either way
+        assert_eq!(got.ok(), Some(503), "a stalled request blocked the accept loop");
+    });
+}
+
+/// tiny_http reads a body of up to 1024 bytes itself, before tether-api has the request: a client
+/// that stops within it is dropped after 30 s. So is an idle kept-alive connection, without a
+/// stray answer (a proxy would take that for the response to its next request).
+#[test]
+fn stalled_small_body_and_idle_keep_alive_are_dropped() {
+    let s = start("");
+    let mut idle = TcpStream::connect(&s.addr).unwrap();
+    for _ in 0..2 {
+        idle.write_all(b"GET /api/policy HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+        assert!(head_of(&mut idle, Duration::from_secs(5)).unwrap_or_default().contains("HTTP/1.1 404"));
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    let mut c = TcpStream::connect(&s.addr).unwrap();
+    c.write_all(b"POST /api/heartbeat HTTP/1.1\r\nHost: t\r\nContent-Length: 1000\r\n\r\n").unwrap();
+    c.write_all(&[b' '; 999]).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    let t0 = Instant::now();
+    let got = c.read(&mut [0u8; 64]);
+    let took = t0.elapsed().as_secs();
+    assert!(!matches!(got, Ok(1..)) && (25..45).contains(&took), "{got:?} after {took} s");
+
+    idle.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut rest = Vec::new();
+    let end = idle.read_to_end(&mut rest);
+    assert!(end.is_ok() && !rest.windows(5).any(|w| w == b"HTTP/"), "{end:?} {:?}", String::from_utf8_lossy(&rest));
+}
+
+/// The signature's timestamp must be current when a release upload begins, not when its body
+/// has arrived (a 200 MiB upload on a slow line takes longer than the allowed clock skew).
+#[test]
+fn slow_upload_is_checked_against_its_start() {
+    let (s, k) = admin_server();
+    let p = "/api/admin/release/stable/technician/windows-x86_64/slow.bin";
+    // More than tiny_http reads before tether-api sees the request (1024 bytes).
+    let body = [b'x'; 2000];
+    let sig = reqauth::sign_request(&k, "PUT", p, &body, now() - reqauth::MAX_SKEW_SECS + 2);
+    let mut c = partial_upload(&s, "PUT", p, &[(reqauth::HEADER, &sig)], 2000);
+    std::thread::sleep(Duration::from_secs(4));
+    c.write_all(&body[1..]).unwrap();
+    let got = head_of(&mut c, Duration::from_secs(5)).unwrap_or_default();
+    assert!(got.starts_with("HTTP/1.1 204"), "{got}");
+}
+
+/// A release upload gets its slot on a signature header nobody has verified yet: such uploads
+/// must not take the slots of diagnostics uploads, which need an open ticket.
+#[test]
+fn unverified_release_uploads_do_not_block_diagnostics() {
+    let (s, k) = admin_server();
+    let ticket = s.admin(&k, "POST", "/api/admin/diag-ticket", br#"{"note":""}"#).json()["ticket"].as_str().unwrap().to_owned();
+    let p = "/api/admin/release/stable/technician/windows-x86_64/big.exe";
+    let fake = format!("v1 ts={} nonce=n sig=s", now());
+    let held: Vec<TcpStream> = (0..4).map(|_| partial_upload(&s, "PUT", p, &[(reqauth::HEADER, &fake)], 100_000_000)).collect();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(s.req("POST", &format!("/api/diag/{ticket}"), &[], b"PK\x03\x04 fake zip").status, 204);
+    drop(held);
+}
+
+/// One IPv6 client has a whole /64: the per-IP limits count the /64, not each address.
+#[test]
+fn ipv6_clients_are_limited_per_64() {
+    let s = start("");
+    let from = |ip: String, uuid: String| s.req("POST", "/api/heartbeat", &[("X-Forwarded-For", &ip)], hb(&uuid).as_bytes()).status;
+    for i in 1..=30 {
+        assert_eq!(from(format!("2001:db8:1:2::{i:x}"), format!("v6-dev-{i:04}")), 200, "heartbeat {i}");
+    }
+    assert_eq!(from("2001:db8:1:2:ffff::1".into(), "v6-dev-0031".into()), 429);
+    assert_eq!(from("2001:db8:1:3::1".into(), "v6-dev-0032".into()), 200);
+    // An IPv4 client in the mapped form is that IPv4 address, not one bucket for all of them.
+    for i in 1..=30 {
+        assert_eq!(from("::ffff:198.51.100.1".into(), format!("v4-dev-{i:04}")), 200, "mapped heartbeat {i}");
+    }
+    assert_eq!(from("198.51.100.1".into(), "v4-dev-0031".into()), 429);
+    assert_eq!(from("::ffff:198.51.100.2".into(), "v4-dev-0032".into()), 200);
+}
+
+/// A release upload's nonce is remembered for as long as a replay that began in time could
+/// still be sending its body (about 54 min for 200 MiB), not just the 601 s of other requests;
+/// a refused replay does not shorten that.
+#[test]
+fn release_upload_nonce_outlives_a_slow_replay() {
+    let (s, k) = admin_server();
+    let p = "/api/admin/release/stable/technician/windows-x86_64/a.bin";
+    let sig = reqauth::sign_request(&k, "PUT", p, b"bytes", now());
+    let put = || s.req("PUT", p, &[(reqauth::HEADER, &sig)], b"bytes").status;
+    assert_eq!(put(), 204);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").status, 200);
+    assert_eq!(put(), 401);
+    let nonces: std::collections::HashMap<String, u64> = serde_json::from_slice(&std::fs::read(s.dir.join("nonces.json")).unwrap()).unwrap();
+    let mut seen: Vec<u64> = nonces.values().map(|t| t.saturating_sub(now())).collect();
+    seen.sort_unstable();
+    // The status request's nonce: now. The upload's: the body deadline (3260 s) and the skew later.
+    assert!(seen.len() == 2 && seen[0] < 5 && (3500..3600).contains(&seen[1]), "{seen:?}");
+}
+
+/// A session history read that would exceed the byte budget is cut and says so.
+#[test]
+fn audit_read_is_cut_with_a_header() {
+    let k = generate_key();
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[], |d| {
+        std::fs::create_dir_all(d.join("audit")).unwrap();
+        let line = serde_json::json!({"ts": now(), "kind": "file", "id": "1", "uuid": "u", "path": "x".repeat(7000)}).to_string() + "\n";
+        std::fs::write(d.join("audit").join(format!("{}.jsonl", utc_day(0))), line.repeat(1500)).unwrap();
+    });
+    let r = s.admin(&k, "GET", "/api/admin/audit?limit=5000", b"");
+    assert_eq!((r.status, r.header("X-Audit-Truncated")), (200, Some("1")));
+    let n = r.json().as_array().unwrap().len();
+    assert!((1000..1500).contains(&n), "{n}");
+    let r = s.admin(&k, "GET", "/api/admin/audit?limit=100", b"");
+    assert_eq!((r.json().as_array().unwrap().len(), r.header("X-Audit-Truncated")), (100, None));
+}
+
+/// A nonce list that cannot be saved (disk full) must not fail every admin request, the deletes
+/// that would free space included; replays are still refused from memory.
+#[test]
+fn unsaved_nonces_do_not_stop_admin_requests() {
+    let k = generate_key();
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[], |d| std::fs::create_dir(d.join("nonces.json")).unwrap());
+    let sig = reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now());
+    assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 200);
+    assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 401);
+}
+
+/// Connections that arrive in a burst are all served: tiny_http queued a new connection behind a
+/// thread it had already woken for an earlier one, where it waited for some connection to end.
+#[test]
+fn burst_of_connections_is_served() {
+    let s = start("");
+    let mut conns: Vec<TcpStream> = (0..40).map(|_| TcpStream::connect(&s.addr).unwrap()).collect();
+    for (i, c) in conns.iter_mut().enumerate() {
+        c.write_all(b"GET /api/policy HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+        let got = head_of(c, Duration::from_secs(3)).unwrap_or_default();
+        assert!(got.starts_with("HTTP/1.1 404"), "connection {i}: {got}");
+    }
 }

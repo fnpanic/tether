@@ -6,15 +6,19 @@ import { formatId, inTauri, invoke } from "../../lib/ipc";
 import { label, newId, normTag, TAG_COLORS, tagColor, type Host, type Store, type TagColor } from "../../lib/hosts/model";
 import { exportCsv, exportJson, mergeImport, parseImport, type Imported } from "../../lib/hosts/io";
 import { parse, search } from "../../lib/hosts/query";
-import { actions, teamSync, useHosts } from "../../lib/hosts/store";
+import { actions, teamSync, useHosts, useReadOnly } from "../../lib/hosts/store";
+import { errorText } from "../../lib/policy";
 import { ago, Kbd, TagChip, TagDot, TagInput } from "./bits";
 
 const H = ({ children }: { children: React.ReactNode }) => <h2 className="text-headline font-semibold">{children}</h2>;
 const P = ({ children }: { children: React.ReactNode }) => <p className="mt-1 text-caption text-muted">{children}</p>;
+/** Shown instead of the controls for what a team shares, to a member who may not change it. */
+const Managed = ({ what }: { what: string }) => <p className="mt-4 rounded-xl bg-parchment px-4 py-3 text-caption text-muted">Managed by your team: {what} can only be changed by members with write permission.</p>;
 
 /** Add/remove tags on many hosts. Shows how many of the selection carry each tag now. */
 export function BulkTags({ hosts, meta, known, onClose }: { hosts: Host[]; meta: Store["tags"]; known: string[]; onClose: () => void }) {
   const ids = hosts.map((h) => h.id);
+  const ro = useReadOnly();
   const counts = useMemo(() => {
     const m = new Map<string, number>();
     for (const h of hosts) for (const t of h.tags) m.set(t, (m.get(t) ?? 0) + 1);
@@ -24,24 +28,30 @@ export function BulkTags({ hosts, meta, known, onClose }: { hosts: Host[]; meta:
     <Modal onClose={onClose} width={480}>
       <H>Tags for {ids.length.toLocaleString()} hosts</H>
       <P>Added tags go on every selected host. Remove takes a tag off all of them.</P>
-      <div className="mt-4">
-        <TagInput autoFocus known={known} onAdd={(t) => actions.addTags(ids, [t])} placeholder="Add tag to all (customer:acme)" />
-      </div>
+      {ro ? (
+        <Managed what="tags" />
+      ) : (
+        <div className="mt-4">
+          <TagInput autoFocus known={known} onAdd={(t) => actions.addTags(ids, [t])} placeholder="Add tag to all (customer:acme)" />
+        </div>
+      )}
       <div className="mt-4 max-h-[280px] space-y-1 overflow-y-auto" aria-label="Tags in the selection">
-        {counts.length === 0 && <div className="text-caption text-faint">The selected hosts have no tags yet.</div>}
+        {counts.length === 0 && <div className="text-caption text-muted">The selected hosts have no tags yet.</div>}
         {counts.map(([t, n]) => (
           <div key={t} className="flex h-8 items-center gap-2 rounded-md px-1 hover:bg-tile-2">
             <TagChip tag={t} meta={meta} />
             <span className="text-footnote text-muted">{n === ids.length ? "all" : `${n.toLocaleString()} of ${ids.length.toLocaleString()}`}</span>
             <span className="flex-1" />
-            {n < ids.length && (
+            {n < ids.length && !ro && (
               <Button size="sm" variant="ghost" onClick={() => actions.addTags(ids, [t])}>
                 Add to all
               </Button>
             )}
-            <Button size="sm" variant="ghost" className="!text-danger" onClick={() => actions.removeTags(ids, [t])}>
-              Remove
-            </Button>
+            {!ro && (
+              <Button size="sm" variant="ghost" className="!text-danger" onClick={() => actions.removeTags(ids, [t])}>
+                Remove
+              </Button>
+            )}
           </div>
         ))}
       </div>
@@ -57,10 +67,12 @@ export function BulkTags({ hosts, meta, known, onClose }: { hosts: Host[]; meta:
 export function TagColors({ tags, meta, onClose }: { tags: string[]; meta: Store["tags"]; onClose: () => void }) {
   const nss = [...new Set(tags.map((t) => (t.includes(":") ? t.slice(0, t.indexOf(":")) : t)))].sort();
   const setColor = (k: string, color: TagColor) => actions.setStore((s) => ({ ...s, tags: { ...s.tags, [k]: { ...s.tags[k], color } } }));
+  const ro = useReadOnly();
   return (
     <Modal onClose={onClose} width={460}>
       <H>Tag colours</H>
       <P>A colour set on a namespace (site) applies to all its tags (site:berlin, site:munich).</P>
+      {ro && <Managed what="tag colours" />}
       <div className="mt-4 max-h-[360px] space-y-1 overflow-y-auto">
         {nss.map((k) => (
           <div key={k} className="flex h-9 items-center gap-3">
@@ -72,6 +84,7 @@ export function TagColors({ tags, meta, onClose }: { tags: string[]; meta: Store
                   role="radio"
                   aria-checked={tagColor(k, meta) === c}
                   aria-label={c}
+                  disabled={ro}
                   onClick={() => setColor(k, c)}
                   className={`grid h-6 w-6 place-items-center rounded-full ${tagColor(k, meta) === c ? "ring-2 ring-focus" : ""}`}
                 >
@@ -94,6 +107,7 @@ export function TagColors({ tags, meta, onClose }: { tags: string[]; meta: Store
 export function Rules({ hosts, store, onClose }: { hosts: Host[]; store: Store; onClose: () => void }) {
   const [tag, setTag] = useState("");
   const [when, setWhen] = useState("");
+  const ro = useReadOnly();
   const p = useMemo(() => parse(when), [when]);
   const n = useMemo(() => (p.node ? search(hosts, p).length : 0), [hosts, p]);
   const add = () => {
@@ -109,11 +123,12 @@ export function Rules({ hosts, store, onClose }: { hosts: Host[]; store: Store; 
       <H>Tag rules</H>
       <P>Hosts that match a search get its tag automatically (dashed chip). Rules use the same syntax as the search box and update as hosts change.</P>
       <div className="mt-4 space-y-1">
-        {store.rules.length === 0 && <div className="text-caption text-faint">No rules yet. Example: hosts whose name starts with BER- get site:berlin.</div>}
+        {store.rules.length === 0 && <div className="text-caption text-muted">No rules yet. Example: hosts whose name starts with BER- get site:berlin.</div>}
         {store.rules.map((r) => (
           <div key={r.id} className="flex h-10 items-center gap-3 rounded-md px-2 hover:bg-tile-2">
             <Toggle
               label={`Rule ${r.tag} on`}
+              disabled={ro}
               checked={!r.off}
               onChange={(v) => actions.setStore((s) => ({ ...s, rules: s.rules.map((x) => (x.id === r.id ? { ...x, off: !v } : x)) }))}
             />
@@ -121,13 +136,15 @@ export function Rules({ hosts, store, onClose }: { hosts: Host[]; store: Store; 
             <span className="text-footnote text-muted">when</span>
             <code className="min-w-0 flex-1 truncate font-mono text-footnote">{r.when}</code>
             <span className="text-footnote text-muted">{r.off ? "off" : `${(counts.get(r.id) ?? 0).toLocaleString()} hosts`}</span>
-            <IconButton label={`Delete rule ${r.tag}`} onClick={() => actions.setStore((s) => ({ ...s, rules: s.rules.filter((x) => x.id !== r.id) }))}>
+            <IconButton label={`Delete rule ${r.tag}`} className="disabled:opacity-40" disabled={ro} onClick={() => actions.setStore((s) => ({ ...s, rules: s.rules.filter((x) => x.id !== r.id) }))}>
               <Trash2 size={15} />
             </IconButton>
           </div>
         ))}
       </div>
+      {ro && <Managed what="tag rules" />}
       <form
+        hidden={ro}
         className="mt-5 grid grid-cols-[160px_1fr_auto] items-start gap-2"
         onSubmit={(e) => {
           e.preventDefault();
@@ -177,7 +194,7 @@ export function Export({ store, selection, onClose, onToast }: { store: Store; s
         onClose();
       }
     } catch (e) {
-      onToast(String(e));
+      onToast(errorText(e));
     }
   };
   return (
@@ -216,6 +233,7 @@ export function Export({ store, selection, onClose, onToast }: { store: Store; s
 export function Import({ store, onClose, onToast }: { store: Store; onClose: () => void; onToast: (m: string) => void }) {
   const [imp, setImp] = useState<Imported | null>(null);
   const [err, setErr] = useState("");
+  const ro = useReadOnly();
   const read = (text: string) => {
     try {
       setImp(parseImport(text));
@@ -226,7 +244,7 @@ export function Import({ store, onClose, onToast }: { store: Store; onClose: () 
   };
   const pick = async () => {
     if (inTauri) {
-      const t = await invoke<string | null>("hosts_import").catch((e) => (setErr(String(e)), null));
+      const t = await invoke<string | null>("hosts_import").catch((e) => (setErr(errorText(e)), null));
       if (t != null) read(t);
     }
   };
@@ -236,6 +254,7 @@ export function Import({ store, onClose, onToast }: { store: Store; onClose: () 
     <Modal onClose={onClose} width={480}>
       <H>Import hosts</H>
       <P>A Tether export (JSON) or a CSV with a header row: id, name, tags (space separated), pinned, notes. Tags are added to the ones a host has; names and notes in the file replace the old ones.</P>
+      {ro && <Managed what="names, tags, rules and saved searches (only pins and notes are imported here)" />}
       <div className="mt-5">
         {inTauri ? (
           <Button variant="secondary" onClick={pick}>
@@ -357,6 +376,7 @@ export function AddHost({ known, onClose, onAdded }: { known: string[]; onClose:
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [tags, setTags] = useState<string[]>([]);
+  const ro = useReadOnly();
   const clean = id.replace(/\s/g, "");
   const ok = /^[A-Za-z0-9_.@:-]{6,64}$/.test(clean);
   return (
@@ -374,13 +394,19 @@ export function AddHost({ known, onClose, onAdded }: { known: string[]; onClose:
         }}
       >
         <TextField autoFocus placeholder="ID" aria-label="Host ID" className="font-mono" value={/^\d[\d\s]*$/.test(id) ? formatId(id) : id} onChange={(e) => setId(e.target.value.slice(0, 64))} />
-        <TextField placeholder="Name (optional)" aria-label="Host name" value={name} onChange={(e) => setName(e.target.value.slice(0, 64))} />
-        <div className="flex flex-wrap gap-1">
-          {tags.map((t) => (
-            <TagChip key={t} tag={t} meta={{}} onRemove={() => setTags(tags.filter((x) => x !== t))} />
-          ))}
-        </div>
-        <TagInput known={known} onAdd={(t) => !tags.includes(t) && setTags([...tags, t])} placeholder="Tags (optional)" />
+        {ro ? (
+          <Managed what="names and tags" />
+        ) : (
+          <>
+            <TextField placeholder="Name (optional)" aria-label="Host name" value={name} onChange={(e) => setName(e.target.value.slice(0, 64))} />
+            <div className="flex flex-wrap gap-1">
+              {tags.map((t) => (
+                <TagChip key={t} tag={t} meta={{}} onRemove={() => setTags(tags.filter((x) => x !== t))} />
+              ))}
+            </div>
+            <TagInput known={known} onAdd={(t) => !tags.includes(t) && setTags([...tags, t])} placeholder="Tags (optional)" />
+          </>
+        )}
         <div className="flex justify-end gap-2 pt-4">
           <Button type="button" variant="pearl" onClick={onClose}>
             Cancel
@@ -434,6 +460,7 @@ interface OpenSession {
 /** Open session windows with what can be sent to each without switching to it. */
 export function Sessions({ hosts, onClose, onToast }: { hosts: Map<string, Host>; onClose: () => void; onToast: (m: string) => void }) {
   const [list, setList] = useState<OpenSession[]>([]);
+  // "lock:<key>" or "restart:<key>": the action that waits for its second click.
   const [confirm, setConfirm] = useState<string | null>(null);
   useEffect(() => {
     const load = () => invoke<OpenSession[]>("sessions_open").then((l) => setList(l ?? []), () => {});
@@ -441,7 +468,7 @@ export function Sessions({ hosts, onClose, onToast }: { hosts: Map<string, Host>
     const t = setInterval(load, 2000);
     return () => clearInterval(t);
   }, []);
-  const act = (p: Promise<unknown>, ok: string) => p.then(() => onToast(ok), (e) => onToast(String(e)));
+  const act = (p: Promise<unknown>, ok: string) => p.then(() => onToast(ok), (e) => onToast(errorText(e)));
   return (
     <Modal onClose={onClose} width={600}>
       <H>Open sessions</H>
@@ -469,15 +496,21 @@ export function Sessions({ hosts, onClose, onToast }: { hosts: Map<string, Host>
                   <IconButton label="Send Ctrl+Alt+Del" onClick={() => act(invoke("session_ctrl_alt_del", { key: s.key }), "Ctrl+Alt+Del sent")}>
                     <Keyboard size={15} />
                   </IconButton>
-                  <IconButton label="Lock remote screen" onClick={() => act(invoke("session_lock_screen", { key: s.key }), "Screen locked")}>
-                    <Lock size={15} />
-                  </IconButton>
-                  {confirm === s.key ? (
+                  {confirm === `lock:${s.key}` ? (
+                    <Button size="sm" variant="danger" title="If Tether is not installed as a service there (TetherQS), you cannot see the lock screen or sign back in." onClick={() => (setConfirm(null), act(invoke("session_lock_screen", { key: s.key }), "Screen locked"))}>
+                      Lock now?
+                    </Button>
+                  ) : (
+                    <IconButton label="Lock remote screen" onClick={() => setConfirm(`lock:${s.key}`)}>
+                      <Lock size={15} />
+                    </IconButton>
+                  )}
+                  {confirm === `restart:${s.key}` ? (
                     <Button size="sm" variant="danger" onClick={() => (setConfirm(null), act(invoke("session_restart_remote", { key: s.key }), "Restart requested"))}>
                       Restart now?
                     </Button>
                   ) : (
-                    <IconButton label="Restart remote computer" onClick={() => setConfirm(s.key)}>
+                    <IconButton label="Restart remote computer" onClick={() => setConfirm(`restart:${s.key}`)}>
                       <Power size={15} />
                     </IconButton>
                   )}

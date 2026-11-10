@@ -130,3 +130,13 @@ describe("helpers", () => {
     expect(cmpVersion("1.0.0-beta", "1.0.0")).toBe(0);
   });
 });
+
+describe("deep nesting", () => {
+  it("never throws: nesting past the limit is ignored with an error", () => {
+    for (const q of ["(".repeat(50_000), "!".repeat(50_000) + "x", "(".repeat(300) + "berlin" + ")".repeat(300)]) {
+      const p = parse(q);
+      expect(p.error).toBe("Too many nested brackets");
+    }
+    expect(parse("(".repeat(150) + "berlin" + ")".repeat(150))).toEqual({ node: { k: "word", v: "berlin" }, words: ["berlin"], error: undefined });
+  });
+});

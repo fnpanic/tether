@@ -454,7 +454,7 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <tr><td>Locked</td><td>Locked to the given value</td></tr>
 <tr><td>Hidden</td><td>Disabled, locked and not shown</td></tr>
 </tbody></table></div>
-<p>Layers, where later wins: built-in defaults → profile (<code>technician</code> or <code>customer</code>) → custom app (for branded TetherQS downloads) → group → machine policy set by GPO/MDM. A later layer set to <strong>On</strong> unlocks what an earlier one locked.</p>
+<p>Layers, where later wins: built-in defaults → profile (<code>technician</code> or <code>customer</code>) → custom app (for branded TetherQS downloads) → group → machine policy set by GPO/MDM. A later layer set to <strong>On</strong> unlocks what an earlier one locked, with one exception: a custom app's setting is ignored for a feature the profile locks, so a custom app cannot switch on what the policy locks.</p>
 <ul>
   <li><strong>Groups:</strong> <strong>Policy → New group</strong>, give it a name and a profile, set its overrides, then assign devices on the <strong>Devices</strong> screen. Assignments take effect only after publishing.</li>
   <li><strong>Preview:</strong> the right column shows the effective policy a device would get from the draft. Locked features have a lock icon, hidden ones are struck through.</li>
@@ -567,7 +567,7 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <tr><td>Works for minutes, then drops and reconnects</td><td>Proxy or firewall closes long-lived WebSockets</td><td>Allow long-lived connections; hosts send a heartbeat every 20 s</td></tr>
 <tr><td>“Reconnecting… (attempt n)” repeatedly, then Retry</td><td>The remote device lost its network, slept or restarted (“could not be end-to-end encrypted” right after a restart)</td><td>Wait until it is online again, then <strong>Retry</strong>. Check the remote Diagnostics page.</td></tr>
 <tr><td>“Update required”, sessions refused, CLI exit 6</td><td>Mandatory release or minimum version above the installed one</td><td>Install the update. “None is available yet”: the admin must publish a release in the device's channel.</td></tr>
-<tr><td>Incoming sessions close immediately</td><td>The host needs a required update, or <code>connect.incoming</code> is off</td><td>Update the host; check its policy</td></tr>
+<tr><td>Incoming sessions close immediately, or are refused with “This device does not accept incoming sessions (set by its organisation).” or “This device must be updated before it accepts sessions.”</td><td>The host needs a required update, or <code>connect.incoming</code> is off</td><td>Update the host; check its policy</td></tr>
 <tr><td>Setting greyed out, “Managed by your organisation”, <code>locked:&lt;feature&gt;</code></td><td>Policy locks it (profile, group or machine level)</td><td>Change it in Tether Manage and publish, or in the GPO if the layers include <code>machine</code></td></tr>
 <tr><td>Policy change not applied</td><td>Not checked yet (15 min), offline, or signature rejected</td><td><code>tether --policy-refresh</code>. Exit 4: the client was built with another admin key and must be reinstalled.</td></tr>
 <tr><td>No record button</td><td>Policy <code>recording.mode</code> is <code>off</code></td><td>Change the policy if recording is wanted</td></tr>

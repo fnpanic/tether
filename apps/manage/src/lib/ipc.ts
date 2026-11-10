@@ -46,6 +46,8 @@ export interface Effective {
   locked: string[];
   hidden: string[];
   sources: string[];
+  /** Rules this build does not know or accept, left out of the result (`<layer>: <why>`). */
+  rejected: string[];
 }
 export interface Device {
   uuid: string;

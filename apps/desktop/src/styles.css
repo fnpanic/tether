@@ -9,7 +9,10 @@
 @theme {
   --font-sans: -apple-system, "SF Pro Text", "SF Pro Display", "Inter Variable", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
+}
 
+/* inline: utilities read var(--tile) where they are used, so a .dark subtree gets the dark palette. */
+@theme inline {
   --color-canvas: var(--canvas);
   --color-parchment: var(--parchment);
   --color-tile: var(--tile);
@@ -20,11 +23,14 @@
   --color-faint: var(--faint);
   --color-hairline: var(--hairline);
   --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
   --color-focus: var(--focus);
   --color-ok: var(--ok);
   --color-warn: var(--warn);
   --color-danger: var(--danger);
+}
 
+@theme {
   /* Radius scale: 5 · 8 · 11 · 18 · full (DESIGN.md). Tailwind names remapped onto it. */
   --radius-xs: 5px;
   --radius-sm: 5px;
@@ -80,11 +86,12 @@
   --ink: #1d1d1f;
   --ink-80: #333333;
   --muted: #6e6e73;
-  --faint: #7a7a7a;
+  --faint: #707070;
   --hairline: rgba(0, 0, 0, 0.08);
   --accent: #0066cc;
+  --on-accent: #ffffff;
   --focus: #0071e3;
-  --ok: #1f9d55;
+  --ok: #198146;
   --warn: #b25000;
   --danger: #d70015;
   /* Tag dots (DESIGN.md › Tags): identification only, never fills. */
@@ -100,7 +107,8 @@
   color-scheme: light;
 }
 
-:root.dark {
+/* A class, not :root.dark: a subtree (the session window) can use the dark palette in a light app. */
+.dark {
   --canvas: #000000;
   --parchment: #1c1c1e;
   --tile: #272729;
@@ -108,13 +116,14 @@
   --ink: #f5f5f7;
   --ink-80: #cccccc;
   --muted: #98989d;
-  --faint: #6e6e73;
+  --faint: #909095;
   --hairline: rgba(255, 255, 255, 0.1);
   --accent: #2997ff;
+  --on-accent: #000000;
   --focus: #2997ff;
   --ok: #30d158;
   --warn: #ffb340;
-  --danger: #ff453a;
+  --danger: #ff544a;
   --tag-gray: #98989d;
   --tag-red: #ff6961;
   --tag-orange: #ffb340;
@@ -184,6 +193,7 @@ button:active:not(:disabled) {
   *::before,
   *::after {
     animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
   }
   button:active:not(:disabled) {

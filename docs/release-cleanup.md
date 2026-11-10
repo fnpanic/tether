@@ -240,7 +240,9 @@ New command `release_prune(keep, pins, delete: Option<…>)` in `main.rs` next t
    wins, so the relays end up consistent and nothing the other one still publishes is lost).
    If the index serials differ between relays, the sheet says so and offers "Sync first"
    (`release_sync`), because a lagging relay protects its older version (safe, but it keeps it).
-3. Execute with the same selection on every relay, one `RelayResult` per relay (`fan_out`
+3. Compute the plan again and keep of the selection only the versions it still offers
+   (`still_offered`: the sheet's list is a request, not the rule). Execute with those on every
+   relay, one `RelayResult` per relay (`fan_out`
    pattern, `main.rs:122-130`), then reload the list and the overview.
 
 UI on the Releases page, header of "Releases on the first relay" (`Releases.tsx:539-549`):

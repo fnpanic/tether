@@ -92,8 +92,9 @@ export const mock = {
           ],
         } as T;
       case "cm_clients":
+        // `?cm=1`: only the first (a request).
         return [{ id: 1, peer_id: "184392571", name: "maria@Design-Studio", authorized: false, keyboard: true, clipboard: true, audio: true, file: true, restart: true, recording: false, block_input: false, is_file_transfer: false },
-          { id: 2, peer_id: "902114538", name: "j.berg@FINANCE-PC-07", authorized: true, keyboard: true, clipboard: true, audio: true, file: true, restart: true, recording: false, block_input: false, is_file_transfer: false }] as T;
+          { id: 2, peer_id: "902114538", name: "j.berg@FINANCE-PC-07", authorized: true, keyboard: true, clipboard: true, audio: true, file: true, restart: true, recording: false, block_input: false, is_file_transfer: false }].slice(0, new URLSearchParams(location.search).get("cm") === "1" ? 1 : 2) as T;
       case "policy_state": {
         // `?ui=forced|off` in the page URL: policy ui.advanced for the mode tests.
         const ui = new URLSearchParams(location.search).get("ui");
@@ -134,7 +135,8 @@ export const mock = {
         return { key: "q2o5n0d6m7m3l1k8p4g2b7r9x0c5v8z1a3s6d9f2g4h=", fingerprint: "9F3A-12B0-C4D1-77E2" } as T;
       case "team_me":
         if (new URLSearchParams(location.search).get("team") === "none") throw "not-member: This app is not in your organisation's team. Send its key to your administrator.";
-        return { name: "Anna (Helpdesk)", write: true, audit: true } as T;
+        // `?team=ro`: a member without write permission.
+        return { name: "Anna (Helpdesk)", write: new URLSearchParams(location.search).get("team") !== "ro", audit: true } as T;
       case "team_devices":
         return (await fleet()).org as T;
       case "team_tags_get":

@@ -7,7 +7,8 @@ Per file: look the SHA-256 up on VirusTotal; if unknown, upload it (files over 3
 upload URL) and wait for the analysis. The full report is saved as
 tools/release/virustotal/<file name>/<sha256 prefix>.json plus a line in summary.md there.
 Exit 1 when a file is FLAGGED (a Microsoft detection, or two or more engines); a single detection by
-another engine is WARN (reported, exit 0). 2 on errors.
+another engine is WARN (reported, exit 0). 2 on errors, which includes a file without a finished
+analysis (verdict ERROR): no result is never CLEAN. Self-check: python -I scripts/vtscan.py --selftest
 
 API key: env VT_API_KEY, else the file C:\\vms\\virustotal\\api-key.txt (never printed or saved).
 Uploading shares the file with VirusTotal's partners; release files are public anyway.
@@ -78,7 +79,10 @@ def upload(path: Path, k: str) -> str:
 def verdict(stats: dict, engines: list[str] | None = None) -> str:
     """CLEAN; WARN for a single detection by an engine other than Microsoft (ML guesses of small
     engines are common for unsigned remote-access tools); FLAGGED for a Microsoft detection (Defender
-    blocks downloads with it) or two or more engines."""
+    blocks downloads with it) or two or more engines; ERROR when no engine has answered (unknown
+    file, or the analysis did not finish in time)."""
+    if not sum(stats.values()):
+        return "ERROR"
     bad = stats.get("malicious", 0) + stats.get("suspicious", 0)
     if bad == 0:
         return "CLEAN"
@@ -138,10 +142,19 @@ def main(files: list[str]) -> int:
             s.write(line + "\n")
         print(f"{v} {p.name} {sha[:16]} {stats}" + (f"\n  " + "\n  ".join(hits) if hits else ""))
         print(f"  https://www.virustotal.com/gui/file/{sha}")
-        if v == "FLAGGED":
-            worst = max(worst, 1)
+        worst = max(worst, {"FLAGGED": 1, "ERROR": 2}.get(v, 0))
     return worst
 
 
+def selftest() -> None:
+    assert verdict({}) == "ERROR"
+    assert verdict({"malicious": 0, "suspicious": 0, "undetected": 0}) == "ERROR"
+    assert verdict({"malicious": 0, "undetected": 70}) == "CLEAN"
+    assert verdict({"malicious": 1, "undetected": 69}, ["Trapmine"]) == "WARN"
+    assert verdict({"malicious": 1, "undetected": 69}, ["Microsoft"]) == "FLAGGED"
+    assert verdict({"malicious": 1, "suspicious": 1, "undetected": 68}, ["A", "B"]) == "FLAGGED"
+    print("selftest ok")
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(selftest() if sys.argv[1:] == ["--selftest"] else main(sys.argv[1:]))

@@ -109,15 +109,18 @@ tccutil reset Accessibility net.tether.quick
 then quit and reopen the app and allow it once more (or remove the entries with − in System
 Settings and add the apps again).
 
-**Stable signature (from 0.5.3, free):** CI signs both apps with one self-signed code-signing
-certificate (`Tether Code Signing`) when the repository secrets `MACOS_SIGNING_P12` (base64 of the
-.p12) and `MACOS_SIGNING_PASSWORD` exist. The designated requirement then names that certificate
+**Stable signature (from 0.5.3, free):** the Mac build runner signs both release apps with one
+self-signed code-signing certificate (`Tether Code Signing`, SHA-1 `BCF53642…FB33`, see
+[code-signing.md](code-signing.md#status-the-two-certificates)). CI does the same only when the
+repository secrets `MACOS_SIGNING_P12` (base64 of that .p12) and `MACOS_SIGNING_PASSWORD` exist;
+its builds are not released. The designated requirement then names that certificate
 instead of one build's hash, so the permissions survive updates (one last re-grant when moving from
 an ad-hoc build). Gatekeeper still needs **Open Anyway** once (no Apple notarization), as before.
 The smoke test prints each app's signature and fails when the certificate was expected but not
-used. Without the secrets CI signs ad-hoc as before. The certificate and its key live only in the
-secrets and in the admin's own backup (not in the repository); renewing it means one more re-grant
-on every Mac. A Developer ID identity (`APPLE_SIGNING_IDENTITY` secret) takes precedence.
+used. Without the secrets CI signs ad-hoc as before. The key lives only on the admin's PC
+(`C:\vms\macsign`, sent per job to the build runner) and in the admin's own backup, not in the
+repository; the public certificate is `certs/tether-codesign-macos.cer`. Renewing it means one more
+re-grant on every Mac. A Developer ID identity (`APPLE_SIGNING_IDENTITY` secret) takes precedence.
 
 What the apps do about it (0.5.4):
 

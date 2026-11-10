@@ -35,7 +35,7 @@ async function until(fn, timeout = 30000, every = 100) {
 const kill = (pid) => { try { execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" }); } catch {} };
 
 mkdirSync(join(work, "a"));
-const relay = spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, `${BIN}/tether-api`, "--data", wslPath(join(work, "a")), "--listen", "127.0.0.1:22170"], { stdio: "ignore" });
+const relay = spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, "RELAY_HOST=127.0.0.1,localhost", `${BIN}/tether-api`, "--data", wslPath(join(work, "a")), "--listen", "127.0.0.1:22170"], { stdio: "ignore" });
 // Relay B: accepts the connection, reads the request, never answers.
 const held = [];
 const dead = createServer((s) => { held.push(s); s.on("error", () => {}); });

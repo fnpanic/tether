@@ -66,12 +66,15 @@ export function DownloadPage() {
   };
 
   const publish = async (skip: string[]): Promise<RelayResult[]> => {
-    const h = await pageHtml(settings, state.servers, invoke);
+    // Relays left out are not read either (as after a release, Releases.tsx).
+    const h = await pageHtml(settings, state.servers, invoke, skip);
     setHtml(h);
     const r = await invoke<RelayResult[]>("page_publish", { html: h, skip });
+    // Saved also when only some relays took it: the page they serve is rebuilt from these settings.
     await api.saveSettings(settings);
     await reload();
-    toast("Download page published");
+    const done = r.filter((x) => x.ok).length;
+    toast(done === r.length ? "Download page published" : `Download page published on ${done} of ${r.length} relays only`);
     return r;
   };
 
@@ -168,6 +171,7 @@ export function DownloadPage() {
               <Label text="Template" hint="Every file you choose is kept; pick an earlier one to go back, or delete versions you no longer need.">
                 <div className="flex items-center gap-2">
                 <Select
+                  aria-label="Template"
                   className="min-w-0 flex-1"
                   value={template ?? ""}
                   onChange={(e) => {

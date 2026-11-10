@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { AlertCircle, Download, X } from "lucide-react";
 import { inTauri, invoke } from "../lib/ipc";
 import { errorText } from "../lib/policy";
-import { Button, IconButton } from "./ui";
+import { Button, IconButton, Modal } from "./ui";
 
 export interface UpdateStatus {
   current: string;
@@ -156,9 +156,10 @@ export function UpdateCard() {
   );
 
   return up.mandatory ? (
-    <div className="animate-fade fixed inset-0 z-50 grid place-items-center bg-black/40" role="alertdialog" aria-modal aria-label={title}>
-      <div className="animate-rise w-[420px] max-w-[92vw] rounded-2xl border border-hairline bg-tile p-8 shadow-float">{body}</div>
-    </div>
+    // No onClose: it stays until the update is installed.
+    <Modal alert label={title}>
+      {body}
+    </Modal>
   ) : (
     <div className="animate-rise fixed bottom-6 right-6 z-40 w-[360px] rounded-2xl border border-hairline bg-tile p-6 shadow-float" role="dialog" aria-label={title}>
       {body}

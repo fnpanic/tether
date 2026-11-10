@@ -21,10 +21,31 @@ fn relay_host() -> &'static str {
 
 /// Proxy without credentials.
 fn proxy_shown() -> Option<String> {
-    let mut u = url::Url::parse(&policy::proxy_url()?).ok()?;
-    let _ = u.set_password(None);
-    let _ = u.set_username("");
-    Some(u.to_string())
+    Some(without_credentials(&policy::proxy_url()?))
+}
+
+/// A URL without `user:pass@`, for logs and the diagnostics page (the logs go into support bundles).
+pub fn without_credentials(url: &str) -> String {
+    // `user:pass@host:port` alone would parse as scheme `user`.
+    match url::Url::parse(&if url.contains("://") { url.to_owned() } else { format!("http://{url}") }) {
+        Ok(mut u) => {
+            let _ = u.set_password(None);
+            let _ = u.set_username("");
+            u.to_string()
+        }
+        // Unparsable: nothing of it is safe to show.
+        Err(_) => "(unreadable proxy URL)".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn proxy_credentials_never_reach_the_log() {
+        assert_eq!(super::without_credentials("http://user:secret@proxy.corp:8080"), "http://proxy.corp:8080/");
+        assert_eq!(super::without_credentials("socks5://u:p@10.0.0.1:1080"), "socks5://10.0.0.1:1080");
+        assert!(!super::without_credentials("user:secret@proxy.corp:8080").contains("secret"));
+    }
 }
 
 fn dns() -> Value {

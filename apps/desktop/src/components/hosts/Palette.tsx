@@ -122,7 +122,7 @@ export function Palette({ hosts, commands, onClose, onHost }: { hosts: Host[]; c
             </div>
           ))}
         </div>
-        <div className="flex shrink-0 items-center gap-3 border-t border-hairline px-4 py-2 text-footnote text-faint">
+        <div className="flex shrink-0 items-center gap-3 border-t border-hairline px-4 py-2 text-footnote text-muted">
           <span className="flex items-center gap-1">
             <Kbd>↑</Kbd>
             <Kbd>↓</Kbd> move

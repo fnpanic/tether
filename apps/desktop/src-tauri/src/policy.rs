@@ -145,12 +145,50 @@ pub fn state_json() -> Value {
     serde_json::to_value(eff).unwrap_or_default()
 }
 
+/// Core option the main UI publishes its install uuid in: options live in the server process
+/// (IPC), so the Windows service's `--server` (LocalSystem, its own config dir) reads it there.
+const UUID_OPTION: &str = "tether-install-uuid";
+
+fn valid_uuid(s: &str) -> bool {
+    (8..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// A root process resolves policy with the uuid the UI published (the one heartbeated and assigned
+/// to groups in Tether Manage); before any UI ran, and everywhere else, with its own.
+fn pick_uuid(root: bool, published: &str, own: impl FnOnce() -> String) -> String {
+    if root && valid_uuid(published) {
+        published.to_owned()
+    } else {
+        own()
+    }
+}
+
 /// Install uuid (heartbeat `uuid`, group assignment): generated once per config dir.
 pub fn install_uuid() -> String {
+    pick_uuid(librustdesk::platform::is_root(), &Config::get_option(UUID_OPTION), own_uuid)
+}
+
+/// Main UI: hand the service this user's uuid. Only from the session the service serves, so two
+/// signed-in users do not overwrite each other in turn.
+fn publish_uuid() {
+    #[cfg(windows)]
+    {
+        use librustdesk::platform::{get_current_process_session_id, get_current_session_id, is_share_rdp};
+        if get_current_process_session_id() != Some(get_current_session_id(is_share_rdp())) {
+            return;
+        }
+    }
+    let own = own_uuid();
+    if librustdesk::ui::api::get_option(UUID_OPTION) != own {
+        librustdesk::ui::api::set_option(UUID_OPTION.to_owned(), own);
+    }
+}
+
+fn own_uuid() -> String {
     let path = Config::path("install-uuid");
     if let Ok(s) = std::fs::read_to_string(&path) {
         let s = s.trim();
-        if (8..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        if valid_uuid(s) {
             return s.to_owned();
         }
     }
@@ -192,7 +230,8 @@ pub(crate) fn write_atomic(path: &PathBuf, data: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp");
+    // The UI and `--server` processes write the same cache files: one temp file each.
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&tmp, data)?;
     std::fs::rename(&tmp, path)
 }
@@ -255,9 +294,16 @@ fn apply(bundle: Option<Bundle>) -> bool {
     // Servers first: apply_direct points STUN at every server.
     let servers_changed = apply_servers(&eff);
     crate::netpolicy::apply_direct(eff.get(DIRECT));
+    if changed && !eff.rejected.is_empty() {
+        log::warn!("policy rules not applied: {}", eff.rejected.join("; "));
+    }
     st.eff = eff;
     st.bundle = bundle;
     drop(st);
+    apply_incoming();
+    if changed {
+        crate::sink::enforce_permission_locks();
+    }
     if servers_changed {
         librustdesk::ui::api::restart_rendezvous();
     }
@@ -265,6 +311,34 @@ fn apply(bundle: Option<Bundle>) -> bool {
         crate::app::emit("policy", state_json());
     }
     changed
+}
+
+/// Why new incoming sessions are refused, as the text the viewer shows; None = accepted.
+pub(crate) fn incoming_refusal(incoming_on: bool, update_required: bool) -> Option<&'static str> {
+    if !incoming_on {
+        Some("This device does not accept incoming sessions (set by its organisation).")
+    } else if update_required {
+        Some("This device must be updated before it accepts sessions.")
+    } else {
+        None
+    }
+}
+
+/// Tells the core (`Connection::on_open`) whether to refuse new incoming sessions. Every role
+/// that can host the server runs this on each policy and update check; the Windows service has
+/// no release state of its own, so there `update::blocked` is the policy minimum version only.
+pub fn apply_incoming() {
+    // Only the main UI checks for releases; every other role takes over what it cached, each
+    // time: a halted release stops refusing, a newly required one starts.
+    if !IS_UI.load(Ordering::Relaxed) {
+        crate::update::reload();
+    }
+    let refusal = incoming_refusal(on("connect.incoming"), crate::update::blocked()).unwrap_or_default();
+    // Always present (empty = accept): a value stored in the config file never counts.
+    let old = OVERWRITE_SETTINGS.write().unwrap().insert("tether-refuse-incoming".to_owned(), refusal.to_owned());
+    if old.as_deref().unwrap_or_default() != refusal {
+        log::warn!("incoming sessions: {}", if refusal.is_empty() { "accepted again" } else { refusal });
+    }
 }
 
 /// Locked features → overwrite settings, unlocked ones → defaults. Floor options are never touched
@@ -409,7 +483,7 @@ pub(crate) fn api_via(
 ) -> Result<reqwest::blocking::Response, String> {
     if let Some(first) = dev_api() {
         let base = dev_apis().into_iter().find(|b| hosts.contains(b)).unwrap_or(first);
-        let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
+        let client = reqwest::blocking::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
         return build(&client, &base).send().map_err(|e| format!("offline: {e}"));
     }
     if hosts.is_empty() {
@@ -426,6 +500,8 @@ pub(crate) fn api_via(
             let mut b = reqwest::blocking::Client::builder()
                 .use_rustls_tls()
                 .no_proxy()
+                // Signed team requests and policy go to the relay itself, never where it points.
+                .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(6))
                 .timeout(Duration::from_secs(30))
                 .user_agent(concat!("Tether/", env!("CARGO_PKG_VERSION")));
@@ -575,8 +651,12 @@ fn interval() -> Duration {
     Duration::from_secs(get("policy.refresh-minutes").parse::<u64>().unwrap_or(15).max(1) * 60)
 }
 
+/// This is the main UI process (set by `start`).
+static IS_UI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Background refresh loop. `ui`: this is the main UI process (heartbeat, update checks).
 pub fn start(ui: bool) {
+    IS_UI.store(ui, Ordering::Relaxed);
     std::thread::spawn(move || loop {
         match refresh() {
             Ok(true) if ui => crate::update::on_policy_change(),
@@ -586,6 +666,9 @@ pub fn start(ui: bool) {
         // Dev builds without admin keys stay out of the production device list.
         if ui && ADMIN_KEYS.is_some_and(|k| !k.trim().is_empty()) {
             heartbeat();
+        }
+        if ui {
+            publish_uuid();
         }
         std::thread::sleep(interval());
     });
@@ -623,6 +706,9 @@ mod tests {
         }
         assert_eq!(o.get("enable-clipboard").map(String::as_str), Some("N"));
         drop(o);
+        for (k, v) in crate::security::ENFORCED_LOCAL {
+            assert_eq!(hbb_common::config::OVERWRITE_LOCAL_SETTINGS.read().unwrap().get(*k).map(String::as_str), Some(*v), "{k} weakened");
+        }
         // video.codec is a per-peer option: it must be forced where the viewer reads it.
         assert!(applied.contains(&"codec-preference".to_owned()));
         assert!(OVERWRITE_DISPLAY_SETTINGS.read().unwrap().contains_key("codec-preference"));
@@ -640,6 +726,41 @@ mod tests {
         assert!(!OVERWRITE_DISPLAY_SETTINGS.read().unwrap().contains_key("codec-preference"));
         assert!(OVERWRITE_SETTINGS.read().unwrap().get("enable-clipboard").is_none());
         crate::security::enforce();
+    }
+
+    #[test]
+    fn incoming_sessions_are_refused_by_policy_or_required_update() {
+        assert_eq!(incoming_refusal(true, false), None);
+        assert!(incoming_refusal(false, false).unwrap().contains("incoming"));
+        assert!(incoming_refusal(true, true).unwrap().contains("updated"));
+        assert!(incoming_refusal(false, true).unwrap().contains("incoming"));
+    }
+
+    #[test]
+    fn service_uses_the_uuid_the_ui_published() {
+        let own = || "own-uuid-1".to_owned();
+        assert_eq!(pick_uuid(true, "ui-uuid-12", own), "ui-uuid-12");
+        // No UI ran yet, or a damaged value: the service's own.
+        assert_eq!(pick_uuid(true, "", own), "own-uuid-1");
+        assert_eq!(pick_uuid(true, "../x y", own), "own-uuid-1");
+        // A user process never takes it from the option.
+        assert_eq!(pick_uuid(false, "ui-uuid-12", own), "own-uuid-1");
+    }
+
+    #[test]
+    fn api_requests_do_not_follow_redirects() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _ = s.read(&mut [0u8; 4096]);
+            let _ = s.write_all(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:9/\r\nContent-Length: 0\r\n\r\n");
+        });
+        std::env::set_var("TETHER_DEV_API", format!("http://{addr}"));
+        let r = api_via(&[], |c, base| c.get(format!("{base}/api/team/me")));
+        std::env::remove_var("TETHER_DEV_API");
+        assert_eq!(r.unwrap().status().as_u16(), 307);
     }
 
     #[test]
@@ -711,8 +832,8 @@ mod tests {
              Generated from `tether_trust::policy::FEATURES` by `TETHER_WRITE_POLICY_DOC=1 cargo test policy_doc` \
              in `apps/desktop/src-tauri`; a test fails when a feature is missing here.\n\n\
              States per layer: `on` (user may change, `value` is the default), `off` (locked off), `locked` \
-             (locked to `value`), `hidden` (locked off and not shown). Layers, later wins: defaults < profile < \
-             group < machine policy (`HKLM\\SOFTWARE\\Policies\\Tether` REG_SZ `PolicyJson`, or \
+             (locked to `value`), `hidden` (locked off and not shown). Layers, later wins: defaults < profile < custom app < \
+             group < machine policy; a custom app's setting is ignored for a feature the profile locks (`HKLM\\SOFTWARE\\Policies\\Tether` REG_SZ `PolicyJson`, or \
              `/Library/Managed Preferences/net.tether.app.plist` key `PolicyJson`, both a `Layer` JSON such as \
              `{\"connect.outgoing\":{\"state\":\"off\"}}`). Core options in `FLOOR` (TLS, encryption, 443-only \
              networking, no silent recording) can never be set by policy.\n\n",

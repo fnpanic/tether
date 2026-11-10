@@ -10,11 +10,17 @@ env:
   TETHER_PUB_KEY: ${{ secrets.TETHER_PUB_KEY }}
   TETHER_ADMIN_PUB_KEY: ${{ secrets.TETHER_ADMIN_PUB_KEY }}
   TETHER_UPDATER_PUB_KEY: ${{ secrets.TETHER_UPDATER_PUB_KEY }}
-  SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
-  WINDOWS_SIGNING_P12: ${{ secrets.WINDOWS_SIGNING_P12 }}
+  # Only whether the signing secrets exist (for `if:`); the secrets themselves go to the signing steps alone.
+  HAVE_SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+  HAVE_WINDOWS_P12: ${{ secrets.WINDOWS_SIGNING_P12 != '' }}
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    # actions: read is for SignPath's action, which fetches the uploaded artifact with the job token.
+    permissions: { contents: read, actions: read }
     strategy:
       fail-fast: false
       matrix:
@@ -40,14 +46,21 @@ jobs:
           cd vendor/rustdesk
           "$VCPKG_ROOT/vcpkg" install --triplet ${{ matrix.triplet }} --x-install-root="$VCPKG_ROOT/installed"
       - uses: Swatinem/rust-cache@v2
-        with: { workspaces: apps/desktop/src-tauri }
+        with:
+          workspaces: |
+            apps/desktop/src-tauri
+            apps/quick/src-tauri
       - name: UI checks
         working-directory: apps/desktop
         run: npm ci && npx tsc --noEmit && npx vitest run
       - name: Rust tests
         working-directory: apps/desktop/src-tauri
         shell: bash
-        run: cargo test --target ${{ matrix.target }} security
+        run: cargo test --target ${{ matrix.target }}
+      - name: Rust tests (TetherQS)
+        working-directory: apps/quick/src-tauri
+        shell: bash
+        run: cargo test --target ${{ matrix.target }}
       - name: Bundle
         working-directory: apps/desktop
         shell: bash
@@ -56,7 +69,7 @@ jobs:
       # Gives a stable publisher identity and full trust on fleets that deploy the .cer (GPO/Intune);
       # inert without the secret. Superseded by the SignPath step below once that is approved.
       - name: Sign (self-signed)
-        if: env.WINDOWS_SIGNING_P12 != '' && github.event_name != 'pull_request'
+        if: env.HAVE_WINDOWS_P12 == 'true' && github.event_name != 'pull_request'
         shell: pwsh
         env:
           P12: ${{ secrets.WINDOWS_SIGNING_P12 }}
@@ -79,7 +92,7 @@ jobs:
       # Free Authenticode signing by SignPath Foundation (docs/code-signing.md). Inert until the
       # project is accepted and the secret SIGNPATH_API_TOKEN and the repo variables exist.
       - name: Sign (SignPath)
-        if: env.SIGNPATH_API_TOKEN != '' && github.event_name != 'pull_request'
+        if: env.HAVE_SIGNPATH == 'true' && github.event_name != 'pull_request'
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -93,6 +106,23 @@ jobs:
         with:
           name: tether-${{ matrix.target }}-signed
           path: signed/
+
+  # Tether Manage: its own tests only (no vendor sources, no bundle; it is built on the maintainer's PC).
+  manage:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: apps/manage/package-lock.json }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: apps/manage/src-tauri }
+      - name: UI tests
+        working-directory: apps/manage
+        run: npm ci && npm test
+      - name: Rust tests
+        working-directory: apps/manage/src-tauri
+        run: cargo test
 
   # Unsigned universal build (Apple silicon + Intel), the same script as on a developer Mac.
   macos:

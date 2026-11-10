@@ -125,14 +125,21 @@ fn open(raw: &[u8], keys: &[VerifyingKey]) -> Result<Bundle, String> {
     Bundle::from_json(&envelope::open_json(raw, keys)?)
 }
 
-/// A fetched document is accepted only if valid and not older than the last accepted serial.
-/// `Ok(None)`: same serial, nothing to do.
-fn accept(raw: &[u8], keys: &[VerifyingKey], last_serial: u64) -> Result<Option<Bundle>, String> {
+/// A fetched document is accepted only if valid and not older than the applied serial and the
+/// `floor` (the highest serial ever accepted). `Ok(None)`: the applied serial, nothing to do.
+fn accept(raw: &[u8], keys: &[VerifyingKey], applied: u64, floor: u64) -> Result<Option<Bundle>, String> {
     let b = open(raw, keys)?;
-    if b.serial < last_serial {
-        return Err(format!("policy serial {} is older than {last_serial}", b.serial));
+    let last = applied.max(floor);
+    if b.serial < last {
+        return Err(format!("policy serial {} is older than {last}", b.serial));
     }
-    Ok((b.serial > last_serial).then_some(b))
+    Ok((b.serial != applied).then_some(b))
+}
+
+/// Highest policy serial ever accepted, kept beside the cache (as the technician app does): with
+/// `policy.json` missing or replaced, an older signed policy still does not come back.
+fn serial_floor() -> u64 {
+    std::fs::read_to_string(Config::path("policy-serial")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
 }
 
 /// Stable per-install id for heartbeat and group assignment.
@@ -148,11 +155,17 @@ pub fn device_uuid() -> String {
 
 fn set(bundle: Option<&Bundle>) {
     let eff = resolved(bundle, &device_uuid());
+    if !eff.rejected.is_empty() {
+        hbb_common::log::warn!("policy {}: rules not applied: {}", eff.serial, eff.rejected.join("; "));
+    }
     apply_core(&eff);
+    // Also after start: the admin's wording arrives with the first fetch.
+    librustdesk::ui::cm::set_record_consent_text(eff.get("recording.consent-text").to_owned());
     // Servers first: apply_direct points STUN at every server.
     let servers_changed = apply_servers(&eff);
     crate::netpolicy::apply_direct(eff.get(DIRECT));
     *EFFECTIVE.write().unwrap() = Some(eff);
+    crate::commands::revoke_denied(&current());
     if servers_changed {
         librustdesk::ui::api::restart_rendezvous();
     }
@@ -222,7 +235,8 @@ pub fn load_cached() {
     apply_server_keys(&trusted_keys());
     let cached = std::fs::read(Config::path("policy.json"))
         .ok()
-        .and_then(|raw| open(&raw, &trusted_keys()).ok());
+        .and_then(|raw| open(&raw, &trusted_keys()).ok())
+        .filter(|b| b.serial >= serial_floor());
     set(cached.as_ref());
 }
 
@@ -245,11 +259,15 @@ fn fetch(keys: &[VerifyingKey]) -> Result<bool, String> {
         s => return Err(format!("policy fetch: HTTP {s}")),
     }
     let raw = tether_trust::read_limited(resp, MAX_DOC).map_err(|e| format!("policy document: {e}"))?;
-    let Some(b) = accept(&raw, keys, serial)? else { return Ok(false) };
+    let Some(b) = accept(&raw, keys, serial, serial_floor())? else { return Ok(false) };
     let path = Config::path("policy.json");
     let tmp = path.with_extension("json.tmp");
+    // The floor only after the cache: a floor above the cached policy would drop that cache at
+    // the next offline start.
     if std::fs::write(&tmp, &raw).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
         hbb_common::log::warn!("could not cache policy");
+    } else if tether_trust::write_atomic(&Config::path("policy-serial"), b.serial.to_string().as_bytes()).is_err() {
+        hbb_common::log::warn!("could not store the policy serial");
     }
     hbb_common::log::info!("policy serial {} applied", b.serial);
     set(Some(&b));
@@ -344,11 +362,15 @@ mod tests {
     fn accepts_newer_rejects_older_and_untrusted() {
         let k = tether_trust::generate_key();
         let keys = [k.verifying_key()];
-        assert!(accept(&doc(5, &k, ""), &keys, 3).unwrap().is_some());
-        assert!(accept(&doc(5, &k, ""), &keys, 5).unwrap().is_none());
-        assert!(accept(&doc(2, &k, ""), &keys, 5).is_err());
+        assert!(accept(&doc(5, &k, ""), &keys, 3, 0).unwrap().is_some());
+        assert!(accept(&doc(5, &k, ""), &keys, 5, 5).unwrap().is_none());
+        assert!(accept(&doc(2, &k, ""), &keys, 5, 0).is_err());
         let other = tether_trust::generate_key();
-        assert!(accept(&doc(9, &other, ""), &keys, 0).is_err());
+        assert!(accept(&doc(9, &other, ""), &keys, 0, 0).is_err());
+        // Cache gone (nothing applied): the floor still refuses an older policy and lets the
+        // last accepted one back in.
+        assert!(accept(&doc(4, &k, ""), &keys, 0, 5).is_err());
+        assert!(accept(&doc(5, &k, ""), &keys, 0, 5).unwrap().is_some());
     }
 
     #[test]

@@ -1,5 +1,12 @@
 ; Tether NSIS installer hooks (Tauri bundler). Runs elevated (installMode = perMachine).
 
+; System tools by full path: a bare name is looked up in the installer's own folder first, so a
+; file planted beside the downloaded setup exe would run elevated. The installer is a 32-bit
+; process: $SYSDIR is the system folder it sees (SysWOW64 on 64-bit Windows), which has all three.
+!define TETHER_SC '"$SYSDIR\sc.exe"'
+!define TETHER_NETSH '"$SYSDIR\netsh.exe"'
+!define TETHER_POWERSHELL '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"'
+
 ; "1" when the installer closed a running Tether main window/tray process (POSTINSTALL restarts it).
 Var TetherRelaunch
 
@@ -8,8 +15,8 @@ Var TetherRelaunch
 ; children), then every other tether.exe from this folder (main window, tray, session viewers),
 ; waiting until none is left. Prints 1 if a main window/tray process (no arguments) was running.
 !macro TETHER_STOP_ALL
-  nsExec::Exec 'sc.exe stop Tether'
-  nsExec::ExecToStack `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$exe = '$INSTDIR\tether.exe'; $$s = Get-Service Tether -ErrorAction SilentlyContinue; if ($$s -and $$s.Status -ne 'Stopped') { try { $$s.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) } catch {} }; $$ui = 0; for ($$i = 0; $$i -lt 50; $$i++) { $$p = @(Get-CimInstance Win32_Process -Filter 'Name=''tether.exe''' | Where-Object { $$_.ExecutablePath -eq $$exe }); if ($$p.Count -eq 0) { break }; foreach ($$x in $$p) { if ($$x.CommandLine -match '\.exe.?\s*$$') { $$ui = 1 }; Stop-Process -Id $$x.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 200 }; Write-Output $$ui"`
+  nsExec::Exec '${TETHER_SC} stop Tether'
+  nsExec::ExecToStack `${TETHER_POWERSHELL} -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$exe = '$INSTDIR\tether.exe'; $$s = Get-Service Tether -ErrorAction SilentlyContinue; if ($$s -and $$s.Status -ne 'Stopped') { try { $$s.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) } catch {} }; $$ui = 0; for ($$i = 0; $$i -lt 50; $$i++) { $$p = @(Get-CimInstance Win32_Process -Filter 'Name=''tether.exe''' | Where-Object { $$_.ExecutablePath -eq $$exe }); if ($$p.Count -eq 0) { break }; foreach ($$x in $$p) { if ($$x.CommandLine -match '\.exe.?\s*$$') { $$ui = 1 }; Stop-Process -Id $$x.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 200 }; Write-Output $$ui"`
   Pop $0
   Pop $1
   ; Runs before the old uninstaller and again in PREINSTALL: only ever raise the relaunch flag.
@@ -25,17 +32,17 @@ Var TetherRelaunch
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
-  nsExec::ExecToStack 'sc.exe query Tether'
+  nsExec::ExecToStack '${TETHER_SC} query Tether'
   Pop $0
   Pop $1
   StrCmp $0 "0" 0 +2
-    nsExec::Exec 'sc.exe start Tether'
+    nsExec::Exec '${TETHER_SC} start Tether'
   ; Direct LAN connections (policy network.direct): Tether listens on TCP 21118 and answers the
   ; LAN lookup on UDP 21119, from the local subnet only. The app listens only while this rule
   ; exists (netpolicy.rs), so it never raises a firewall prompt. Replaces older versions' rules.
-  nsExec::Exec 'netsh advfirewall firewall delete rule name="Tether"'
-  nsExec::Exec 'netsh advfirewall firewall add rule name="Tether" dir=in action=allow program="$INSTDIR\${MAINBINARYNAME}.exe" protocol=TCP localport=21118 remoteip=localsubnet profile=any enable=yes'
-  nsExec::Exec 'netsh advfirewall firewall add rule name="Tether" dir=in action=allow program="$INSTDIR\${MAINBINARYNAME}.exe" protocol=UDP localport=21119 remoteip=localsubnet profile=any enable=yes'
+  nsExec::Exec '${TETHER_NETSH} advfirewall firewall delete rule name="Tether"'
+  nsExec::Exec '${TETHER_NETSH} advfirewall firewall add rule name="Tether" dir=in action=allow program="$INSTDIR\${MAINBINARYNAME}.exe" protocol=TCP localport=21118 remoteip=localsubnet profile=any enable=yes'
+  nsExec::Exec '${TETHER_NETSH} advfirewall firewall add rule name="Tether" dir=in action=allow program="$INSTDIR\${MAINBINARYNAME}.exe" protocol=UDP localport=21119 remoteip=localsubnet profile=any enable=yes'
   ; Reopen Tether for the signed-in user (unelevated, like "Run Tether" on the finish page) if we
   ; closed it. With /R (in-app update) the bundler restarts it itself.
   ${If} $TetherRelaunch == "1"
@@ -49,11 +56,28 @@ Var TetherRelaunch
 
 !macro NSIS_HOOK_PREUNINSTALL
   ; Stop and remove the background service, only if unattended access was installed.
-  nsExec::ExecToStack 'sc.exe query Tether'
+  nsExec::ExecToStack '${TETHER_SC} query Tether'
   Pop $0
   Pop $1
   StrCmp $0 "0" 0 +2
     nsExec::Exec '"$INSTDIR\tether.exe" --uninstall-service'
-  nsExec::Exec 'netsh advfirewall firewall delete rule name="Tether"'
+  nsExec::Exec '${TETHER_NETSH} advfirewall firewall delete rule name="Tether"'
   !insertmacro TETHER_STOP_ALL
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  ; "Delete the application data": Tether keeps its data (device key, password hash, remembered
+  ; peer passwords, team key, policy cache, logs) in %APPDATA%\Tether, not under the bundle id the
+  ; bundler removes, and the service keeps a copy in the LocalService profile.
+  ${If} $DeleteAppDataCheckboxState = 1
+  ${AndIf} $UpdateMode <> 1
+    RmDir /r "$WINDIR\ServiceProfiles\LocalService\AppData\Roaming\Tether"
+    ; The elevated uninstaller's profile (the admin who confirmed UAC) ...
+    SetShellVarContext current
+    RmDir /r "$APPDATA\Tether"
+    ; ... and the signed-in user's, as that user (RunAsUser: unelevated, %APPDATA% is theirs).
+    ; shortcut: other users' profiles on this PC keep their %APPDATA%\Tether; walk
+    ; HKLM\...\ProfileList when shared PCs must be wiped by one uninstall.
+    nsis_tauri_utils::RunAsUser "$SYSDIR\cmd.exe" '/c rd /s /q "%APPDATA%\Tether"'
+  ${EndIf}
 !macroend

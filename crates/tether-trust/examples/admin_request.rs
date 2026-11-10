@@ -6,7 +6,8 @@
 //! the relay's `ADMIN_PUB_KEY`.
 //! `cargo run --example admin_request -- <keyfile> <METHOD> <path> [<body>]` prints the header value
 //! for exactly that request (sign it right before sending: the relay accepts it for a few minutes,
-//! once).
+//! once). With `TETHER_RELAY=<the relay's base URL or host name>` it is a v2 signature, valid at
+//! that relay only (which needs `RELAY_HOST`); without, the old v1 form.
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -28,7 +29,11 @@ fn main() {
             let path = args.get(2).expect("path");
             let body = args.get(3).map(String::as_bytes).unwrap_or_default();
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-            println!("{}", tether_trust::reqauth::sign_request(&key, method, path, body, now));
+            let sig = match std::env::var("TETHER_RELAY") {
+                Ok(relay) => tether_trust::reqauth::sign_request_for(&key, &relay, method, path, body, now),
+                Err(_) => tether_trust::reqauth::sign_request(&key, method, path, body, now),
+            };
+            println!("{sig}");
         }
         None => {
             eprintln!("usage: admin_request <keyfile> --pub | <METHOD> <path> [<body>]");

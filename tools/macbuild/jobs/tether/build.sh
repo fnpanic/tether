@@ -5,7 +5,8 @@
 # which the runner starts once the screen is unlocked. Sent by submit.sh; see docs/mac-build-runner.md.
 #
 # work/: build.sh swap.sh src.tgz        secrets/: keys.env cs.p12 p12.pass
-# $JOB_CACHE keeps src/ (with .tools/ and Cargo's target/) between builds, so builds are incremental.
+# $JOB_CACHE keeps src/.tools/ and Cargo's target/ folders between builds, so builds are incremental;
+# every other file in src/ comes from this job's src.tgz.
 set -uo pipefail
 B=$JOB_CACHE
 S=$JOB_SECRETS
@@ -19,7 +20,10 @@ if [ -e "$kc" ]; then
   security delete-keychain "$kc" 2>/dev/null || rm -f "$kc"
   log "removed a stale temporary keychain"
 fi
-rm -rf "$B/src/vendor" && tar -xzf "$JOB_WORK/src.tgz" -C "$B/src" || fail "untar"
+# Only the build caches survive: a file deleted from git (say a Tauri capability) must not be built in.
+rm -rf "$B/src/vendor" &&
+  (cd "$B/src" && find . -mindepth 1 \( -path ./.tools -o -name target \) -prune -o \( -type f -o -type l \) -exec rm -f {} +) &&
+  tar -xzf "$JOB_WORK/src.tgz" -C "$B/src" || fail "untar"
 rm -f "$JOB_WORK/src.tgz"
 log "version $(grep -m1 '"version"' "$B/src/apps/desktop/src-tauri/tauri.conf.json")"
 

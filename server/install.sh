@@ -66,11 +66,6 @@ if ! /usr/local/bin/caddy version 2>/dev/null | grep -q "^v$CADDY_VERSION "; the
   rm -rf "$tmp"
 fi
 
-# Relay list: this relay first (checked locally), then the others, e.g.
-#   RELAY_SERVERS="a.example|http://127.0.0.1:21121/readyz,b.example|https://b.example/readyz/relay"
-printf 'RELAY_HOST=%s\nRELAY_SERVERS=%s\nPROXY=%s\n' "$HOST" "${RELAY_SERVERS:-$HOST|http://127.0.0.1:21121/readyz}" "$PROXY" > /etc/tether/server.env
-install -m 0644 "$HERE/caddy/Caddyfile" /etc/tether/Caddyfile
-
 if [ "$PROXY" = nginx ]; then
   # nginx mainline + its ACME module from nginx.org (signed packages; the OS's automatic updates
   # keep them patched). The packaged nginx.service stays off: tether-https runs nginx.
@@ -108,12 +103,23 @@ if [ "$PROXY" = nginx ]; then
   case "$resolver" in *:*) resolver="[$resolver]" ;; esac
   sed -e "s|@RELAY_HOST@|$HOST|g" -e "s|@RESOLVER@|${resolver:-127.0.0.53}|g" "$HERE/nginx/nginx.conf" > /etc/tether/nginx.conf.new
   chmod 0644 /etc/tether/nginx.conf.new
-  if ! /usr/sbin/nginx -e stderr -t -q -c /etc/tether/nginx.conf.new; then
+  # The test needs the pid directory, which exists only while the nginx unit runs (RuntimeDirectory).
+  run_made=""
+  [ -d /run/tether-https ] || { install -d -o tether-https -g tether-https -m 0755 /run/tether-https; run_made=1; }
+  ok=1; /usr/sbin/nginx -e stderr -t -q -c /etc/tether/nginx.conf.new || ok=""
+  [ -z "$run_made" ] || rm -rf /run/tether-https
+  if [ -z "$ok" ]; then
     rm -f /etc/tether/nginx.conf.new
-    echo "nginx config invalid: nothing changed" >&2; exit 1
+    echo "nginx config invalid: /etc/tether and the running services are unchanged (the new binaries and the nginx packages are installed, nothing was restarted)" >&2; exit 1
   fi
   mv /etc/tether/nginx.conf.new /etc/tether/nginx.conf
 fi
+# Only now, with a front-end config that passed: server.env names the proxy the next run keeps.
+# Relay list: this relay first (checked locally), then the others, e.g.
+#   RELAY_SERVERS="a.example|http://127.0.0.1:21121/readyz,b.example|https://b.example/readyz/relay"
+# RELAY_HOST is also the name tether-api accepts signed requests for (tether-api.service reads this file).
+printf 'RELAY_HOST=%s\nRELAY_SERVERS=%s\nPROXY=%s\n' "$HOST" "${RELAY_SERVERS:-$HOST|http://127.0.0.1:21121/readyz}" "$PROXY" > /etc/tether/server.env
+install -m 0644 "$HERE/caddy/Caddyfile" /etc/tether/Caddyfile
 if [ -n "${ADMIN_PUB_KEY:-}" ]; then
   echo "ADMIN_PUB_KEY=$ADMIN_PUB_KEY" > /etc/tether/api.env
 elif [ ! -f /etc/tether/api.env ]; then
@@ -181,7 +187,9 @@ elif command -v iptables >/dev/null && iptables -S INPUT | grep -q -- "-j REJECT
   # Raw iptables, as on Oracle Cloud's Ubuntu images (INPUT rejects everything except SSH).
   for rule in "-p tcp -m multiport --dports 21115:21117" "-p udp --dport 21116" "-p tcp --dport 443" "-p tcp --dport 80"; do
     # shellcheck disable=SC2086
-    iptables -C INPUT $rule -m state --state NEW -j ACCEPT 2>/dev/null || iptables -I INPUT 5 $rule -m state --state NEW -j ACCEPT
+    # Before the first REJECT, wherever this image has it.
+    iptables -C INPUT $rule -m state --state NEW -j ACCEPT 2>/dev/null ||
+      iptables -I INPUT "$(iptables -L INPUT -n --line-numbers | awk '$2 == "REJECT" {print $1; exit}')" $rule -m state --state NEW -j ACCEPT
   done
   if command -v netfilter-persistent >/dev/null; then
     netfilter-persistent save
@@ -189,6 +197,14 @@ elif command -v iptables >/dev/null && iptables -S INPUT | grep -q -- "-j REJECT
     echo "note: install iptables-persistent to keep the firewall rules across reboots" >&2
   fi
 fi
+
+# hbbs and hbbr exit when they cannot read the key pair (e.g. one restored as root).
+for f in /var/lib/tether/id_ed25519*; do
+  if [ -e "$f" ]; then
+    chown tether:tether "$f"
+    case "$f" in *.pub) ;; *) chmod 0600 "$f" ;; esac
+  fi
+done
 
 systemctl daemon-reload
 systemctl enable tether-hbbr tether-hbbs tether-api tether-https
@@ -203,7 +219,24 @@ fi
 
 # hbbs creates the key pair on first start.
 for _ in $(seq 1 40); do [ -s /var/lib/tether/id_ed25519.pub ] && break; sleep 0.5; done
-systemctl --no-pager --lines=0 status tether-hbbs tether-hbbr tether-api tether-https | grep -E "Active:" || true
+# All four must stay up: a service that exits at once is restarted every 3 s and looks active for
+# a moment, so they must be active 4 seconds in a row (within 30 s: hbbr may start before hbbs
+# made the key pair).
+up=0
+for _ in $(seq 1 30); do
+  sleep 1
+  down=""
+  for u in tether-hbbs tether-hbbr tether-api tether-https; do
+    systemctl is-active --quiet "$u" || down="$u"
+  done
+  if [ -z "$down" ]; then up=$((up + 1)); else up=0; fi
+  [ "$up" -lt 4 ] || break
+done
+if [ "$up" -lt 4 ]; then
+  systemctl --no-pager --lines=10 status "$down" >&2 || true
+  echo "ERROR: $down is not running: the relay is NOT up (journalctl -u $down)" >&2
+  exit 1
+fi
 echo
 echo "Tether relay is running on $HOST"
 echo "Cloud firewall (e.g. Oracle VCN security list) must allow: TCP 443, TCP 80, and for stock RustDesk clients TCP 21115-21117, UDP 21116"

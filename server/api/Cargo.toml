@@ -17,6 +17,8 @@ lto = true
 codegen-units = 1
 strip = true
 
-# tiny_http with a bounded body drain (patched/tiny_http/src/util/equal_reader.rs).
+# tiny_http with a bounded body drain (patched/tiny_http/src/util/equal_reader.rs), a read
+# timeout on accepted connections (src/lib.rs), `Connection: close` let through (src/response.rs)
+# and no connection left in the thread pool's queue (src/util/task_pool.rs).
 [patch.crates-io]
 tiny_http = { path = "patched/tiny_http" }

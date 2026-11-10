@@ -58,3 +58,52 @@ describe("shared doc", () => {
     expect(d!.searches).toEqual([]);
   });
 });
+
+describe("team sync between two clients", () => {
+  // The relay: a client pulls, merges, and puts only when the merge differs from what it pulled (store.ts teamSync).
+  const relay = { doc: null as unknown, puts: 0 };
+  const client = (local: SharedDoc) => {
+    let base: SharedDoc | null = null;
+    return () => {
+      const remote = readShared(relay.doc);
+      const merged = merge3(base, local, remote);
+      if (JSON.stringify(merged) !== JSON.stringify(remote)) {
+        relay.doc = JSON.parse(JSON.stringify(merged));
+        relay.puts++;
+      }
+      base = local = merged;
+    };
+  };
+  it("stops writing once both have each other's additions (hosts with names as IDs, rules, searches, colours)", () => {
+    const a = client(doc({ zeta: { name: "Z" }, "99999999999": { tags: ["a"] } }, { tags: { site: { color: "red" } }, rules: [{ id: "ra", tag: "t", when: "x" }], searches: [{ id: "sa", name: "A", query: "a" }] }));
+    const b = client(doc({ alpha: { tags: ["b"] } }, { tags: { env: { color: "blue" } }, rules: [{ id: "rb", tag: "u", when: "y" }], searches: [{ id: "sb", name: "B", query: "b" }] }));
+    a();
+    b();
+    a();
+    expect(relay.puts).toBe(2);
+    for (let round = 0; round < 3; round++) {
+      a();
+      b();
+    }
+    expect(relay.puts).toBe(2);
+    expect(Object.keys((relay.doc as SharedDoc).hosts).sort()).toEqual(["99999999999", "alpha", "zeta"]);
+    expect((relay.doc as SharedDoc).rules.map((r) => r.id)).toEqual(["ra", "rb"]);
+  });
+});
+
+describe("a shared doc is limited like an import", () => {
+  it("drops over-long queries, unknown colours, invalid tags and __proto__ keys", () => {
+    const raw = JSON.parse(`{"hosts":{"__proto__":{"name":"x"},"1":{"name":"ok"}},"tags":{"__proto__":{"color":"red"},"Site A":{"color":"red"},"env":{"color":"javascript:1"}},
+      "rules":[{"id":"r1","tag":"T 1","when":"os:mac","off":true,"future":{"x":1}},{"id":"r0","tag":"t","when":""},{"id":"r2","tag":"t","when":"${"(".repeat(5000)}"},{"id":"r3","tag":"!!","when":"x"},{"id":"__proto__","tag":"t","when":"x"}],
+      "searches":[{"id":"s1","name":"n","query":"q"},{"id":"s2","name":"n","query":"${"(".repeat(1001)}"},{"id":"s3","name":"","query":"q"},{"id":"s4","name":"empty","query":""}]}`);
+    const d = readShared(raw)!;
+    expect(d.hosts).toEqual({ "1": { name: "ok" } });
+    expect(d.tags).toEqual({ "site-a": { color: "red" }, env: {} });
+    expect(Object.getPrototypeOf(d.tags)).toBe(Object.prototype);
+    // Fields of a newer app stay; an empty query is as valid here as in an import; a too long one is cut like there.
+    expect(d.rules).toEqual([{ id: "r1", tag: "t-1", when: "os:mac", off: true, future: { x: 1 } }, { id: "r0", tag: "t", when: "" }]);
+    expect(d.searches).toEqual([{ id: "s1", name: "n", query: "q" }, { id: "s2", name: "n", query: "(".repeat(1000) }, { id: "s4", name: "empty", query: "" }]);
+    expect(readShared({ tags: { a: { color: "red", icon: "x" }, b: { color: "nope", icon: "y" } } })!.tags).toEqual({ a: { icon: "x", color: "red" }, b: { icon: "y" } });
+    expect(readShared({ rules: Array.from({ length: 2000 }, (_, i) => ({ id: `r${i}`, tag: "t", when: "x" })) })!.rules).toHaveLength(500);
+  });
+});

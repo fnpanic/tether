@@ -144,7 +144,7 @@ fn refresh_system_proxy() {
     match detected {
         Some(url) => {
             if d.get("proxy-url") != Some(&url) {
-                hbb_common::log::info!("using system proxy {url}");
+                hbb_common::log::info!("using system proxy {}", crate::diag::without_credentials(&url));
             }
             d.insert("proxy-url".to_owned(), url);
         }

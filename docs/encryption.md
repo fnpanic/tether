@@ -62,7 +62,7 @@ sequenceDiagram
     H->>P: WSS /ws/id (TLS, WebPKI + OS roots)
     P->>S: WebSocket, X-Forwarded-For = peer IP
     H->>S: RegisterPk{id, uuid = machine uid, pk = Ed25519 public key}
-    S->>S: first time: store (id, uuid, pk, ip)<br/>later: refuse other uuid; refuse other pk from other IP
+    S->>S: first time: store (id, uuid, pk, ip)<br/>later: refuse other uuid; refuse other pk from other IP, and over UDP from any IP
     S-->>H: RegisterPkResponse OK
     loop heartbeat
         H->>S: RegisterPeer{id, serial}
@@ -79,8 +79,11 @@ sequenceDiagram
   chosen only for a domain name with an `https` `api-server`, which Tether forces for its own
   servers; an endpoint given as an IP address gets plain `ws://` (`hbb_common/src/websocket.rs:628-649`,
   [W4](#w4-plain-ws-for-ip-endpoints)).
-- hbbs accepts the first `RegisterPk` for an ID, then refuses a different `uuid`, and refuses a
-  different `pk` only when it also comes from a different IP (`rendezvous_server.rs:693-723`).
+- hbbs accepts the first `RegisterPk` for an ID, then refuses a different `uuid`. Over
+  TCP/WebSocket it refuses a different `pk` only when it also comes from a different IP (upstream
+  rule); over UDP, where the sender chooses the source address, it never changes a registered key
+  (`rendezvous_server.rs::register_pk`, test `udp_register_pk_cannot_replace_a_key`). Tether
+  clients register over the WebSocket; UDP serves stock RustDesk clients.
 - hbbs stores per peer: `id`, `uuid`, `pk`, creation time and an `info` JSON with the IP
   (`vendor/rustdesk-server/src/database.rs:74-84`, `peer.rs:93-111`), and logs id, address,
   uuid and key at info level on every key update (`peer.rs:102`). It sees every registration,
@@ -267,16 +270,28 @@ sequenceDiagram
 - **Unauthenticated connections** are closed after 180 s and limited to 64 at a time
   (`connection.rs:87-92`).
 
-**Ways in without the password, 2FA or Accept.** All are bearer secrets the viewer presents, not
+**Ways in without the password or Accept.** All are bearer secrets the viewer presents, not
 a viewer identity:
 
-- **Resume ticket:** a reconnect of an accepted remote session within 120 s that presents the
-  same session key and the 128-bit `companion_secret` of its `LoginRequest` is admitted without
-  password, 2FA or Accept (`is_resume_of_authed_session`, `connection.rs:5998-6008`;
-  `RESUME_WINDOW`, `connection.rs:8096-8114`; the branch at `connection.rs:3131-3136`).
+- **Resume ticket:** a remote connection that presents the same session key and the 128-bit
+  `companion_secret` of an accepted session's `LoginRequest` is admitted without password or
+  Accept (`resume_of_authed_session` in `connection.rs`, called from the login branch that also
+  handles the file-transfer companion). **2FA is not skipped:** the connection goes through
+  `send_logon_response_and_keep_alive`, which asks for the code where the host requires one.
+  - Valid while the session's connection runs, and for 120 s after it dropped (`RESUME_WINDOW`,
+    `ResumeTicket::valid`, `resume_ended`).
+  - When the new connection is authorised, a connection of the same session that still runs is
+    closed ("resumed on a newer connection", `resume_register`): a session never runs on two.
+  - Not after either side ended the session on purpose: Disconnect on the host
+    (`send_close_reason_no_retry`) and a close reason from the viewer (any but `kcp`) forget the
+    ticket (`resume_forget`).
+  - The resumed connection keeps the permissions the host user last set (`resume_set_perms`,
+    `apply_resume_perms`).
+  - A released (older) viewer that reloads its session window is asked again by a host with
+    this change.
 - **File-transfer companion:** a file-transfer connection with the same session key and
-  `companion_secret` as a running authorised remote session is admitted the same way
-  (`connection.rs:3127-3136, 5975-5996, 8073-8080`).
+  `companion_secret` as a running authorised remote session whose file permission is on is
+  admitted the same way (`is_file_transfer_of_authed_session`, `companion_register`).
 - **Trusted-device token:** after a correct permanent password, a valid token skips 2FA
   (`src/server/connection/trusted_devices.rs:9-35`).
 - **Recent session (upstream):** within 30 s of the last activity of an authenticated session with
@@ -396,19 +411,25 @@ keys are ephemeral), and recorded past sessions stay safe (forward secrecy).
 
 ### Related: replacing a host's key at hbbs without the server key
 
-hbbs accepts a `RegisterPk` that changes the key of an ID when it carries the ID's registered
-`uuid` and comes from the same IP as the current registration (`rendezvous_server.rs:693-723`,
-upstream rule). The `uuid` is the machine uid: hbbs, a TLS-inspecting proxy (it travels in
+hbbs accepts a `RegisterPk` over TCP/WebSocket that changes the key of an ID when it carries the
+ID's registered `uuid` and comes from the same IP as the current registration
+(`rendezvous_server.rs::register_pk`, upstream rule). Over UDP a registered key is never changed
+(next release): there the source address is the sender's choice, so "same IP" proved nothing. The `uuid` is the machine uid: hbbs, a TLS-inspecting proxy (it travels in
 `RegisterPk`) and readers of the audit log (`docs/api.md`, audit records carry it) can learn it,
 including a team member with the `audit` flag (the team device list itself carries the heartbeat's
 install uuid, not the machine uuid; [api.md](api.md)) and anyone who reads hbbs's log
-(`peer.rs:102`). All clients behind one NAT or one proxy share an IP as hbbs sees it. From the
+(`peer.rs::update_pk`). All clients behind one NAT or one proxy share an IP as hbbs sees it. From the
 code, such a party can make hbbs sign its own key for that ID: the real host's sessions then fail
 (its signature no longer matches), and a viewer that reaches the attacker's machine talks to the
 attacker, sees the attacker's screen and hands over a challenge response that can be attacked
-offline. **Untested, and probably short-lived:** the real host sends `RegisterPk` again on each
-WebSocket reconnect (comment at `rendezvous_server.rs:686-687`), from the same IP, which puts its
-own key back. See [W8](#w8-key-replacement-at-hbbs-via-registerpk).
+offline. It is not short-lived. While the attacker stays on the shared IP, the real host's next
+`RegisterPk` from that IP puts its own key back. But the attacker can register the new key again
+from its own IP (same uuid, same key: accepted, and the stored IP moves). From then on the real
+host's `RegisterPk` has another key **and** another IP, gets `UUID_MISMATCH`, and the host takes
+a new ID (`rendezvous_mediator.rs::handle_uuid_mismatch`); the attacker keeps the old one. Before
+the UDP fix the first step needed no shared IP: a UDP datagram with a forged source address was
+enough. The takeover over TCP/WebSocket is untested end to end. See
+[W8](#w8-key-replacement-at-hbbs-via-registerpk).
 
 ## 9. Who sees what
 
@@ -432,7 +453,8 @@ own key back. See [W8](#w8-key-replacement-at-hbbs-via-registerpk).
   `key_tests`.
 - Empirical: the inspecting-proxy test in [corporate-networks.md](corporate-networks.md).
 - Not covered by tests here: a live man-in-the-middle with the server key (section 8) and the
-  `RegisterPk` key replacement; both follow from reading the code.
+  `RegisterPk` key replacement over TCP/WebSocket; both follow from reading the code. The UDP
+  rule has a unit test (`udp_register_pk_cannot_replace_a_key` in `rendezvous_server.rs`).
 
 ## 11. Known weaknesses
 
@@ -468,7 +490,7 @@ refuses to write them unless policy allows `settings.server` (default N,
 them with `--option` (`src/core_main.rs:515-534`). Whoever sets them decides which key vouches for
 hosts.
 
-Status: fixed in the next release: while `settings.server` is off, policy blanks `key`, `custom-rendezvous-server` and `relay-server` on every apply (policy.rs `apply_core`), so values written earlier or by `--option` are not used; `id@server` targets other than `@public` are refused (`peer_target_refused` in client.rs).
+Status: fixed in the next release: while `settings.server` is off, policy blanks `key`, `custom-rendezvous-server` and `relay-server` on every apply (policy.rs `apply_core`), so values written earlier or by `--option` are not used; `id@server` targets other than `@public` are refused (`peer_target_refused` in client.rs). Also closed in Tether builds: upstream's custom-client routes, which set server and key from the exe file name or the environment variable `RUSTDESK_APPNAME` (`get_license_from_exe_name` in platform/windows.rs) or from `custom.txt` beside the exe (`load_custom_client` in common.rs).
 
 ### W4. Plain `ws://` for IP endpoints
 
@@ -506,10 +528,12 @@ Status: fixed in the next release: the viewer refuses address peers (IP or host:
 
 ### W8. Key replacement at hbbs via RegisterPk
 
-Same uuid from the same IP may replace an ID's key (`rendezvous_server.rs:693-723`). The uuid is
-not secret. Impact untested; the real host's next `RegisterPk` restores its key. Section 8.
+Same uuid from the same IP may replace an ID's key (`rendezvous_server.rs::register_pk`). The
+uuid is not secret, and over UDP the source IP could be forged. The real host gets its key back
+only while the attacker stays on the same IP: once the attacker registers the new key again from
+its own IP, the real host gets `UUID_MISMATCH` and takes a new ID. Section 8.
 
-Status: open (upstream rule).
+Status: UDP path fixed in the next release (a `RegisterPk` over UDP never changes a registered key; a stock RustDesk client that re-registers over UDP with a new key gets `UUID_MISMATCH` and a new ID); TCP/WebSocket from the same IP: open (upstream rule).
 
 ### W9. Unsigned update manifest
 
@@ -569,3 +593,53 @@ Audit posts are unauthenticated device telemetry ([SECURITY.md](../SECURITY.md#s
 anyone who reaches a relay can add records under any ID. Use them as a hint, not as evidence.
 
 Status: open — by design today.
+
+### W14. v1 request signatures are not bound to a relay
+
+A v1 `Tether-Sig` signs method, path, timestamp, nonce and body hash, but no relay name. Each
+relay keeps its own nonce cache, so whoever captures a signed admin or team request (a relay that
+received it, or a TLS-inspecting proxy) can replay it at another relay within ±300 s. v2 adds the
+relay's host name to the signed text (`tether-admin-v2`, `reqauth::sign_request_for`); a relay
+accepts v2 only for the names in its `RELAY_HOST` (`sig_relay` in `server/api/src/main.rs`).
+[api.md](api.md#admin-endpoints-signed-requests).
+
+Status: v2 in the next release (Tether Manage and the technician app sign v2); open while a relay accepts v1. Remedy: relays first (with `RELAY_HOST`), then the apps, then `TETHER_SIG_V1=off` in `api.env`.
+
+### W15. The recording upload token is public
+
+The upload token is part of the policy bundle, and `GET /api/policy` needs no authentication:
+anyone who reaches the relay can read it. It must therefore be write-only (PUT/create; no list,
+read or overwrite). [recording.md](recording.md).
+
+Status: open — by design today.
+
+### W16. Release upload slots are granted before the signature is checked
+
+The signature of a release upload covers the body, so tether-api can verify it only after the body
+arrived. The slot is granted on the header (present, timestamp within ±300 s of the upload's
+start). Made-up uploads with a slow body can hold the 4 release slots, about 55 min each, and
+block release uploads. Diagnostics uploads and all other requests are not affected (`shortcut:`
+note at `MAX_UPLOADS` in `server/api/src/main.rs`).
+
+Status: open.
+
+### W17. A forged UDP RegisterPk or RegisterPeer can move a host's address
+
+A forged UDP `RegisterPk` (an ID's uuid and its unchanged key) or `RegisterPeer` (from the host's
+IP) moves the address hbbs stores for a host registered over UDP until it registers again
+(`peer.rs::update_pk`; the key is not changed, W8). Hosts registered over TCP/WebSocket (all
+Tether hosts) are not affected while their connection is open: a datagram does not take the path
+of a host that has an entry in `TCP_PEERS` (`register_peer`, `register_pk` in
+`rendezvous_server.rs`).
+
+Status: fixed for TCP/WebSocket hosts in the next release; open for UDP hosts (stock clients).
+
+### W18. Mouse Keys and the On-Screen Keyboard pass the own-window guard
+
+The guard ([SECURITY.md](../SECURITY.md#tethers-own-windows-are-for-the-local-user-only-056))
+drops remote clicks over a Tether window and remote keys while a Tether window is in front. With
+Windows Mouse Keys on, a key press becomes a click at the pointer while another window is in
+front. Clicks on the On-Screen Keyboard, which is not a Tether window, type into a Tether window
+that has the focus.
+
+Status: open.

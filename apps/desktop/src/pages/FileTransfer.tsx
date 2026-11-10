@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowLeft, ArrowUpFromLine, CheckCircle2, File, Folder, FolderPlus, HardDrive, RefreshCw, Trash2, XCircle } from "lucide-react";
 import { formatId, invoke, subscribe, videoChannel } from "../lib/ipc";
-import { Button, IconButton, Logo, Modal, TitleBar } from "../components/ui";
+import { Button, IconButton, Logo, Modal, TextField, TitleBar } from "../components/ui";
+import { errorText } from "../lib/policy";
 import { clickSelect, emptySelection, moveSelect, selectAll } from "../lib/selection";
 import { passwordWhy, RESUME_GRACE_MS } from "../lib/login";
 
@@ -14,6 +15,15 @@ interface Entry {
 }
 
 const isDir = (e: Entry) => e.type === 0 || e.type === 1 || e.type === 2;
+
+/** The core's question before it writes over a file that exists (`override_file`). */
+interface Existing {
+  id: number;
+  file_num: number;
+  to: string;
+  is_upload: boolean;
+  is_identical: boolean;
+}
 
 interface Job {
   id: number;
@@ -63,7 +73,12 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
   const typed = useRef(false);
   const pwTimer = useRef(0);
   const [pw, setPw] = useState("");
+  const [remember, setRemember] = useState(false);
+  const [existing, setExisting] = useState<Existing[]>([]);
+  const [newFolder, setNewFolder] = useState<string | null>(null);
   const [waiting, setWaiting] = useState(false);
+  // The session could not start (policy, update required): no listing will come.
+  const [failed, setFailed] = useState(false);
   const [remoteSep, setRemoteSep] = useState("/");
   const localSep = navigator.userAgent.includes("Windows") ? "\\" : "/";
   const [local, setLocal] = useState<{ path: string; entries: Entry[] }>({ path: "", entries: [] });
@@ -80,13 +95,13 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
       const r = await invoke<{ path: string; entries: Entry[] }>("fs_local_dir", { path, hidden: false });
       setLocal({ path: r.path || path, entries: sortEntries(r.entries) });
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   }, []);
   const loadRemote = useCallback(
     (path: string) => {
       remotePathRef.current = path;
-      invoke("fs_remote_dir", { key, path, hidden: false }).catch((e) => setError(String(e)));
+      invoke("fs_remote_dir", { key, path, hidden: false }).catch((e) => setError(errorText(e)));
     },
     [key],
   );
@@ -116,7 +131,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
             const files: Entry[] = p.entries ?? [];
             Promise.all(files.map((f) => invoke("fs_remove", { key, id: p.id, path: join(dir, f.name, sep), isRemote: true, isDir: false })))
               .then(() => invoke("fs_remove_empty_dirs", { key, id: p.id, path: dir, isRemote: true }))
-              .catch((e) => setError(String(e)));
+              .catch((e) => setError(errorText(e)));
           } else if (p.id) setJobs((js) => js.map((j) => (j.id === p.id && p.total_size ? { ...j, total: p.total_size } : j)));
           else if (!p.is_local && !p.only_count) {
             remotePathRef.current = p.path;
@@ -132,10 +147,13 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           setLocal((l) => (loadLocal(l.path), l));
           break;
         case "job_error":
+          // No job: the remote refused to list a folder (e.g. Tether's own files there).
+          if (!p.id) setError(errorText(p.err));
           setJobs((js) => js.map((j) => (j.id === p.id ? { ...j, state: "error", err: p.err } : j)));
           break;
         case "override_file":
-          invoke("fs_override", { key, id: p.id, fileNum: p.file_num, needOverride: true, remember: true, isUpload: p.is_upload }).catch((e) => setError(String(e)));
+          // Never overwritten without asking; the job waits for the answer.
+          setExisting((q) => [...q, p]);
           break;
         case "msgbox":
           if (p.type === "input-password" || p.type === "re-input-password") {
@@ -157,7 +175,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
       // StrictMode's discarded first run must not start (and consume the pending login of) a session.
       if (!alive) return;
       await invoke("session_start", { key, peer, conn: "file-transfer", webcodecs: [], video: videoChannel(() => {}) });
-    })().catch((e) => alive && setError(String(e)));
+    })().catch((e) => alive && (setFailed(true), setError(errorText(e))));
     return () => {
       alive = false;
       sub.off();
@@ -191,15 +209,20 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
     setJobs((js) => js.map((j) => (ids.has(j.id) ? { ...j, state: "running" } : j)));
     for (const j of start) {
       invoke("fs_transfer", { key, id: j.id, path: j.from, to: j.to, fileNum: 0, hidden: false, isRemote: !j.upload }).catch((err) =>
-        setJobs((js) => js.map((x) => (x.id === j.id ? { ...x, state: "error", err: String(err) } : x))),
+        setJobs((js) => js.map((x) => (x.id === j.id ? { ...x, state: "error", err: errorText(err) } : x))),
       );
     }
   }, [jobs, key]);
 
   const cancel = (j: Job) => {
     // The core reports nothing for a cancelled job: end it here so the queue moves on.
-    if (j.state === "running") invoke("fs_cancel", { key, id: j.id }).catch((e) => setError(String(e)));
+    if (j.state === "running") invoke("fs_cancel", { key, id: j.id }).catch((e) => setError(errorText(e)));
     setJobs((js) => js.map((x) => (x.id === j.id ? { ...x, state: "error", err: "Cancelled" } : x)));
+  };
+
+  const answerExisting = (x: Existing, overwrite: boolean, rest: boolean) => {
+    setExisting((q) => q.filter((y) => y !== x));
+    invoke("fs_override", { key, id: x.id, fileNum: x.file_num, needOverride: overwrite, remember: rest, isUpload: x.is_upload }).catch((e) => setError(errorText(e)));
   };
 
   const removeRemote = (es: Entry[]) => {
@@ -212,7 +235,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
         return invoke("fs_remove", { key, id, path, isRemote: true, isDir: isDir(e) });
       }),
     )
-      .catch((e) => setError(String(e)))
+      .catch((e) => setError(errorText(e)))
       .finally(() => setTimeout(() => loadRemote(remote.path), 300));
   };
 
@@ -224,7 +247,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           onSubmit={(e) => {
             e.preventDefault();
             typed.current = true;
-            invoke("session_login", { key, password: pw, remember: true }).catch((e) => setError(String(e)));
+            invoke("session_login", { key, password: pw, remember }).catch((e) => setError(errorText(e)));
             setPassword(null);
             setPw("");
           }}
@@ -233,7 +256,11 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           <div className={`mt-1 text-caption ${password.wrong ? "text-danger" : "text-muted"}`}>{password.wrong ? "Wrong password, try again" : "Enter the one-time password shown on the remote device"}</div>
           {password.why && <div className="mt-1 text-footnote">{password.why}</div>}
           <div className="mt-1 text-footnote text-muted">Or ask the person there to click Accept: this window then continues by itself.</div>
-          <input type="password" autoFocus value={pw} onChange={(e) => setPw(e.target.value)} className="mt-3 h-10 w-full rounded-xl border border-hairline bg-parchment px-3.5 text-caption outline-none focus-visible:border-focus" />
+          <input type="password" autoFocus aria-label="Password" value={pw} onChange={(e) => setPw(e.target.value)} className="mt-3 h-10 w-full rounded-xl border border-hairline bg-parchment px-3.5 text-caption outline-none focus-visible:border-focus" />
+          <label className="mt-3 flex items-center gap-2 text-caption text-muted">
+            <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} className="accent-[var(--accent)]" />
+            Remember password for this device
+          </label>
           <Button type="submit" variant="primary" className="mt-3 w-full" disabled={!pw}>
             Connect
           </Button>
@@ -273,26 +300,52 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           path={remote.path}
           entries={remote.entries}
           loading={!connected}
-          loadingText={waiting ? "Waiting for the person at the remote computer to click Accept…" : "Connecting…"}
+          loadingText={failed ? "Not connected." : waiting ? "Waiting for the person at the remote computer to click Accept…" : "Connecting…"}
           onOpen={(e) => loadRemote(join(remote.path, e.name, remoteSep))}
           onUp={() => loadRemote(parent(remote.path, remoteSep))}
           onRefresh={() => loadRemote(remote.path)}
           onTransfer={(es) => transfer("remote", es)}
           transferIcon={<ArrowDownToLine size={15} />}
           transferLabel="Download"
-          onNewFolder={() => {
-            const n = prompt("Folder name");
-            if (n) invoke("fs_create_dir", { key, id: nextJob++, path: join(remote.path, n, remoteSep), isRemote: true }).then(() => setTimeout(() => loadRemote(remote.path), 300));
-          }}
+          onNewFolder={() => setNewFolder("")}
           onDelete={setToDelete}
           onDropFrom="local"
           onDrop={(names) => transfer("local", local.entries.filter((x) => names.includes(x.name)))}
         />
       </div>
       <Jobs jobs={jobs} onCancel={cancel} onClear={() => setJobs((js) => js.filter((j) => j.state === "running" || j.state === "queued"))} />
+      {newFolder !== null && (
+        <Modal width={360} onClose={() => setNewFolder(null)}>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const n = newFolder.trim();
+              if (!n) return;
+              setNewFolder(null);
+              invoke("fs_create_dir", { key, id: nextJob++, path: join(remote.path, n, remoteSep), isRemote: true }).then(
+                () => setTimeout(() => loadRemote(remote.path), 300),
+                (e) => setError(errorText(e)),
+              );
+            }}
+          >
+            <h2 className="text-headline font-semibold">New folder</h2>
+            <p className="mt-2 text-callout text-muted">Created on the remote device in {remote.path || "the current folder"}.</p>
+            <TextField className="mt-4" aria-label="Folder name" placeholder="Folder name" value={newFolder} onChange={(e) => setNewFolder(e.target.value.slice(0, 255))} />
+            <div className="mt-6 flex gap-2">
+              <Button type="button" className="flex-1" onClick={() => setNewFolder(null)}>
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary" className="flex-1" disabled={!newFolder.trim()}>
+                Create
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {existing[0] && <Overwrite key={`${existing[0].id}:${existing[0].file_num}`} x={existing[0]} onAnswer={(o, rest) => answerExisting(existing[0], o, rest)} />}
       {toDelete && (
         <Modal width={360} onClose={() => setToDelete(null)}>
-          <div className="text-headline font-semibold">{toDelete.length === 1 ? `Delete "${toDelete[0].name}"?` : `Delete ${toDelete.length} items?`}</div>
+          <h2 className="text-headline font-semibold">{toDelete.length === 1 ? `Delete "${toDelete[0].name}"?` : `Delete ${toDelete.length} items?`}</h2>
           <p className="mt-2 text-callout text-muted">
             {toDelete.length === 1 ? "It is" : "They are"} deleted on the remote device{toDelete.some(isDir) ? ", folders with everything in them" : ""}. This cannot be undone.
           </p>
@@ -300,13 +353,40 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
             <Button className="flex-1" onClick={() => setToDelete(null)}>
               Cancel
             </Button>
-            <Button variant="danger" className="flex-1" autoFocus onClick={() => removeRemote(toDelete)}>
+            <Button variant="danger" className="flex-1" data-autofocus onClick={() => removeRemote(toDelete)}>
               Delete
             </Button>
           </div>
         </Modal>
       )}
     </Shell>
+  );
+}
+
+/** A file with this name exists at the destination: overwrite or skip, for this file or the rest of the job. Escape skips. */
+function Overwrite({ x, onAnswer }: { x: Existing; onAnswer: (overwrite: boolean, rest: boolean) => void }) {
+  const [rest, setRest] = useState(false);
+  return (
+    <Modal width={400} onClose={() => onAnswer(false, false)}>
+      <h2 className="text-headline font-semibold">Replace the existing file?</h2>
+      <p className="mt-2 break-all font-mono text-caption">{x.to}</p>
+      <p className="mt-2 text-callout text-muted">
+        A file with this name already exists on {x.is_upload ? "the remote device" : "this computer"}
+        {x.is_identical ? " and has the same content" : ""}. Overwriting replaces it; this cannot be undone.
+      </p>
+      <label className="mt-4 flex items-center gap-2 text-caption">
+        <input type="checkbox" checked={rest} onChange={(e) => setRest(e.target.checked)} className="accent-[var(--accent)]" />
+        Do the same for the rest of this transfer
+      </label>
+      <div className="mt-6 flex gap-2">
+        <Button className="flex-1" onClick={() => onAnswer(false, rest)}>
+          Skip
+        </Button>
+        <Button variant="danger" className="flex-1" onClick={() => onAnswer(true, rest)}>
+          Overwrite
+        </Button>
+      </div>
+    </Modal>
   );
 }
 
@@ -478,8 +558,8 @@ function Jobs({ jobs, onCancel, onClear }: { jobs: Job[]; onCancel: (j: Job) => 
             <span className="w-48 truncate" title={j.name}>
               {j.name}
             </span>
-            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-parchment">
-              <div className={`h-full rounded-full transition-all ${j.state === "error" ? "bg-danger" : "bg-accent"}`} style={{ width: `${pct}%` }} />
+            <div role="progressbar" aria-label={j.name} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)} className="h-1.5 flex-1 overflow-hidden rounded-full bg-parchment">
+              <div className={`h-full origin-left transition-transform ${j.state === "error" ? "bg-danger" : "bg-accent"}`} style={{ transform: `scaleX(${pct / 100})` }} />
             </div>
             <span className="w-24 text-right font-mono text-footnote text-muted">
               {j.state === "queued" ? "Queued" : j.state === "running" ? `${fmtSize(j.speed)}/s` : j.state === "done" ? <CheckCircle2 size={15} className="ml-auto text-ok" /> : <span className="text-danger">{j.err ?? "failed"}</span>}

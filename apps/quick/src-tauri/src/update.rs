@@ -122,6 +122,12 @@ pub fn evaluate(current: &str, m: &Candidate, policy_min: &str, eligible: bool) 
     (newer, required)
 }
 
+/// The rollout reached this device, or it is below a minimum version: it refuses sessions until
+/// it updates, so the (not halted) release is offered whatever the rollout stage says.
+fn eligible(current: &str, m: &Candidate, policy_min: &str, rollout: bool) -> bool {
+    rollout || (!m.halted && (version::below_minimum(current, &m.minimum_version) || version::below_minimum(current, policy_min)))
+}
+
 /// Heartbeat fields: `(update_state, release serial, version in flight)`.
 pub fn heartbeat_fields() -> (String, u64, String) {
     let s = STATE.lock().unwrap();
@@ -381,9 +387,7 @@ pub fn check() -> Result<String, String> {
 
 fn check_inner() -> Result<String, String> {
     let eff = policy::current();
-    if PUBKEY.is_none() {
-        return Err("updates are not configured in this build".into());
-    }
+    let key = PUBKEY.ok_or("updates are not configured in this build")?;
     // Off: still checked, so a release minimum version blocks as in the technician app; nothing is
     // offered, downloaded or required by `mandatory` (the organisation deploys updates).
     let enabled = eff.on("update.enabled");
@@ -401,12 +405,14 @@ fn check_inner() -> Result<String, String> {
     };
     let t = now();
     let bucket = release::bucket(&policy::device_uuid(), "customer", &m.version);
-    let eligible = m.eligible(bucket, t, eff.get("update.rollout"));
+    let eligible = eligible(VERSION, &m, eff.get("update.minimum-version"), m.eligible(bucket, t, eff.get("update.rollout")));
     let (newer, required) = evaluate(VERSION, &m, eff.get("update.minimum-version"), enabled && eligible);
     let offer = enabled && newer && eligible;
     let auto = offer && (m.forced || (required && eff.on("update.force")));
     // Superseded or installed downloads (the running exe is the new one after a swap).
     release::prune_staged(&fallback_dir(), staged_path(&m).filter(|_| offer).as_deref());
+    // Verified, not only present: a broken or foreign file is downloaded again.
+    let is_staged = offer && staged_path(&m).is_some_and(|p| verified(&p, &m, key).is_some());
     {
         let mut s = STATE.lock().unwrap();
         s.available = offer.then(|| m.version.clone());
@@ -419,7 +425,7 @@ fn check_inner() -> Result<String, String> {
             _ if m.halted && version::compare(&m.version, VERSION) == Some(std::cmp::Ordering::Greater) => "halted",
             _ if newer && !eligible => "waiting-rollout",
             _ if s.stale => "stale",
-            _ if offer && staged_path(&m).is_some_and(|p| p.exists()) => "staged",
+            _ if is_staged => "staged",
             _ => "idle",
         }
         .into();
@@ -431,7 +437,7 @@ fn check_inner() -> Result<String, String> {
         _ => format!("TetherQS {VERSION} is up to date."),
     };
     *MANIFEST.lock().unwrap() = offer.then_some(m.clone());
-    if offer {
+    if offer && !is_staged {
         stage_in_background(m);
     }
     if auto {
@@ -517,12 +523,18 @@ fn staged_path(c: &Candidate) -> Option<PathBuf> {
     release::valid_version(&c.version).then(|| fallback_dir().join(format!("update-{}.staged", c.version)))
 }
 
+/// The staged download at `path` if it is `c`: read back and verified again (the folder is not
+/// trusted more than the network).
+fn verified(path: &Path, c: &Candidate, key: &str) -> Option<Vec<u8>> {
+    std::fs::read(path).ok().filter(|b| c.verify(b, key).is_ok())
+}
+
 /// Download and verify in the background as soon as the device may install it (D7: the install
-/// itself waits for idle). Only one download at a time.
+/// itself waits for idle). Only one download at a time; the caller checked that none is staged.
 fn stage_in_background(c: Candidate) {
     static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let Some(path) = staged_path(&c) else { return };
-    if path.exists() || BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
     std::thread::spawn(move || {
@@ -548,6 +560,9 @@ fn busy() -> bool {
     crate::sink::has_session()
 }
 
+/// `install` refused: a session started while it checked and downloaded.
+const BUSY: &str = "The update installs when the session ends.";
+
 /// Forced update: the countdown of `update.restart-seconds` starts only while no session runs and
 /// starts over when one begins; then install (which re-checks the index first).
 fn forced_when_idle(secs: u64) {
@@ -570,7 +585,7 @@ fn forced_loop(
     mark: impl Fn(),
     set_at: impl Fn(Option<u64>),
     tick: impl Fn(),
-    install: impl FnOnce() -> Result<(), String>,
+    install: impl Fn() -> Result<(), String>,
 ) -> Result<(), String> {
     'wait: loop {
         mark();
@@ -587,7 +602,11 @@ fn forced_loop(
             }
         }
         set_at(None);
-        return install();
+        match install() {
+            // A session began during the re-check or download: wait for idle again.
+            Err(e) if e == BUSY => continue,
+            r => return r,
+        }
     }
 }
 
@@ -601,11 +620,14 @@ pub fn install() -> Result<(), String> {
         }
         let c = MANIFEST.lock().unwrap().clone().ok_or("no update available (it may have been halted)")?;
         STATE.lock().unwrap().installing = true;
-        let staged = staged_path(&c).and_then(|p| std::fs::read(p).ok()).filter(|b| c.verify(b, key).is_ok());
-        let bytes = match staged {
+        let bytes = match staged_path(&c).and_then(|p| verified(&p, &c, key)) {
             Some(b) => b,
             None => download(&c, key)?,
         };
+        // Checked last: the swap and restart below would end a session that began meanwhile.
+        if busy() {
+            return Err(BUSY.to_owned());
+        }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let replace = |e: io::Error| format!("could not replace the program: {e}");
         let u = unit(&exe).map_err(replace)?;
@@ -624,7 +646,8 @@ pub fn install() -> Result<(), String> {
     let mut s = STATE.lock().unwrap();
     s.installing = false;
     s.progress = None;
-    s.error = r.as_ref().err().cloned();
+    // Waiting for the session is not a failure.
+    s.error = r.as_ref().err().filter(|e| *e != BUSY).cloned();
     r
 }
 
@@ -795,6 +818,31 @@ mod tests {
         assert!(log.borrow().contains(&false) && log.borrow().contains(&true));
     }
 
+    /// A session that begins while the install re-checks and downloads: no swap, the loop waits
+    /// for idle again instead of ending.
+    #[test]
+    fn forced_update_waits_again_when_install_finds_a_session() {
+        use std::cell::Cell;
+        let attempts = Cell::new(0);
+        let r = forced_loop(1, || false, || {}, |_| {}, || {}, || {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 { Err(BUSY.to_owned()) } else { Ok(()) }
+        });
+        assert!(r.is_ok());
+        assert_eq!(attempts.get(), 2);
+        // Any other failure ends the loop.
+        assert_eq!(forced_loop(1, || false, || {}, |_| {}, || {}, || Err("no network".to_owned())), Err("no network".to_owned()));
+    }
+
+    #[test]
+    fn below_a_minimum_version_is_offered_before_the_rollout_reaches_it() {
+        assert!(!eligible("0.3.0", &cand("0.3.2", false, ""), "", false));
+        assert!(eligible("0.3.0", &cand("0.3.2", false, "0.3.1"), "", false));
+        assert!(eligible("0.3.0", &cand("0.3.2", false, ""), "0.3.1", false));
+        assert!(!eligible("0.3.0", &Candidate { halted: true, ..cand("0.3.2", false, "0.3.1") }, "", false));
+        assert!(eligible("0.3.0", &cand("0.3.2", false, ""), "", true));
+    }
+
     #[test]
     fn manifest_urls_and_channel() {
         assert_eq!(channel("beta-2"), "beta-2");
@@ -858,6 +906,13 @@ mod tests {
         let mut bad = c("0.5.24");
         bad.signature = "not base64!".into();
         assert!(bad.verify(data, &pk_tauri).is_err());
+        // A staged file counts only if it verifies, not because it exists.
+        let p = std::env::temp_dir().join(format!("tetherqs-staged-test-{}", std::process::id()));
+        std::fs::write(&p, b"tampered").unwrap();
+        assert!(verified(&p, &c("0.5.24"), &pk_tauri).is_none());
+        std::fs::write(&p, data).unwrap();
+        assert_eq!(verified(&p, &c("0.5.24"), &pk_tauri).as_deref(), Some(&data[..]));
+        std::fs::remove_file(&p).unwrap();
     }
 
     #[test]

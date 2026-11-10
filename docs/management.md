@@ -2,7 +2,24 @@
 
 Tether Manage (`apps/manage`) is the desktop app an administrator uses to run a Tether deployment.
 It holds the two signing keys and talks to the relay API (`tether-api`, see [api.md](api.md)) with
-signed requests. Nothing in it is needed by technicians or customers.
+signed requests. Each signature names the relay it is for (`Tether-Sig: v2 host=…`, see
+[api.md](api.md)), and Tether Manage follows no HTTP redirect: a relay that answers with one gets
+the error "The server redirects to another address, which this app does not follow. Enter the
+server's own https:// address." Nothing in it is needed by technicians or customers.
+
+**Update order (request signatures).** A relay accepts a v2 signature only for its own name, and
+no app falls back to v1 by itself. So:
+
+1. First every relay: the new tether-api with `RELAY_HOST` set to the host name(s) entered for it
+   under Status and relays.
+2. Then Tether Manage and the apps.
+3. Last `TETHER_SIG_V1=off` on every relay.
+
+A new Tether Manage in front of an old relay says "This relay runs an older tether-api that does
+not know this app's request signatures. Update the relay first."; with a missing or different
+`RELAY_HOST` it says "The relay does not know its own host name. Set RELAY_HOST on the relay to the
+name entered under Status and relays." or "The relay knows itself under another host name. Enter
+the relay's own name (its RELAY_HOST) under Status and relays." (`api.rs::explain`).
 
 | Screen | What it does |
 | --- | --- |
@@ -53,6 +70,7 @@ Keys, settings, the policy draft and local copies of published policies live in
 | `settings.json` | Relay list (default `https://tether-desk.duckdns.org`), download page texts |
 | `policy/draft.json` | The policy being edited |
 | `policy/published/<serial>.json` | Every policy this PC published |
+| `releases/<channel>.serial`, `releases/<channel>.live` | Per channel: the last release index serial this PC signed, and the last one a relay accepted from this PC (see "A relay that may hold a newer index" under [Keys](#keys)) |
 | `custom/<id>.json` | Custom apps created on this PC: profile (logo, colour, settings), token, expiry |
 
 Set `TETHER_MANAGE_DIR` to use a different folder: a separate vault for tests or for several
@@ -80,6 +98,9 @@ XChaCha20-Poly1305). The passphrase must be at least 8 characters. There is no r
 `keys.json` has a format version (`v`). A vault that also holds server keys is written as format 2
 (Tether Manage 0.5.5 and later), which older versions refuse to open instead of opening it and
 dropping the server keys when they save it again. A vault without server keys stays format 1.
+The vault, like the other files Tether Manage keeps in the data folder, is written to a temporary
+file, synced to disk and then renamed, so a crash or power loss leaves the old file or the new
+one, never an empty one.
 Fields a newer version adds are kept unchanged when this version saves the vault; a vault of a
 newer format than this version knows can be unlocked and used, but this version refuses to save
 it ("written by a newer version of Tether Manage … update Tether Manage first").
@@ -134,6 +155,22 @@ this again once it answers."): it may well have the files. **Publish to missing 
 index to it, together with every file of other releases that index names and the relay lacks;
 later publishes reach it again.
 
+**A relay that may hold a newer index.** Manage remembers per channel the serial of the last
+release index a relay accepted from this PC (`releases/<channel>.live`). The check starts with the
+first successful publish after updating Tether Manage: until that file exists nothing is refused.
+When the newest index it can read is older than that, and a relay did
+not answer or was left out, that relay may still hold the newer index: a new index built on the
+older one would drop its releases and halts. Publish, Resume, Everyone now and re-sign are then
+refused: "Not published: a relay that did not answer or was left out may hold a newer release index
+(serial N; the newest one read has serial M). Building on the older one would drop its releases and
+halts. Do this again when that relay answers; if it is gone for good, take it out of the server list
+under Status and relays. Halt still works." With every relay of the list read, the publish goes ahead on the newest index found.
+**Halt is never refused:** the halted index goes to the relays that answer, and the result of each
+relay that did not answer adds "It may hold a newer release index (serial N; the halt was built on
+the newest one read, serial M) in which this release is not halted. Halt it again when this relay
+answers, and check that no release is missing under Rollouts."
+The re-sign at unlock leaves such a channel out and still re-signs the other channels.
+
 ### Server key
 
 hbbs and hbbr sign device identities with the server key (`/var/lib/tether/id_ed25519` on every
@@ -148,20 +185,34 @@ trust only their built-in key.
 
 **Rotate the server key** is a checklist; each step opens when the previous one is done:
 
-1. **Generate the new key.** Enter the current server public key (prefilled from a published list)
-   and the passphrase. The new key pair is sealed into `keys.json` at once. Export the backup again.
+1. **Generate the new key.** Enter the current server public key and the passphrase. The field is
+   prefilled with the key the relays' hbbs sign with when they tell and agree (after a rotation
+   cancelled past the switch that is its new key, not the first key of the list); when no relay
+   tells, with the first key of the published list. A key other than the one the relays sign with
+   is refused ("Not the key the relays sign with: … Start from that key."), and so is a start while
+   the relays sign with different keys ("The relays sign with different keys: … Bring every relay to
+   one key before a new rotation."). The new key pair is sealed into `keys.json` at once. Export the
+   backup again.
 2. **Announce it to the devices.** **Publish key list…** (review sheet, every relay) publishes
    *current + new*: devices keep presenting the current key and start to trust the new one.
-   Optionally set a date from which devices stop trusting the old key on their own.
+   Optionally set a date from which devices stop trusting the old key on their own; the sheet
+   shows it ("trusted until …"). Every publish of a key list first asks each relay which key its
+   hbbs signs with and is refused when the list lacks one of them ("Not published: the list lacks
+   the key these relays sign with now, and devices would stop trusting them: …"). When no relay
+   tells its key, the list is published and the result says that it could not be checked.
 3. **Switch the relays.** A counter shows how many devices active in the last 24 h report the list
    (heartbeat `server_keys_serial`, refreshed every 30 s; versions before key rotation never do).
    When enough do: **Save key files…** writes `id_ed25519` and `id_ed25519.pub` of the new key into
    a folder; the commands below install them on every relay with `server/rotate-key.sh switch`
    (Helm: the `helm upgrade` line). `id_ed25519` is the server's **private** key: it is created
    so that only the current Windows user can open it (a protected ACL with that user's SID only,
-   nothing inherited; 0600 on macOS/Linux), and a warning with **Delete key files** stays in this
+   nothing inherited; 0600 on macOS/Linux). A folder that already holds another `id_ed25519` pair
+   (for example an SSH key) is refused: "… already holds another key pair named id_ed25519. Pick an
+   empty folder." A warning with **Delete key files** stays in this
    step and the next one until you delete it (the button removes only `id_ed25519` and
-   `id_ed25519.pub` from that folder). **Every relay is switched** opens only when every relay's
+   `id_ed25519.pub` from that folder, and only when the `.pub` there is a server key of this vault;
+   otherwise "Nothing deleted: the id_ed25519 files in … are not a server key saved from Tether
+   Manage."). **Every relay is switched** opens only when every relay's
    hbbs reports that it signs with the new key (`https://<relay>/rendezvous/pubkey`, see
    [key-rotation.md](key-rotation.md#checking-the-switch)); the list shows which relay still signs
    with the old key or cannot tell (hbbs or Caddyfile without the route: update them first), and
@@ -173,12 +224,18 @@ trust only their built-in key.
 Devices that miss a step heal on their next policy check, because the list comes over HTTPS from
 the relay API. Until then they get "Server key mismatch …" when connecting.
 
+**Cancel rotation** (below the steps) forgets the rotation; the generated key stays in the key
+file. When a relay already signs with the new key, it asks first: cancelling does not switch that
+relay back, and the next rotation then starts from that key.
+
 ## Status and relays
 
 **Relays** is the most important setting: Tether Manage publishes to exactly these relays
 ([relay-ha.md](relay-ha.md)). Add a relay by host name (`https://` is added), remove one, then
 **Save relay list**. The first relay is used for reads and for the links of custom apps. Every
-address must start with `https://`.
+address must be `https://host` with an optional port and nothing else (no path, user name, query
+or fragment; `server_ok`), and must be the relay's own address: requests are signed for that host
+name and redirects are not followed.
 
 Each relay row shows its health from `GET /api/admin/status` ("Admin key accepted" or the error),
 relay API version, the policy serial it serves (**Live** or **Behind**), device count, free disk
@@ -203,6 +260,11 @@ Later wins:
 4. **group** overrides, for devices assigned to the group
 5. machine policy on the device (`HKLM\SOFTWARE\Policies\Tether` `PolicyJson`, set by GPO/MDM)
 
+One exception: a custom app's setting is ignored for every feature the profile locks (Off, Locked
+or Hidden). Its signed settings have no serial or expiry and cannot be revoked on a downloaded
+app, so a custom app can add restrictions and defaults but never unlock what the published policy
+locks.
+
 ### Feature states
 
 | State | Effect on the device |
@@ -216,8 +278,16 @@ Later wins:
 A later layer set to **On** unlocks a feature an earlier layer locked.
 
 Values are checked when editing: bool `Y`/`N`, choices from the list, numbers as whole numbers,
-text up to 1024 characters. Unknown features or values make the whole draft "Not publishable"; a
-typo never silently does nothing. The EN/DE switch only changes the labels.
+text up to 1024 characters; `update.minimum-version` must be empty or a version and
+`update.channel` empty or a channel name. Unknown features or values make the whole draft "Not
+publishable"; a typo never silently does nothing. The EN/DE switch only changes the labels.
+
+The apps are less strict: one rule never makes an app ignore the policy. An app skips a rule with
+a feature it does not know or a value it finds invalid, logs it (technician app: `policy rules not
+applied: …`; TetherQS: `policy <serial>: rules not applied: …`) and applies the rest; a rule with a
+state or field from a newer Tether Manage is skipped without a log line. An unparsable
+`update.minimum-version` or `update.channel` is such a skipped rule (the channel falls back to
+`stable`); Tether Manage and the relay refuse to publish one.
 
 ### Groups and device assignment
 
@@ -234,8 +304,8 @@ Deleting a group also removes its assignments.
 
 **Policy → Draft editor** edits one layer at a time (technician profile, customer profile, or a
 group). Every feature has a state control; the selected state is a filled segment (**Default**
-quietly outlined, any other state filled in the accent colour). A feature set in this layer has an
-accent bar on the left and the badge **Changed from default**; one whose rule differs from the
+quietly outlined, any other state filled in the accent colour). A feature set in this layer has a
+bar on the left and the badge **Changed from default**; one whose rule differs from the
 live policy also has **Not published**. The **All / Changed only / Not published** switch filters
 the list. The EN/DE switch only changes the labels.
 
@@ -324,7 +394,9 @@ The server keeps at most 10 000 devices and drops entries older than 180 days.
 
 The session audit log ([api.md](api.md), "session audit log"): what the hosts reported about
 incoming connections, read from **every** relay (`GET /api/admin/audit`, newest 5000 per relay
-and range) and merged. A host posts to the first relay of its build only. Records are
+and range) and merged. A relay answers at most about 8 MiB of records and marks a cut answer with
+the header `X-Audit-Truncated: 1`; the Sessions page then says "<relay> sent only the newest
+records (answer cut by size); pick a shorter range". A host posts to the first relay of its build only. Records are
 deduplicated by their nonce (else host + connection + action + time), so a record two relays have
 is listed once. A relay that does not answer, or runs a tether-api without the audit log (404), is
 named above the list.
@@ -362,6 +434,10 @@ names any relay whose roster differs or that does not answer.
 | Fingerprint | First 16 hex digits of the SHA-256 of the key, e.g. `630D-CD29-66C4-3366` |
 | Can edit shared tags | May replace the shared tag document (`write`) |
 | Can read session history | May read the session audit log of one device at a time (`audit`) |
+
+Unpublished changes to the roster are kept while Tether Manage is open, also while another page is
+shown ("Not published yet. The changes are kept until you publish or reload; closing Tether Manage
+discards them."). **Reload from the relays** asks before it discards them.
 
 **Add technician**: the technician copies the public key from their app and sends it; paste it
 with a name. The page checks that it is a 32-byte base64 key and shows its fingerprint: compare it
@@ -485,7 +561,7 @@ uploads it to every relay. One failing relay does not stop the others; the resul
 | Channel | 1–32 lowercase letters, digits or dashes. Devices use the channel from policy `update.channel` (default `stable`). |
 | Release notes | Shown in the update card |
 | Mandatory | Sessions are blocked on older versions until this one is installed |
-| Minimum version | Versions below it are blocked, whether or not they can update |
+| Minimum version | Versions below it are blocked, whether or not they can update. It cannot be above the release's own version ("The minimum version … is above this release (…)"): no device could reach it. |
 | Forced | Installed without asking after `update.restart-seconds` |
 | Rollout | How fast devices get it, signed into the release index (each device has a stable bucket 0–100 per release and installs once the ramp passes it). **Standard**: 1 % at once → 10 % after 1 h → 50 % after 6 h → 100 % after 24 h. **Fast**: 10 % → 100 % after 1 h. **Immediately**: everyone at once. **Custom**: the share at once (1–100 %), then the hours from publishing until 10 %, 50 % and 100 % (fractions allowed, e.g. 0.5; at most 720 h = 30 days; each step later than the one before; steps the first share already reaches are left out). The last choice is remembered for both forms (`settings.rollout`). **Everyone now** under "Rollout" in the release index list ends a ramp early. |
 | Security release | Skips the rollout: every device gets it at once |
@@ -509,6 +585,14 @@ to delete the published release (the version in the release index or `latest.jso
 only then sends the forced delete. The server refuses uploads that would leave less than 2 GiB
 free.
 
+**Rollouts** lists the releases of one channel's signed index with **Halt**, **Resume** and the
+ramp controls (**Everyone now** asks "Offer … to everyone now?"). A control acts on the channel
+of the table it is in, also when the channel field was changed since. When the new index did not
+reach every relay, a sheet "… not on every relay" lists each relay's result: devices that ask a
+relay marked failed still get its old release index, so do it again once that relay answers.
+While a relay that may hold a newer index does not answer, Resume and Everyone now are refused;
+Halt always goes out to the relays that answer (see "A relay that may hold a newer index").
+
 ### Cleaning up old releases
 
 Every publish adds a version to every relay; nothing removes them by itself. Above the list:
@@ -525,7 +609,8 @@ Every publish adds a version to every relay; nothing removes them by itself. Abo
   CDN (every version in this PC's `cdn-assets.json` is kept, the next CDN deploy needs it), or
   uploaded in the last 24 h. A version only one relay protects says on which. The top line shows
   what the ticked versions free per relay; **Select all / none** for the sheet and per folder.
-  **Delete N versions** asks once, then each relay checks again and deletes only what it would
+  **Delete N versions** asks once. Tether Manage then computes the plan again and sends only the
+  versions that plan still offers, and each relay checks again and deletes only what it would
   still delete (a version published in between is kept). The results show per relay what was
   deleted, kept or already gone. If the relays hold different release indexes the sheet says so:
   a lagging relay keeps its older version, so publish to the missing relays first.
@@ -565,7 +650,10 @@ available yet". The links point to the current **stable** release; **Publish** f
 offered app has a stable release on any OS. Republish the page after every release (file names
 contain the version) and after changing the texts. **Publish…** opens the review sheet and
 uploads the page to every relay; its links are relative, so each relay serves its own files
-(publish releases to every relay first). The preview in Tether Manage shows the page without its
+(publish releases to every relay first). When only some relays took it, the message says so
+("Download page published on 1 of 2 relays only"). The file names come from the relays' unsigned
+`latest.json`: a release is linked only when the name there is exactly the name Tether Manage
+publishes for that app, platform and version. The preview in Tether Manage shows the page without its
 script (both sections); its links and the switch do nothing there, and **Preview** always redraws it.
 
 ## Custom apps
@@ -588,7 +676,7 @@ release in the app's channel; `<link>/mac` and `<link>/windows` choose a platfor
 | Welcome text | Up to 400 characters. Empty: the policy's `customer.welcome`. |
 | Update channel | Which TetherQS build the link serves (default `stable`). |
 | Link valid for | 1–366 days, default 30. |
-| Settings | Customer-module features with the same editor as the policy. Order on the device: defaults < customer profile < custom app < group < machine policy. |
+| Settings | Customer-module features with the same editor as the policy. Order on the device: defaults < customer profile < custom app < group < machine policy. A custom app's setting is ignored for a feature the profile locks, so a custom app cannot switch on what the policy locks. |
 
 **Review… → Create** gives the app a random id, a new 256-bit link token (`custom::new_token`),
 signs the profile and stores it on every relay with the same token, so the link

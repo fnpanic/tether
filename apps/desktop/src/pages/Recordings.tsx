@@ -1,7 +1,7 @@
 // Recordings dialog of the main window: the recordings on this computer, with the folder they are in.
 import { useCallback, useEffect, useState } from "react";
 import { FolderOpen, Play, Trash2, Video, X } from "lucide-react";
-import { Button, IconButton } from "../components/ui";
+import { Button, IconButton, Modal } from "../components/ui";
 import { formatDuration, formatSize, onRecordings, peerLabel, recordingsApi, type Recording, type RecordingsState } from "../lib/recordings";
 import { formatId } from "../lib/ipc";
 import { errorText, usePolicy } from "../lib/policy";
@@ -30,21 +30,10 @@ export const recordingsHidden = (eff: ReturnType<typeof usePolicy>, st: Recordin
 export function Recordings({ onClose, onToast }: { onClose: () => void; onToast: (m: string) => void }) {
   const { st, load } = useRecordings();
   const [ask, setAsk] = useState<string | null>(null);
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [onClose]);
   const act = (p: Promise<unknown>) => p.catch((e) => onToast(errorText(e)));
   return (
-    <div className="animate-fade fixed inset-0 z-30 flex bg-black/40" onMouseDown={onClose}>
-      <div
-        className="animate-rise m-auto flex h-[min(600px,92vh)] w-[min(860px,94vw)] flex-col overflow-hidden rounded-2xl border border-hairline bg-tile shadow-float"
-        onMouseDown={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-label="Recordings"
-        data-testid="recordings"
-      >
+    <Modal label="Recordings" onClose={onClose} width="min(860px,94vw)" className="h-[min(600px,92vh)] overflow-hidden rounded-2xl">
+      <div className="flex h-full flex-col" data-testid="recordings">
         <div className="flex items-center gap-3 px-7 pb-2 pt-5">
           <h2 className="text-title font-semibold">Recordings</h2>
           <div className="flex-1" />
@@ -85,7 +74,7 @@ export function Recordings({ onClose, onToast }: { onClose: () => void; onToast:
           )}
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }
 

@@ -10,7 +10,7 @@ installed clients.
 | Server key (`TETHER_PUB_KEY`) | `fe8A7xTX72RJlJypn8aBxG3NZHHxygCLPQqCWxbeev8=` |
 | Host | OCI `VM.Standard.E2.1.Micro` (Always Free), Oracle Linux 9, region eu-amsterdam-1 |
 | Public IP | ephemeral (free); the DNS name follows it |
-| Ports | **TCP 443** (Caddy → `/ws/id`, `/ws/relay`; what Tether clients use) and **TCP 80** (firewalld forwards it to 443, the fallback route; see [connection-resilience.md](connection-resilience.md)). Legacy TCP 21115–21117 and UDP 21116 are still open for stock RustDesk clients and can be closed. |
+| Ports | **TCP 443** (Caddy → `/ws/id`, `/ws/relay`; what Tether clients use) and **TCP 80**. `install.sh` only opens port 80; the front end listens there and answers with a redirect to https. On the production relays a firewalld forward of 80 to 443 was added by hand (step 4 below), which is what serves TLS on port 80 for the fallback route in [connection-resilience.md](connection-resilience.md); `install.sh` does not add it (its comment says never to forward 80 to the TLS port). Legacy TCP 21115–21117 and UDP 21116 are still open for stock RustDesk clients and can be closed. |
 | Services | `tether-hbbs`, `tether-hbbr` (patched for WebSocket hosts), `tether-https` (Caddy, Let's Encrypt), `tether-api` (policy, heartbeats, releases, download page, diagnostics; `MemoryMax=64M`), `tether-ddns.timer` (systemd, enabled at boot) |
 | Admin key | `ADMIN_PUB_KEY` in `/etc/tether/api.env`: the public half of the Tether Manage admin key (comma-separated to trust several during a rotation). Without it the admin endpoints answer 503. |
 | Download page | `https://tether-desk.duckdns.org/` (published from Tether Manage; files under `/var/lib/tether-api/download/<channel>/…`) |
@@ -26,23 +26,44 @@ No other paid resources were created.
 ## How it was set up
 
 1. `dist/linux-relay` copied to the VM, then `sudo ./install.sh tether-desk.duckdns.org`. The
-   installer opens firewalld and creates the hardened systemd units.
+   installer opens firewalld and creates the hardened systemd units. It gives existing key files
+   in `/var/lib/tether` to user `tether` (private ones 0600; hbbs and hbbr exit when they cannot read
+   the key), and ends with an error when one of the four services does not stay up (active 4
+   seconds in a row within 30 s). On hosts with raw iptables it inserts its rules before the first
+   REJECT rule.
 2. OCI security list: ingress rules for TCP 21115–21117 and UDP 21116 from `0.0.0.0/0`.
 3. DuckDNS: `/etc/tether/duckdns.env` (root-only, holds the token), plus
-   `server/systemd/tether-ddns.{service,timer}`, which refresh the name every 5 minutes and at boot.
+   `server/systemd/tether-ddns.{service,timer}`, which refresh the name every 5 minutes and at boot. The service runs as a systemd
+   `DynamicUser` (not root) and passes the URL with the token to curl on stdin, so the token is in
+   no command line.
 4. HTTPS front end (443-only clients, see [corporate-networks.md](corporate-networks.md)):
    - Caddy static binary at `/usr/local/bin/caddy`, system user `tether-https`;
    - `server/caddy/Caddyfile` copied to `/etc/tether/Caddyfile`, with `RELAY_HOST=tether-desk.duckdns.org` in `/etc/tether/server.env`;
    - `server/systemd/tether-https.service` enabled; TCP 443 opened in the OCI security list and firewalld;
-   - port 80 fallback: `firewall-cmd --permanent --add-forward-port=port=80:proto=tcp:toport=443 --add-port=80/tcp` plus an OCI ingress rule for TCP 80;
+   - port 80 fallback, added by hand on these relays (not by `install.sh`, which only opens 80 so the front end can redirect to https): `firewall-cmd --permanent --add-forward-port=port=80:proto=tcp:toport=443 --add-port=80/tcp` plus an OCI ingress rule for TCP 80;
    - the certificate comes from Let's Encrypt via TLS-ALPN-01 on 443 (no port 80 needed) and renews automatically.
    - Alternative front end: `sudo PROXY=nginx ./install.sh <host>` installs nginx from nginx.org
      with its ACME module instead (same routes, same unit name, 2.7× less memory per device);
-     why and how to switch and back: [proxy-benchmark.md](proxy-benchmark.md).
+     why and how to switch and back: [proxy-benchmark.md](proxy-benchmark.md). The switch also works
+     on a fresh node, and `server.env` (which names the proxy the next run keeps) is written only
+     after the new proxy config passed its test. nginx sends `releases.json` and `releases-v2.json`
+     to tether-api and has no `gzip_static`.
 5. Relay API (`tether-api`, 0.3.0+): binary at `/usr/local/bin/tether-api` (`install`, not `mv`,
    so SELinux labels are right), user `tether-api`, data in `/var/lib/tether-api` (0750; Caddy's
    user is in group `tether-api` to read `download/`), `server/systemd/tether-api.service`,
-   `/etc/tether/api.env` with `ADMIN_PUB_KEY=<base64>`. Restart `tether-https` after changing the
+   `/etc/tether/api.env` with `ADMIN_PUB_KEY=<base64>`. The unit also reads `/etc/tether/server.env`
+   for `RELAY_HOST`: tether-api accepts the signed requests of current apps (`Tether-Sig: v2`) only
+   for that name, and answers them with 401 without it. `TETHER_SIG_V1=off` in `api.env` refuses the
+   older signatures once every Tether Manage and technician app is updated
+   ([api.md](api.md#admin-endpoints-signed-requests)). **Update order:** first every relay, with
+   `RELAY_HOST` set to the host name(s) entered for it in Tether Manage; then Tether Manage and
+   the apps; last `TETHER_SIG_V1=off`. The apps do not fall back to v1 by themselves.
+   Roll out the new `Caddyfile` / `nginx.conf` together with the new tether-api: tether-api closes
+   an idle connection after 30 s, and the proxies now keep idle connections to it for 20 s only
+   (`keepalive 20s` / `keepalive_timeout 20s`).
+   Docker: the containers run as uid 65532. On an **existing** docker-compose relay run
+   `sudo chown -R 65532:65532 data && sudo chmod 0700 data` before `docker compose up -d` with the
+   new image; otherwise hbbs and hbbr cannot open their database and key and restart in a loop. Restart `tether-https` after changing the
    Caddyfile (its admin API is off). A fresh server gets all of this from
    `sudo ADMIN_PUB_KEY=<key> ./install.sh tether-desk.duckdns.org`.
 6. VM tuning for the 1 GB micro shape:
@@ -133,3 +154,30 @@ done
 Rollback per relay: `sudo install -m 0755 /usr/local/bin/hbbs.bak-0.5 /usr/local/bin/hbbs && sudo systemctl restart tether-hbbs`.
 Clients from 0.5.x keep working with the new hbbs (they send no offer); new clients against the
 old hbbs stay on the relay (see [relay-ha.md](relay-ha.md#ipv6-and-nat-hole-punching-webrtcice)).
+
+## Update: review fixes (hbbs, tether-api, Caddyfile, ddns unit)
+
+Not rolled out yet when this was written. The bundle `dist/linux-relay` is built with
+`scripts/build-relay.sh` and tested with `scripts/test-relay.sh`; `dist/SHA256SUMS` lists it.
+`scripts/deploy-relay-update.sh` rolls it out, one relay at a time, relay 2 first:
+
+```bash
+# from the PC, Git Bash, in C:\installemote-support
+bash scripts/deploy-relay-update.sh            # HBBR=1 also replaces hbbr (ends relayed sessions on that node)
+```
+
+Per relay it checks first (stops without changing anything when a check fails): the `tether` user
+can read `/var/lib/tether/id_ed25519` (the new hbbs and hbbr exit otherwise), `RELAY_HOST` is in
+`/etc/tether/server.env` (tether-api needs it for the request signatures of current apps), Caddy
+is the front end, and the new Caddyfile validates. Then it installs tether-api with its unit (the
+unit now also reads `server.env`), the Caddyfile (request buffers, 20 s keep-alive to tether-api)
+and hbbs, restarts tether-api, tether-hbbs and tether-https, replaces the ddns unit where one
+exists (and puts the old one back if the update does not answer OK), and checks that all four
+services are active, that tether-api got `RELAY_HOST`, `localhost:21122/readyz` and
+`https://<host>/api/policy`. Hosts re-register within seconds; WebSockets through Caddy reconnect.
+Relayed sessions keep running unless `HBBR=1`. The replaced files stay beside the new ones as
+`*.bak-review`; the rollback commands are at the end of the script.
+
+After both relays: update Tether Manage and the apps, and when every Manage and technician app is
+updated set `TETHER_SIG_V1=off` in `/etc/tether/api.env` and restart tether-api
+([management.md](management.md), [api.md](api.md)).

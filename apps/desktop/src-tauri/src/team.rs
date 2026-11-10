@@ -33,17 +33,53 @@ fn unhex(s: &str) -> Option<[u8; 32]> {
 /// Load the key from `path`, creating it on first use (owner-only on macOS/Linux; the config
 /// folder is per user on Windows).
 pub fn key_at(path: &std::path::Path) -> R<SigningKey> {
-    if let Ok(s) = std::fs::read_to_string(path) {
-        return unhex(&s).map(|b| SigningKey::from_bytes(&b)).ok_or_else(|| "The team key file is damaged.".to_owned());
+    match read_key(path)? {
+        Some(k) => Ok(k),
+        None => store_new(path, tether_trust::generate_key()),
     }
-    let k = tether_trust::generate_key();
-    crate::policy::write_atomic(&path.to_path_buf(), hex(&k.to_bytes()).as_bytes()).map_err(|e| e.to_string())?;
+}
+
+const DAMAGED: &str = "The team key file is damaged.";
+
+/// The stored key; None only when there is no file. Unreadable or damaged is an error, never
+/// "absent": a new key would replace the enrolled one.
+fn read_key(path: &std::path::Path) -> R<Option<SigningKey>> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => unhex(&s).map(|b| Some(SigningKey::from_bytes(&b))).ok_or_else(|| DAMAGED.to_owned()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("The team key file cannot be read: {e}")),
+    }
+}
+
+/// Stores `k` unless a key is there already, and returns the key now in the file. Complete or
+/// absent at every moment: written to a temp file (owner-only from the start), then linked into
+/// place, which never replaces a file another process put there meanwhile.
+fn store_new(path: &std::path::Path, k: SigningKey) -> R<SigningKey> {
+    use std::io::{ErrorKind, Write as _};
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let placed = o
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(hex(&k.to_bytes()).as_bytes()).and_then(|_| f.sync_all()))
+        .and_then(|_| match std::fs::hard_link(&tmp, path) {
+            // shortcut: a volume without hard links gets a plain rename, which could replace a key
+            // stored in the same instant; use a no-replace rename (renameat2, MoveFileEx) if that
+            // ever happens in the field.
+            Err(e) if e.kind() != ErrorKind::AlreadyExists && !path.exists() => std::fs::rename(&tmp, path),
+            r => r,
+        });
+    let _ = std::fs::remove_file(&tmp);
+    match placed {
+        Ok(()) => Ok(k),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => read_key(path)?.ok_or_else(|| DAMAGED.to_owned()),
+        Err(e) => Err(format!("The team key could not be stored: {e}")),
     }
-    Ok(k)
 }
 
 fn key() -> R<SigningKey> {
@@ -63,6 +99,10 @@ fn now() -> u64 {
 /// Readable answer for the UI; `offline:`-prefixed when no relay was reached.
 fn status_error(code: u16, body: &str) -> String {
     match code {
+        // Requests are signed for one relay (v2). A relay from before that, or one that does not
+        // know its own name, refuses every member: say so instead of "not in the team".
+        401 if body.contains("unsupported signature version") => "This server must be updated before team features work with this version of Tether.".into(),
+        401 if body.contains("RELAY_HOST") || body.contains("signed for another relay") => "The server is not set up for this version of Tether yet (RELAY_HOST).".into(),
         401 => "not-member: This app is not in your organisation's team. Send its key to your administrator.".into(),
         403 => "Your team membership does not allow this.".into(),
         404 => "unsupported: The server does not offer team access yet.".into(),
@@ -77,8 +117,9 @@ fn call(method: &str, path: &str, body: Option<&[u8]>, if_match: Option<u64>, li
     let k = key()?;
     let body = body.unwrap_or_default().to_vec();
     let r = crate::policy::api(|c, base| {
-        // A fresh signature (and nonce) per attempt: the relay rejects a replayed one.
-        let sig = reqauth::sign_request(&k, method, path, &body, now());
+        // A fresh signature (and nonce) per attempt: the relay rejects a replayed one, and each
+        // is made for the relay it goes to.
+        let sig = reqauth::sign_request_for(&k, base, method, path, &body, now());
         let url = format!("{base}{path}");
         let rq = if method == "PUT" { c.put(url).header("Content-Type", "application/json").body(body.clone()) } else { c.get(url) };
         let rq = rq.header(reqauth::HEADER, sig);
@@ -152,6 +193,28 @@ mod tests {
         assert_eq!(a.to_bytes(), b.to_bytes());
         std::fs::write(&p, "nonsense").unwrap();
         assert!(key_at(&p).is_err(), "a damaged key is reported, never silently replaced");
+        // Unreadable as text (any read error but "not found"): reported, and the file stays.
+        std::fs::write(&p, [0xff, 0xfe, 0x00]).unwrap();
+        assert!(key_at(&p).is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), [0xff, 0xfe, 0x00]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::remove_file(&p);
+            key_at(&p).unwrap();
+            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_file(&p);
+        // A key stored meanwhile (another process) is used, not replaced; no temp file stays.
+        let (k1, k2) = (tether_trust::generate_key(), tether_trust::generate_key());
+        assert_eq!(store_new(&p, k1.clone()).unwrap().to_bytes(), k1.to_bytes());
+        assert_eq!(store_new(&p, k2).unwrap().to_bytes(), k1.to_bytes());
+        assert_eq!(key_at(&p).unwrap().to_bytes(), k1.to_bytes());
+        assert!(!p.with_extension(format!("{}.tmp", std::process::id())).exists());
+        // A damaged file in the way is reported and left alone.
+        std::fs::write(&p, "nonsense").unwrap();
+        assert!(store_new(&p, tether_trust::generate_key()).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "nonsense");
         let _ = std::fs::remove_file(&p);
     }
 
@@ -165,6 +228,11 @@ mod tests {
     #[test]
     fn errors_are_classified() {
         assert!(status_error(401, "").starts_with("not-member:"));
+        assert!(status_error(401, "signature does not match").starts_with("not-member:"));
+        assert!(status_error(401, "unsupported signature version").contains("must be updated"));
+        for body in ["this relay does not know its own host name (RELAY_HOST), so it cannot accept v2 signatures", "request signed for another relay"] {
+            assert!(status_error(401, body).contains("not set up"), "{body}");
+        }
         assert!(status_error(404, "").starts_with("unsupported:"));
         assert!(status_error(500, &"x".repeat(1000)).len() < 260);
     }

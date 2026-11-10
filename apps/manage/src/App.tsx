@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { Activity, FileCode2, History, KeyRound, Lock, Monitor, Package, Palette, ShieldCheck, Stethoscope, Users } from "lucide-react";
 import { api, emptyBundle, invoke, type AppState, type Bundle, type Change, type Live } from "./lib/ipc";
 import { incomplete } from "./lib/live";
+import type { Roster } from "./lib/team";
 import { SELECTED, useToast } from "./components/ui";
 import { PolicyBar, PolicyPublish } from "./components/policy-publish";
 import { Gate } from "./pages/Gate";
@@ -35,6 +36,9 @@ interface Ctx {
   publish: () => void;
   toast: (m: string) => void;
   go: (p: PageId) => void;
+  /** Unpublished changes to the team roster: kept while another page is open (Team page). */
+  teamDraft: Roster | null;
+  setTeamDraft: React.Dispatch<React.SetStateAction<Roster | null>>;
 }
 const AppCtx = createContext<Ctx>(null!);
 export const useApp = () => useContext(AppCtx);
@@ -62,6 +66,7 @@ export function App() {
   const [changes, setChanges] = useState<Change[]>([]);
   const [invalid, setInvalid] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
+  const [teamDraft, setTeamDraft] = useState<Roster | null>(null);
   const { show, node } = useToast();
 
   const reload = useCallback(async () => setState(await api.state()), []);
@@ -124,6 +129,8 @@ export function App() {
     publish: () => setPublishing(true),
     toast: show,
     go: setPage,
+    teamDraft,
+    setTeamDraft,
   };
 
   return (
@@ -131,10 +138,10 @@ export function App() {
       <div className="flex h-full">
         <nav className="flex w-56 shrink-0 flex-col gap-0.5 border-r border-hairline bg-parchment p-3" aria-label="Sections">
           <div className="mb-4 flex items-center gap-2 px-2 pt-2">
-            <svg width={22} height={22} viewBox="0 0 1024 1024" aria-hidden>
+            <svg width={22} height={22} viewBox="0 0 1024 1024" aria-hidden className="text-on-accent">
               <rect x="64" y="64" width="896" height="896" rx="216" fill="var(--accent)" />
-              <rect x="236" y="300" width="352" height="248" rx="44" fill="none" stroke="#fff" strokeWidth="56" />
-              <rect x="436" y="476" width="352" height="248" rx="44" fill="#fff" fillOpacity="0.25" stroke="#fff" strokeWidth="56" />
+              <rect x="236" y="300" width="352" height="248" rx="44" fill="none" stroke="currentColor" strokeWidth="56" />
+              <rect x="436" y="476" width="352" height="248" rx="44" fill="currentColor" fillOpacity="0.25" stroke="currentColor" strokeWidth="56" />
             </svg>
             <span className="text-callout font-semibold">Tether Manage</span>
           </div>
@@ -145,10 +152,10 @@ export function App() {
               aria-current={page === id ? "page" : undefined}
               className={`flex h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-caption ${page === id ? SELECTED : "text-ink-80 hover:bg-tile-2"}`}
             >
-              <Icon size={16} strokeWidth={1.75} className={page === id ? "text-white" : "text-muted"} />
+              <Icon size={16} strokeWidth={1.75} className={page === id ? "text-on-accent" : "text-muted"} />
               {label}
               {id === "policy" && ctx.dirty && (
-                <span className={`ml-auto rounded-full px-1.5 text-footnote ${page === id ? "bg-white/25 text-white" : "bg-accent text-white"}`} title="Unpublished changes">
+                <span className={`ml-auto rounded-full px-1.5 text-footnote ${page === id ? "bg-on-accent/25 text-on-accent" : "bg-accent text-on-accent"}`} title="Unpublished changes">
                   {changes.length}
                 </span>
               )}

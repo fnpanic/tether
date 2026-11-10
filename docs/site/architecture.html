@@ -360,7 +360,7 @@ docs/                    specs and runbooks (this site: docs/site/)</code></pre>
 <tr><td>Relay list (<code>RELAY_SERVERS</code>)</td><td><code>tether-desk…|http://127.0.0.1:21121/readyz,tether-desk2…|https://tether-desk2…/readyz/relay</code></td><td>the mirror image</td></tr>
 <tr><td>VM tuning</td><td colspan="2">kdump off and <code>crashkernel</code> removed (it reserved 448 MB of the 1 GB), 2 GB swap file</td></tr>
 </tbody></table></div>
-<p>A complete node is set up by <code>server/install.sh &lt;name&gt;</code> (hbbs, hbbr, Caddy, tether-api, port-80 forward, DuckDNS), or with Docker (<code>server/docker-compose.yml</code>, host networking). Everything runs inside Oracle's Always Free tier; DuckDNS is free with no expiry.</p>
+<p>A complete node is set up by <code>server/install.sh &lt;name&gt;</code> (hbbs, hbbr, Caddy, tether-api, firewall ports 443 and 80, DuckDNS), or with Docker (<code>server/docker-compose.yml</code>, host networking). Everything runs inside Oracle's Always Free tier; DuckDNS is free with no expiry.</p>
 
 <!-- ============================ NETWORK ============================ -->
 <h2 id="network">Network</h2>
@@ -395,7 +395,7 @@ docs/                    specs and runbooks (this site: docs/site/)</code></pre>
 <tr><td><code>/</code></td><td><code>download/index.html</code></td><td>download page, else <code>200 Tether relay</code></td></tr>
 <tr><td><code>/readyz/relay</code></td><td>hbbr <code>:21121/readyz</code></td><td>health of this node's relay for other nodes</td></tr>
 <tr><td>TCP 80</td><td>forwarded to 443</td><td>fallback route</td></tr>
-<tr><td>21121 / 21122</td><td>hbbr / hbbs health</td><td>local only, not opened in the firewall</td></tr>
+<tr><td>21121 / 21122</td><td>hbbr / hbbs health</td><td>bound to all interfaces; <code>install.sh</code> does not open them in the firewall</td></tr>
 </tbody></table></div>
 <p>Stock RustDesk clients would also need TCP 21115–21117 and UDP 21116; Tether clients do not.</p>
 
@@ -524,16 +524,16 @@ docs/                    specs and runbooks (this site: docs/site/)</code></pre>
 <ul>
   <li><strong>Envelope:</strong> <code>{"payload": b64, "sig": b64(ed25519), "key": b64(pubkey)}</code>. Clients accept it only if <code>key</code> is one of the compiled-in admin keys and the signature verifies.</li>
   <li><strong>Rollback protection:</strong> clients store the last accepted serial and reject lower ones; the relay requires a serial higher than its current one (<code>409</code>). A compromised relay can withhold a policy, but cannot alter, forge or roll one back.</li>
-  <li><strong>Admin requests:</strong> header <code>Tether-Sig: v1 ts=… nonce=… sig=…</code> over <code>"tether-admin-v1\n" + METHOD + path(with query) + ts + nonce + hex(sha256(body))</code>. The server allows ±300 s clock skew and rejects a nonce seen in the last 600 s (persisted across restarts).</li>
+  <li><strong>Admin requests:</strong> header <code>Tether-Sig: v2 host=&lt;relay host&gt; ts=… nonce=… sig=…</code> over <code>"tether-admin-v2\n" + host + "\n" + METHOD + "\n" + path(with query) + "\n" + ts + "\n" + nonce + "\n" + hex(sha256(body))</code>. The relay accepts v2 only for its own names (<code>RELAY_HOST</code>), allows ±300 s clock skew and rejects a nonce seen in the last 601 s (persisted across restarts). The older <code>v1</code> form (no host, so not bound to one relay) is accepted from older apps until <code>TETHER_SIG_V1=off</code> is set on the relay. Tether Manage and the technician app sign v2 and follow no HTTP redirects.</li>
   <li><strong>Updates:</strong> minisign signature checked against the compiled-in updater key before anything runs.</li>
   <li><strong>Custom apps:</strong> the profile is an admin-signed envelope; the relay checks it before storing, and TetherQS checks it again against its own compiled-in keys.</li>
 </ul>
 
 <h3 id="sec-floor">Security floor and hardening</h3>
-<p><code>tether_trust::policy::FLOOR</code> lists core options no policy can set; the apps force them on top of any policy: <code>allow-insecure-tls-fallback</code>, <code>allow-remote-config-modification</code>, <code>enable-check-update</code>, <code>allow-auto-update</code>, <code>direct-server</code>, <code>enable-remote-printer</code>, <code>allow-auto-record-incoming/outgoing</code>, <code>stop-service</code>, <code>allow-websocket</code>, <code>disable-udp</code>, <code>enable-lan-discovery</code>, <code>api-server</code>, <code>enable-webrtc</code>, <code>enable-udp-punch</code>, <code>enable-ipv6-punch</code>, <code>custom-rendezvous-server</code>, <code>relay-server</code>, <code>key</code>.</p>
+<p><code>tether_trust::policy::FLOOR</code> lists core options no policy can set; the apps force them on top of any policy: <code>allow-insecure-tls-fallback</code>, <code>allow-remote-config-modification</code>, <code>enable-check-update</code>, <code>allow-auto-update</code>, <code>direct-server</code>, <code>enable-remote-printer</code>, <code>allow-auto-record-incoming/outgoing</code>, <code>stop-service</code>, <code>enable-camera</code>, <code>enable-terminal</code>, <code>allow-websocket</code>, <code>disable-udp</code>, <code>enable-lan-discovery</code>, <code>api-server</code>, <code>enable-webrtc</code>, <code>enable-udp-punch</code>, <code>enable-ipv6-punch</code>, <code>custom-rendezvous-server</code>, <code>relay-server</code>, <code>key</code>.</p>
 <ul>
   <li>A connected peer can never change this machine's settings; no third-party update checks; no virtual printer; nothing written to disk without an explicit action.</li>
-  <li>Tauri shell: strict CSP (<code>default-src 'self'</code>), no shell/filesystem/HTTP/updater plugins, DevTools not compiled into release builds. Every IPC command validates input: peer IDs <code>[A-Za-z0-9_.@:-]{1,64}</code>, session keys 32 hex characters, options from an allow-list, bounded lengths, connection types as an enum.</li>
+  <li>Tauri shell: strict CSP (<code>default-src 'self'</code>), no shell, filesystem or HTTP plugins; the updater, dialog, deep-link and single-instance plugins are used from Rust only and no plugin command is exposed to the webview (<code>capabilities/default.json</code>); DevTools not compiled into release builds. Commands that change this machine's security posture (permanent password, 2FA, options, installing the service, saving the hosts store and team tags) answer the main window only. Validated IPC input: peer IDs <code>[A-Za-z0-9_.@:-]{1,64}</code>, session keys 32 hex characters, options from an allow-list, bounded lengths, connection types as an enum.</li>
   <li>Locked settings are refused in the backend (<code>locked:&lt;feature&gt;</code> errors), not only greyed out in the UI.</li>
 </ul>
 
@@ -557,8 +557,8 @@ docs/                    specs and runbooks (this site: docs/site/)</code></pre>
     <text class="ta h" x="28" y="165" text-anchor="middle" transform="rotate(-90 28 165)">later wins</text>
     <rect class="b" x="60" y="20" width="480" height="50" rx="11"/><text class="h" x="76" y="42">Machine policy (GPO / MDM)</text><text class="s" x="76" y="60">HKLM\SOFTWARE\Policies\Tether PolicyJson · macOS Managed Preferences</text>
     <rect class="b" x="60" y="80" width="480" height="50" rx="11"/><text class="h" x="76" y="102">Group overrides</text><text class="s" x="76" y="120">devices assigned by install uuid · groups target one profile</text>
-    <rect class="ba" x="60" y="140" width="480" height="50" rx="11"/><text class="h" x="76" y="162">Custom app (branded TetherQS download)</text><text class="s" x="76" y="180">signed CustomProfile layer · customer features only</text>
     <rect class="b" x="60" y="200" width="480" height="50" rx="11"/><text class="h" x="76" y="222">Profile: technician | customer</text><text class="s" x="76" y="240">from the signed Bundle</text>
+    <rect class="ba" x="60" y="140" width="480" height="50" rx="11"/><text class="h" x="76" y="162">Custom app (branded TetherQS download)</text><text class="s" x="76" y="180">signed CustomProfile layer · customer features only</text>
     <rect class="b" x="60" y="260" width="480" height="50" rx="11"/><text class="h" x="76" y="282">Built-in defaults</text><text class="s" x="76" y="300">tether_trust::policy::FEATURES</text>
     <path class="l" d="M540 135H598" marker-end="url(#ah)"/>
     <rect class="ba" x="600" y="80" width="280" height="110" rx="18"/>
@@ -568,10 +568,10 @@ docs/                    specs and runbooks (this site: docs/site/)</code></pre>
     <path class="l" d="M740 220V194" marker-end="url(#ah)"/>
     <text class="h" x="60" y="346">States per layer</text>
     <text class="s" x="60" y="368">default: not set here · on: user may change, value is the default · off: locked off · locked: locked to value · hidden: locked off, not shown</text>
-    <text class="s" x="60" y="388">A later layer set to “on” unlocks a feature an earlier layer locked. Invalid layers (machine, custom) are ignored, not partially applied.</text>
+    <text class="s" x="60" y="388">A later layer set to “on” unlocks a feature an earlier layer locked (not a custom app over the profile). An invalid or unknown rule is skipped; the other rules of its layer apply.</text>
   </svg>
   </div>
-  <figcaption><code>policy::resolve_with(bundle, profile, device, custom, machine)</code>. The custom app sits between profile and group: it is the admin's choice for everyone using that download, while groups and GPO/MDM still target individual devices.</figcaption>
+  <figcaption><code>policy::resolve_with(bundle, profile, device, custom, machine)</code>. The custom app sits between profile and group: it is the admin's choice for everyone using that download, while groups and GPO/MDM still target individual devices. Its setting is ignored for a feature the profile locks: its signed settings have no serial or expiry and cannot be revoked on a downloaded app, so they never switch on what the published policy locks.</figcaption>
 </figure>
 <p><strong>Distribution.</strong> Clients poll <code>GET /api/policy</code> every <code>policy.refresh-minutes</code> (15; 1 with <code>policy.fast-apply</code>) with <code>If-None-Match: "&lt;serial&gt;"</code>, verify, reject lower serials, cache the verified document and apply it at the next start before the core runs. Then they send <code>POST /api/heartbeat</code> (uuid, ID, profile, version, OS, serial; ≤ 2048 bytes, rate-limited). The policy API, heartbeats and updates use the first server that answers.</p>
 <p><strong>Publishing from Tether Manage.</strong> Publishing validates the draft (unknown features or values make it unpublishable), shows a review of the change, signs it, and publishes the same signed document to every configured relay with serial = highest serial on any relay or published from this PC + 1. It then reads back each relay's state and reports per relay; a relay that missed it can be published to again, since any node with a lower serial accepts the same document. History keeps the last 50 versions per relay (<code>policy-history/&lt;serial&gt;.json</code>); restore republishes old content under a new serial, and only documents that verify with this PC's admin key are used.</p>
@@ -749,7 +749,7 @@ docs/                    specs and runbooks (this site: docs/site/)</code></pre>
 <thead><tr><th>Endpoint</th><th>Auth</th><th>Purpose</th></tr></thead>
 <tbody>
 <tr><td><code>GET /api/policy</code></td><td>public</td><td>Signed policy, <code>ETag: "&lt;serial&gt;"</code>, <code>304</code> when unchanged</td></tr>
-<tr><td><code>POST /api/heartbeat</code></td><td>public</td><td>Device report; 1 per uuid per 60 s, 30 per IP per minute; ≤ 10 000 devices, 180 days</td></tr>
+<tr><td><code>POST /api/heartbeat</code></td><td>public</td><td>Device report; 1 per uuid per 60 s; 30 per IP per minute for uuids the relay does not know yet;≤ 10 000 devices, 180 days</td></tr>
 <tr><td><code>POST /api/diag/&lt;ticket&gt;</code></td><td>ticket</td><td>Diagnostics zip ≤ 2 MiB</td></tr>
 <tr><td><code>GET /q/&lt;token&gt;</code></td><td>token</td><td>Custom TetherQS download</td></tr>
 <tr><td><code>PUT /api/admin/policy</code></td><td>signed</td><td>Publish (≤ 256 KiB, serial must increase); history of 50</td></tr>

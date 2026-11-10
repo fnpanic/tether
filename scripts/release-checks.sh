@@ -1,7 +1,8 @@
 #!/bin/bash
-# Malware checks for release files, run for every build before it goes into dist/ or is published
-# (docs/release-checks.md): Microsoft Defender scan, then VirusTotal (scripts/vtscan.py saves the
-# reports under tools/release/virustotal/). Exit != 0 when anything flags a file.
+# Malware checks for release files, to be run by hand for every build before it is published
+# (docs/release-checks.md; nothing else enforces it): Microsoft Defender scan, then VirusTotal
+# (scripts/vtscan.py saves the reports under tools/release/virustotal/). Exit 1 when anything flags a
+# file, 2 when a check gave no result (missing file, VirusTotal error or no finished analysis).
 #   bash scripts/release-checks.sh dist/windows/Tether_<v>_x64-setup.exe dist/quick/TetherQS-<v>.exe ...
 set -u
 [ $# -gt 0 ] || { echo "usage: $0 FILE..." >&2; exit 2; }

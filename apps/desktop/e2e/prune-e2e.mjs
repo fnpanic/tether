@@ -45,7 +45,7 @@ const none = (v) => !qsFiles(v).some(has);
 
 // ---- tether-api in WSL and the Caddy stand-in ----
 mkdirSync(apiDir);
-const api = spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, `${BIN}/tether-api`, "--data", wslPath(apiDir), "--listen", `127.0.0.1:${API_PORT}`], { stdio: ["ignore", "pipe", "pipe"] });
+const api = spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, "RELAY_HOST=127.0.0.1,localhost", `${BIN}/tether-api`, "--data", wslPath(apiDir), "--listen", `127.0.0.1:${API_PORT}`], { stdio: ["ignore", "pipe", "pipe"] });
 let apiOut = "";
 api.stdout.on("data", (d) => (apiOut += d));
 api.stderr.on("data", (d) => (apiOut += d));

@@ -372,6 +372,9 @@ B and C it is only the last resort.
   - At 10 % per hour, the TetherQS release in §4.4 needs 78 Mbit/s (32 with gzip).
 - **Policy** `update.rollout` = `default` | `early` (treats b as 0) | `late` (waits for 100 %).
   This is the Chromium enterprise model, for admins who want their own machines first or last.
+  As built, one exception: a device below the release's `minimumVersion` is blocked until it
+  updates, so a release that is not halted is offered to it whatever its bucket or `late`
+  ([updates.md](updates.md#staged-rollout-halt-security-releases)).
 - **Halt**: Manage re-signs the index with `halted: true` (new serial). Hint, fetch, then:
   - eligible devices that have not installed stop, including a download in progress, because the
     client re-checks the index (conditional GET) right before `install`;
@@ -430,6 +433,10 @@ with a `.exe.gz` that Manage uploads, and nginx `gzip_static on`. The TetherQS c
 `Accept-Encoding: gzip`; `reqwest` with the `gzip` feature decompresses it transparently. The
 signature still covers the plain exe. Result: 35 → 14.6 MB (measured). xz would be 9.3 MB, but
 that needs a new dependency.
+As it is now: neither front end does this any more (`server/caddy/Caddyfile` has no
+`precompressed`, `server/nginx/nginx.conf` no `gzip_static`: download scanners never finished
+analysing the gzip-encoded exe). The TetherQS updater fetches the `.exe.gz` (or `.xz`) copy by
+its own URL and unpacks it itself ([updates.md](updates.md#endpoint-layout)).
 
 **Delta updates: not recommended now.**
 

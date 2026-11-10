@@ -1,5 +1,5 @@
 // Shared primitives. Every visual rule here comes from /DESIGN.md.
-import { type ButtonHTMLAttributes, type ReactNode, useEffect, useRef, useState } from "react";
+import { type ButtonHTMLAttributes, type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Laptop, Minus, Monitor, Server, Square, X } from "lucide-react";
 import { inTauri } from "../lib/ipc";
 
@@ -50,6 +50,9 @@ export function Logo({ size = 22 }: { size?: number }) {
   );
 }
 
+/** A selected segment, nav item or filter (DESIGN.md › Segmented control). */
+export const SELECTED = "bg-accent text-on-accent font-semibold";
+
 type Variant = "primary" | "secondary" | "utility" | "pearl" | "ghost" | "danger";
 
 export function Button({
@@ -59,7 +62,7 @@ export function Button({
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: "sm" | "md" | "lg" }) {
   const v: Record<Variant, string> = {
-    primary: "rounded-full bg-accent text-white hover:brightness-110",
+    primary: "rounded-full bg-accent text-on-accent hover:brightness-110",
     secondary: "rounded-full border border-accent text-accent hover:bg-accent/10",
     utility: "rounded-md bg-ink text-canvas hover:opacity-90",
     pearl: "rounded-xl border border-hairline bg-tile-2 text-ink-80 hover:bg-parchment",
@@ -101,9 +104,9 @@ export function Toggle({ checked, onChange, label, disabled }: { checked: boolea
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative h-6 w-10 shrink-0 rounded-full disabled:opacity-40 ${checked ? "bg-accent" : "bg-hairline"}`}
+      className={`relative h-6 w-10 shrink-0 rounded-full disabled:opacity-40 ${checked ? "bg-accent" : "bg-faint"}`}
     >
-      <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all duration-150 ${checked ? "left-[18px]" : "left-0.5"}`} style={{ boxShadow: "0 1px 3px rgba(0,0,0,.25)" }} />
+      <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform duration-150 ${checked ? "translate-x-4" : ""}`} />
     </button>
   );
 }
@@ -117,7 +120,7 @@ export function Segmented<T extends string>({ value, options, onChange }: { valu
           role="radio"
           aria-checked={value === o.value}
           onClick={() => onChange(o.value)}
-          className={`rounded-full px-3.5 py-1.5 text-caption ${value === o.value ? "border border-hairline bg-tile text-ink" : "border border-transparent text-muted hover:text-ink"}`}
+          className={`rounded-full border border-transparent px-3.5 py-1.5 text-caption ${value === o.value ? SELECTED : "text-muted hover:text-ink"}`}
         >
           {o.label}
         </button>
@@ -146,26 +149,76 @@ export function useToast() {
     t.current = window.setTimeout(() => setMsg(null), ms);
   };
   useEffect(() => () => clearTimeout(t.current), []);
+  // A popover joins the top layer, above an open modal dialog; shown again on every render, because
+  // a dialog opened later would cover it (the top layer is ordered by time of showing). Without
+  // popover support (older WKWebView) it stays a fixed layer of the page.
+  const raise = (el: HTMLDivElement | null) => {
+    if (!el?.showPopover) return;
+    try {
+      if (el.matches(":popover-open")) el.hidePopover();
+      el.showPopover();
+    } catch {
+      /* not connected yet */
+    }
+  };
   const node = msg ? (
-    <div role="status" className="pointer-events-none fixed inset-x-0 bottom-8 z-50 flex justify-center">
+    <div ref={raise} popover="manual" role="status" className="pointer-events-none fixed inset-x-0 bottom-8 top-auto z-50 m-0 flex h-auto w-auto justify-center overflow-visible border-0 bg-transparent p-0">
       <div className="animate-rise rounded-full bg-ink px-5 py-2.5 text-caption text-canvas shadow-float">{msg}</div>
     </div>
   ) : null;
   return { show, node };
 }
 
-export function Modal({ children, onClose, width = 420 }: { children: ReactNode; onClose?: () => void; width?: number }) {
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose?.();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [onClose]);
+/** A native modal dialog: focus stays inside, the page behind is inert, Escape and a click outside
+ *  ask to close (no `onClose`: it must be answered), and focus returns to what opened it. Named by
+ *  `label`, else by its first `h2`. First focus: `data-autofocus`, else the first control. */
+export function Modal({
+  children,
+  onClose,
+  width = 420,
+  label,
+  alert,
+  className = "p-8",
+}: {
+  children: ReactNode;
+  onClose?: () => void;
+  width?: number | string;
+  label?: string;
+  alert?: boolean;
+  className?: string;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const id = useId();
+  // Layout effect: close() must run while the dialog is still in the page, or focus does not return.
+  useLayoutEffect(() => {
+    const d = ref.current!;
+    d.showModal();
+    d.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+    const h = label ? null : d.querySelector("h2");
+    if (h) d.setAttribute("aria-labelledby", (h.id ||= id));
+    return () => d.close();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   return (
-    <div className="animate-fade fixed inset-0 z-40 grid place-items-center bg-black/40" onMouseDown={onClose}>
-      <div role="dialog" aria-modal style={{ width }} className="animate-rise max-w-[92vw] rounded-2xl border border-hairline bg-tile p-8 shadow-float" onMouseDown={(e) => e.stopPropagation()}>
-        {children}
-      </div>
-    </div>
+    <dialog
+      ref={ref}
+      role={alert ? "alertdialog" : "dialog"}
+      aria-label={label}
+      style={{ width }}
+      className="animate-rise m-auto max-h-[calc(100vh-2rem)] max-w-[92vw] overflow-y-auto rounded-2xl border border-hairline bg-tile text-ink shadow-float backdrop:bg-black/40"
+      onCancel={(e) => {
+        e.preventDefault();
+        onClose?.();
+      }}
+      // A second Escape closes a dialog whatever `cancel` said: follow it, or reopen one that needs an answer.
+      onClose={() => {
+        const d = ref.current;
+        if (d && !d.open) onClose ? onClose() : d.showModal();
+      }}
+      // Only the backdrop has the dialog itself as target (the content fills it).
+      onMouseDown={(e) => e.target === e.currentTarget && onClose?.()}
+    >
+      <div className={className}>{children}</div>
+    </dialog>
   );
 }
 

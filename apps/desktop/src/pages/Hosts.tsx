@@ -25,7 +25,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { Button, IconButton, Logo, Modal, TitleBar, useToast } from "../components/ui";
+import { Button, IconButton, Logo, Modal, SELECTED, TitleBar, useToast } from "../components/ui";
 import { api, formatId, invoke, type Status } from "../lib/ipc";
 import { useMode } from "../lib/mode";
 import { Settings } from "./Settings";
@@ -36,7 +36,7 @@ import { errorText, isOn, usePolicy } from "../lib/policy";
 import { buildHosts, label, type Host } from "../lib/hosts/model";
 import { applyRules } from "../lib/hosts/rules";
 import { parse, search } from "../lib/hosts/query";
-import { actions, flush, useHosts } from "../lib/hosts/store";
+import { actions, flush, useHosts, useReadOnly } from "../lib/hosts/store";
 import { HostTable, smartOrder, sortHosts, type Sort } from "../components/hosts/HostTable";
 import { Detail } from "../components/hosts/Detail";
 import { Palette, type Cmd } from "../components/hosts/Palette";
@@ -74,6 +74,7 @@ function tagTree(hosts: Host[]) {
 
 export function Hosts() {
   const st = useHosts();
+  const ro = useReadOnly();
   const eff = usePolicy();
   const toast = useToast();
   const canConnect = isOn(eff, "connect.outgoing");
@@ -219,12 +220,15 @@ export function Hosts() {
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
+      const el = e.target instanceof Element ? e.target : null;
+      // A dialog or overlay has the keyboard (the palette is one too, but Ctrl+K also closes it).
+      if (dlg || settings || recordings || (!palette && el?.closest("dialog, [role=dialog], [role=alertdialog]"))) return;
       if (mod && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPalette((p) => !p);
         return;
       }
-      if (palette || dlg) return;
+      if (palette) return;
       const inSearch = e.target === searchRef.current;
       const typing = isText(e.target) && !inSearch;
       if (typing) return;
@@ -234,6 +238,10 @@ export function Hosts() {
         searchRef.current?.select();
         return;
       }
+      // A focused control keeps the keys it uses itself (Enter on "Add host" must not open a
+      // session); every other shortcut still works after a click on a filter or button.
+      const ctl = el?.closest("button, a, select, [role=switch], [role=radio], [role=checkbox]");
+      if (ctl && (e.key === "Enter" || e.key === " " || (e.key.startsWith("Arrow") && ctl.matches("select, [role=radio]")))) return;
       switch (e.key) {
         case "ArrowDown":
           e.preventDefault();
@@ -318,7 +326,7 @@ export function Hosts() {
     { id: "files", title: "Transfer files to the current host", keys: "⇧ Enter", icon: <FolderSync size={14} />, run: () => cur && connect(cur, "file-transfer") },
     { id: "view", title: "View only (current host)", keys: "Alt Enter", icon: <Eye size={14} />, run: () => cur && connect(cur, "view-only") },
     { id: "sessions", title: "Open sessions", hint: "Ctrl+Alt+Del, lock, restart", icon: <Monitor size={14} />, run: () => setDlg("sessions") },
-    { id: "save", title: "Save this search", hint: q, icon: <Star size={14} />, run: () => q.trim() && setDlg("save") },
+    { id: "save", title: "Save this search", hint: q, icon: <Star size={14} />, run: () => (ro ? toast.show("Saved searches are managed by your team.") : q.trim() && setDlg("save")) },
     { id: "rules", title: "Tag rules", hint: "auto-tag by OS, hostname…", icon: <Wand2 size={14} />, run: () => setDlg("rules") },
     { id: "colors", title: "Tag colours", icon: <PaletteIcon size={14} />, run: () => setDlg("colors") },
     { id: "import", title: "Import hosts", hint: "JSON or CSV", icon: <Upload size={14} />, run: () => setDlg("import") },
@@ -344,11 +352,11 @@ export function Hosts() {
       <button
         onClick={onClick}
         aria-current={active || undefined}
-        className={`flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-caption ${active ? "bg-accent text-white" : "text-ink-80 hover:bg-tile-2"}`}
+        className={`flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-caption ${active ? SELECTED : "text-ink-80 hover:bg-tile-2"}`}
       >
-        {icon && <span className={`grid w-4 shrink-0 place-items-center ${active ? "text-white" : "text-muted"}`}>{icon}</span>}
+        {icon && <span className={`grid w-4 shrink-0 place-items-center ${active ? "" : "text-muted"}`}>{icon}</span>}
         <span className="min-w-0 flex-1 truncate">{text}</span>
-        {n !== undefined && <span className={`text-footnote tabular-nums ${active ? "text-white/80" : "text-muted"}`}>{n.toLocaleString()}</span>}
+        {n !== undefined && <span className={`text-footnote font-normal tabular-nums ${active ? "" : "text-muted"}`}>{n.toLocaleString()}</span>}
       </button>
       {extra}
     </div>
@@ -376,11 +384,11 @@ export function Hosts() {
               const parts = q.split(/\s+/).filter((p) => p && p !== term && p !== `-${term}`);
               setQ((q.split(/\s+/).includes(t) ? parts : [...parts, t]).join(" "));
             }}
-            className={`flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 text-left text-caption ${on ? "bg-accent text-white" : neg ? "text-muted line-through" : "text-ink-80 hover:bg-tile-2"}`}
+            className={`flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 text-left text-caption ${on ? SELECTED : neg ? "text-muted line-through" : "text-ink-80 hover:bg-tile-2"}`}
           >
             <TagDot tag={k} meta={st.store.tags} />
             <span className="min-w-0 flex-1 truncate">{k.slice(k.lastIndexOf(":") + 1)}</span>
-            <span className={`text-footnote tabular-nums ${on ? "text-white/80" : "text-muted"}`}>{tree.count.get(k)?.toLocaleString()}</span>
+            <span className={`text-footnote font-normal tabular-nums ${on ? "" : "text-muted"}`}>{tree.count.get(k)?.toLocaleString()}</span>
           </button>
         </div>
         {open[k] && kids.map((c) => tagNode(c, depth + 1))}
@@ -399,7 +407,7 @@ export function Hosts() {
         <div className="flex-1" data-tauri-drag-region />
         <button
           onClick={() => setPalette(true)}
-          className="no-drag flex h-8 w-[300px] items-center gap-2 rounded-full border border-hairline bg-parchment px-3.5 text-caption text-faint hover:text-muted"
+          className="no-drag flex h-8 w-[300px] items-center gap-2 rounded-full border border-hairline bg-parchment px-3.5 text-caption text-muted hover:text-ink"
           aria-label="Open command palette"
         >
           <Search size={14} /> Go to host or command
@@ -438,12 +446,12 @@ export function Hosts() {
 
           <div className="mt-5 flex items-center justify-between px-2 text-footnote font-semibold text-muted">
             Saved searches
-            <IconButton label="Save this search" className="!h-6 !w-6" disabled={!q.trim()} onClick={() => setDlg("save")}>
+            <IconButton label={ro ? "Saved searches are managed by your team" : "Save this search"} className="!h-6 !w-6" disabled={ro || !q.trim()} onClick={() => setDlg("save")}>
               <Plus size={13} />
             </IconButton>
           </div>
           <div className="mt-1 space-y-0.5">
-            {st.store.searches.length === 0 && <div className="px-2 text-footnote text-faint">Search, then + to keep it here.</div>}
+            {st.store.searches.length === 0 && <div className="px-2 text-footnote text-muted">{ro ? "Managed by your team." : "Search, then + to keep it here."}</div>}
             {st.store.searches.map((s) =>
               navItem(
                 s.id,
@@ -452,7 +460,7 @@ export function Hosts() {
                 q === s.query,
                 () => setQ(s.query),
                 <Star size={14} />,
-                <button
+                !ro && <button
                   aria-label={`Delete saved search ${s.name}`}
                   onClick={() => actions.setStore((x) => ({ ...x, searches: x.searches.filter((y) => y.id !== s.id) }))}
                   className="absolute right-1 top-1 hidden h-6 w-6 place-items-center rounded-full bg-parchment text-muted hover:text-danger group-hover:grid"
@@ -475,7 +483,7 @@ export function Hosts() {
             </span>
           </div>
           <div className="mt-1" aria-label="Tags">
-            {tree.roots.length === 0 && <div className="px-2 text-footnote text-faint">Select hosts and press T to tag them.</div>}
+            {tree.roots.length === 0 && <div className="px-2 text-footnote text-muted">Select hosts and press T to tag them.</div>}
             {tree.roots.map((r) => tagNode(r, 0))}
           </div>
         </nav>
@@ -508,6 +516,11 @@ export function Hosts() {
             </Button>
           </div>
 
+          {st.saveError && (
+            <div role="alert" className="mx-4 mb-2 shrink-0 rounded-xl bg-danger/10 px-3 py-2 text-caption text-danger">
+              {st.saveError}
+            </div>
+          )}
           {sel.length > 0 && (
             <div role="toolbar" aria-label="Selection" className="animate-fade mx-4 mb-2 flex min-h-10 shrink-0 flex-wrap items-center gap-x-2 rounded-xl py-1 bg-accent/12 px-3 text-caption">
               <span className="font-semibold" data-testid="selection-count">
@@ -573,9 +586,8 @@ export function Hosts() {
               {rows.length === hosts.length ? `${hosts.length.toLocaleString()} hosts` : `${rows.length.toLocaleString()} of ${hosts.length.toLocaleString()} hosts`}
             </span>
             {st.onlineState === "ok" && <span>{counts.online.toLocaleString()} online</span>}
-            {onlineNote && <span className="text-faint">{onlineNote}</span>}
+            {onlineNote && <span>{onlineNote}</span>}
             {st.store.team?.enabled && st.team.error && <span className="text-warn">Team: {st.team.error}</span>}
-            {st.saveError && <span className="text-danger">{st.saveError}</span>}
             <span className="flex-1" />
             <span className="hidden tabular-nums text-faint xl:inline" data-testid="search-ms">
               search {perf.last.toFixed(1)} ms
@@ -589,7 +601,7 @@ export function Hosts() {
           </footer>
         </main>
 
-        {curHost && <Detail h={curHost} meta={st.store.tags} known={known} canConnect={canConnect} onConnect={connect} onToast={toast.show} onRemove={() => setDlg("remove")} />}
+        {curHost && <Detail key={curHost.id} h={curHost} meta={st.store.tags} known={known} canConnect={canConnect} onConnect={connect} onToast={toast.show} onRemove={() => setDlg("remove")} />}
       </div>
 
       {palette && <Palette hosts={hosts} commands={commands} onClose={() => setPalette(false)} onHost={connect} />}
@@ -613,7 +625,7 @@ export function Hosts() {
             </Button>
             <Button
               variant="danger"
-              autoFocus
+              data-autofocus
               onClick={() => {
                 void actions.remove(targets);
                 setSelected(new Set());

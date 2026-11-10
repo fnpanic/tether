@@ -156,14 +156,51 @@ export function table(d: PageData): { blocks: Set<string>; sections: Set<string>
 /** Attributes whose value is fetched or navigated to: only url placeholders, at the start. */
 const URL_ATTRS = new Set(["href", "src", "srcset", "action", "formaction", "poster", "data", "cite", "background", "ping", "xlink:href", "manifest"]);
 
+/** Start of the tag or comment that `at` is inside, or -1 in text. `<` and `>` inside quoted
+ *  attribute values, comments, scripts and styles do not open or close a tag. */
+function tagStart(html: string, at: number): number {
+  for (let i = 0; i < at; ) {
+    const lt = html.indexOf("<", i);
+    if (lt < 0 || lt >= at) return -1;
+    if (html.startsWith("<!--", lt)) {
+      const end = html.indexOf("-->", lt + 4);
+      if (end < 0 || end + 3 > at) return lt;
+      i = end + 3;
+      continue;
+    }
+    // As in HTML, `<` opens a tag only before a letter, `/`, `!` or `?`.
+    if (!/[a-z/!?]/i.test(html[lt + 1] ?? "")) {
+      i = lt + 1;
+      continue;
+    }
+    let quote = "";
+    let j = lt + 1;
+    for (; j < at; j++) {
+      const c = html[j];
+      if (quote) quote = c === quote ? "" : quote;
+      else if (c === '"' || c === "'") quote = c;
+      else if (c === ">") break;
+    }
+    if (j >= at) return lt;
+    i = j + 1;
+    const raw = /^<(script|style)\b/i.exec(html.slice(lt, lt + 8));
+    if (raw) {
+      const end = html.toLowerCase().indexOf(`</${raw[1].toLowerCase()}`, i);
+      if (end < 0 || end >= at) return -1;
+      i = end;
+    }
+  }
+  return -1;
+}
+
 /** Why a placeholder at `at` in `html` is not allowed there, or null. */
 function context(html: string, at: number, val: Val | undefined): string | null {
   const before = html.slice(0, at).toLowerCase();
   for (const el of ["script", "style"]) {
     if (before.lastIndexOf(`<${el}`) > before.lastIndexOf(`</${el}`)) return `not inside <${el}> (put it in a data- attribute and read that)`;
   }
-  const lt = before.lastIndexOf("<");
-  if (lt <= before.lastIndexOf(">")) return null; // text
+  const lt = tagStart(html, at);
+  if (lt < 0) return null; // text
   if (before.startsWith("<!--", lt)) return null; // comment
   // Closed quoted values out of the way: the first quote left opens the value we are in.
   const t = html.slice(lt, at).replace(/"[^"]*"|'[^']*'/g, "_");

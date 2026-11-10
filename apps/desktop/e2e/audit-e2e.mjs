@@ -98,7 +98,7 @@ function startRelay() {
   return until("hbbs listening", () => out[1]().includes("Listening on websocket"), 20000);
 }
 function startApi() {
-  children.push(spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, API_BIN, "--data", `/tmp/audit-e2e-api-${process.pid}`, "--listen", "127.0.0.1:22230"], { stdio: "ignore" }));
+  children.push(spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, "RELAY_HOST=127.0.0.1,localhost", API_BIN, "--data", `/tmp/audit-e2e-api-${process.pid}`, "--listen", "127.0.0.1:22230"], { stdio: "ignore" }));
   return until("tether-api", () => fetch(API + "/api/policy", { signal: AbortSignal.timeout(3000) }).then((r) => r.status === 404), 30000, 500);
 }
 async function startManage() {

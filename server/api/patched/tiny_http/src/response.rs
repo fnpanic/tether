@@ -255,7 +255,9 @@ where
         let header = header.into();
 
         // ignoring forbidden headers
-        if header.field.equiv("Connection")
+        // Tether: `Connection: close` passes (upstream dropped it): tether-api sends it with a
+        // response after which it closes the connection, so a proxy does not reuse it.
+        if (header.field.equiv("Connection") && !header.value.as_str().eq_ignore_ascii_case("close"))
             || header.field.equiv("Trailer")
             || header.field.equiv("Transfer-Encoding")
             || header.field.equiv("Upgrade")

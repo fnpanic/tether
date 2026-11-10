@@ -60,7 +60,7 @@ for (const [i, r] of RELAYS.entries()) {
   r.dir = join(work, `api${i + 1}`);
   mkdirSync(r.dir, { recursive: true });
   r.out = "";
-  r.proc = spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, `${BIN}/tether-api`, "--data", wslPath(r.dir), "--listen", `127.0.0.1:${r.api}`], { stdio: ["ignore", "pipe", "pipe"] });
+  r.proc = spawn("wsl", ["-d", "Ubuntu-22.04", "--", "env", `ADMIN_PUB_KEY=${ADMIN_PUB}`, "RELAY_HOST=127.0.0.1,localhost", `${BIN}/tether-api`, "--data", wslPath(r.dir), "--listen", `127.0.0.1:${r.api}`], { stdio: ["ignore", "pipe", "pipe"] });
   r.proc.stdout.on("data", (d) => (r.out += d));
   r.proc.stderr.on("data", (d) => (r.out += d));
   // Caddy's part: /download/* from the data dir, the rest to tether-api; upload bodies at RATE.

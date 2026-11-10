@@ -1,4 +1,8 @@
 # Tether relay. Host networking keeps UDP hole punching and real client IPs intact.
+# The containers run as uid 65532, not root. The data directory holds the server's private key
+# and must be theirs alone; compose cannot set that on a bind mount, so create it first:
+#   sudo install -d -m 0700 -o 65532 -g 65532 data
+# (an existing one: sudo chown -R 65532:65532 data && sudo chmod 0700 data)
 #   RELAY_HOST=relay.example.com docker compose up -d
 #   docker compose exec hbbs cat /data/id_ed25519.pub   # -> build clients with TETHER_PUB_KEY
 services:
@@ -8,6 +12,9 @@ services:
     container_name: tether-hbbs
     command: hbbs -r ${RELAY_HOST:?set RELAY_HOST to this server's public DNS name or IP} -k _
     network_mode: host
+    user: "65532:65532"
+    cap_drop: [ ALL ]
+    security_opt: [ "no-new-privileges:true" ]
     volumes: [ "./data:/data" ]
     restart: unless-stopped
     depends_on: [ hbbr ]
@@ -17,5 +24,8 @@ services:
     container_name: tether-hbbr
     command: hbbr -k _
     network_mode: host
+    user: "65532:65532"
+    cap_drop: [ ALL ]
+    security_opt: [ "no-new-privileges:true" ]
     volumes: [ "./data:/data" ]
     restart: unless-stopped

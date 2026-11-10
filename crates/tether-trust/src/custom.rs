@@ -48,8 +48,14 @@ pub struct CustomProfile {
 }
 
 impl CustomProfile {
-    /// Strict validation (also done by the relay before storing and by TetherQS before applying).
+    /// Strict validation (Tether Manage before signing, the relay before storing).
     pub fn validate(&self) -> Result<(), String> {
+        self.check(true)
+    }
+
+    /// Not `strict` (TetherQS, [`open_app`]): a setting this build does not know or finds invalid
+    /// is left to `policy::resolve_with`, which skips it; everything else is checked.
+    fn check(&self, strict: bool) -> Result<(), String> {
         if self.id.is_empty() || self.id.len() > 40 || !self.id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
             return Err("custom app id must be 1-40 characters [a-z0-9-]".into());
         }
@@ -75,10 +81,11 @@ impl CustomProfile {
             profiles: [(crate::policy::PROFILE_CUSTOMER.to_owned(), self.layer.clone())].into(),
             ..Default::default()
         };
-        probe.validate().map_err(|e| format!("custom app settings: {e}"))?;
+        if strict {
+            probe.validate().map_err(|e| format!("custom app settings: {e}"))?;
+        }
         for id in self.layer.keys() {
-            let f = crate::policy::feature(id).ok_or_else(|| format!("unknown feature {id}"))?;
-            if !f.profiles.contains(&crate::policy::PROFILE_CUSTOMER) {
+            if crate::policy::feature(id).is_some_and(|f| !f.profiles.contains(&crate::policy::PROFILE_CUSTOMER)) {
                 return Err(format!("{id} is not a customer-module setting"));
             }
         }
@@ -175,6 +182,19 @@ pub fn open(signed_doc_json: &[u8], trusted: &[crate::VerifyingKey]) -> Result<C
     let payload = envelope::open_json(signed_doc_json, trusted)?;
     let p: CustomProfile = serde_json::from_slice(&payload).map_err(|e| format!("invalid custom app: {e}"))?;
     p.validate()?;
+    Ok(p)
+}
+
+/// [`open`] for TetherQS: one setting this build does not know or finds invalid (a newer feature,
+/// a value an older Tether Manage let through) does not make it lose the whole custom app.
+pub fn open_app(signed_doc_json: &[u8], trusted: &[crate::VerifyingKey]) -> Result<CustomProfile, String> {
+    let payload = envelope::open_json(signed_doc_json, trusted)?;
+    let mut v: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| format!("invalid custom app: {e}"))?;
+    if let Some(layer) = v.get_mut("layer") {
+        crate::policy::drop_unreadable_rules(layer);
+    }
+    let p: CustomProfile = serde_json::from_value(v).map_err(|e| format!("invalid custom app: {e}"))?;
+    p.check(false)?;
     Ok(p)
 }
 
@@ -301,6 +321,27 @@ mod tests {
         let t = new_token();
         assert!(valid_token(&t) && t != new_token());
         assert!(!valid_token("../../etc/passwd"));
+    }
+
+    #[test]
+    fn app_keeps_a_profile_with_a_setting_it_cannot_use() {
+        let k = crate::generate_key();
+        let signed = |payload: &str| serde_json::to_vec(&envelope::sign(payload.as_bytes(), &k)).unwrap();
+        let keys = [k.verifying_key()];
+        // What a released Tether Manage could sign (free text), a newer feature and a newer state.
+        let doc = signed(
+            r#"{"id":"acme-1","name":"ACME","issued_at":1,"layer":{"update.minimum-version":{"state":"locked","value":"0.5.x"},"update.channel":{"state":"locked","value":"Stable"},"no.such":{"state":"off"},"permission.audio":{"state":"forced"},"permission.clipboard":{"state":"off"}}}"#,
+        );
+        assert!(open(&doc, &keys).is_err(), "the relay and Tether Manage stay strict");
+        let p = open_app(&doc, &keys).expect("TetherQS keeps its name, logo and the other settings");
+        let e = crate::policy::resolve_with(None, crate::policy::PROFILE_CUSTOMER, "d", Some(&p.layer), None);
+        assert!(e.is_locked("permission.clipboard") && !e.on("permission.clipboard"));
+        assert_eq!((e.get("update.minimum-version"), e.get("update.channel")), ("", "stable"));
+        assert_eq!(e.rejected.len(), 3, "{:?}", e.rejected);
+        // Still refused: another signer, a technician-only setting, a bad name.
+        assert!(open_app(&doc, &[crate::generate_key().verifying_key()]).is_err());
+        assert!(open_app(&signed(r#"{"id":"acme-1","name":"ACME","issued_at":1,"layer":{"recording.mode":{"state":"off"}}}"#), &keys).is_err());
+        assert!(open_app(&signed(r#"{"id":"acme-1","name":" ","issued_at":1}"#), &keys).is_err());
     }
 
     #[test]

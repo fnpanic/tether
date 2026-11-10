@@ -48,7 +48,7 @@ export function Gate({ state, onDone }: { state: AppState; onDone: () => void })
           {mode === "import" && (
             <Label text="Backup file">
               <div className="flex gap-2">
-                <TextField readOnly value={file} placeholder="No file chosen" />
+                <TextField readOnly aria-label="Backup file" value={file} placeholder="No file chosen" />
                 <Button
                   type="button"
                   onClick={async () => {
@@ -62,11 +62,11 @@ export function Gate({ state, onDone }: { state: AppState; onDone: () => void })
             </Label>
           )}
           <Label text="Passphrase" hint={mode === "create" ? "At least 8 characters. There is no way to recover it: export a backup and keep the passphrase somewhere safe." : undefined}>
-            <TextField type="password" autoFocus value={pass} onChange={(e) => setPass(e.target.value)} />
+            <TextField type="password" autoComplete={mode === "create" ? "new-password" : "current-password"} autoFocus value={pass} onChange={(e) => setPass(e.target.value)} />
           </Label>
           {mode === "create" && (
             <Label text="Repeat passphrase">
-              <TextField type="password" value={pass2} onChange={(e) => setPass2(e.target.value)} />
+              <TextField type="password" autoComplete="new-password" value={pass2} onChange={(e) => setPass2(e.target.value)} />
             </Label>
           )}
           <ErrorText error={error} />

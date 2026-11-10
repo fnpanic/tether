@@ -114,6 +114,30 @@ The viewer stayed at "Restarting remote device / Connection in progress" althoug
 (`apps/desktop/src/lib/reconnect.ts`) classified as fatal. It is now retryable, so the usual reconnect series
 runs (step 6: back 13 s after the restart command).
 
+## Policy in the service
+
+Added after the runs above (not part of them; unit tests in `apps/desktop/src-tauri/src/policy.rs`).
+
+- The service's `--server` process checks the policy on the usual interval (`policy::start`) and
+  refuses **new** incoming sessions while policy `connect.incoming` is off or policy
+  `update.minimum-version` is above its version, also at the logon screen: it sets the core option
+  `tether-refuse-incoming` (`policy::apply_incoming`), and the core answers the viewer in
+  `Connection::on_open`, before any password or Accept, with "This device does not accept incoming
+  sessions (set by its organisation)." or "This device must be updated before it accepts
+  sessions." Sessions that already run are not ended.
+- The service has no release state of its own. A mandatory release or a release's minimum version
+  is enforced by the app in the user's session and its connection window (which closes the new
+  connection), so not at the logon screen.
+- Group policy: the service runs as another account with its own config folder and device id.
+  The app of the signed-in user publishes its device id to the service (core option
+  `tether-install-uuid`, only from the session the service serves); from its next policy check the
+  service resolves the policy with that id, so the group Tether Manage assigned to the device
+  applies. Before a user has opened Tether, only the profile and the machine policy apply.
+- A policy that locks a permission off takes it from running sessions and from sessions that
+  resume, where the connection window runs (`sink::enforce_permission_locks` and `revoke_locked`,
+  in the `--cm` process). A running file-transfer connection is closed when file transfer is
+  locked off.
+
 ## Open
 
 - `session_type_text` does not reach **console windows** (PowerShell/cmd, conhost): it injects characters as

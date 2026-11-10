@@ -33,6 +33,8 @@ key "$T/third" >/dev/null
 bash "$HERE/rotate-key.sh" rollback >/dev/null
 [ "$(cat "$DATA/id_ed25519.pub")" = "$A" ] || fail "rollback did not restore the old key"
 [ "$(cat "$ETC/keys.env")" = "KEYS_ACCEPT=$B" ] || fail "rollback does not accept the new key"
+! bash "$HERE/rotate-key.sh" rollback 2>/dev/null || fail "rolled back twice"
+[ "$(cat "$ETC/keys.env")" = "KEYS_ACCEPT=$B" ] || fail "second rollback dropped the new key from KEYS_ACCEPT"
 bash "$HERE/rotate-key.sh" switch "$T/new" >/dev/null
 
 bash "$HERE/rotate-key.sh" retire >/dev/null

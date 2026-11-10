@@ -1,7 +1,9 @@
 // Team sync: three-way merge of the shared doc (docs/advanced.md#team-sync). base = what this app
 // last synced, local = now, remote = what the relay has. Changes on both sides survive; for the same
 // field changed on both sides the local edit wins (the user who saves last sees the result at once).
-import { cleanTags, STORE_VERSION, type Rule, type SavedSearch, type SharedDoc } from "./model";
+// The merged doc lists keys and entries in the relay's order, then what is new here: a merge that
+// changes nothing is then byte-identical to the relay's doc, and no client writes it back.
+import { cleanRule, cleanSearch, cleanTagMeta, cleanTags, normTag, STORE_VERSION, type Rule, type SavedSearch, type SharedDoc } from "./model";
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -20,7 +22,7 @@ export function mergeSet(base: string[] = [], local: string[] = [], remote: stri
 /** Maps keyed by id; an entry deleted on one side and unchanged on the other is deleted. */
 function mergeMap<V>(base: Record<string, V>, local: Record<string, V>, remote: Record<string, V>, value: (b: V | undefined, l: V | undefined, r: V | undefined) => V | undefined): Record<string, V> {
   const out: Record<string, V> = {};
-  for (const k of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)])) {
+  for (const k of new Set([...Object.keys(remote), ...Object.keys(local), ...Object.keys(base)])) {
     const b = base[k];
     const l = local[k];
     const r = remote[k];
@@ -45,32 +47,49 @@ export function merge3(base: SharedDoc | null | undefined, local: SharedDoc, rem
     return { ...(name ? { name } : {}), ...(tags.length ? { tags } : {}) };
   });
   const tags = mergeMap(b.tags ?? {}, local.tags ?? {}, r.tags ?? {}, (bt, lt, rt) => pick(bt, lt, rt) ?? lt ?? rt);
-  const order = <T extends { id: string }>(l: T[], rr: T[], m: Record<string, T>) => {
-    const ids = [...l.map((x) => x.id), ...rr.map((x) => x.id).filter((id) => !l.some((x) => x.id === id))];
-    return ids.filter((id) => m[id]).map((id) => m[id]);
-  };
+  const order = <T extends { id: string }>(first: T[], then: T[], m: Record<string, T>) => [...new Set([...first, ...then].map((x) => x.id))].filter((id) => m[id]).map((id) => m[id]);
   const rules = mergeMap<Rule>(byId(b.rules), byId(local.rules), byId(r.rules), (bb, l, rr) => pick(bb, l, rr) ?? l ?? rr);
   const searches = mergeMap<SavedSearch>(byId(b.searches), byId(local.searches), byId(r.searches), (bb, l, rr) => pick(bb, l, rr) ?? l ?? rr);
-  return { v: STORE_VERSION, hosts, tags, rules: order(local.rules ?? [], r.rules ?? [], rules), searches: order(local.searches ?? [], r.searches ?? [], searches) };
+  return { v: STORE_VERSION, hosts, tags, rules: order(r.rules ?? [], local.rules ?? [], rules), searches: order(r.searches ?? [], local.searches ?? [], searches) };
 }
 
-/** A doc from the relay, reduced to what this version understands (it may come from a newer app). */
+const MAX_LIST = 500;
+const MAX_TAG_META = 5000;
+// `__proto__` as a key would set the prototype of the map it is put in.
+const okId = (x: unknown): x is string => typeof x === "string" && /^[A-Za-z0-9_.@:-]{1,64}$/.test(x) && x !== "__proto__";
+
+/** A doc from the relay, reduced to what this version understands (it may come from a newer app)
+ *  and to the limits an import has (io.ts): every team member renders what one member wrote. */
 export function readShared(raw: unknown): SharedDoc | null {
   if (!raw || typeof raw !== "object") return null;
   const d = raw as Partial<SharedDoc>;
   const hosts: SharedDoc["hosts"] = {};
   for (const [id, e] of Object.entries(d.hosts ?? {})) {
-    if (!/^[A-Za-z0-9_.@:-]{1,64}$/.test(id) || !e || typeof e !== "object") continue;
+    if (!okId(id) || !e || typeof e !== "object") continue;
     const tags = cleanTags(e.tags);
     const name = typeof e.name === "string" ? e.name.slice(0, 64) : "";
     if (name || tags.length) hosts[id] = { ...(name ? { name } : {}), ...(tags.length ? { tags } : {}) };
   }
-  const arr = <T,>(x: unknown, ok: (v: T) => boolean): T[] => (Array.isArray(x) ? (x as T[]).filter((v) => v && typeof v === "object" && ok(v)) : []);
+  const tags: SharedDoc["tags"] = {};
+  for (const [k, v] of Object.entries(d.tags && typeof d.tags === "object" ? d.tags : {}).slice(0, MAX_TAG_META)) {
+    const n = normTag(k);
+    if (n && n !== "__proto__") tags[n] = cleanTagMeta(v);
+  }
+  // The entry's own limits are the import's and the dialogs' (model.ts); here also a valid id.
+  const list = <T extends { id: string }>(x: unknown, clean: (v: unknown) => Omit<T, "id"> | null): T[] => {
+    const out: T[] = [];
+    for (const v of Array.isArray(x) ? x : []) {
+      const r = clean(v);
+      const id = (v as { id?: unknown } | null)?.id;
+      if (r && okId(id) && out.push({ ...r, id } as T) >= MAX_LIST) break;
+    }
+    return out;
+  };
   return {
     v: STORE_VERSION,
     hosts,
-    tags: d.tags && typeof d.tags === "object" ? d.tags : {},
-    rules: arr<Rule>(d.rules, (r) => typeof r.id === "string" && typeof r.tag === "string" && typeof r.when === "string"),
-    searches: arr<SavedSearch>(d.searches, (s) => typeof s.id === "string" && typeof s.name === "string" && typeof s.query === "string"),
+    tags,
+    rules: list<Rule>(d.rules, cleanRule),
+    searches: list<SavedSearch>(d.searches, cleanSearch),
   };
 }

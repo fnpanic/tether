@@ -92,7 +92,7 @@ pub fn logo_url() -> String {
 fn from_file(exe: &Path, keys: &[VerifyingKey]) -> Loaded {
     let tail = read_tail(exe, MAX_PROFILE_BYTES as u64 + 12).map_err(|e| e.to_string())?;
     let Some(doc) = custom::split(&tail).1 else { return Err(String::new()) };
-    Ok((custom::open(doc, keys)?, doc.to_vec()))
+    Ok((custom::open_app(doc, keys)?, doc.to_vec()))
 }
 
 /// macOS: the mac id in the `.app` folder name around `exe`, then the cached or fetched profile.
@@ -101,11 +101,11 @@ fn from_bundle(exe: &Path, keys: &[VerifyingKey], cache_path: impl Fn(&str) -> P
     let folder = exe.ancestors().nth(3).and_then(Path::file_name).and_then(|n| n.to_str()).unwrap_or("");
     let Some(id) = custom::mac_id_from_bundle(folder) else { return Err(String::new()) };
     let cache = cache_path(id);
-    if let Some(p) = std::fs::read(&cache).ok().and_then(|doc| custom::open(&doc, keys).ok()) {
+    if let Some(p) = std::fs::read(&cache).ok().and_then(|doc| custom::open_app(&doc, keys).ok()) {
         return Ok((p, Vec::new()));
     }
     let doc = fetch(id).map_err(|e| format!("custom app {id}: could not fetch the profile: {e}"))?;
-    let p = custom::open(&doc, keys).map_err(|e| format!("custom app {id}: {e}"))?;
+    let p = custom::open_app(&doc, keys).map_err(|e| format!("custom app {id}: {e}"))?;
     // Not fatal: the profile is fetched again at the next start.
     if let Err(e) = cache.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&cache, &doc)) {
         hbb_common::log::warn!("custom app {id}: profile not cached at {}: {e}", cache.display());

@@ -167,7 +167,7 @@ function Adoption({ serial }: { serial: number }) {
       </p>
       {devices && recent.length > 0 && (
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-hairline" aria-hidden>
-          <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${(done / recent.length) * 100}%` }} />
+          <div className="h-full origin-left rounded-full bg-accent transition-transform" style={{ transform: `scaleX(${done / recent.length})` }} />
         </div>
       )}
       <p className="mt-3 text-caption text-muted">
@@ -176,7 +176,7 @@ function Adoption({ serial }: { serial: number }) {
           : `Devices pick it up within ${minutes} minutes (policy.refresh-minutes). For a rollout you watch live, turn on Fast apply (policy.fast-apply, checks every minute), publish, and turn it off again afterwards.`}{" "}
         On one device, <code className="font-mono">tether --policy-refresh</code> applies it at once.
       </p>
-      <p className="mt-2 text-footnote text-faint">Updates every 30 s for 10 minutes{at ? ` · last ${at.toLocaleTimeString()}` : ""}</p>
+      <p className="mt-2 text-footnote text-muted">Updates every 30 s for 10 minutes{at ? ` · last ${at.toLocaleTimeString()}` : ""}</p>
     </div>
   );
 }

@@ -34,15 +34,26 @@ data:
     }
     :8081 {
       # The relay API. tether-api trusts X-Forwarded-For only from loopback, so every request
-      # goes through here (the Service has no tether-api port). Bodies stream through; the proxy
-      # pod reads small ones whole first.
+      # goes through here (the Service has no tether-api port). The first 600 KiB of a body are
+      # read before tether-api is connected (more than it reads into memory), so a slow client
+      # waits here, also behind your own ingress; larger uploads stream through after that.
       handle /api/* {
-        reverse_proxy 127.0.0.1:21120
+        reverse_proxy 127.0.0.1:21120 {
+          request_buffers 600KiB
+          # Shorter than tether-api keeps an idle connection (30 s), so Caddy closes it first.
+          transport http {
+            keepalive 20s
+          }
+        }
       }
       # Custom-app links: tether-api checks the token and names a prepared file under /data
       # (X-Accel-Redirect); this Caddy sends it, so a slow download holds no tether-api worker.
       handle /q/* {
         reverse_proxy 127.0.0.1:21120 {
+          request_buffers 600KiB
+          transport http {
+            keepalive 20s
+          }
           header_up X-Tether-Accel 1
           @accel header X-Accel-Redirect *
           handle_response @accel {
@@ -102,6 +113,8 @@ spec:
           command: ["tether-api", "--data", "/data", "--listen", "0.0.0.0:21120"]
           env:
             - { name: ADMIN_PUB_KEY, value: {{ .Values.api.adminPubKey | quote }} }
+            # The host name signed requests must name (tether-api takes the host of the URL).
+            - { name: RELAY_HOST, value: {{ .Values.publicUrl | quote }} }
           ports:
             - { name: api, containerPort: 21120 }
           readinessProbe:

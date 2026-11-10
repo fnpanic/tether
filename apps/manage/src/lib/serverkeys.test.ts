@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { announceList, confirmed, isKey, newest, notSwitched, retireList, step, switchCommands } from "./serverkeys.ts";
+import { announceList, confirmed, currentKey, fromProblem, isKey, newest, notSwitched, retireCommands, retireList, step, switchCommands } from "./serverkeys.ts";
 
 const A = "A".repeat(43) + "=";
 const B = "B".repeat(43) + "=";
@@ -39,9 +39,41 @@ test("confirmations count active devices on the list", () => {
 
 test("relay commands and key format", () => {
   const c = switchCommands(["https://r1.example.org", "http://127.0.0.1:21131"]);
-  assert.match(c, /opc@r1\.example\.org:\/tmp\//);
-  assert.match(c, /ssh opc@127\.0\.0\.1 'sudo bash \/tmp\/rotate-key\.sh switch \/tmp\/id_ed25519/);
+  // docs/key-rotation.md: a 0700 folder in the login user's home, never /tmp; the private key
+  // is removed also when the switch fails, and the script's exit code is kept.
+  assert.equal(
+    switchCommands(["https://r1.example.org"]),
+    "ssh opc@r1.example.org 'install -d -m 0700 ~/tether-key'\n" +
+      "scp id_ed25519 id_ed25519.pub rotate-key.sh opc@r1.example.org:tether-key/\n" +
+      "ssh opc@r1.example.org 'sudo bash ~/tether-key/rotate-key.sh switch ~/tether-key/id_ed25519; rc=$?; rm -f ~/tether-key/id_ed25519 ~/tether-key/id_ed25519.pub; exit $rc'",
+  );
+  assert.match(c, /ssh opc@127\.0\.0\.1 'sudo bash ~\/tether-key\/rotate-key\.sh switch /);
+  assert.equal(retireCommands(["https://r1.example.org"]), "ssh opc@r1.example.org 'sudo bash ~/tether-key/rotate-key.sh retire'");
+  assert.ok(!c.includes("/tmp") && !c.includes("&& rm"));
   assert.ok(isKey(A) && !isKey("abc") && !isKey(A + "x"));
+});
+
+test("a new rotation starts from the key the relays sign with", () => {
+  const C = "C".repeat(43) + "=";
+  // Cancel after the switch: the live list is [A, B] and the relays already sign with B.
+  const relays = [
+    { server: "https://a", reachable: true, verified: true, serial: 2, keys: [{ key: A }, { key: B }], signing: B },
+    { server: "https://b", reachable: true, verified: true, serial: 2, keys: [{ key: A }, { key: B }], signing: B },
+  ];
+  const live = newest(relays);
+  assert.equal(currentKey(relays, live), B, "not the list's first key A");
+  assert.deepEqual(announceList({ from: currentKey(relays, live), to: C }).map((k) => k.key), [B, C], "the list keeps the key in use");
+  assert.match(fromProblem(A, relays)!, /a \(BBBBBBBB…\), b \(BBBBBBBB…\)/);
+  assert.equal(fromProblem(B, relays), null);
+  // Relays that do not tell: the list's presented key, and nothing to object to.
+  const quiet = relays.map(({ signing, ...r }) => r);
+  assert.equal(currentKey(quiet, live), A);
+  assert.equal(fromProblem(A, quiet), null);
+  // Half switched: no key covers every relay.
+  const mixed = [relays[0], { ...relays[1], signing: A }];
+  assert.equal(currentKey(mixed, live), "");
+  assert.match(fromProblem(A, mixed)!, /different keys/);
+  assert.match(fromProblem(B, mixed)!, /different keys/);
 });
 
 test("the switch step needs every relay to sign with the new key", () => {

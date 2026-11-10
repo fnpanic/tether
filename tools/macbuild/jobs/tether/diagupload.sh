@@ -15,7 +15,10 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 fail() { log "FAIL $*"; exit 1; }
 log "start (job $JOB_ID)"
 mkdir -p "$B/src"
-rm -rf "$B/src/vendor" && tar -xzf "$JOB_WORK/src.tgz" -C "$B/src" || fail "untar"
+# As in build.sh: only the build caches (.tools, target) survive, no file deleted from git.
+rm -rf "$B/src/vendor" &&
+  (cd "$B/src" && find . -mindepth 1 \( -path ./.tools -o -name target \) -prune -o \( -type f -o -type l \) -exec rm -f {} +) &&
+  tar -xzf "$JOB_WORK/src.tgz" -C "$B/src" || fail "untar"
 rm -f "$JOB_WORK/src.tgz"
 # shellcheck source=/dev/null
 . "$JOB_SECRETS/keys.env"

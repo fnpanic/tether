@@ -59,7 +59,7 @@ export function ChangeList({ changes, empty = "No changes." }: { changes: Change
               <span className="min-w-0 flex-1">{c.label}</span>
               <span className="text-muted line-through">{c.from}</span>
               <span className="text-muted">→</span>
-              <span className="font-semibold text-accent">{c.to}</span>
+              <span className="font-semibold">{c.to}</span>
             </>
           ) : (
             <span className="min-w-0 flex-1">{c.text.replace(`${c.scope} `, "").replace(/^./, (x) => x.toUpperCase())}</span>

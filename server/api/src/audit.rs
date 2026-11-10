@@ -21,6 +21,9 @@ pub const LIMIT: u64 = 8 << 10;
 pub const IP_PER_MIN: u32 = 120;
 pub const DEVICE_PER_MIN: u32 = 60;
 pub const READ_MAX: usize = 5000;
+/// Record bytes one read returns at most: READ_MAX records of LIMIT each would be 40 MB in
+/// memory (MemoryMax=64M).
+const READ_BYTES: usize = 8 << 20;
 const DAY: u64 = 86_400;
 /// Longer than the client's retry window (120 s), so a retried post is stored once.
 const NONCE_TTL: u64 = 600;
@@ -298,21 +301,24 @@ fn files(dir: &Path) -> Vec<(String, u64)> {
 }
 
 /// Records in the log at `dir` with `ts >= since` (and `id` or `uuid` == `device` if given),
-/// newest first. Needs no `Log` (runs without the state lock): files are only appended to, a
+/// newest first, each as its JSON line; true if older ones were left out to stay within
+/// READ_BYTES. Needs no `Log` (runs without the state lock): files are only appended to, a
 /// half-written last line does not parse and is skipped, a file pruned meanwhile is skipped.
-pub fn read(dir: &Path, since: u64, limit: usize, device: &str) -> Vec<Value> {
+pub fn read(dir: &Path, since: u64, limit: usize, device: &str) -> (Vec<String>, bool) {
     let first = date(since);
     // A line without the device's text cannot match: skipped unparsed. Valid while serde_json
     // writes the value unescaped (no quote, backslash or control character in it).
     let quick = !device.is_empty() && !device.chars().any(|c| c == '"' || c == '\\' || c.is_control());
     let mut out = Vec::new();
+    let (mut bytes, mut cut) = (0, false);
     for (day, _) in files(dir).into_iter().rev() {
-        if day < first || out.len() >= limit {
+        if day < first || out.len() >= limit || cut {
             break;
         }
         let Ok(f) = fs::File::open(dir.join(format!("{day}.jsonl"))) else { continue };
         // Lines are in time order: keep the last `limit` matches of the day.
         let mut keep = VecDeque::new();
+        let mut kept = 0;
         for line in BufReader::new(f).lines().map_while(Result::ok) {
             if quick && !line.contains(device) {
                 continue;
@@ -321,14 +327,25 @@ pub fn read(dir: &Path, since: u64, limit: usize, device: &str) -> Vec<Value> {
             if v["ts"].as_u64().unwrap_or(0) < since || (!device.is_empty() && v["id"] != device && v["uuid"] != device) {
                 continue;
             }
-            keep.push_back(v);
-            if keep.len() > limit - out.len() {
-                keep.pop_front();
+            kept += line.len();
+            keep.push_back(line);
+            while keep.len() > limit - out.len() || bytes + kept > READ_BYTES {
+                cut |= keep.len() <= limit - out.len();
+                kept -= keep.pop_front().map_or(0, |l| l.len());
             }
         }
+        bytes += kept;
         out.extend(keep.into_iter().rev());
     }
-    out
+    (out, cut)
+}
+
+/// The response of a `read`: the JSON array of the records, `X-Audit-Truncated: 1` if it was cut.
+pub fn response(dir: &Path, since: u64, limit: usize, device: &str) -> crate::Resp {
+    let (lines, cut) = read(dir, since, limit, device);
+    let r = tiny_http::Response::from_data(format!("[{}]", lines.join(","))).with_header(crate::hdr("Content-Type", "application/json"));
+    // Content-Length, not chunks: the size is known.
+    if cut { r.with_header(crate::hdr("X-Audit-Truncated", "1")) } else { r }.with_chunked_threshold(usize::MAX).boxed()
 }
 
 /// `application/x-www-form-urlencoded` value.
@@ -375,8 +392,31 @@ mod tests {
             writeln!(f, "{}", json!({"ts": t, "id": id, "uuid": "u-1"})).unwrap();
         }
         for (device, n) in [("a\"b", 1), ("a\\b", 1), ("abc", 1), ("u-1", 4), ("b", 0), ("", 4)] {
-            assert_eq!(read(&dir, 0, 10, device).len(), n, "{device}");
+            assert_eq!(read(&dir, 0, 10, device).0.len(), n, "{device}");
         }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_stops_at_the_byte_budget() {
+        let dir = std::env::temp_dir().join(format!("tether-audit-budget-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (t, pad) = (1_794_009_599, "x".repeat(7000));
+        // Two days of 1000 records of 7 KB: 14 MB.
+        for day in [t - DAY, t] {
+            let mut f = fs::File::create(dir.join(format!("{}.jsonl", date(day)))).unwrap();
+            for i in 0..1000 {
+                writeln!(f, "{}", json!({"ts": day, "id": "a", "conn_id": i, "path": pad})).unwrap();
+            }
+        }
+        let (lines, cut) = read(&dir, 0, READ_MAX, "");
+        let size: usize = lines.iter().map(String::len).sum();
+        assert!(cut && size <= READ_BYTES && size > READ_BYTES - 8000, "{cut} {size}");
+        // The newest are kept, newest first: all of the last day, then the end of the day before.
+        let v: Vec<Value> = lines.iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!((v[0]["ts"].as_u64(), v[0]["conn_id"].as_u64()), (Some(t), Some(999)));
+        assert_eq!((v[1000]["ts"].as_u64(), v[1000]["conn_id"].as_u64()), (Some(t - DAY), Some(999)));
+        assert_eq!(read(&dir, 0, 100, ""), (lines[..100].to_vec(), false));
         fs::remove_dir_all(&dir).unwrap();
     }
 

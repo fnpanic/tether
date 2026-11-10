@@ -34,7 +34,7 @@ ulimit -n 65536
 cd "$W/hb"
 HEALTH_PORT=25121 METRICS_PORT=25124 setsid "$BIN/hbbr" -p 25117 -k _ > "$W/hbbr.log" 2>&1 & echo $! > "$W/hbbr.pid"
 IP_BLOCK_PER_MIN=100000 IP_BLOCK_IDS_PER_DAY=100000 HEALTH_PORT=25122 METRICS_PORT=25123 setsid "$BIN/hbbs" -p 25116 -k _ -r 'ws://127.0.0.1:28081/ws/relay|http://127.0.0.1:25121/readyz' > "$W/hbbs.log" 2>&1 & echo $! > "$W/hbbs.pid"
-ADMIN_PUB_KEY= setsid "$BIN/tether-api" --data "$W/api" --listen 127.0.0.1:25120 > "$W/api.log" 2>&1 & echo $! > "$W/api.pid"
+RELAY_HOST=127.0.0.1,localhost ADMIN_PUB_KEY= setsid "$BIN/tether-api" --data "$W/api" --listen 127.0.0.1:25120 > "$W/api.log" 2>&1 & echo $! > "$W/api.pid"
 cd "$W"
 
 # ---- Pebble (local ACME CA), validating TLS-ALPN-01 on nginx's TLS port ----
@@ -142,7 +142,7 @@ echo "[{\"ticket\":\"$TK\",\"note\":\"e2e\",\"created\":$(date +%s),\"uploaded\"
 # tether-api writes devices.json when it stops (SIGTERM).
 p=$(cat "$W/api.pid"); kill "$p"; for _ in $(seq 100); do [ -d /proc/$p ] || break; sleep 0.1; done
 check "tether-api sees the real peer, not the client's X-Forwarded-For" grep -q '"ip": *"127.0.0.9"' "$W/api/devices.json"
-ADMIN_PUB_KEY= setsid "$BIN/tether-api" --data "$W/api" --listen 127.0.0.1:25120 > "$W/api.log" 2>&1 & echo $! > "$W/api.pid"
+RELAY_HOST=127.0.0.1,localhost ADMIN_PUB_KEY= setsid "$BIN/tether-api" --data "$W/api" --listen 127.0.0.1:25120 > "$W/api.log" 2>&1 & echo $! > "$W/api.pid"
 for _ in $(seq 50); do curl -s -o /dev/null 127.0.0.1:25120/api/policy && break; sleep 0.1; done
 head -c 1900000 /dev/urandom > "$W/diag.zip"
 # A slow client: 1.9 MB at 2 MB/s. nginx holds the whole body before tether-api gets it.
@@ -153,7 +153,7 @@ check "diag upload 1.9 MB ($st), stored intact" bash -c "[ '$st' = 204 ] && cmp 
 TOK=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ
 echo "{\"id\":\"acme\",\"name\":\"ACME\",\"token\":\"$TOK\",\"expires\":$(( $(date +%s) + 86400 )),\"channel\":\"stable\",\"created\":1,\"downloads\":0,\"last_download\":null,\"profile\":{\"x\":1}}" > "$W/api/custom/acme.json"
 kill -9 "$(cat "$W/api.pid")"; sleep 0.3
-ADMIN_PUB_KEY= setsid "$BIN/tether-api" --data "$W/api" --listen 127.0.0.1:25120 > "$W/api.log" 2>&1 & echo $! > "$W/api.pid"
+RELAY_HOST=127.0.0.1,localhost ADMIN_PUB_KEY= setsid "$BIN/tether-api" --data "$W/api" --listen 127.0.0.1:25120 > "$W/api.log" 2>&1 & echo $! > "$W/api.pid"
 for _ in $(seq 50); do curl -s -o /dev/null 127.0.0.1:25120/api/policy && break; sleep 0.1; done
 h=$("${C[@]}" -D - -o "$W/q.exe" "https://localhost:28443/q/$TOK" | tr -d '\r')
 echo "$h" | grep -iE '^(HTTP|content-type|content-disposition|content-length|cache-control|x-accel|x-content)' | sed 's/^/     /'
