@@ -200,7 +200,7 @@ index 0000000..c2706d9
 +    }
 +}
 diff --git a/libs/enigo/src/macos/macos_impl.rs b/libs/enigo/src/macos/macos_impl.rs
-index 0f1436a..1062351 100644
+index 0f1436a..5e3d298 100644
 --- a/libs/enigo/src/macos/macos_impl.rs
 +++ b/libs/enigo/src/macos/macos_impl.rs
 @@ -112,6 +112,10 @@ pub struct Enigo {
@@ -222,24 +222,21 @@ index 0f1436a..1062351 100644
              ignore_flags: false,
              flags: CGEventFlags::CGEventFlagNull,
              char_to_vkey_map: Default::default(),
-@@ -271,7 +276,9 @@ impl MouseControllable for Enigo {
+@@ -271,7 +276,13 @@ impl MouseControllable for Enigo {
              }
          }
          self.last_click_time = Some(now);
 +        self.held_buttons |= Self::drag_bit(button);
          let (current_x, current_y) = Self::mouse_location();
-+        let left = button == MouseButton::Left;
++        // The pointer got here by CGEvent moves, which the HID side does not see: sync it before the
++        // press (button still up), so the HID drags that follow start their deltas from here.
++        if button == MouseButton::Left {
++            super::hid_post::left_pressed(current_x as f64, current_y as f64, self.hid_flags());
++        }
          let (button, event_type, btn_value) = match button {
              MouseButton::Left => (CGMouseButton::Left, CGEventType::LeftMouseDown, None),
              MouseButton::Middle => (CGMouseButton::Center, CGEventType::OtherMouseDown, None),
-@@ -306,10 +313,14 @@ impl MouseControllable for Enigo {
-                 self.post(event, None);
-             }
-         }
-+        if left {
-+            super::hid_post::left_pressed(current_x as f64, current_y as f64, self.hid_flags());
-+        }
-         Ok(())
+@@ -310,6 +321,7 @@ impl MouseControllable for Enigo {
      }
  
      fn mouse_up(&mut self, button: MouseButton) {
@@ -247,7 +244,7 @@ index 0f1436a..1062351 100644
          let (current_x, current_y) = Self::mouse_location();
          let (button, event_type, btn_value) = match button {
              MouseButton::Left => (CGMouseButton::Left, CGEventType::LeftMouseUp, None),
-@@ -542,6 +553,26 @@ impl Enigo {
+@@ -542,6 +554,26 @@ impl Enigo {
          }
      }
  
@@ -274,7 +271,7 @@ index 0f1436a..1062351 100644
      /// Internal implementation for mouse movement with optional delta values.
      ///
      /// The `delta` parameter is crucial for browser Pointer Lock API support.
-@@ -549,7 +580,9 @@ impl Enigo {
+@@ -549,7 +581,9 @@ impl Enigo {
      /// (MOUSE_EVENT_DELTA_X/Y) directly from CGEvent to calculate movementX/Y.
      /// Without setting these fields, the browser sees zero movement.
      fn mouse_move_to_impl(&mut self, x: i32, y: i32, delta: Option<(i32, i32)>) {
@@ -285,7 +282,7 @@ index 0f1436a..1062351 100644
  
          // Determine event type and corresponding mouse button based on pressed buttons.
          // The CGMouseButton must match the event type for drag events.
-@@ -563,6 +596,9 @@ impl Enigo {
+@@ -563,6 +597,9 @@ impl Enigo {
              (CGEventType::MouseMoved, CGMouseButton::Left) // Button doesn't matter for MouseMoved
          };
  
