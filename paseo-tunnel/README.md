@@ -48,6 +48,24 @@ its relay link, and (with a pairing URI) an end-to-end check against the PC.
 
 Undo: `bash ~/.paseo/bin/paseo-corp-ca.sh uninstall` (then restart Paseo).
 
+## Pairing the iOS app with the Mac
+
+The phone talks to the Mac daemon through the same relay, so it needs the CA fix above on the
+Mac (the phone itself does not). Watch out for **which host's QR code** you show. The Mac app shows
+the QR code of the host selected in Settings. With **GameMachine** (the PC) selected, the phone
+pairs with the PC again ("nothing happens", because it already knows the PC). Select the Mac's own host
+(This Mac), then **Pair a device**. Or print the Mac's offer in Terminal on the Mac:
+
+```bash
+/Applications/Paseo.app/Contents/Resources/bin/paseo daemon pair   # QR in the terminal + link
+```
+
+Scan it from **inside the Paseo iOS app** (Add host → Scan QR code), not with the Camera app, or
+paste the link (Add host → Paste pairing link). Seen on 2026-11-10: the Mac app fetched the
+PC's offer (`Loaded daemon keypair` in the PC log) and 7 s later the phone connected to the
+PC; the Mac daemon never saw a relay client. The PC reached the Mac through the relay in 1.1 s,
+so the Mac side was fine.
+
 ## Evidence (2026-11-10, Mac 15.7.4 arm64, Paseo 0.15.3 on both sides)
 
 | Check | Result |
