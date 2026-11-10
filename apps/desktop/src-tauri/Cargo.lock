@@ -9820,7 +9820,7 @@ dependencies = [
 
 [[package]]
 name = "tether"
-version = "0.5.34"
+version = "0.5.35"
 dependencies = [
  "base",
  "flate2",

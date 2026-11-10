@@ -7,7 +7,7 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 ## [Unreleased]
 
 ### Added
-- **Copy and paste files between macOS and Windows** (Tether and TetherQS for macOS, next build; docs/macos.md
+- **Copy and paste files between macOS and Windows** (Tether 0.5.35 and TetherQS 0.5.33 for macOS; 0.5.34/0.5.32 were already published without it; docs/macos.md
   "Files through the clipboard"). Copy files in Finder, paste them in Explorer on the other side, and the
   other way round, with the Mac as host or as viewer. Windows already did this; the macOS builds now include
   the core's `unix-file-copy-paste` (target-specific feature in both apps' Cargo.toml). Fixed on the way
