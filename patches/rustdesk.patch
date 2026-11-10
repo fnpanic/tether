@@ -75,7 +75,7 @@ index 5f5bf8f..1228f95 100644
  ///
  /// Key: `file-transfer-max-files`.
 diff --git a/libs/clipboard/src/platform/unix/macos/paste_observer.rs b/libs/clipboard/src/platform/unix/macos/paste_observer.rs
-index 01e8b6c..1401e9a 100644
+index 01e8b6c..b265ed7 100644
 --- a/libs/clipboard/src/platform/unix/macos/paste_observer.rs
 +++ b/libs/clipboard/src/platform/unix/macos/paste_observer.rs
 @@ -59,14 +59,15 @@ impl PasteObserver {
@@ -127,6 +127,16 @@ index 01e8b6c..1401e9a 100644
                      Ok(FseventControl::Exit) | Err(RecvTimeoutError::Disconnected) => {
                          break;
                      }
+@@ -172,7 +179,8 @@ impl PasteObserver {
+ 
+     pub fn stop(&mut self) {
+         if let Some(tx_handle_fsevent_thread) = &self.tx_handle_fsevent_thread {
+-            self.observer_info = Default::default();
++            // Clear in place: the observer thread holds this Arc, a new one would never be seen again.
++            *self.observer_info.lock().unwrap() = None;
+             tx_handle_fsevent_thread.tx.send(FseventControl::Stop).ok();
+         }
+     }
 diff --git a/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs b/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs
 index dbd9917..cbd4d66 100644
 --- a/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs

@@ -119,6 +119,8 @@ if (PART.includes("2")) {
     check("Mac (viewer) -> VM (host): file pasted in Explorer", got.includes(`pasted ${m2v}.txt`) && got.includes(`content-${m2v}`), got.replace(/\r?\n/g, " | "));
     await until(start + 68);
     console.log("vm", await vm("set", v2m));
+    // The runner talks to the Mac over a Tether connection, and a connection that ends clears the files on the Mac's pasteboard: ask only after the job pasted.
+    await until(start + 75 + 20);
     const log = await jobLog(id);
     console.log("mac:", log.trim().replace(/\n/g, " | "));
     check("VM (host) -> Mac (viewer): file pasted in Finder", log.includes(`mac got file ${v2m}.txt`));
@@ -154,6 +156,8 @@ if (PART.includes("3")) {
     check("Mac (host) -> VM (viewer): file pasted in Explorer", got.includes(`pasted ${m2v}.txt`) && got.includes(`content-${m2v}`), got.replace(/\r?\n/g, " | "));
     await until(start + 45);
     console.log("vm", await vm("set", v2m));
+    // The runner talks to the Mac over a Tether connection, and a connection that ends clears the files on the Mac's pasteboard: ask only after the job pasted.
+    await until(start + 60 + (+(process.env.PASTE_LATE ?? 45)) + 20);
     const log = await jobLog(id);
     console.log("mac:", log.trim().replace(/\n/g, " | "));
     check("VM (viewer) -> Mac (host): file pasted in Finder", log.includes(`mac got file ${v2m}.txt`));
