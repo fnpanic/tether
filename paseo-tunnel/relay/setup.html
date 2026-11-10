@@ -62,11 +62,20 @@ $p daemon pair          # Mac</code></pre>
       <code>daemon pair</code>, or the one under Settings → (this host) → <i>Pair a device</i>. Then remove the old entry.</li>
   <li><b>Another computer:</b> Settings → <i>Add host</i> → paste the <code>relay://…</code> link, then remove the old entry.</li>
 </ul>
-<p><b>A host that stays "connecting" (never green)</b> still has the old relay address saved. That
-happened with the PC entry on the Mac. Check it, replace it, and it turns online within seconds:</p>
-<pre><code>$p host ls --json | grep -E '"label"|"status"|"targetDescription"'   # shows relay://relay.paseo.sh:443/… = old
+<p><b>A host that stays offline or "connecting" (never green)</b> still has the old relay address saved.
+Paseo Desktop keeps <b>two</b> host lists, and both need the new link:</p>
+<ol>
+  <li><b>The app window</b> (what you see): Settings → <i>Add host</i> → paste the new <code>relay://tether-desk.duckdns.org:443/…</code>
+      link of that host. If an old entry with the same name remains, remove it.</li>
+  <li><b>The daemon</b> (used by agents and the CLI). Check it, and replace it if it shows <code>relay.paseo.sh</code>:
+<pre><code>$p host ls --json | grep -E '"label"|"status"|"targetDescription"'   # relay://relay.paseo.sh:443/… = old
 $p host rm &lt;registrationId&gt;
-$p host add 'relay://tether-desk.duckdns.org:443/…'  --label GameMachine   # link from daemon pair on that host</code></pre>
+$p host add 'relay://tether-desk.duckdns.org:443/…' --label GameMachine</code></pre></li>
+</ol>
+<p>This happened with the PC on the Mac (2026-11-10): the daemon list was fixed and online, but the window
+still dialled <code>relay.paseo.sh</code>. Once every device has the new link, this does not come back.
+Short drops of a few seconds are normal when the Hetzner server restarts Tether's Caddy (Tether updates,
+nightly reboot at 04:00); Paseo reconnects by itself.</p>
 <p>Treat the pairing link like a password: anyone who has it can control that daemon.</p>
 
 <h2>3. Undo (back to relay.paseo.sh)</h2>
