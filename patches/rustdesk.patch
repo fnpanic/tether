@@ -74,8 +74,118 @@ index 5f5bf8f..1228f95 100644
  /// Maximum number of files allowed during a single file transfer request.
  ///
  /// Key: `file-transfer-max-files`.
+diff --git a/libs/enigo/src/macos/hid_post.rs b/libs/enigo/src/macos/hid_post.rs
+new file mode 100644
+index 0000000..1f39c80
+--- /dev/null
++++ b/libs/enigo/src/macos/hid_post.rs
+@@ -0,0 +1,104 @@
++//! Left-button presses and drags through IOKit's HID event path (`IOHIDPostEvent`).
++//!
++//! The Screenshot app's selection (Cmd+Shift+5) follows a drag only when its events enter at the
++//! HID level: a CGEvent drag posted to the HID tap moves the pointer but draws no rectangle there,
++//! while Cmd+Shift+4 and ordinary apps accept both. Checked on macOS 15 (2026-11-10).
++//! Every function returns false when the HID path is unavailable, and the caller then posts the
++//! CGEvent as before.
++
++use std::os::raw::{c_char, c_void};
++use std::sync::OnceLock;
++
++const NX_LMOUSEDOWN: u32 = 1;
++const NX_LMOUSEUP: u32 = 2;
++const NX_LMOUSEDRAGGED: u32 = 6;
++const K_NX_EVENT_DATA_VERSION: u32 = 2;
++const K_IOHID_SET_CURSOR_POSITION: u32 = 0x2;
++const K_IOHID_PARAM_CONNECT_TYPE: u32 = 1;
++
++#[repr(C)]
++struct IOGPoint {
++    x: i16,
++    y: i16,
++}
++
++/// `NXEventData` (a union of at most 48 bytes); the mouse member: click at 4, pressure at 8,
++/// buttonNumber at 9. Zero for drags (their `mouseMove` deltas stay 0: the position is absolute).
++#[repr(C, align(8))]
++struct EventData([u8; 64]);
++
++#[link(name = "IOKit", kind = "framework")]
++extern "C" {
++    fn IOServiceMatching(name: *const c_char) -> *mut c_void;
++    fn IOServiceGetMatchingService(main_port: u32, matching: *mut c_void) -> u32;
++    fn IOServiceOpen(service: u32, owning_task: u32, connect_type: u32, connect: *mut u32) -> i32;
++    fn IOObjectRelease(object: u32) -> i32;
++    fn IOHIDPostEvent(connect: u32, event_type: u32, location: IOGPoint, event_data: *const EventData, event_data_version: u32, event_flags: u32, options: u32) -> i32;
++}
++
++extern "C" {
++    static mach_task_self_: u32;
++}
++
++/// The IOHIDSystem connection, opened once; `None` when it cannot be opened.
++fn connection() -> Option<u32> {
++    static CONNECT: OnceLock<Option<u32>> = OnceLock::new();
++    *CONNECT.get_or_init(|| unsafe {
++        let service = IOServiceGetMatchingService(0, IOServiceMatching(b"IOHIDSystem\0".as_ptr() as *const c_char));
++        if service == 0 {
++            log::warn!("IOHIDSystem not found: left-button drags use CGEvent");
++            return None;
++        }
++        let mut connect = 0u32;
++        let r = IOServiceOpen(service, mach_task_self_, K_IOHID_PARAM_CONNECT_TYPE, &mut connect);
++        IOObjectRelease(service);
++        if r != 0 {
++            log::warn!("IOHIDSystem not opened ({r:#x}): left-button drags use CGEvent");
++            return None;
++        }
++        Some(connect)
++    })
++}
++
++fn post(event_type: u32, x: f64, y: f64, data: EventData, flags: u32) -> bool {
++    let Some(connect) = connection() else { return false };
++    let clamp = |v: f64| v.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16;
++    let r = unsafe { IOHIDPostEvent(connect, event_type, IOGPoint { x: clamp(x), y: clamp(y) }, &data, K_NX_EVENT_DATA_VERSION, flags, K_IOHID_SET_CURSOR_POSITION) };
++    if r != 0 {
++        log::warn!("IOHIDPostEvent {event_type} failed ({r:#x}), using CGEvent");
++    }
++    r == 0
++}
++
++fn button_data(click: i64, pressure: u8) -> EventData {
++    let mut d = EventData([0; 64]);
++    d.0[4..8].copy_from_slice(&(click.clamp(1, i32::MAX as i64) as i32).to_ne_bytes());
++    d.0[8] = pressure;
++    d
++}
++
++/// Left button down at (x, y) (global points), `click` = click count.
++pub fn left_down(x: f64, y: f64, click: i64, flags: u32) -> bool {
++    post(NX_LMOUSEDOWN, x, y, button_data(click, 255), flags)
++}
++
++pub fn left_up(x: f64, y: f64, click: i64, flags: u32) -> bool {
++    post(NX_LMOUSEUP, x, y, button_data(click, 0), flags)
++}
++
++pub fn left_dragged(x: f64, y: f64, flags: u32) -> bool {
++    post(NX_LMOUSEDRAGGED, x, y, EventData([0; 64]), flags)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn button_data_layout() {
++        let d = button_data(2, 255);
++        assert_eq!(i32::from_ne_bytes(d.0[4..8].try_into().unwrap()), 2);
++        assert_eq!((d.0[8], d.0[9]), (255, 0), "pressure, left button");
++        assert_eq!(i32::from_ne_bytes(button_data(0, 0).0[4..8].try_into().unwrap()), 1, "click count at least 1");
++    }
++}
 diff --git a/libs/enigo/src/macos/macos_impl.rs b/libs/enigo/src/macos/macos_impl.rs
-index 0f1436a..1d69352 100644
+index 0f1436a..41530c8 100644
 --- a/libs/enigo/src/macos/macos_impl.rs
 +++ b/libs/enigo/src/macos/macos_impl.rs
 @@ -112,6 +112,10 @@ pub struct Enigo {
@@ -97,26 +207,43 @@ index 0f1436a..1d69352 100644
              ignore_flags: false,
              flags: CGEventFlags::CGEventFlagNull,
              char_to_vkey_map: Default::default(),
-@@ -271,6 +276,7 @@ impl MouseControllable for Enigo {
+@@ -271,7 +276,11 @@ impl MouseControllable for Enigo {
              }
          }
          self.last_click_time = Some(now);
 +        self.held_buttons |= Self::drag_bit(button);
          let (current_x, current_y) = Self::mouse_location();
++        if button == MouseButton::Left && super::hid_post::left_down(current_x as f64, current_y as f64, self.multiple_click, self.hid_flags()) {
++            return Ok(());
++        }
          let (button, event_type, btn_value) = match button {
              MouseButton::Left => (CGMouseButton::Left, CGEventType::LeftMouseDown, None),
-@@ -310,6 +316,7 @@ impl MouseControllable for Enigo {
+             MouseButton::Middle => (CGMouseButton::Center, CGEventType::OtherMouseDown, None),
+@@ -310,7 +319,11 @@ impl MouseControllable for Enigo {
      }
  
      fn mouse_up(&mut self, button: MouseButton) {
 +        self.held_buttons &= !Self::drag_bit(button);
          let (current_x, current_y) = Self::mouse_location();
++        if button == MouseButton::Left && super::hid_post::left_up(current_x as f64, current_y as f64, self.multiple_click, self.hid_flags()) {
++            return;
++        }
          let (button, event_type, btn_value) = match button {
              MouseButton::Left => (CGMouseButton::Left, CGEventType::LeftMouseUp, None),
-@@ -542,6 +549,17 @@ impl Enigo {
+             MouseButton::Middle => (CGMouseButton::Center, CGEventType::OtherMouseUp, None),
+@@ -542,6 +555,26 @@ impl Enigo {
          }
      }
  
++    /// Event flags for the HID path: what `post_event` sets on a mouse CGEvent.
++    fn hid_flags(&self) -> u32 {
++        if self.ignore_flags {
++            0
++        } else {
++            self.flags.bits() as u32
++        }
++    }
++
 +    /// `pressedMouseButtons` bit for a button (left=1, right=2, middle=4), matching the masks
 +    /// `mouse_move_to_impl` tests. Buttons without a drag mask (back/forward) return 0.
 +    fn drag_bit(button: MouseButton) -> usize {
@@ -131,7 +258,7 @@ index 0f1436a..1d69352 100644
      /// Internal implementation for mouse movement with optional delta values.
      ///
      /// The `delta` parameter is crucial for browser Pointer Lock API support.
-@@ -549,7 +567,9 @@ impl Enigo {
+@@ -549,7 +582,9 @@ impl Enigo {
      /// (MOUSE_EVENT_DELTA_X/Y) directly from CGEvent to calculate movementX/Y.
      /// Without setting these fields, the browser sees zero movement.
      fn mouse_move_to_impl(&mut self, x: i32, y: i32, delta: Option<(i32, i32)>) {
@@ -142,6 +269,25 @@ index 0f1436a..1d69352 100644
  
          // Determine event type and corresponding mouse button based on pressed buttons.
          // The CGMouseButton must match the event type for drag events.
+@@ -563,6 +598,9 @@ impl Enigo {
+             (CGEventType::MouseMoved, CGMouseButton::Left) // Button doesn't matter for MouseMoved
+         };
+ 
++        if pressed & 1 > 0 && delta.is_none() && super::hid_post::left_dragged(x as f64, y as f64, self.hid_flags()) {
++            return;
++        }
+         let dest = CGPoint::new(x as f64, y as f64);
+         if let Some(src) = self.event_source.as_ref() {
+             if let Ok(event) =
+diff --git a/libs/enigo/src/macos/mod.rs b/libs/enigo/src/macos/mod.rs
+index f9aebb5..4e0fe61 100644
+--- a/libs/enigo/src/macos/mod.rs
++++ b/libs/enigo/src/macos/mod.rs
+@@ -1,3 +1,4 @@
++mod hid_post;
+ mod macos_impl;
+ 
+ pub mod keycodes;
 diff --git a/libs/scrap/Cargo.toml b/libs/scrap/Cargo.toml
 index 185c38f..48c5e3d 100644
 --- a/libs/scrap/Cargo.toml
