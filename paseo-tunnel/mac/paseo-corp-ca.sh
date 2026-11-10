@@ -8,6 +8,7 @@
 #
 #   paseo-corp-ca.sh install [--restart]   export CAs, verify they fix TLS, persist (LaunchAgent + ~/.zprofile)
 #   paseo-corp-ca.sh export                only write the CA bundle (PASEO_CORP_CA_PEM overrides the path)
+#   paseo-corp-ca.sh session               export + restart Paseo with the CA, nothing persisted (until next Paseo restart)
 #   paseo-corp-ca.sh refresh               re-export CAs + launchctl setenv (what the LaunchAgent runs)
 #   paseo-corp-ca.sh restart               restart Paseo app + daemon so they pick up the CA (skips if agents run)
 #   paseo-corp-ca.sh doctor [relay://...]  show TLS with/without the CA, env of the running daemon, optional e2e
@@ -77,7 +78,7 @@ restart() {
   pkill -TERM -x Paseo 2>/dev/null || true
   for _ in $(seq 1 20); do pgrep -x Paseo >/dev/null || break; sleep 0.5; done
   NODE_EXTRA_CA_CERTS="$PEM" to 30 "$CLI" daemon stop >/dev/null 2>&1 || true
-  NODE_EXTRA_CA_CERTS="$PEM" open -a "$APP"
+  open --env NODE_EXTRA_CA_CERTS="$PEM" -a "$APP" # open(1) does not pass the caller env; --env does
   for _ in $(seq 1 60); do
     NODE_EXTRA_CA_CERTS="$PEM" to 10 "$CLI" daemon status --json 2>/dev/null | grep -q '"localDaemon": "running"' && { log "daemon is back"; return 0; }
     sleep 2
@@ -160,9 +161,10 @@ uninstall() {
 case "${1:-}" in
   install) shift; install "$@" ;;
   export) export_pem ;;
+  session) export_pem; restart ;;
   refresh) refresh ;;
   restart) restart ;;
   doctor) shift; doctor "$@" ;;
   uninstall) uninstall ;;
-  *) sed -n '2,16p' "$0"; exit 2 ;;
+  *) sed -n '2,17p' "$0"; exit 2 ;;
 esac
