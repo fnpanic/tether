@@ -12,7 +12,8 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   other way round, with the Mac as host or as viewer. Windows already did this; the macOS builds now include
   the core's `unix-file-copy-paste` (target-specific feature in both apps' Cargo.toml). Fixed on the way
   in the core: a Finder paste more than 30 s after the copy found nothing (the placeholder file was
-  deleted and the fsevent watch for the paste stopped after 30 quiet seconds; both now stay).
+  deleted and the fsevent watch for the paste stopped after 30 quiet seconds; both now last until
+  the paste or the session's end, and the watch stops with them).
   e2e `apps/desktop/e2e/mac-fileclip-e2e.mjs`.
 - **Second release index `releases-v2.json` with xz copies** (Tether 0.5.33, TetherQS 0.5.31,
   Tether Manage 0.5.15, tether-api; docs/updates.md "Two index files", docs/api.md). The universal

@@ -194,9 +194,12 @@ How the Mac receives files (`vendor/rustdesk/libs/clipboard/src/platform/unix/ma
 an empty placeholder file `/tmp/.rustdesk_<uuid>`; when Finder pastes it somewhere in the home folder,
 an fsevent watcher notices the copy, removes it and fetches the real files from the other side into
 that folder. So a paste works only in the home folder (Desktop, Documents, Downloads, …), not on other
-volumes. The placeholder stays until the clipboard changes or the session ends, and the fsevent watch on the
-home folder stays on from the first received file until the clipboard context closes (the core stopped both after 30
-quiet seconds, so a later ⌘V found nothing or went unnoticed; patched).
+volumes. The placeholder stays until it is pasted, the other side copies something new, or the
+session ends; the fsevent watch on the home folder runs only as long: from the moment the pasteboard
+hands out the placeholder until the paste or the session's end (the core stopped both after 30 quiet
+seconds, so a later ⌘V found nothing or went unnoticed; patched). Outside a session, or once the
+files are pasted, no watch runs. One gap: copying something else on the Mac instead of pasting leaves
+the watch on until the session ends (the core is not told about local pasteboard changes).
 
 Same requirements as the clipboard itself (permission "clipboard", on by default) plus file transfer
 allowed on the host side. Test: `node e2e/mac-fileclip-e2e.mjs` (build Mac + Windows VM: Mac viewer ↔

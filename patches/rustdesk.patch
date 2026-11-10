@@ -75,10 +75,44 @@ index 5f5bf8f..1228f95 100644
  ///
  /// Key: `file-transfer-max-files`.
 diff --git a/libs/clipboard/src/platform/unix/macos/paste_observer.rs b/libs/clipboard/src/platform/unix/macos/paste_observer.rs
-index 01e8b6c..6d1de19 100644
+index 01e8b6c..1401e9a 100644
 --- a/libs/clipboard/src/platform/unix/macos/paste_observer.rs
 +++ b/libs/clipboard/src/platform/unix/macos/paste_observer.rs
-@@ -149,10 +149,13 @@ impl PasteObserver {
+@@ -59,14 +59,15 @@ impl PasteObserver {
+         };
+ 
+         let (tx_observer, rx_observer) = channel::<fsevent::Event>();
++        let (tx_control, rx_control) = channel::<FseventControl>();
+         let handle_observer = Self::init_thread_observer(
+             self.exit.clone(),
+             self.observer_info.clone(),
+             rx_observer,
+             cb_pasted,
++            tx_control.clone(),
+         );
+         self.handle_observer_thread = Some(handle_observer);
+-        let (tx_control, rx_control) = channel::<FseventControl>();
+         let handle_fsevent = Self::init_thread_fsevent(
+             home_dir.to_string_lossy().to_string(),
+             tx_observer,
+@@ -93,6 +94,7 @@ impl PasteObserver {
+         observer_info: Arc<Mutex<Option<PasteObserverInfo>>>,
+         rx_observer: Receiver<fsevent::Event>,
+         cb_pasted: fn(&PasteObserverInfo) -> (),
++        tx_control: Sender<FseventControl>,
+     ) -> thread::JoinHandle<()> {
+         thread::spawn(move || loop {
+             match rx_observer.recv_timeout(Duration::from_millis(300)) {
+@@ -113,6 +115,8 @@ impl PasteObserver {
+                                 {
+                                     observer_info.target_path = event.path.clone();
+                                     cb_pasted(observer_info);
++                                    // The paste consumed the placeholder: nothing left to watch for.
++                                    tx_control.send(FseventControl::Stop).ok();
+                                 }
+                             }
+                         }
+@@ -149,10 +153,13 @@ impl PasteObserver {
                                  Some(Self::new_fsevent(home_dir.clone(), tx_observer.clone()));
                          }
                      }
@@ -87,14 +121,14 @@ index 01e8b6c..6d1de19 100644
                          let _ = fsevent.as_mut().map(|e| e.shutdown_observe());
                          fsevent = None;
                      }
-+                    // Keep watching while the placeholder is on the pasteboard (it outlives 30 s
-+                    // now, see pasteboard_context.rs); a paste after a quiet spell went unnoticed.
++                    // Watch until the paste or until the placeholder is removed (Stop), not for a
++                    // fixed 30 s: a paste after a quiet spell went unnoticed.
 +                    Err(RecvTimeoutError::Timeout) => {}
                      Ok(FseventControl::Exit) | Err(RecvTimeoutError::Disconnected) => {
                          break;
                      }
 diff --git a/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs b/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs
-index dbd9917..5ea528e 100644
+index dbd9917..cbd4d66 100644
 --- a/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs
 +++ b/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs
 @@ -150,15 +150,16 @@ impl PasteboardContext {
@@ -118,6 +152,15 @@ index dbd9917..5ea528e 100644
                      }
                  }
              }
+@@ -167,6 +168,8 @@ impl PasteboardContext {
+ 
+     // Just removing the file can also make paste option in the context menu disappear.
+     fn empty_clipboard_(&mut self, _conn_id: i32) -> bool {
++        // Session end: the placeholder goes, so does the watch for its paste.
++        self.observer.lock().unwrap().stop();
+         self.tx_remove_file
+             .as_ref()
+             .map(|tx| tx.send("".to_string()).ok());
 diff --git a/libs/enigo/src/macos/hid_post.rs b/libs/enigo/src/macos/hid_post.rs
 new file mode 100644
 index 0000000..d2d1ab7
