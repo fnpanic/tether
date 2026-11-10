@@ -10,3 +10,6 @@ patches/*.patch text eol=lf
 deploy/monitoring/** text eol=lf
 # Kernel settings copied to Linux relays.
 server/sysctl/* text eol=lf
+
+# Paseo relay files, copied to the Hetzner node as they are.
+paseo-tunnel/relay/** text eol=lf
