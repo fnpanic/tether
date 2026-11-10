@@ -2,17 +2,18 @@
 # Roll the relay bundle dist/linux-relay out to running relays, one at a time (docs/deployment.md,
 # "Update: review fixes"): hbbs, tether-api with its unit, the Caddyfile and the ddns unit.
 # hbbr is left alone unless HBBR=1 (its restart ends the relayed sessions on that node).
-#   bash scripts/deploy-relay-update.sh                 # both production relays, relay 2 first
-#   RELAYS="opc@host" bash scripts/deploy-relay-update.sh
+#   bash scripts/deploy-relay-update.sh                 # both production relays, the backup first
+#   RELAYS="user@host=ssh-key-name" bash scripts/deploy-relay-update.sh
 # Stops at the first relay that fails a check; the old files stay as *.bak-review on the node.
 set -euo pipefail
 cd "$(dirname "$0")/../dist"
-RELAYS=${RELAYS:-"opc@92.5.231.71 opc@158.101.205.185"}
-SSH_KEY=${SSH_KEY:-$HOME/.ssh/tether_oracle}
+# user@host=key file in ~/.ssh (docs/relay-ha.md: Oracle relay 2 is the backup, Hetzner the primary).
+RELAYS=${RELAYS:-"opc@92.5.231.71=tether_oracle tadmin@tether-desk.duckdns.org=tether_hetzner"}
 B=linux-relay
 grep " \*\./$B/" SHA256SUMS | sha256sum -c --quiet -   # the bundle is the one that was tested
 
-for r in $RELAYS; do
+for e in $RELAYS; do
+  r=${e%%=*} SSH_KEY=$HOME/.ssh/${e#*=}
   echo "== $r"
   ssh -i "$SSH_KEY" "$r" 'install -d -m 0700 ~/tether-update'
   scp -q -i "$SSH_KEY" $B/bin/hbbs $B/bin/hbbr $B/bin/tether-api $B/systemd/tether-api.service \
@@ -43,7 +44,7 @@ if systemctl cat tether-ddns.service >/dev/null 2>&1; then
   put tether-ddns.service /etc/systemd/system/tether-ddns.service 0644
   sudo systemctl daemon-reload
   # DynamicUser under SELinux is untested: put the old unit back if the update does not run.
-  sudo systemctl start tether-ddns.service && journalctl -u tether-ddns -n 2 --no-pager | grep -q OK || {
+  sudo systemctl start tether-ddns.service && journalctl -u tether-ddns -n 4 --no-pager | grep -q "duckdns: OK" || {
     echo "ddns unit failed: old unit restored"
     sudo install -m 0644 /etc/systemd/system/tether-ddns.service.bak-review /etc/systemd/system/tether-ddns.service
     sudo systemctl daemon-reload

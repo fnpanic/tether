@@ -157,9 +157,9 @@ old hbbs stay on the relay (see [relay-ha.md](relay-ha.md#ipv6-and-nat-hole-punc
 
 ## Update: review fixes (hbbs, tether-api, Caddyfile, ddns unit)
 
-Not rolled out yet when this was written. The bundle `dist/linux-relay` is built with
+Rolled out on 2026-11-10 to Oracle relay 2 (backup) and then Hetzner (primary), see [relay-ha.md](relay-ha.md). The bundle `dist/linux-relay` is built with
 `scripts/build-relay.sh` and tested with `scripts/test-relay.sh`; `dist/SHA256SUMS` lists it.
-`scripts/deploy-relay-update.sh` rolls it out, one relay at a time, relay 2 first:
+`scripts/deploy-relay-update.sh` rolls it out, one relay at a time, the backup first (its `RELAYS` default names both nodes and their SSH keys):
 
 ```bash
 # from the PC, Git Bash, in C:\installemote-support

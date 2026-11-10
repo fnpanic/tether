@@ -632,7 +632,7 @@ Tether hosts) are not affected while their connection is open: a datagram does n
 of a host that has an entry in `TCP_PEERS` (`register_peer`, `register_pk` in
 `rendezvous_server.rs`).
 
-Status: fixed for TCP/WebSocket hosts in the next release; open for UDP hosts (stock clients).
+Status: fixed for TCP/WebSocket hosts, deployed 2026-11-10; open for UDP hosts (stock clients).
 
 ### W18. Mouse Keys and the On-Screen Keyboard pass the own-window guard
 

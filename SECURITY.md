@@ -414,10 +414,10 @@ Update the status here and there together.
 | W11 | Traffic analysis: frame sizes and keystroke timing visible to relay and proxy | open |
 | W12 | A captured challenge response allows offline password guessing | open |
 | W13 | Audit records are unauthenticated and can be forged | open — by design today |
-| W14 | A v1 `Tether-Sig` names no relay: a captured admin or team request can be replayed at another relay within ±300 s (the replayer needs a view inside TLS: a relay that received it, or an inspecting proxy) | v2 (host-bound) in the next release; open while relays accept v1: set `TETHER_SIG_V1=off` once every app signs v2 |
+| W14 | A v1 `Tether-Sig` names no relay: a captured admin or team request can be replayed at another relay within ±300 s (the replayer needs a view inside TLS: a relay that received it, or an inspecting proxy) | relays accept v2 (host-bound) since 2026-11-10, apps sign it from the next release; open while relays accept v1: set `TETHER_SIG_V1=off` once every app signs v2 |
 | W15 | The recording upload token travels in the public policy bundle (`GET /api/policy` needs no authentication): anyone who reaches the relay can read it | open — by design today: the token must be write-only (PUT/create; no list, read or overwrite) |
 | W16 | A release upload slot is granted on an unverified `Tether-Sig` header (the signature covers the body): made-up uploads can hold the 4 release slots, about 55 min each, and block release uploads; nothing else | open |
-| W17 | A forged UDP `RegisterPk` (an ID's uuid and its unchanged key) or `RegisterPeer` (from the host's IP) moves the address hbbs stores for a host registered over UDP until it registers again. Hosts registered over TCP/WebSocket (all Tether hosts) are not affected while their connection is open | fixed for TCP/WebSocket hosts in the next release; open for UDP hosts (stock clients) |
+| W17 | A forged UDP `RegisterPk` (an ID's uuid and its unchanged key) or `RegisterPeer` (from the host's IP) moves the address hbbs stores for a host registered over UDP until it registers again. Hosts registered over TCP/WebSocket (all Tether hosts) are not affected while their connection is open | fixed for TCP/WebSocket hosts, deployed 2026-11-10; open for UDP hosts (stock clients) |
 | W18 | Own-window guard: Windows Mouse Keys (a key press becomes a click at the pointer while another window is in front) and the On-Screen Keyboard (clicks on its window type into a focused Tether window) get past it | open |
 
 ## Reporting

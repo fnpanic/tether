@@ -470,3 +470,31 @@ ightelay-0527\deploy.sh` (backup `/root/bak-0527`), Oracle 2 first, then Hetzne
 tether-api `793caf1a2745440a` (hbbs unchanged `0320ad9eb5848691`). Verified on both: services active,
 RELAY_SERVERS kept, WebSocket 101, `/`, `/api/policy`, `releases.json` 200, unknown ticket upload
 `404 not found`, unsigned close 401, 27/27 targets up. Older apps keep working (plain 404s).
+
+## Review fixes deployed (2026-11-10)
+
+hbbs `d497e879cc10ba61`, tether-api `89bf6a0447d1edfd`, `tether-api.service` (now also reads
+`/etc/tether/server.env` for `RELAY_HOST`), the Caddyfile (request buffers 600 KiB on `/api`, `/q`
+and the release index, 20 s keep-alive to tether-api) and `tether-ddns.service` (DynamicUser, token
+on stdin; works under SELinux on both nodes) from branch `review-fixes` (CHANGELOG [Unreleased] ›
+Review fixes), with `scripts/deploy-relay-update.sh`: Oracle relay 2 (backup) first, then Hetzner
+(primary). hbbr unchanged (`HBBR=1` replaces it too; its only change is the exit on an unreadable
+key). The script checks before touching anything (key readable by `tether`, `RELAY_HOST` set, Caddy
+active, new Caddyfile valid) and keeps `*.bak-review` copies beside the replaced files; rollback
+commands are at its end. Retired Oracle relay 1 was not touched (the script stops there: no Caddy).
+
+Checks before the rollout: `scripts/test-relay.sh` on the final tree (hbbs 40, hbbr 11, tether-api
+55 with 2 ignored, backup failover) all green. After, on both relays: all four services active, no
+hbbs errors, tether-api started with `RELAY_HOST`, `/api/policy`, `/readyz/relay`,
+`/rendezvous/pubkey`, `/download/stable/releases.json` 200, `/ws/id` upgrade 101, a GET with a body
+400, STUN ok and TURN Allocate 401 (`tools/turn-bench/turn-check.py`). Not run after the rollout:
+the keyrot, audit and cm-window e2e against production, and Prometheus target checks.
+
+The released apps and Tether Manage keep working (v1 request signatures are accepted). When the
+next app release is out everywhere, set `TETHER_SIG_V1=off` in `/etc/tether/api.env` on both nodes.
+
+Certificate files published the same day under `/var/lib/tether-api/download/` on both relays
+(`Install Tether certificate.cmd`, `Remove Tether certificate.cmd`, `Trust Tether.mobileconfig`,
+`tether-codesign.cer`, `tether-codesign-macos.cer`, `trust-windows-cert.ps1`, `trust-macos-cert.sh`);
+checked over HTTPS: the macOS certificate has SHA-1 `BC:F5:36:42…FB:33` (the one releases are signed
+with), the Windows one `9B:DF:E8:3E…C3:46`.

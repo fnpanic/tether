@@ -6,7 +6,7 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
-### Review fixes (relays, apps, Tether Manage, tooling; not released, not deployed)
+### Review fixes (relays, apps, Tether Manage, tooling; relays deployed 2026-11-10, apps not released)
 
 About 100 findings of a code review, fixed on branch `review-fixes`. What is still open is in
 SECURITY.md "Known weaknesses" (W8, W14 to W18).
@@ -137,7 +137,7 @@ SECURITY.md "Known weaknesses" (W8, W14 to W18).
   set, and gives the api container `RELAY_HOST`.
 - **Tooling:** `scripts/bootstrap.sh` checks the upstream commits, not only the tags.
   `tools/vm/broker.ps1` runs scripts only when file and folder belong to Administrators/SYSTEM and
-  nobody else can write them. CI keeps the signing secrets out of the workflow-wide environment.
+  nobody else can write them (`tools/vm/secure-broker.cmd`, run once as administrator, sets that up). CI keeps the signing secrets out of the workflow-wide environment.
   The trust scripts pin the certificate fingerprint and download over https only.
 - **Known and not fixed:** Windows Mouse Keys and the On-Screen Keyboard get past the own-window
   guard (W18). The recording upload token is public and must be write-only (W15).
