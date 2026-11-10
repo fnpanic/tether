@@ -60,8 +60,13 @@ $p daemon pair          # Mac</code></pre>
 <ul>
   <li><b>Phone:</b> in the Paseo app, choose <i>Add host → Scan QR code</i> and scan the QR code from
       <code>daemon pair</code>, or the one under Settings → (this host) → <i>Pair a device</i>. Then remove the old entry.</li>
-  <li><b>Another computer:</b> Settings → <i>Add host</i> → paste the <code>relay://…</code> link.</li>
+  <li><b>Another computer:</b> Settings → <i>Add host</i> → paste the <code>relay://…</code> link, then remove the old entry.</li>
 </ul>
+<p><b>A host that stays "connecting" (never green)</b> still has the old relay address saved. That
+happened with the PC entry on the Mac. Check it, replace it, and it turns online within seconds:</p>
+<pre><code>$p host ls --json | grep -E '"label"|"status"|"targetDescription"'   # shows relay://relay.paseo.sh:443/… = old
+$p host rm &lt;registrationId&gt;
+$p host add 'relay://tether-desk.duckdns.org:443/…'  --label GameMachine   # link from daemon pair on that host</code></pre>
 <p>Treat the pairing link like a password: anyone who has it can control that daemon.</p>
 
 <h2>3. Undo (back to relay.paseo.sh)</h2>
