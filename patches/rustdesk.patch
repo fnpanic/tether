@@ -76,7 +76,7 @@ index 5f5bf8f..1228f95 100644
  /// Key: `file-transfer-max-files`.
 diff --git a/libs/enigo/src/macos/hid_post.rs b/libs/enigo/src/macos/hid_post.rs
 new file mode 100644
-index 0000000..c2706d9
+index 0000000..d2d1ab7
 --- /dev/null
 +++ b/libs/enigo/src/macos/hid_post.rs
 @@ -0,0 +1,119 @@
@@ -174,9 +174,9 @@ index 0000000..c2706d9
 +    }
 +}
 +
-+/// After the left button went down at (x, y) (global points): the pointer got there by CGEvents,
-+/// which the HID side does not see, so a HID move to the same point lets the first drag's delta
-+/// start from here.
++/// Right before the left button goes down at (x, y) (global points): the pointer got there by
++/// CGEvents, which the HID side does not see, so a HID move to the same point (button still up)
++/// lets the first drag's delta start from here.
 +pub fn left_pressed(x: f64, y: f64, flags: u32) -> bool {
 +    post(NX_MOUSEMOVED, x, y, 0.0, 0.0, flags)
 +}

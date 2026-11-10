@@ -60,6 +60,19 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
   injected moves went out as `MouseMoved` instead of `…MouseDragged`. The macOS input backend now
   tracks the buttons the remote is holding and emits the drag events (patches/rustdesk.patch,
   libs/enigo macos_impl.rs).
+- macOS host (Tether 0.5.34, TetherQS 0.5.32): a remote drag in the **Screenshot app** (Cmd+Shift+5,
+  "Capture Selected Portion") selected nothing: it stayed at "0 × 0". Cmd+Shift+4 and ordinary
+  apps take CGEvent drags, but this selection grows only by the deltas of drags that arrive at the
+  HID level (checked with an injector on the Mac: every CGEvent variant — event number, deltas,
+  pressure, click state, HID source, session tap — drew nothing; `IOHIDPostEvent` drew the full
+  rectangle). Left-button drags now go through `IOHIDPostEvent` with their real deltas, after a HID
+  move to the press point right before the press (the pointer got there by CGEvents, which the
+  HID side does not see; without it the rectangle stopped at about a third). Presses and releases
+  stay CGEvents: a HID click did not reach the system's permission dialogs. Falls back to CGEvent
+  when the HID path cannot be opened (`libs/enigo/src/macos/hid_post.rs`, two hooks in
+  macos_impl.rs). E2E through Tether on the build Mac (`apps/desktop/e2e/mac-drag-e2e.mjs`,
+  `mac-click-e2e.mjs`): Screenshot-app selection 604 × 391 for a 604 × 391 drag, Cmd+Shift+4
+  region 1210 × 784 px, TextEdit double-click selects the word, drag selects the text.
 
 ## [0.5.31] — 2026-11-09
 Tether (technician app) 0.5.31 (Windows) and TetherQS 0.5.29 (Windows, macOS), published 2026-11-09:

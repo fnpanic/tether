@@ -153,6 +153,35 @@ Verified 2026-11-05 on an Apple Silicon Mac: before the fix, input died about 20
 session started and every key was dropped; with 0.5.13 keys pass and input still arrives after
 100 s.
 
+### Drags: CGEvent and HID
+
+Mouse input is posted as CGEvents (`libs/enigo/src/macos/macos_impl.rs`), with one exception:
+**left-button drags** go through IOKit's `IOHIDPostEvent` (`hid_post.rs`). The Screenshot app's
+selection (Cmd+Shift+5) grows only by the deltas of drags that arrive at the HID level; it draws
+no rectangle for CGEvent drags, whatever their fields, while Cmd+Shift+4 and ordinary apps
+take either. Details of the path, checked on macOS 15 (2026-11-10):
+
+- Right before a left press, one HID move to the press point (button still up): the pointer got
+  there by CGEvent moves, which the HID side does not see, and the first drag's delta must start
+  from the press point. Without it the selection stopped at about a third of the drag.
+- Each drag carries its step from the previous HID position as `dx`/`dy`, and the absolute
+  position (`kIOHIDSetCursorPosition`).
+- Presses and releases stay CGEvents: a HID click reached TextEdit but not the system's permission
+  dialogs ("… would like to control this computer"), which a supporter must be able to click.
+- If IOHIDSystem cannot be opened, drags use CGEvent as before (logged once).
+
+E2E through Tether, from the PC against the build Mac (`tools/macbuild` jobs drive the Mac side):
+
+```sh
+TOOLBAR=1 node e2e/mac-drag-e2e.mjs     # Screenshot app: the rectangle reaches the drag's end
+node e2e/mac-drag-e2e.mjs               # Cmd+Shift+4: macOS saves the dragged region
+OVER_TETHER=1 node e2e/mac-drag-e2e.mjs # the same, starting on Tether's own window
+node e2e/mac-click-e2e.mjs              # TextEdit: double-click selects a word, a drag selects text
+```
+
+They click and drag on the Mac's screen: run them while nobody uses the Mac (a window that comes
+to the front ends a screenshot selection).
+
 ## Windows and the Dock
 
 Tether shows **one** icon in the Dock. Session windows (screen, file transfer, camera, terminal),
