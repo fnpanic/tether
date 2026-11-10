@@ -74,6 +74,31 @@ index 5f5bf8f..1228f95 100644
  /// Maximum number of files allowed during a single file transfer request.
  ///
  /// Key: `file-transfer-max-files`.
+diff --git a/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs b/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs
+index dbd9917..5ea528e 100644
+--- a/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs
++++ b/libs/clipboard/src/platform/unix/macos/pasteboard_context.rs
+@@ -150,15 +150,16 @@ impl PasteboardContext {
+                             cur_file = Some(path);
+                         }
+                     }
+-                    Err(e) => {
++                    // Keep the placeholder while it is on the pasteboard: removing it after a quiet
++                    // spell made a paste in Finder fail once 30 s had passed since the copy.
++                    Err(RecvTimeoutError::Timeout) => {}
++                    Err(RecvTimeoutError::Disconnected) => {
+                         if let Some(file) = cur_file.take() {
+                             if !file.is_empty() {
+                                 std::fs::remove_file(&file).ok();
+                             }
+                         }
+-                        if e == RecvTimeoutError::Disconnected {
+-                            break;
+-                        }
++                        break;
+                     }
+                 }
+             }
 diff --git a/libs/enigo/src/macos/hid_post.rs b/libs/enigo/src/macos/hid_post.rs
 new file mode 100644
 index 0000000..d2d1ab7
