@@ -76,10 +76,10 @@ index 5f5bf8f..1228f95 100644
  /// Key: `file-transfer-max-files`.
 diff --git a/libs/enigo/src/macos/hid_post.rs b/libs/enigo/src/macos/hid_post.rs
 new file mode 100644
-index 0000000..46eec6e
+index 0000000..6a0462f
 --- /dev/null
 +++ b/libs/enigo/src/macos/hid_post.rs
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,137 @@
 +//! Left-button presses and drags through IOKit's HID event path (`IOHIDPostEvent`).
 +//!
 +//! The Screenshot app's selection (Cmd+Shift+5) follows a drag only when its events enter at the
@@ -89,10 +89,11 @@ index 0000000..46eec6e
 +//! CGEvent as before.
 +
 +use std::os::raw::{c_char, c_void};
-+use std::sync::OnceLock;
++use std::sync::{Mutex, OnceLock};
 +
 +const NX_LMOUSEDOWN: u32 = 1;
 +const NX_LMOUSEUP: u32 = 2;
++const NX_MOUSEMOVED: u32 = 5;
 +const NX_LMOUSEDRAGGED: u32 = 6;
 +const K_NX_EVENT_DATA_VERSION: u32 = 2;
 +const K_IOHID_SET_CURSOR_POSITION: u32 = 0x2;
@@ -105,7 +106,7 @@ index 0000000..46eec6e
 +}
 +
 +/// `NXEventData` (a union of at most 48 bytes); the mouse member: click at 4, pressure at 8,
-+/// buttonNumber at 9. Zero for drags (their `mouseMove` deltas stay 0: the position is absolute).
++/// buttonNumber at 9; the `mouseMove` member (moves, drags): dx at 0, dy at 4.
 +#[repr(C, align(8))]
 +struct EventData([u8; 64]);
 +
@@ -161,8 +162,26 @@ index 0000000..46eec6e
 +    d
 +}
 +
-+/// Left button down at (x, y) (global points), `click` = click count.
++/// Where the last HID event put the pointer: drags carry the step from there as their delta. The
++/// Screenshot app grows its selection by these deltas, not by the position.
++static LAST: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
++
++/// `NXEventData.mouseMove`: dx at 0, dy at 4.
++fn move_data(dx: f64, dy: f64) -> EventData {
++    let mut d = EventData([0; 64]);
++    d.0[0..4].copy_from_slice(&(dx.round() as i32).to_ne_bytes());
++    d.0[4..8].copy_from_slice(&(dy.round() as i32).to_ne_bytes());
++    d
++}
++
++/// Left button down at (x, y) (global points), `click` = click count. The pointer got there by
++/// CGEvent moves, which the HID side does not see: a HID move to the same point first, so the
++/// first drag's delta starts from here.
 +pub fn left_down(x: f64, y: f64, click: i64, flags: u32) -> bool {
++    if !post(NX_MOUSEMOVED, x, y, move_data(0.0, 0.0), flags) {
++        return false;
++    }
++    *LAST.lock().unwrap() = (x, y);
 +    post(NX_LMOUSEDOWN, x, y, button_data(click, 255), flags)
 +}
 +
@@ -171,12 +190,24 @@ index 0000000..46eec6e
 +}
 +
 +pub fn left_dragged(x: f64, y: f64, flags: u32) -> bool {
-+    post(NX_LMOUSEDRAGGED, x, y, EventData([0; 64]), flags)
++    let (lx, ly) = *LAST.lock().unwrap();
++    let ok = post(NX_LMOUSEDRAGGED, x, y, move_data(x - lx, y - ly), flags);
++    if ok {
++        *LAST.lock().unwrap() = (x, y);
++    }
++    ok
 +}
 +
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
++
++    #[test]
++    fn move_data_layout() {
++        let d = move_data(20.4, -13.0);
++        assert_eq!(i32::from_ne_bytes(d.0[0..4].try_into().unwrap()), 20);
++        assert_eq!(i32::from_ne_bytes(d.0[4..8].try_into().unwrap()), -13);
++    }
 +
 +    #[test]
 +    fn button_data_layout() {
