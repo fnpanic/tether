@@ -865,6 +865,89 @@ encoder: the VM's own drawing pipeline plus Windows.Graphics.Capture on a softwa
 AnyDesk could not be measured again that night (its test viewer showed pictures 20-60 s old at
 3-9 per second after the day's many sessions).
 
+# Exact still pictures and the host's part of the delay (0.6.2, 2026-11-12)
+
+## Where the delay is: the host's statistics and the direct route
+
+`fluxrt capture/min` (new, next to `fluxrt video/min` in the host log) on the GPU-less VM during
+the scroll test, avg / p95 per picture: capturer call 12.0 / 23.1 ms, of which the copy 3.1 / 4.4;
+the picture is already 14.3 / 24.0 ms old when Windows.Graphics.Capture hands it over; conversion
+0.5 / 0.8 ms; encode 2.4 / 3.3 ms; 22 pictures/s whatever the QoS ceiling (60). So Tether adds
+about 6 ms of its own before the network; the rest of the 54 ms "page drew it -> host has it" is
+the VM drawing and composing in software.
+
+Same split on the route an unforced session between these two machines takes, **Direct (LAN)**
+(the peer option `force-always-relay` had been left on by the relay comparisons):
+
+| Part (median) | Relay (WebSocket) | Direct (LAN) |
+|---|---|---|
+| page drew it -> host has it | 56 ms | 54 ms |
+| -> handed to the viewer's decoder | 17 ms | 3 ms |
+| -> drawn | 0 ms | 0 ms |
+| delay to first appearance | 73 ms | 57 ms |
+
+The relay hop costs 14 ms; the app's own hand-over to the webview is within the 3 ms. AnyDesk
+through its relay: 67-68 ms (earlier boot). Nothing left to gain on this host short of a
+different way to get the picture from Windows, and Desktop Duplication (torn frames) and GDI
+(50 ms a copy) are both worse there (see "Bands across Edge pages").
+
+## Stalls: a blackout on the TCP relay route
+
+`C:\vms\perf\netpause.ps1` blocks the VM's outbound TCP 443 for 2.3 s in the middle of the scroll
+test (relay route). Picture gap: 4.3 s with the 0.6.2 viewer, 4.1 and 4.4 s with the 0.6.1
+viewer; no key-frame request and no dropped frame in any run; the picture resumes at once
+afterwards. The two extra seconds are TCP's retransmission timer doubling on the host (0.3, 0.6,
+1.2, 2.4 s). So a stall of this kind is the transport, not the video code: the viewer's burst
+limit (`MAX_DECODE_QUEUE`) is not reached and changing it (tried: 120, with a 3 s key retry)
+made no difference; it was taken back out. The remedy exists already as another route: WebRTC
+over UDP (direct or through the relay's TURN, docs/stun-turn.md), whose retransmission starts at
+40 ms; the WebSocket relay is only what remains when UDP cannot be used (proxies). The 3.0 s gap
+seen once in the AnyDesk comparison fits this (a blackout of about a second on the path), and
+AnyDesk's own TCP relay would stall the same way; it was not hit in its two runs.
+
+## Exact still pictures
+
+Video is lossy and 4:2:0, so small coloured text and photos stay a little off however long the
+picture stands (4:4:4 video costs too much in motion, see the follow-up above). From 0.6.2 the
+host sends the captured pixels themselves once the picture stands still and the encoder has
+finished refining it (`src/server/video_service/exact_still.rs`):
+
+- full-width strips of 32 rows: RGB, each pixel minus the one to its left, zstd; inside a
+  `VideoFrame` (`exact`, field 20), so they travel in order with the video and take part in the
+  wait for the connection (one strip in flight at most);
+- one strip per loop pass at the byte rate of the video bitrate of the moment (floor 16 kB/s),
+  only to viewers that advertise `SupportedDecoding.exact_stills` (the 0.6.2 technician app);
+- the next captured picture starts over; nothing is sent while the picture moves. Keeping the
+  pixels costs the host 0.4 ms per captured picture (a copy);
+- the viewer writes the rows into its picture texture (`GlRenderer.strip`, or `putImageData` on
+  the 2D canvas); strips that arrive while the last video frame is still in the decoder wait for
+  it, and the next video frame replaces everything as before.
+
+Not covered: hosts whose encoder takes textures (GPU hosts with the VRAM encoders: no CPU
+pixels), recordings (they hold the video only), viewers before 0.6.2.
+
+Still page of the AnyDesk comparison (`quality-run.sh static`, 2 runs, relay route, settled
+picture at :40; AnyDesk and 0.6.1 from the tables above):
+
+| | Tether 0.6.1 | Tether 0.6.2 | AnyDesk 9.8.3 |
+|---|---|---|---|
+| PSNR Y, all | 39.5 dB | **65.4 dB** | 35.2 dB |
+| PSNR Cb / Cr | 25.8 / 26.0 dB | **50.0 / 50.7 dB** | 26.6 / 26.6 dB |
+| Text 8-12 px: PSNR Y / fringe | 44.5 dB / 35.5 | **exact / 0** | 34.7 dB / 33.1 |
+| Coloured text: PSNR Y / Cb | 40.8 / 23.6 dB | **exact / exact** | 34.5 / 24.1 dB |
+| Photo: PSNR Y | 48.8 dB | **61.2 dB** | 51.0 dB |
+| Picture at :02 (2 s after the change): PSNR Y / Cb | 39.5 / 25.8 dB | 45.4 / 31.0 dB | 35.2 / 26.6 dB |
+| VM sent per page change | 420-480 kB | 936 kB (403 kB in the first second, then 90-165 kB/s for 4 s) | about 350 kB |
+
+("exact" = no differing pixel in that region; the photo and the whole page are within one
+level in about 5 % of the pixels, cause not looked for.) Scrolling with the feature in the
+build: 101 ms median counted the old way, 21.2 pictures/s, as before.
+
+Measuring note: `TETHER_PTS_WALL=1` on the host is for the delay split only. Until the fix in
+this version it stamped captured frames but not the repeats of a still picture, so the encoder
+saw time run backwards and refused every repeat ("static refresh failed: Failed to encode"): no
+refinement and no exact picture in that state.
+
 # Viewer watchdog: frames arrive, no picture (2026-11-09)
 
 A WebCodecs decoder can fail without an error: it takes every frame and outputs nothing. The

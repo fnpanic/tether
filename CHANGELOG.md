@@ -7,11 +7,24 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ## [Unreleased]
 
-### 0.6.2 (in work)
+### 0.6.2 (in work; nothing released under this number yet)
 
-Work on the four points where AnyDesk is ahead (docs/performance.md "Follow-up the same
-evening"): scrolling latency, colour detail, photos, stalls. Nothing released under this number
-yet.
+- **Exact still pictures.** When the remote screen stands still, the host now sends the
+  captured pixels themselves after the video has refined the picture; text, coloured text and
+  photos become exact instead of "as good as the video codec gets". Same still page as the
+  AnyDesk comparison: brightness 65.4 dB (0.6.1: 39.5, AnyDesk 35.2), colour 50.0 / 50.7 dB
+  (25.8 / 26.0, AnyDesk 26.6), small and coloured text exact, photo 61.2 dB (48.8, AnyDesk
+  51.0). Cost: about 0.9 MB per full page change instead of 0.45 MB, sent at the video bitrate
+  over a few seconds; nothing while the picture moves. Needs host and viewer 0.6.2; not on hosts
+  with a GPU texture encoder, not in recordings (docs/performance.md "Exact still pictures").
+- **Latency: measured, not changed.** The earlier "30-60 ms behind AnyDesk" came from two
+  meters that counted differently. Delay to first appearance on the GPU-less test host: 57 ms on
+  the direct route, 73 ms through the relay; AnyDesk through its relay 67-68 ms. The host's own
+  part before the network is about 6 ms (new log line `fluxrt capture/min`).
+- **Stalls: explained, not changed.** A 2.3 s blackout on the TCP relay route gives a 4.3 s
+  picture gap (TCP's retry timer), the same with the 0.6.1 viewer; the UDP routes do not have
+  this. No video code is involved.
+- Upstream RustDesk 1.5.3 (section below).
 
 ### Upstream RustDesk 1.5.3 (2026-11-11; in 0.6.2)
 
