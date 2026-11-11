@@ -37,6 +37,19 @@ left out and why, and how to move the pin: [docs/upstream.md](docs/upstream.md).
 - Glue code: `LoginConfigHandler::initialize` takes a login method; Tether passes the default
   (password login). Upstream's "request approval" is in the core but not offered in the UI.
 
+Checked on builds of the merged tree (2026-11-11): `cargo test` in `apps/desktop/src-tauri` (72)
+and the core's tests for the touched areas (104, among them upstream's relay-request tests and
+our key-exchange tests); on one PC against a local hbbs/hbbr `disconnect-e2e`, `connect-once-e2e`,
+`cm-window-e2e`, `keyboard-e2e` and `ft-multi` 5/5; in the VM with a release setup: update over
+an installed 0.6.1 with its service running (service back on the new build, same ID), the app of
+a standard user reading the ID and setting the permanent password through the service's pipe, a
+session from this PC with that password (picture, connection window "Session active"),
+`--uninstall-service`, `--install-service`, a second session, and the uninstaller leaving no
+service behind. A Mac build for Apple silicon compiles and signs. Not checked: the Mac apps in
+use, the Intel Mac slice, the F-Secure and Temp-junction cases themselves, pasting many files
+through the clipboard, TetherQS with its portable service on the new core, the corporate-proxy
+path.
+
 ### 0.6.1 (2026-11-11; files in dist/, ready to publish; frozen)
 
 Checked on the 0.6.1 files: `vm-e2e.mjs` 5/5 (TetherQS and viewer 0.6.1, direct egress), the file

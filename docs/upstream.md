@@ -54,6 +54,15 @@ in the main checkout is not disturbed.
    tree at the old commit. Move the old directory away first; changes that are not in `patches/`
    are lost with it.
 
+A trap in the VM checks: while the app's main window runs with a WebView2 debugging port
+(`vm-svc-setup.ps1` starts it that way), the connection window of an incoming session cannot
+create its WebView2 (`0x8007139F`: same profile folder, other browser arguments) and the session
+ends with "The remote side ended the session". Stop that window (`vm-svc-cli.ps1 -StopUi`)
+before connecting. And `vm-svc-setup.ps1` recreates the "Test CDP tech" firewall rule for the old
+subnet: run `vm-perf-exec.ps1 -Script fwsubnet.ps1` after it.
+
+What was run for 1.5.3 is listed in the CHANGELOG entry "Upstream RustDesk 1.5.3".
+
 ## Review of upstream pull requests (2026-11-11)
 
 All 89 open pull requests and the 42 merged since the 1.5.1 pin were looked at. About 45 touch
