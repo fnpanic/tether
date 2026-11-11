@@ -761,6 +761,9 @@ Scrolling panel (60 s per run):
 | VM sent | **162-182 kbit/s** | 447 kbit/s |
 | VM CPU total / host app | 12-16 % / 3.1-3.6 % | 14.9 % / 3.0 % |
 
+(The latency rows of this table compare two different kinds of number; see "Correction" below
+before using them.)
+
 Reading: the picture is as on 2026-11-07 (Tether ahead on luma and text, AnyDesk on chroma and
 the photo). **Latency under scrolling is now AnyDesk's**: about 20-30 ms lower in the median and
 a tighter tail; on 2026-11-07 it was 129 / 163 ms (Tether) against 140 / 242 ms (AnyDesk).
@@ -822,6 +825,45 @@ WebCodecs configured for profile 1), which is not built.
 **Stalls.** The stall right after a page switch came with the test's own browser restart in the
 VM (host log: one 164 kB frame waited 2.0 s for the connection in that minute; AnyDesk's runs
 never started right after a restart). The 3.0 s gap in the middle of one run is not explained.
+
+## Correction (same night): the two latency meters did not measure the same thing
+
+The latency columns above (and in "Result: scrolling panel" of 2026-11-07) compare numbers of two
+different kinds:
+
+- **AnyDesk** (`xgrab.py sample --serve` + `udp-stamp.mjs`): every **new** barcode value is
+  time-stamped once, when it first appears (its age in the grabber is subtracted). That is the
+  delay until a picture is first shown.
+- **Tether** (`stress-sampler.mjs`): the canvas is read at fixed intervals and every sample
+  counts, so a picture that stays on screen for 50 ms (20 pictures/s) is counted again and again
+  while it ages. That adds about half a picture interval on average, here about 30 ms. The
+  sampler's interval does not matter (5, 15, 60, 200 ms: 115-117 ms median each).
+
+Split of Tether's delay (`stress-sampler.mjs --split`, host started with `TETHER_PTS_WALL=1`: every
+frame carries the host's wall clock at the moment it is captured and converted; VM clock offset
+-0.8 ms by `clocksrv.ps1` / `clock_offset.py`; scroll page, relay route, 60 s, 1952 samples):
+
+| Part | min | p10 | median | p90 |
+|---|---|---|---|---|
+| page drew it -> host has it captured and converted | 38 | 41 | 56 | 71 ms |
+| -> handed to the viewer's decoder (encode, relay, hand-over to the webview) | 14 | 15 | 17 | 24 ms |
+| -> drawn | 0 | 0 | 0 | 1 ms |
+| -> read by the sampler (the picture's age on screen) | 2 | 12 | 30 | 60 ms |
+| all, as the old Tether column counted it | 64 | 81 | 106 | 140 ms |
+
+Counted like AnyDesk's column (first appearance of each of the 1191 distinct pictures):
+**58 / 73 / 94 ms** (p10 / median / p95), 19.9 pictures/s. In the VM boot where both products
+ran (clock offset not measured there, the same for both) that puts Tether's ordinary sessions at
+about 65-72 ms against AnyDesk's 67-68 ms: level, not 30-60 ms behind; one Tether session of
+that boot was about 30 ms slower than the others (cause open: relay or route of that session).
+On 2026-11-07 the same correction applies in Tether's favour (129 ms counted the old way against
+AnyDesk's 140 ms).
+
+What this says about where time goes: the relay path and the viewer are not the place (17 ms
+and under 1 ms). Three quarters of the delay to first appearance is on the host before the
+encoder: the VM's own drawing pipeline plus Windows.Graphics.Capture on a software adapter.
+AnyDesk could not be measured again that night (its test viewer showed pictures 20-60 s old at
+3-9 per second after the day's many sessions).
 
 # Viewer watchdog: frames arrive, no picture (2026-11-09)
 
