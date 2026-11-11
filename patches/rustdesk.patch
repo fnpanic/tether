@@ -5766,7 +5766,7 @@ index 790f23b..e1b3490 100644
 +    }
 +}
 diff --git a/src/server/video_service.rs b/src/server/video_service.rs
-index a13aebb..3195dce 100644
+index a13aebb..19c6858 100644
 --- a/src/server/video_service.rs
 +++ b/src/server/video_service.rs
 @@ -65,6 +65,7 @@ use std::{
@@ -5787,10 +5787,13 @@ index a13aebb..3195dce 100644
      let repeat_encode_max = 10;
      let mut encode_fail_counter = 0;
      let mut first_frame = true;
-@@ -815,8 +819,10 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -815,8 +819,13 @@ fn run(vs: VideoService) -> ResultType<()> {
  
          let time = now - start;
          let ms = (time.as_secs() * 1000 + time.subsec_millis() as u64) as i64;
++        // Measurements (`pts_wall`): repeats of a still picture are on the same clock as captured
++        // frames, or the encoder would see time run backwards and refuse them.
++        let ms = pts_wall().unwrap_or(ms);
 +        let t_cap0 = time::Instant::now();
          let res = match c.frame(spf) {
              Ok(frame) => {
@@ -5798,7 +5801,7 @@ index a13aebb..3195dce 100644
                  repeat_encode_counter = 0;
                  if frame.valid() {
                      let screenshot_key = (vs.source, display_idx);
-@@ -866,8 +872,13 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -866,8 +875,14 @@ fn run(vs: VideoService) -> ResultType<()> {
                          }
                      }
  
@@ -5808,11 +5811,12 @@ index a13aebb..3195dce 100644
 +                    #[cfg(feature = "tauri")]
 +                    fluxrt_stats::captured(t_got, t_cap0.elapsed() - t_got);
                      static_refresh.on_frame(&frame);
++                    // Measurements: stamped again here, once the picture is captured and converted.
 +                    let ms = pts_wall().unwrap_or(ms);
                      let result = handle_one_frame(
                          display_idx,
                          &sp,
-@@ -882,6 +893,7 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -882,6 +897,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                          capture_height,
                      )?;
                      static_refresh.on_frame_encoded(&result);
@@ -5820,12 +5824,13 @@ index a13aebb..3195dce 100644
                      frame_controller.set_send(now, result.send_conn_ids);
                      send_counter += 1;
                  }
-@@ -962,6 +974,16 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -962,6 +978,17 @@ fn run(vs: VideoService) -> ResultType<()> {
                      &mut encoder,
                      &mut frame_controller,
                  )?;
 +                // Tether: the picture stands and is refined: its exact pixels, strip by strip.
 +                if static_refresh.refined() && !exact_ids.is_empty() {
++                    // As many bytes a second as the video may use on this link right now.
 +                    let rate = (VIDEO_QOS.lock().unwrap().bitrate() as f64 * 125.0).max(exact_still::MIN_RATE);
 +                    if let Some(msg) = exact.next_strip(display_idx, rate) {
 +                        for id in exact_ids.iter() {
@@ -5837,7 +5842,7 @@ index a13aebb..3195dce 100644
              }
              Err(err) => {
                  #[cfg(windows)]
-@@ -1007,8 +1029,11 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -1007,8 +1034,11 @@ fn run(vs: VideoService) -> ResultType<()> {
          }
  
          let mut fetched_conn_ids = HashSet::new();
@@ -5849,7 +5854,7 @@ index a13aebb..3195dce 100644
          while wait_begin.elapsed().as_millis() < timeout_millis as _ {
              if vs.source.is_monitor() {
                  check_privacy_mode_changed(&sp, display_idx, &c)?;
-@@ -1018,8 +1043,28 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -1018,8 +1048,28 @@ fn run(vs: VideoService) -> ResultType<()> {
              if fetched_conn_ids.len() >= frame_controller.send_conn_ids.len() {
                  break;
              }
@@ -5878,7 +5883,7 @@ index a13aebb..3195dce 100644
  
          let elapsed = now.elapsed();
          // may need to enable frame(timeout)
-@@ -1274,6 +1319,22 @@ fn refresh_allowed(unfed: bool, warmed_up: bool, latency_free: bool) -> bool {
+@@ -1274,6 +1324,22 @@ fn refresh_allowed(unfed: bool, warmed_up: bool, latency_free: bool) -> bool {
  }
  
  #[inline]
@@ -5901,7 +5906,7 @@ index a13aebb..3195dce 100644
  fn handle_one_frame(
      display: usize,
      sp: &GenericService,
-@@ -1300,8 +1361,12 @@ fn handle_one_frame(
+@@ -1300,8 +1366,12 @@ fn handle_one_frame(
      let mut vpx_no_output = false;
      let first = *first_frame;
      *first_frame = false;
@@ -5914,7 +5919,7 @@ index a13aebb..3195dce 100644
              *encode_fail_counter = 0;
              *encoder_warmed_up = true;
              vf.display = display as _;
-@@ -1315,6 +1380,8 @@ fn handle_one_frame(
+@@ -1315,6 +1385,8 @@ fn handle_one_frame(
              send_conn_ids = sp.send_video_frame(msg);
          }
          Err(e) => {
@@ -5923,7 +5928,7 @@ index a13aebb..3195dce 100644
              vpx_no_output = e.is::<scrap::VpxNoOutput>();
              *encode_fail_counter += 1;
              // Encoding errors are not frequent except on Android
-@@ -1590,3 +1657,132 @@ mod tests {
+@@ -1590,3 +1662,132 @@ mod tests {
          assert!(refresh_allowed(true, false, false));
      }
  }
@@ -6058,10 +6063,10 @@ index a13aebb..3195dce 100644
 +}
 diff --git a/src/server/video_service/exact_still.rs b/src/server/video_service/exact_still.rs
 new file mode 100644
-index 0000000..369d422
+index 0000000..51a0983
 --- /dev/null
 +++ b/src/server/video_service/exact_still.rs
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,161 @@
 +//! Tether: the exact pixels of a still picture.
 +//!
 +//! Video is lossy and 4:2:0: small coloured text and photos stay a little off however long the
@@ -6075,8 +6080,9 @@ index 0000000..369d422
 +
 +/// Rows per strip.
 +const ROWS: usize = 32;
-+/// Bytes per second the strips may use at least (the video bitrate when that is higher).
-+pub(super) const MIN_RATE: f64 = 125_000.0;
++/// Bytes per second the strips may use at least; normally the video bitrate of the moment, so a
++/// link the QoS controller has throttled gets its exact picture slowly instead of being flooded.
++pub(super) const MIN_RATE: f64 = 16_000.0;
 +
 +#[derive(Default)]
 +pub(super) struct ExactStill {

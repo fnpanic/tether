@@ -74,14 +74,11 @@ export async function probeCodecs(): Promise<CodecName[]> {
   return out;
 }
 
-/** Ask again this often while no key frame has arrived (a request or its answer can be lost).
- * Longer than the host needs to answer: a request restarts its video service (about 1 s, more on
- * a busy host), and a second request during that restart starts it over. */
-export const KEY_RETRY_MS = 3000;
-/** Drop deltas and resync only when the decoder is this many frames behind. A burst is normal:
- * after a pause on the path (a retransmission, 1-3 s) everything sent meanwhile arrives at once,
- * and software decodes 120 pictures in well under 0.1 s, while a resync costs a second or more. */
-export const MAX_DECODE_QUEUE = 120;
+/** Ask again this often while no key frame has arrived (a request or its answer can be lost). */
+export const KEY_RETRY_MS = 1000;
+/** Drop deltas and resync only when the decoder is this many frames behind. Bursts of a few
+ * frames are normal (relays and proxies coalesce packets) and decode in a few milliseconds. */
+export const MAX_DECODE_QUEUE = 24;
 
 /**
  * Key-frame recovery: once the pipeline needs a key frame it requests one right away and again every
