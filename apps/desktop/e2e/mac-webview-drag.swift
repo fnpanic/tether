@@ -37,7 +37,8 @@ var drags = 0, down = false
 NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged, .mouseMoved]) { e in
     if e.type == .leftMouseDown { down = true; drags = 0 }
     if e.type == .leftMouseUp { down = false }
-    if e.type == .mouseMoved && !down { return e }
+    // Only a move before the first drag step: later ones are somebody at the Mac moving the pointer.
+    if e.type == .mouseMoved && (!down || drags > 0) { return e }
     if e.type == .leftMouseDragged { drags += 1; if drags > 2 { return e } }
     let name = [NSEvent.EventType.leftMouseDown: "down", .leftMouseUp: "up", .leftMouseDragged: "dragged", .mouseMoved: "MOVED-AFTER-PRESS"][e.type] ?? "?"
     print("NS \(name) t=\(e.timestamp) at \(e.locationInWindow)")

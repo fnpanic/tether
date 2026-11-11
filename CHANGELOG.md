@@ -6,6 +6,20 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
+### macOS host (2026-11-11; on the build Mac, not released)
+
+- **Text could not be selected by dragging in WebKit views** (seen in a WKWebView app's text
+  field; local input and other windows were fine). The HID move Tether posts right before a left
+  press (see 0.5.35, Screenshot-app drags) reached the app after the press, as a plain move with
+  the button down, and WebKit then dropped the selection. The press now waits until the window
+  server has counted that move, at most 30 ms (`patches/rustdesk.patch`, `hid_post.rs`;
+  docs/macos.md "Drags: CGEvent and HID"; e2e `mac-webview-drag-e2e.mjs`).
+- **Washed-out colours from a Mac host.** The screen was captured in the display's own colour
+  space (Display P3 on a MacBook) and shown by viewers as sRGB: sRGB red (255,0,0) arrived as
+  (233,51,35), green (0,192,0) as (86,189,56). The capture now asks for sRGB frames
+  (`kCGDisplayStreamColorSpace`; docs/performance.md "Mac host: colours"; e2e
+  `mac-picture-probe.mjs`).
+
 ### Review fixes (relays, apps, Tether Manage, tooling; relays deployed 2026-11-10, apps not released)
 
 About 100 findings of a code review, fixed on branch `review-fixes`. What is still open is in

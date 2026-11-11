@@ -7,6 +7,7 @@
 //
 //   node e2e/mac-webview-drag-e2e.mjs
 // Env: TECH, MAC_ID, MAC_PW_FILE, OUT, MOVES (20), MOVE_MS (40), START_DELAY (60), RUNS (3 drags).
+// TIGHT=1: move, press and first drag steps without pauses (the press right behind a move).
 // LOCAL=1: no job; the window is already up on the Mac (./wkdrag 600), only the drags are made.
 import { execFile, execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -23,6 +24,7 @@ const MOVES = Number(process.env.MOVES || 20);
 const MOVE_MS = Number(process.env.MOVE_MS || 40);
 const RUNS = Number(process.env.RUNS || 3);
 const LOCAL = process.env.LOCAL === "1";
+const TIGHT = process.env.TIGHT === "1";
 const START_DELAY = Number(process.env.START_DELAY || 60);
 const ROOT = resolve(import.meta.dirname, "../../..");
 const HID = join(import.meta.dirname, "hidden-run.ps1");
@@ -69,20 +71,30 @@ try {
   let id;
   if (!LOCAL) {
     const startAt = Math.floor(Date.now() / 1000) + START_DELAY + 30;
-    id = (await mb("submit", "--user", "tether", "--work", join(OUT, "job"), "--timeout", "300", "--env", `START=${startAt}`, "--", "bash", "run.sh")).trim().split(/\s+/).pop();
+    // The upload (a Tether file transfer) sometimes fails once; START leaves room for a second try.
+    const submit = () => mb("submit", "--user", "tether", "--work", join(OUT, "job"), "--timeout", "300", "--env", `START=${startAt}`, "--", "bash", "run.sh");
+    id = (await submit().catch(submit)).trim().split(/\s+/).pop();
     check("Mac job submitted", /^\d{8}T\d{6}Z-/.test(id), id);
     while (Date.now() / 1000 < startAt + 8) await sleep(500);
   }
   const r = await page.evaluate(() => { const b = document.querySelector("canvas").getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height }; });
   const at = (fx, fy) => [r.x + r.w * fx, r.y + r.h * fy];
   const [x0, y0] = at(fx0, fy0), [x1, y1] = at(fx1, fy1);
+  // A click below the text ends the selection (a press on selected text would drag the text itself)
+  // and, before the first drag, makes the window the active one. 50 ms between press and release:
+  // the viewer does not keep the order of a press and a release issued in the same instant.
+  const deselect = async () => {
+    await page.mouse.click(...at(fx0 + 0.05, fy0 + 0.12), { delay: 50 });
+    await sleep(1200); // the next press must be a single click
+  };
+  await deselect();
   for (let n = 1; n <= RUNS; n++) {
     await page.mouse.move(x0 - 20, y0);
     await sleep(200);
     await page.mouse.move(x0, y0);
-    await sleep(1200); // longer than the double-click time: every press is a single click
+    if (!TIGHT) await sleep(1200); // longer than the double-click time: every press is a single click
     await page.mouse.down();
-    await sleep(300);
+    if (!TIGHT) await sleep(300);
     for (let i = 1; i <= MOVES; i++) {
       await page.mouse.move(x0 + ((x1 - x0) * i) / MOVES, y0 + ((y1 - y0) * i) / MOVES);
       await sleep(MOVE_MS);
@@ -91,9 +103,7 @@ try {
     if (n === 1) await shot("1-before-release");
     await page.mouse.up();
     await sleep(1000);
-    // A click below the text ends the selection: a press on selected text would drag the text itself.
-    await page.mouse.click(...at(fx0 + 0.05, fy0 + 0.18));
-    await sleep(300);
+    await deselect();
   }
   await shot("2-after");
   if (LOCAL) console.log("INFO  drags made; read the window's output on the Mac");

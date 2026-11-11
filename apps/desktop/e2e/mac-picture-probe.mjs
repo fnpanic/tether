@@ -2,7 +2,7 @@
 // Mac on a hidden desktop, prints the session statistics, the canvas size and the colour at each
 // PROBE point (fractions of the picture, 5x5 mean), and saves the decoded picture 1:1 to OUT.
 // With a window of known flat colours on the Mac this shows colour and sharpness loss end to end
-// (docs/performance.md "Mac host: picture").
+// (docs/performance.md "Mac host: colours").
 //
 //   PROBE="0.2,0.31;0.26,0.31" node e2e/mac-picture-probe.mjs
 // Env: TECH, MAC_ID, MAC_PW_FILE, OUT, SETTLE_MS (4000), CODEC (auto|vp9|av1|h264|h265).

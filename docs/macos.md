@@ -167,6 +167,12 @@ take either. Details of the path, checked on macOS 15 (2026-11-10):
 - Right before a left press, one HID move to the press point (button still up): the pointer got
   there by CGEvent moves, which the HID side does not see, and the first drag's delta must start
   from the press point. Without it the selection stopped at about a third of the drag.
+  The press then **waits until the window server has counted that move**
+  (`CGEventSourceCounterForEventType`, at most 30 ms). The HID path is slower than a CGEvent:
+  without the wait the move reached the app after the press, as a plain move with the button
+  down, and WebKit views dropped the text selection the drag should have made (2026-11-11: no
+  drag-select in the text field of a WKWebView app; AppKit text views such as TextEdit ignore
+  such a move, so they worked).
 - Each drag carries its step from the previous HID position as `dx`/`dy`, and the absolute
   position (`kIOHIDSetCursorPosition`).
 - Presses and releases stay CGEvents: a HID click reached TextEdit but not the system's permission
@@ -180,7 +186,22 @@ TOOLBAR=1 node e2e/mac-drag-e2e.mjs     # Screenshot app: the rectangle reaches 
 node e2e/mac-drag-e2e.mjs               # Cmd+Shift+4: macOS saves the dragged region
 OVER_TETHER=1 node e2e/mac-drag-e2e.mjs # the same, starting on Tether's own window
 node e2e/mac-click-e2e.mjs              # TextEdit: double-click selects a word, a drag selects text
+node e2e/mac-webview-drag-e2e.mjs       # WKWebView text area: every drag selects text
 ```
+
+`mac-webview-drag-e2e.mjs` shows `mac-webview-drag.swift` on the Mac (a floating window with a
+web view; the job compiles it with `swiftc`) and reads from its output how many characters each
+drag selected and whether a plain move arrived between the press and the first drag step.
+0.5.35: 0 of 2 drags selected anything; with the wait: 5 of 5 (187 characters each), and with
+`TIGHT=1` (the press right behind a move, the first drag step right behind the press) 8 of 8
+presses without a move behind them. The wait took about 0.65 ms (press and move time stamps);
+the Screenshot-app and TextEdit checks above still pass.
+
+Known limits: the counter counts every mouse move, so somebody moving the Mac's own pointer in
+that millisecond ends the wait early (the selection can then be lost as before). The viewer does
+not keep the order of a press and a release issued in the same instant (a scripted click without
+a delay): the release can arrive first and the button then stays held on the Mac until the next
+click.
 
 They click and drag on the Mac's screen: run them while nobody uses the Mac (a window that comes
 to the front ends a screenshot selection).

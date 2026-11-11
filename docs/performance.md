@@ -692,6 +692,38 @@ the next picture did not grow (p95 +53…+70 before, +60…+68 after).
   was measured; the proxy forwards the same bytes).
 - Slow links: `refine_ratio` scales with the QoS ratio, but no run on a throttled link was made.
 
+# Mac host: colours (2026-11-11)
+
+"H.264/H.265 from hardware encoders: colours not checked" above was the open point for Mac hosts.
+Checked with a window of flat sRGB colours on the Mac (MacBook Pro 14", built-in Liquid Retina XDR,
+profile "Color LCD" = Display P3; host 0.5.35, Auto = H.265, direct LAN) and the viewer on this PC
+(`apps/desktop/e2e/mac-picture-probe.mjs`: statistics, the decoded picture 1:1 and the colour at
+given points, read from the session canvas over CDP):
+
+| sRGB colour on the Mac | Viewer, host 0.5.35 | Viewer, host with the fix |
+|---|---|---|
+| red 255,0,0 | 233,51,35 | 255,1,0 |
+| green 0,192,0 | 86,189,56 | 1,191,2 |
+| blue 0,0,255 | 1,0,244 | 0,0,255 |
+| dark red 208,0,0 | 191,40,27 | 208,1,0 |
+| orange 255,128,0 | 239,136,52 | 255,128,0 |
+| grey 128 / white | 128,128,128 / 255,255,255 | the same |
+
+**Cause:** `CGDisplayStream` hands out frames in the display's own colour space unless told
+otherwise, so the host encoded Display P3 pixel values (sRGB red is 234,51,35 in P3) and every
+viewer showed them as sRGB: all saturated colours washed out, greys untouched. The YUV matrix of
+the H.265 path is right (the colours are exact once the frames are sRGB).
+
+**Fix** (`libs/scrap/src/quartz/config.rs`): the stream is created with
+`kCGDisplayStreamColorSpace` = sRGB; the window server converts while it composes the frame.
+Same session otherwise: 26 pictures/s shown and received before and after (a still desktop),
+decode 0.6–0.7 ms, 1728×1116.
+
+Not verified: the cost of the conversion in the window server under full-screen motion (no stress
+run after the change); external displays (an sRGB display needs next to no conversion); colours
+outside sRGB are clipped, as they are on an sRGB viewer anyway. Unchanged on purpose: a Retina
+display is streamed at its logical size (host option `tether-full-retina` for full pixels).
+
 # Viewer watchdog: frames arrive, no picture (2026-11-09)
 
 A WebCodecs decoder can fail without an error: it takes every frame and outputs nothing. The
