@@ -9634,7 +9634,7 @@ dependencies = [
 
 [[package]]
 name = "tether-quick"
-version = "0.5.34"
+version = "0.6.0"
 dependencies = [
  "flate2",
  "hbb_common",

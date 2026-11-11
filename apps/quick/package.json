@@ -1,7 +1,7 @@
 {
   "name": "tether-quick",
   "private": true,
-  "version": "0.5.34",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

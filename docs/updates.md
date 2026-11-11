@@ -263,8 +263,11 @@ token). Tests of the Worker script: `npm test` in `server/cloudflare/worker`.
 
 ## Release procedure
 
-1. Set the version in `apps/desktop/src-tauri/tauri.conf.json` / `Cargo.toml` (technician) or
-   `apps/quick/src-tauri/Cargo.toml` (TetherQS).
+1. **One version for everything** (from 0.6.0): Tether, TetherQS and Tether Manage carry the same
+   number on Windows and macOS, and every release bumps, builds and publishes all of them, also
+   when only one app or platform changed. Set it in `apps/{desktop,quick,manage}`:
+   `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and the app's own entry in
+   `src-tauri/Cargo.lock`.
 2. Build with the four release variables (`TETHER_SERVER`, `TETHER_PUB_KEY`,
    `TETHER_ADMIN_PUB_KEY`, `TETHER_UPDATER_PUB_KEY`), see [deployment.md](deployment.md):
    technician `npx tauri build --bundles nsis` → `Tether_<version>_x64-setup.exe`; TetherQS

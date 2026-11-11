@@ -6,7 +6,15 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
-### macOS host (2026-11-11; Tether 0.5.36 and TetherQS 0.5.34 for macOS, built, not published yet)
+### One version number for every app: 0.6.0 (2026-11-11; built, not published yet)
+
+From 0.6.0 on, Tether (technician app), TetherQS and Tether Manage carry **the same version on
+Windows and macOS**, and a release bumps, builds and publishes all of them together. Before, the
+numbers had drifted (Tether 0.5.35 on macOS / 0.5.33 on Windows, TetherQS 0.5.33 / 0.5.31, Tether
+Manage 0.5.15), and a Mac-only rebuild needed its own number. Procedure: docs/updates.md "Release
+procedure". 0.6.0 holds everything below under "Unreleased" plus the macOS host fixes.
+
+### macOS host (2026-11-11; in 0.6.0)
 
 - **Text could not be selected by dragging in WebKit views** (seen in a WKWebView app's text
   field; local input and other windows were fine). The HID move Tether posts right before a left
