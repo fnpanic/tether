@@ -5,7 +5,7 @@ import { Button, IconButton, Logo, Modal, TextField, TitleBar } from "../compone
 import { errorText } from "../lib/policy";
 import { clickSelect, emptySelection, moveSelect, selectAll } from "../lib/selection";
 import { passwordWhy, RESUME_GRACE_MS } from "../lib/login";
-import { join, parent } from "../lib/paths";
+import { DRIVES, join, parent } from "../lib/paths";
 
 interface Entry {
   name: string;
@@ -15,7 +15,8 @@ interface Entry {
   is_hidden?: boolean;
 }
 
-const isDir = (e: Entry) => e.type === 0 || e.type === 1 || e.type === 2;
+// FileType of the core: Dir 0, DirLink 2, DirDrive 3 (a drive in the drive list), File 4, FileLink 5.
+const isDir = (e: Entry) => e.type < 4;
 
 /** The core's question before it writes over a file that exists (`override_file`). */
 interface Existing {
@@ -280,7 +281,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           onOpen={(e) => loadLocal(join(local.path, e.name, localSep))}
           onUp={() => loadLocal(parent(local.path, localSep))}
           onRefresh={() => loadLocal(local.path)}
-          onNewFolder={() => setNewFolder({ remote: false, name: "" })}
+          onNewFolder={local.path && local.path !== DRIVES ? () => setNewFolder({ remote: false, name: "" }) : undefined}
           onTransfer={(es) => transfer("local", es)}
           transferIcon={<ArrowUpFromLine size={15} />}
           transferLabel="Upload"
@@ -300,7 +301,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           onTransfer={(es) => transfer("remote", es)}
           transferIcon={<ArrowDownToLine size={15} />}
           transferLabel="Download"
-          onNewFolder={() => setNewFolder({ remote: true, name: "" })}
+          onNewFolder={remote.path && remote.path !== DRIVES ? () => setNewFolder({ remote: true, name: "" }) : undefined}
           onDelete={setToDelete}
           onDropFrom="local"
           onDrop={(names) => transfer("local", local.entries.filter((x) => names.includes(x.name)))}
@@ -315,6 +316,11 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
               const n = newFolder.name.trim();
               if (!n) return;
               setNewFolder(null);
+              // One folder in this folder: the core would create a whole path, and reports an
+              // existing folder as created.
+              const here = newFolder.remote ? remote.entries : local.entries;
+              if (/[\\/]/.test(n) || n === "." || n === "..") return setError("A folder name cannot contain / or \\.");
+              if (here.some((e) => e.name.toLowerCase() === n.toLowerCase())) return setError(`"${n}" already exists here.`);
               const id = nextJob++;
               creates.current.add(id);
               const path = newFolder.remote ? join(remote.path, n, remoteSep) : join(local.path, n, localSep);

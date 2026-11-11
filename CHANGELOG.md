@@ -31,6 +31,33 @@ Known limit: nothing enforces the rule. Tether Manage's "Publish the latest buil
 highest version per app and platform from `dist/`, so a release with one platform's files
 missing publishes the others without a warning.
 
+### File transfer (2026-11-11; in 0.6.0)
+
+- **Going up to the drive root failed.** From `C:\Users` the viewer asked the host for `C:` (no
+  backslash), which Windows reads as "the current folder on C:"; the request timed out
+  ("Timeout") and the remote pane stopped answering. Up now leads to `C:\` (`lib/paths.ts`,
+  unit test).
+- **Other drives could not be reached.** Up from `C:\` jumped to the home folder (remote) or
+  showed an error (this computer). It now shows the list of drives, and opening one leads to
+  its root (drive entries were also taken for files).
+- **New folder** also on "This computer" (it existed for the remote side only). A creation the
+  system refuses (no permission) is shown instead of doing nothing visible; a name that already
+  exists there or contains `/` or `\` is refused with a message (the core would report an
+  existing folder as created and create a whole path). No New folder while a pane shows the
+  drive list or no folder yet.
+- Checked through the UI against the bench VM (standard user), both panes: folders created,
+  `C:\` and the drive list reached and a drive opened from it, "Access is denied" for
+  `C:\Windows`, the two name messages.
+
+### Picture and latency (2026-11-11; in 0.6.0)
+
+- Relay connections over WebSocket no longer use Nagle's algorithm (as the other paths already
+  did not).
+- AV1 refines a still picture further (q 2-12 for its repeats): photo +1.4 dB, about 20-30 %
+  more bytes per page change.
+- Measured, not changed: 4:4:4 and the remaining latency gap to AnyDesk (docs/performance.md
+  "Follow-up the same evening").
+
 ### macOS host (2026-11-11; in 0.6.0)
 
 - **Text could not be selected by dragging in WebKit views** (seen in a WKWebView app's text

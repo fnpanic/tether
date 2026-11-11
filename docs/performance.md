@@ -777,6 +777,52 @@ and the e2e scripts `VM_IP=<address>`. `vm-e2e.mjs` on 0.6.0 (direct egress): re
 first frame in 1.1 s, recording declined and allowed pass; the relay-outage part needs corporate
 mode (not run).
 
+## Follow-up the same evening: what was tried against the gaps
+
+**Where the scrolling latency is not.** The host's `fluxrt video/min` line during the scroll: AV1
+21.8 fps, encode avg 2.4 ms (p95 3.8), QoS ceiling 60 fps, longest wait for the connection 35 ms;
+the viewer decodes in 0.5 ms. The picture rate is the VM's own (software composition; AnyDesk
+gets 18). So neither the encoder nor the QoS controller holds frames back.
+
+**Latency varies by session.** The same build read 131 / 168 ms in one session and 95 / 125 and
+102 / 139 ms in the next (same VM boot; the fast one ran through the Hetzner relay, the relay of
+the slow one was not recorded). AnyDesk in that boot: 67 / 84 and 68 / 83 ms (the clock
+reference moves with every VM restart: compare within a boot only). The gap to AnyDesk is
+therefore about 30 ms at best and 60 ms at worst, and which relay a session gets is the first
+thing to look at next.
+
+**Nagle on relay connections** (`libs/hbb_common/src/websocket.rs`): the direct WebSocket
+connection to a relay left Nagle's algorithm on (the proxy path, plain TCP and the relays
+themselves turn it off), so the last packet of a frame and every input message could wait for
+the acknowledgement of the data before them. Turned off. In this test (frames of about 1 kB,
+one packet each) no gain could be shown inside the session-to-session spread; it matters for
+frames of several packets and for input. Do not turn it back on to save packets: a session is
+write-write-read (a move, then a click, then waiting for the picture), and Nagle together with
+the receiver's delayed acknowledgements (up to 200 ms on Windows) turns that into pauses of tens
+to hundreds of milliseconds. The cost of having it off is one small packet per key, mouse
+message or audio frame, as on the TCP and proxy paths before.
+
+**Deeper refinement of still pictures** (`aom.rs` `STILL_REFINE`, `static_refresh.rs`): at the
+top of the scale the repeats of a still picture use q 2-12 instead of 5-25. The switch is per
+video thread (another display's encoder never sees it). Known cost: with the q ceiling at 12
+the first repeats of a complex screen can exceed the bitrate target, so on a slow uplink a
+picture that starts moving again within that second waits behind them; links the QoS controller
+has already cut below Balanced (ratio < 0.667) refine as before. Still page, 3 runs:
+photo 47.3 -> 48.8 dB (AnyDesk 51.0), text 43.4 -> 44.4 dB, all 39.2 -> 39.5 dB; bytes per page
+change about 350 -> 420-480 kB (AnyDesk about 350 kB).
+
+**4:4:4 (not switched on).** With the peer option `i444 = Y` the host codes VP9 4:4:4 (Auto and
+also an AV1 preference end at VP9 then) and the viewer decodes natively. Still page: Cb / Cr
+41.6 / 41.9 dB (4:2:0: 25.8 / 26.0; AnyDesk 26.6), coloured text Cb 39.6 dB (23.7; AnyDesk 24.1),
+fringe 6.4 (35). Scrolling: 9.4 pictures/s shown, 222 / 300 ms, 982 kbit/s, VM CPU 31.7 %. Full
+time it costs more than it gives; the way to AnyDesk's chroma and beyond is 4:4:4 for the
+refinement of a still picture only (encoder switch on still, AV1 4:4:4 negotiated, the viewer's
+WebCodecs configured for profile 1), which is not built.
+
+**Stalls.** The stall right after a page switch came with the test's own browser restart in the
+VM (host log: one 164 kB frame waited 2.0 s for the connection in that minute; AnyDesk's runs
+never started right after a restart). The 3.0 s gap in the middle of one run is not explained.
+
 # Viewer watchdog: frames arrive, no picture (2026-11-09)
 
 A WebCodecs decoder can fail without an error: it takes every frame and outputs nothing. The
