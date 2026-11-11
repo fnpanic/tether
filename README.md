@@ -25,7 +25,7 @@ Fast, private, self-hosted remote desktop for Windows and macOS, with a Linux re
   [docs/updates.md](docs/updates.md), [docs/quick-support.md](docs/quick-support.md),
   [docs/recording.md](docs/recording.md), [docs/cli.md](docs/cli.md),
   [docs/troubleshooting.md](docs/troubleshooting.md), [docs/api.md](docs/api.md),
-  [docs/key-rotation.md](docs/key-rotation.md), [docs/download-page.md](docs/download-page.md) (custom download page templates).
+  [docs/key-rotation.md](docs/key-rotation.md), [docs/upstream.md](docs/upstream.md) (RustDesk pin and upstream review), [docs/download-page.md](docs/download-page.md) (custom download page templates).
 - **Scale and HA:** several relays and Kubernetes: [docs/relay-ha.md](docs/relay-ha.md),
   [docs/kubernetes.md](docs/kubernetes.md); performance: [docs/performance.md](docs/performance.md);
   macOS build: [docs/macos.md](docs/macos.md); Mac builds from the PC while the Mac is locked (signed

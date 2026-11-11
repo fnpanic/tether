@@ -1,8 +1,85 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 7b7263a..0ab1f67 100644
+index 56cbcae..8a38700 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -7436,6 +7436,7 @@ dependencies = [
+@@ -2088,9 +2088,8 @@ checksum = "f578e8e2c440e7297e008bb5486a3a8a194775224bbc23729b0dbdfaeebf162e"
+ 
+ [[package]]
+ name = "default-net"
+-version = "0.14.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "a4898b43aed56499fad6b294d15b3e76a51df68079bf492e5daae38ca084e003"
++version = "0.22.0"
++source = "git+https://github.com/rustdesk-org/netdev?branch=rustdesk-0.22#cda9ab9d65b7c9e5d455d4300187d3fb96a542ab"
+ dependencies = [
+  "dlopen2",
+  "libc",
+@@ -2100,7 +2099,7 @@ dependencies = [
+  "netlink-sys",
+  "once_cell",
+  "system-configuration",
+- "windows 0.32.0",
++ "windows 0.48.0",
+ ]
+ 
+ [[package]]
+@@ -2323,27 +2322,15 @@ dependencies = [
+ 
+ [[package]]
+ name = "dlopen2"
+-version = "0.4.1"
++version = "0.5.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "b121caccfc363e4d9a4589528f3bef7c71b83c6ed01c8dc68cbeeb7fd29ec698"
++checksum = "09b4f5f101177ff01b8ec4ecc81eead416a8aa42819a2869311b3420fa114ffa"
+ dependencies = [
+- "dlopen2_derive",
+  "libc",
+  "once_cell",
+  "winapi 0.3.9",
+ ]
+ 
+-[[package]]
+-name = "dlopen2_derive"
+-version = "0.2.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "3a09ac8bb8c16a282264c379dffba707b9c998afc7506009137f3c6136888078"
+-dependencies = [
+- "proc-macro2 1.0.93",
+- "quote 1.0.36",
+- "syn 1.0.109",
+-]
+-
+ [[package]]
+ name = "dlopen_derive"
+ version = "0.1.4"
+@@ -4945,21 +4932,20 @@ dependencies = [
+ 
+ [[package]]
+ name = "netlink-packet-core"
+-version = "0.5.0"
++version = "0.7.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7e5cf0b54effda4b91615c40ff0fd12d0d4c9a6e0f5116874f03941792ff535a"
++checksum = "72724faf704479d67b388da142b186f916188505e7e0b26719019c525882eda4"
+ dependencies = [
+  "anyhow",
+  "byteorder",
+- "libc",
+  "netlink-packet-utils",
+ ]
+ 
+ [[package]]
+ name = "netlink-packet-route"
+-version = "0.15.0"
++version = "0.17.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ea993e32c77d87f01236c38f572ecb6c311d592e56a06262a007fd2a6e31253c"
++checksum = "053998cea5a306971f88580d0829e90f270f940befd7cf928da179d4187a5a66"
+ dependencies = [
+  "anyhow",
+  "bitflags 1.3.2",
+@@ -7436,6 +7422,7 @@ dependencies = [
   "tracing",
   "webm",
   "winapi 0.3.9",
@@ -10,7 +87,7 @@ index 7b7263a..0ab1f67 100644
   "zbus",
  ]
  
-@@ -9710,7 +9711,6 @@ dependencies = [
+@@ -9710,7 +9697,6 @@ dependencies = [
  [[package]]
  name = "webrtc-sctp"
  version = "0.12.0"
@@ -18,7 +95,92 @@ index 7b7263a..0ab1f67 100644
  dependencies = [
   "arc-swap",
   "async-trait",
-@@ -11019,3 +11019,8 @@ dependencies = [
+@@ -9862,19 +9848,6 @@ version = "0.4.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
+ 
+-[[package]]
+-name = "windows"
+-version = "0.32.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "fbedf6db9096bc2364adce0ae0aa636dcd89f3c3f2cd67947062aaf0ca2a10ec"
+-dependencies = [
+- "windows_aarch64_msvc 0.32.0",
+- "windows_i686_gnu 0.32.0",
+- "windows_i686_msvc 0.32.0",
+- "windows_x86_64_gnu 0.32.0",
+- "windows_x86_64_msvc 0.32.0",
+-]
+-
+ [[package]]
+ name = "windows"
+ version = "0.34.0"
+@@ -10289,12 +10262,6 @@ version = "0.53.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a9d8416fa8b42f5c947f8482c43e7d89e73a173cead56d044f6a56104a6d1b53"
+ 
+-[[package]]
+-name = "windows_aarch64_msvc"
+-version = "0.32.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d8e92753b1c443191654ec532f14c199742964a061be25d77d7a96f09db20bf5"
+-
+ [[package]]
+ name = "windows_aarch64_msvc"
+ version = "0.34.0"
+@@ -10325,12 +10292,6 @@ version = "0.53.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b9d782e804c2f632e395708e99a94275910eb9100b2114651e04744e9b125006"
+ 
+-[[package]]
+-name = "windows_i686_gnu"
+-version = "0.32.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6a711c68811799e017b6038e0922cb27a5e2f43a2ddb609fe0b6f3eeda9de615"
+-
+ [[package]]
+ name = "windows_i686_gnu"
+ version = "0.34.0"
+@@ -10373,12 +10334,6 @@ version = "0.53.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "fa7359d10048f68ab8b09fa71c3daccfb0e9b559aed648a8f95469c27057180c"
+ 
+-[[package]]
+-name = "windows_i686_msvc"
+-version = "0.32.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "146c11bb1a02615db74680b32a68e2d61f553cc24c4eb5b4ca10311740e44172"
+-
+ [[package]]
+ name = "windows_i686_msvc"
+ version = "0.34.0"
+@@ -10409,12 +10364,6 @@ version = "0.53.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1e7ac75179f18232fe9c285163565a57ef8d3c89254a30685b57d83a38d326c2"
+ 
+-[[package]]
+-name = "windows_x86_64_gnu"
+-version = "0.32.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c912b12f7454c6620635bbff3450962753834be2a594819bd5e945af18ec64bc"
+-
+ [[package]]
+ name = "windows_x86_64_gnu"
+ version = "0.34.0"
+@@ -10469,12 +10418,6 @@ version = "0.53.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0ffa179e2d07eee8ad8f57493436566c7cc30ac536a3379fdf008f47f6bb7ae1"
+ 
+-[[package]]
+-name = "windows_x86_64_msvc"
+-version = "0.32.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "504a2476202769977a040c6364301a3f65d0cc9e3fb08600b2bda150a0488316"
+-
+ [[package]]
+ name = "windows_x86_64_msvc"
+ version = "0.34.0"
+@@ -11019,3 +10962,8 @@ dependencies = [
   "quote 1.0.36",
   "syn 1.0.109",
  ]
@@ -28,7 +190,7 @@ index 7b7263a..0ab1f67 100644
 +version = "0.12.0"
 +source = "git+https://github.com/rustdesk-org/webrtc?rev=49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63#49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63"
 diff --git a/Cargo.toml b/Cargo.toml
-index 1002586..83b1fb8 100644
+index 625f45d..333ff22 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -26,6 +26,7 @@ use_samplerate = ["samplerate", "libsamplerate-sys"]
@@ -39,10 +201,19 @@ index 1002586..83b1fb8 100644
  default = ["use_dasp"]
  hwcodec = ["scrap/hwcodec"]
  vram = ["scrap/vram"]
-@@ -292,3 +293,7 @@ rpath = true
- 
- [profile.dev]
- debug = 1
+@@ -73,7 +74,7 @@ libsamplerate-sys = { version = "0.1.12", optional = true }
+ uuid = { version = "1.3", features = ["v4"] }
+ num_cpus = "1.15"
+ bytes = { version = "1.4", features = ["serde"] }
+-default-net = "0.14"
++default-net = { git = "https://github.com/rustdesk-org/netdev", branch = "rustdesk-0.22" }
+ wol-rs = "1.0"
+ flutter_rust_bridge = { version = "=1.80", features = ["uuid"], optional = true}
+ errno = "0.3"
+@@ -300,3 +301,7 @@ debug = 1
+ # enum check aborts on them (release builds never had the check).
+ [profile.dev.package.sciter-rs]
+ debug-assertions = false
 +
 +# Tether: our copy of the fork's SCTP (crates/webrtc-sctp, RACK loss detection, 40 ms RTO floor).
 +[patch."https://github.com/rustdesk-org/webrtc"]
@@ -171,6 +342,94 @@ index dbd9917..cbd4d66 100644
          self.tx_remove_file
              .as_ref()
              .map(|tx| tx.send("".to_string()).ok());
+diff --git a/libs/clipboard/src/platform/windows.rs b/libs/clipboard/src/platform/windows.rs
+index 20c516d..b9767f5 100644
+--- a/libs/clipboard/src/platform/windows.rs
++++ b/libs/clipboard/src/platform/windows.rs
+@@ -29,7 +29,8 @@ const CHANNEL_RC_NO_MEMORY: u32 = 12;
+ /// used by FreeRDP to represent errors.
+ const ERROR_INTERNAL_ERROR: u32 = 0x54F;
+ 
+-pub type size_t = ::std::os::raw::c_ulonglong;
++// Pointer-sized like C's size_t. bindgen on x64 emitted c_ulonglong, which is wrong on 32-bit.
++pub type size_t = usize;
+ pub type __vcrt_bool = bool;
+ pub type wchar_t = ::std::os::raw::c_ushort;
+ 
+diff --git a/libs/clipboard/src/windows/wf_cliprdr.c b/libs/clipboard/src/windows/wf_cliprdr.c
+index 1e3bcbb..233139a 100644
+--- a/libs/clipboard/src/windows/wf_cliprdr.c
++++ b/libs/clipboard/src/windows/wf_cliprdr.c
+@@ -2750,14 +2750,15 @@ static FILEDESCRIPTORW *wf_cliprdr_get_file_descriptor(WCHAR *file_name, size_t
+ 		return NULL;
+ 	}
+ 
+-	// to-do: use `fd->dwFlags = FD_ATTRIBUTES | FD_FILESIZE | FD_WRITESTIME | FD_PROGRESSUI`.
+-	// We keep `fd->dwFlags = FD_ATTRIBUTES | FD_WRITESTIME | FD_PROGRESSUI` for compatibility.
+-	// fd->dwFlags = FD_ATTRIBUTES | FD_FILESIZE | FD_WRITESTIME | FD_PROGRESSUI;
+ 	fd->dwFlags = FD_ATTRIBUTES | FD_WRITESTIME | FD_PROGRESSUI;
+ 	fd->dwFileAttributes = GetFileAttributesW(file_name);
+ 	if (fd->dwFileAttributes == INVALID_FILE_ATTRIBUTES)
+ 	{
+-		// TODO: debug handle some errors
++		// INVALID_FILE_ATTRIBUTES has FILE_ATTRIBUTE_DIRECTORY set, so the entry would go out as
++		// an empty directory in place of the file.
++		CloseHandle(hFile);
++		free(fd);
++		return NULL;
+ 	}
+ 
+ 	if (!GetFileTime(hFile, NULL, NULL, &fd->ftLastWriteTime))
+@@ -2765,7 +2766,34 @@ static FILEDESCRIPTORW *wf_cliprdr_get_file_descriptor(WCHAR *file_name, size_t
+ 		fd->dwFlags &= ~FD_WRITESTIME;
+ 	}
+ 
+-	fd->nFileSizeLow = GetFileSize(hFile, &fd->nFileSizeHigh);
++	// Announce the size in the file list. Without FD_FILESIZE the receiving side cannot
++	// trust the size fields, so CliprdrStream_New() asks for each file's size with its own
++	// FILECONTENTS_SIZE request and blocks on the reply. Those requests are made for every
++	// entry up front, while the shell is inside IDataObject::GetData(), so the cost grows
++	// with the number of files and not with their size.
++	//
++	// GetFileSize() reports failure as INVALID_FILE_SIZE, which cannot be told apart from a
++	// genuine 4GB-1 file without GetLastError(). A directory gets no size: whatever the
++	// handle FILE_FLAG_BACKUP_SEMANTICS lets us open above reports is not a file size. A
++	// file whose size cannot be read is rejected rather than sent with the flag off: the
++	// Unix receiver reads the size fields whether or not the flag is set, for compatibility
++	// with older Windows senders, and would take the zero for an empty file.
++	if ((fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
++	{
++		LARGE_INTEGER file_size = {0};
++
++		if (!GetFileSizeEx(hFile, &file_size) || file_size.QuadPart < 0)
++		{
++			CloseHandle(hFile);
++			free(fd);
++			return NULL;
++		}
++
++		fd->nFileSizeLow = file_size.LowPart;
++		fd->nFileSizeHigh = (DWORD)file_size.HighPart;
++		fd->dwFlags |= FD_FILESIZE;
++	}
++
+ 	if ((wcslen(file_name + pathLen) + 1) > sizeof(fd->cFileName) / sizeof(fd->cFileName[0]))
+ 	{
+ 		// The file name is too long, which is not a normal case.
+@@ -2843,8 +2871,12 @@ static BOOL wf_cliprdr_add_to_file_arrays(wfClipboard *clipboard, WCHAR *full_fi
+ 		return FALSE;
+ 	}
+ 
++	// Receivers never read an empty file, so the audit waits for the first file with content.
+ 	if ((clipboard->fileDescriptor[clipboard->nFiles]->dwFileAttributes &
+-		 FILE_ATTRIBUTE_DIRECTORY) == 0) {
++		 FILE_ATTRIBUTE_DIRECTORY) == 0 &&
++		(clipboard->fileDescriptor[clipboard->nFiles]->nFileSizeLow |
++		 clipboard->fileDescriptor[clipboard->nFiles]->nFileSizeHigh) != 0 &&
++		clipboard->first_file_index == (size_t)-1) {
+ 		clipboard->first_file_index = clipboard->nFiles;
+ 	}
+ 
 diff --git a/libs/enigo/src/macos/hid_post.rs b/libs/enigo/src/macos/hid_post.rs
 new file mode 100644
 index 0000000..bce2920
@@ -1085,7 +1344,7 @@ index c55bc8c..b7d8185 100644
      pub fn CGDisplayStreamCreateWithDispatchQueue(
          display: u32,
 diff --git a/src/client.rs b/src/client.rs
-index 597dc86..76085e4 100644
+index ea71ca4..fad142a 100644
 --- a/src/client.rs
 +++ b/src/client.rs
 @@ -28,7 +28,7 @@ use uuid::Uuid;
@@ -1097,7 +1356,7 @@ index 597dc86..76085e4 100644
      is_keyboard_mode_supported,
      kcp_stream::KcpStream,
      secure_tcp, secure_tcp_required,
-@@ -114,6 +114,8 @@ const MAX_DECODE_FAIL_COUNTER: usize = 3;
+@@ -116,6 +116,8 @@ const MAX_DECODE_FAIL_COUNTER: usize = 3;
  
  pub const LOGIN_MSG_PASSWORD_EMPTY: &str = "Empty Password";
  pub const LOGIN_MSG_PASSWORD_WRONG: &str = "Wrong Password";
@@ -1106,7 +1365,7 @@ index 597dc86..76085e4 100644
  pub const LOGIN_MSG_2FA_WRONG: &str = "Wrong 2FA Code";
  pub const REQUIRE_2FA: &'static str = "2FA Required";
  pub const LOGIN_MSG_NO_PASSWORD_ACCESS: &str = "No Password Access";
-@@ -175,6 +177,14 @@ lazy_static::lazy_static! {
+@@ -177,6 +179,14 @@ lazy_static::lazy_static! {
  
  const PUBLIC_SERVER: &str = "public";
  
@@ -1121,7 +1380,7 @@ index 597dc86..76085e4 100644
  #[cfg(not(any(target_os = "android", target_os = "ios")))]
  pub fn get_key_state(key: enigo::Key) -> bool {
      use enigo::KeyboardControllable;
-@@ -212,17 +222,179 @@ impl Drop for OffererGuard {
+@@ -214,17 +224,179 @@ impl Drop for OffererGuard {
      }
  }
  
@@ -1301,7 +1560,7 @@ index 597dc86..76085e4 100644
  ) -> ResultType<T> {
      let mut webrtc_fut = Some(webrtc_fut);
      let mut others_fut = Some(select_ok(others));
-@@ -232,6 +404,7 @@ async fn race_transports_prefer_webrtc<'a, T: 'a>(
+@@ -234,6 +406,7 @@ async fn race_transports_prefer_webrtc<'a, T: 'a>(
      let window = tokio::time::sleep(Duration::from_millis(window_ms));
      tokio::pin!(window);
      let mut window_started = false;
@@ -1309,7 +1568,7 @@ index 597dc86..76085e4 100644
      loop {
          tokio::select! {
              res = async {
-@@ -328,6 +501,13 @@ async fn race_transports_prefer_webrtc<'a, T: 'a>(
+@@ -330,6 +503,13 @@ async fn race_transports_prefer_webrtc<'a, T: 'a>(
                  }
              }
              _ = &mut window, if window_started => {
@@ -1323,7 +1582,7 @@ index 597dc86..76085e4 100644
                  if let Some(conn) = held.take() {
                      return Ok(conn);
                  }
-@@ -434,6 +614,10 @@ impl Client {
+@@ -436,6 +616,10 @@ impl Client {
          if config::is_incoming_only() && !is_switch_sides_back(conn_type, &interface).await {
              bail!("Incoming only mode");
          }
@@ -1334,7 +1593,7 @@ index 597dc86..76085e4 100644
          // to-do: remember the port for each peer, so that we can retry easier
          if hbb_common::is_ip_str(peer) {
              return Ok((
-@@ -487,6 +671,67 @@ impl Client {
+@@ -489,6 +673,67 @@ impl Client {
              }
          };
  
@@ -1402,7 +1661,7 @@ index 597dc86..76085e4 100644
          // Same relay gate as the v6 socket below: under any forced relay the v6 punch cannot
          // be used, so probing v6 reachability is wasted work on every such connection.
          if crate::get_ipv6_punch_enabled() && !interface.is_force_relay() {
-@@ -538,6 +783,7 @@ impl Client {
+@@ -540,6 +785,7 @@ impl Client {
              None
          };
          let has_webrtc_offerer = webrtc_offerer.is_some();
@@ -1410,7 +1669,7 @@ index 597dc86..76085e4 100644
          let fut = Self::_start_inner(
              peer.to_owned(),
              key.to_owned(),
-@@ -587,6 +833,7 @@ impl Client {
+@@ -589,6 +835,7 @@ impl Client {
                  vec![fallback_fut],
                  Self::relay_fallback_delay_ms(),
                  |result| result.0 .1,
@@ -1418,7 +1677,7 @@ index 597dc86..76085e4 100644
              )
              .await;
          }
-@@ -603,17 +850,15 @@ impl Client {
+@@ -605,17 +852,15 @@ impl Client {
  
      /// Whether to build a WebRTC offerer for this connection.
      ///
@@ -1441,7 +1700,7 @@ index 597dc86..76085e4 100644
          if interface.is_policy_relay() && !WebRTCStream::has_turn_server() {
              return false;
          }
-@@ -1012,6 +1257,9 @@ impl Client {
+@@ -1014,6 +1259,9 @@ impl Client {
                                      bail!("Remote desktop is offline");
                                  }
                                  Ok(punch_hole_response::Failure::LICENSE_MISMATCH) => {
@@ -1451,7 +1710,7 @@ index 597dc86..76085e4 100644
                                      bail!("Key mismatch");
                                  }
                                  Ok(punch_hole_response::Failure::LICENSE_OVERUSE) => {
-@@ -1072,6 +1320,7 @@ impl Client {
+@@ -1074,6 +1322,7 @@ impl Client {
                              }
                          }
                          signed_id_pk = rr.pk().into();
@@ -1459,7 +1718,7 @@ index 597dc86..76085e4 100644
                          let mut webrtc_bridge_stop = None;
                          let mut webrtc_for_connect = None;
                          if !rr.webrtc_sdp_answer.is_empty() {
-@@ -1151,6 +1400,7 @@ impl Client {
+@@ -1153,6 +1402,7 @@ impl Client {
                          let mut webrtc_guard = None;
                          let race_result = if let Some(webrtc) = webrtc_for_connect {
                              webrtc_guard = Some(OffererGuard::new(webrtc.clone()));
@@ -1467,7 +1726,7 @@ index 597dc86..76085e4 100644
                              let mut raced = webrtc;
                              let webrtc_fut = async move {
                                  raced.wait_connected(CONNECT_TIMEOUT).await?;
-@@ -1172,20 +1422,71 @@ impl Client {
+@@ -1174,20 +1424,71 @@ impl Client {
                                  connect_futures.push(webrtc_fut);
                                  select_ok(connect_futures).await.map(|r| r.0)
                              } else {
@@ -1542,7 +1801,7 @@ index 597dc86..76085e4 100644
                          };
                          if let Some(stop) = webrtc_bridge_stop {
                              let _ = stop.send(());
-@@ -1195,7 +1496,12 @@ impl Client {
+@@ -1197,7 +1498,12 @@ impl Client {
                          let (mut conn, kcp, mut typ, mut direct) = race_result?;
                          feedback = rr.feedback;
                          log::info!("{:?} used to establish {typ} connection", start.elapsed());
@@ -1556,7 +1815,7 @@ index 597dc86..76085e4 100644
                              &peer,
                              signed_id_pk.clone(),
                              &key,
-@@ -1249,6 +1555,7 @@ impl Client {
+@@ -1251,6 +1557,7 @@ impl Client {
                                  pk
                              }
                              Err(e) => return Err(e),
@@ -1564,7 +1823,7 @@ index 597dc86..76085e4 100644
                          };
                          // `direct` came from the winning future, which resolved it while the pc was
                          // definitely alive — the race needed it to pick a winner at all.
-@@ -1526,6 +1833,12 @@ impl Client {
+@@ -1528,6 +1835,12 @@ impl Client {
                      direct_futures,
                      Self::relay_fallback_delay_ms(),
                      |r| r.3,
@@ -1577,7 +1836,7 @@ index 597dc86..76085e4 100644
                  )
                  .await
              }
-@@ -1656,11 +1969,8 @@ impl Client {
+@@ -1658,11 +1971,8 @@ impl Client {
          key: &str,
          conn: &mut Stream,
      ) -> ResultType<Option<Vec<u8>>> {
@@ -1591,7 +1850,7 @@ index 597dc86..76085e4 100644
          // A WebRTC channel is peer-authenticated only once its DTLS fingerprint is bound to the
          // verified peer identity below. Once a trusted identity IS established, every binding
          // failure fails closed: any peer able to answer WebRTC also signs its fingerprint, so a
-@@ -1673,17 +1983,23 @@ impl Client {
+@@ -1675,17 +1985,23 @@ impl Client {
          let mut sign_pk = None;
          let mut option_pk = None;
          if !signed_id_pk.is_empty() {
@@ -1621,7 +1880,7 @@ index 597dc86..76085e4 100644
          }
          let sign_pk = match sign_pk {
              Some(v) => v,
-@@ -1697,7 +2013,14 @@ impl Client {
+@@ -1699,7 +2015,14 @@ impl Client {
                  return Ok(option_pk);
              }
          };
@@ -1637,7 +1896,7 @@ index 597dc86..76085e4 100644
              Some(res) => {
                  let bytes = res?;
                  if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
-@@ -1727,6 +2050,10 @@ impl Client {
+@@ -1729,6 +2052,10 @@ impl Client {
                                  } else {
                                      hbb_common::tcp::kx_version_for(kx_version)
                                  };
@@ -1648,7 +1907,7 @@ index 597dc86..76085e4 100644
                                  let mut msg_out = Message::new();
                                  msg_out.set_public_key(PublicKey {
                                      asymmetric_value: asymmetric_value.clone(),
-@@ -2851,6 +3178,8 @@ pub struct LoginConfigHandler {
+@@ -2855,6 +3182,8 @@ pub struct LoginConfigHandler {
      pub version: i64,
      features: Option<Features>,
      pub session_id: u64, // used for local <-> server communication
@@ -1657,7 +1916,7 @@ index 597dc86..76085e4 100644
      pub supported_encoding: SupportedEncoding,
      restarting_remote_device: bool,
      // Start time of the restart grace window. On Windows the peer may briefly
-@@ -2920,7 +3249,7 @@ impl LoginConfigHandler {
+@@ -2925,7 +3254,7 @@ impl LoginConfigHandler {
              let server = server_key.next().unwrap_or_default();
              let args = server_key.next().unwrap_or_default();
              let key = if server == PUBLIC_SERVER {
@@ -1666,7 +1925,7 @@ index 597dc86..76085e4 100644
              } else {
                  let mut args_map: HashMap<String, &str> = HashMap::new();
                  for arg in args.split('&') {
-@@ -2972,6 +3301,7 @@ impl LoginConfigHandler {
+@@ -2981,6 +3310,7 @@ impl LoginConfigHandler {
              }
          }
          self.session_id = sid;
@@ -1674,7 +1933,7 @@ index 597dc86..76085e4 100644
          self.supported_encoding = Default::default();
          self.clear_restarting_remote_device();
          // Three scopes: what was decided about this PEER, what this CLIENT is set up as (proxy),
-@@ -2980,8 +3310,10 @@ impl LoginConfigHandler {
+@@ -2989,8 +3319,10 @@ impl LoginConfigHandler {
          self.peer_relay =
              config::option2bool("force-always-relay", &self.get_option("force-always-relay"))
                  || force_relay;
@@ -1687,7 +1946,7 @@ index 597dc86..76085e4 100644
          if let Some((real_id, server, key)) = &self.other_server {
              let other_server_key = self.get_option("other-server-key");
              if !other_server_key.is_empty() && key.is_empty() {
-@@ -3002,6 +3334,12 @@ impl LoginConfigHandler {
+@@ -3011,6 +3343,12 @@ impl LoginConfigHandler {
          self.shared_password = shared_password;
          self.record_state = false;
          self.record_permission = true;
@@ -1700,7 +1959,7 @@ index 597dc86..76085e4 100644
  
          // `std::env::remove_var("IS_TERMINAL_ADMIN");` is called in `session_add_sync()` - `flutter_ffi.rs`.
          let is_terminal_admin = conn_type == ConnType::TERMINAL
-@@ -3854,6 +4192,7 @@ impl LoginConfigHandler {
+@@ -3864,6 +4202,7 @@ impl LoginConfigHandler {
              my_platform,
              option: self.get_option_message(true).into(),
              session_id: self.session_id,
@@ -1708,7 +1967,7 @@ index 597dc86..76085e4 100644
              version: crate::VERSION.to_string(),
              os_login,
              hwid,
-@@ -3951,6 +4290,17 @@ impl LoginConfigHandler {
+@@ -3964,6 +4303,17 @@ impl LoginConfigHandler {
          &self.id
      }
  
@@ -1726,7 +1985,7 @@ index 597dc86..76085e4 100644
      pub fn get_key_terminal_service_id(&self) -> &'static str {
          if self.is_terminal_admin {
              "terminal-admin-service-id"
-@@ -4510,8 +4860,22 @@ pub fn handle_login_error(
+@@ -4523,8 +4873,22 @@ pub fn handle_login_error(
          interface.msgbox("input-password", "Password Required", "", "");
          true
      } else if err == LOGIN_MSG_PASSWORD_WRONG {
@@ -1751,7 +2010,7 @@ index 597dc86..76085e4 100644
          true
      } else if err == LOGIN_MSG_2FA_WRONG || err == REQUIRE_2FA {
          let enabled = lc.read().unwrap().get_option("trust-this-device") == "Y";
-@@ -5007,6 +5371,10 @@ pub trait Interface: Send + Clone + 'static + Sized {
+@@ -5035,6 +5399,10 @@ pub trait Interface: Send + Clone + 'static + Sized {
  #[derive(Clone)]
  pub enum Data {
      Close,
@@ -1762,7 +2021,7 @@ index 597dc86..76085e4 100644
      RejectInsecureConnection,
      Login((String, String, String, bool)),
      Message(Message),
-@@ -5043,6 +5411,19 @@ pub async fn confirm_insecure_connection(
+@@ -5071,6 +5439,19 @@ pub async fn confirm_insecure_connection(
      interface: &impl Interface,
      receiver: &mut UnboundedReceiver<Data>,
  ) -> bool {
@@ -1782,7 +2041,7 @@ index 597dc86..76085e4 100644
      interface.msgbox(
          "insecure-connection-nocancel-hasclose",
          "Insecure Connection",
-@@ -5054,6 +5435,8 @@ pub async fn confirm_insecure_connection(
+@@ -5082,6 +5463,8 @@ pub async fn confirm_insecure_connection(
              Data::ContinueInsecureConnection => return true,
              Data::RejectInsecureConnection => return false,
              Data::Close => return false,
@@ -1791,7 +2050,7 @@ index 597dc86..76085e4 100644
              _ => {}
          }
      }
-@@ -5562,6 +5945,69 @@ async fn udp_nat_connect(
+@@ -5590,6 +5973,69 @@ async fn udp_nat_connect(
      Ok((res.1, Some(res.0), typ))
  }
  
@@ -1861,7 +2120,7 @@ index 597dc86..76085e4 100644
  #[cfg(test)]
  mod webrtc_race_tests {
      use super::race_transports_prefer_webrtc;
-@@ -5600,6 +6046,7 @@ mod webrtc_race_tests {
+@@ -5628,6 +6074,7 @@ mod webrtc_race_tests {
              vec![ok_after(120, "relay")],
              60_000,
              |result| *result == "direct",
@@ -1869,7 +2128,7 @@ index 597dc86..76085e4 100644
          )
          .await
          .unwrap();
-@@ -5613,6 +6060,7 @@ mod webrtc_race_tests {
+@@ -5641,6 +6088,7 @@ mod webrtc_race_tests {
              vec![ok_after(10, "relay")],
              60_000,
              NOT_P2P,
@@ -1877,7 +2136,7 @@ index 597dc86..76085e4 100644
          )
          .await
          .unwrap();
-@@ -5628,6 +6076,7 @@ mod webrtc_race_tests {
+@@ -5656,6 +6104,7 @@ mod webrtc_race_tests {
              vec![ok_after(120, "direct")],
              60_000,
              |tag| *tag == "direct",
@@ -1885,7 +2144,7 @@ index 597dc86..76085e4 100644
          )
          .await
          .unwrap();
-@@ -5642,6 +6091,7 @@ mod webrtc_race_tests {
+@@ -5670,6 +6119,7 @@ mod webrtc_race_tests {
              vec![err_after(50, "punch failed")],
              60_000,
              NOT_P2P,
@@ -1893,7 +2152,7 @@ index 597dc86..76085e4 100644
          )
          .await
          .unwrap();
-@@ -5656,6 +6106,7 @@ mod webrtc_race_tests {
+@@ -5684,6 +6134,7 @@ mod webrtc_race_tests {
              vec![ok_after(10, "relay"), ok_after(100, "ipv6")],
              1_000,
              |t| *t == "ipv6",
@@ -1901,7 +2160,7 @@ index 597dc86..76085e4 100644
          )
          .await
          .unwrap();
-@@ -5672,6 +6123,7 @@ mod webrtc_race_tests {
+@@ -5700,6 +6151,7 @@ mod webrtc_race_tests {
              vec![ok_after(10, "relay"), ok_after(100, "ipv6")],
              60_000,
              |t| *t == "ipv6",
@@ -1909,7 +2168,7 @@ index 597dc86..76085e4 100644
          )
          .await
          .unwrap();
-@@ -5686,6 +6138,7 @@ mod webrtc_race_tests {
+@@ -5714,6 +6166,7 @@ mod webrtc_race_tests {
              vec![ok_after(10, "relay")],
              150,
              NOT_P2P,
@@ -1917,7 +2176,7 @@ index 597dc86..76085e4 100644
          )
          .await
          .unwrap();
-@@ -5701,6 +6154,7 @@ mod webrtc_race_tests {
+@@ -5729,6 +6182,7 @@ mod webrtc_race_tests {
              vec![ok_after(10, "relay")],
              60_000,
              NOT_P2P,
@@ -1925,7 +2184,7 @@ index 597dc86..76085e4 100644
          )
          .await
          .unwrap();
-@@ -5715,6 +6169,7 @@ mod webrtc_race_tests {
+@@ -5743,6 +6197,7 @@ mod webrtc_race_tests {
              vec![ok_after(100, "relay")],
              60_000,
              NOT_P2P,
@@ -1933,7 +2192,7 @@ index 597dc86..76085e4 100644
          )
          .await
          .unwrap();
-@@ -5728,12 +6183,31 @@ mod webrtc_race_tests {
+@@ -5756,12 +6211,31 @@ mod webrtc_race_tests {
              vec![err_after(10, "relay dead")],
              50,
              NOT_P2P,
@@ -1965,7 +2224,7 @@ index 597dc86..76085e4 100644
      #[tokio::test]
      async fn p2p_transport_committed_immediately() {
          let start = Instant::now();
-@@ -5742,6 +6216,7 @@ mod webrtc_race_tests {
+@@ -5770,6 +6244,7 @@ mod webrtc_race_tests {
              vec![ok_after(10, "ipv6")],
              60_000,
              |t| *t == "ipv6",
@@ -1973,7 +2232,7 @@ index 597dc86..76085e4 100644
          )
          .await
          .unwrap();
-@@ -5759,6 +6234,7 @@ mod webrtc_race_tests {
+@@ -5787,6 +6262,7 @@ mod webrtc_race_tests {
                  vec![err_after(fallback_ms, "Remote desktop is offline")],
                  60_000,
                  NOT_P2P,
@@ -1981,7 +2240,7 @@ index 597dc86..76085e4 100644
              )
              .await
              .unwrap_err();
-@@ -5893,6 +6369,7 @@ mod kx_tests {
+@@ -5921,6 +6397,7 @@ mod kx_tests {
          assert!(seen.decrypted && decrypted);
      }
  
@@ -1989,7 +2248,7 @@ index 597dc86..76085e4 100644
      #[tokio::test]
      async fn test_a_peer_without_versions_gets_version_0() {
          let (seen, decrypted) = handshake(0, Some(0)).await;
-@@ -5900,6 +6377,23 @@ mod kx_tests {
+@@ -5928,6 +6405,23 @@ mod kx_tests {
          assert!(seen.decrypted && decrypted);
      }
  
@@ -2013,7 +2272,7 @@ index 597dc86..76085e4 100644
      #[tokio::test]
      async fn test_a_pick_lowered_in_transit_decrypts_nothing() {
          // The controlled side takes 0 from a controller without versions, so a lowered pick is
-@@ -5909,3 +6403,21 @@ mod kx_tests {
+@@ -5937,3 +6431,21 @@ mod kx_tests {
          assert!(!seen.decrypted && !decrypted);
      }
  }
@@ -2141,10 +2400,31 @@ index 1b197a8..983d20e 100644
                      if !self.video_threads.contains_key(&display) {
                          self.new_video_thread(display);
 diff --git a/src/common.rs b/src/common.rs
-index 53831cc..326f2ae 100644
+index 4bc5bc2..ae0b4a4 100644
 --- a/src/common.rs
 +++ b/src/common.rs
-@@ -693,6 +693,11 @@ impl Drop for CheckTestNatType {
+@@ -120,7 +120,20 @@ impl Drop for SimpleCallOnReturn {
+     }
+ }
+ 
++/// `sodium_init()` chooses libsodium's implementations, so it runs before anything else uses the
++/// library: a later call swaps Poly1305 under a computation another thread is in the middle of.
++pub fn init_sodium() -> bool {
++    let ok = hbb_common::sodiumoxide::init().is_ok();
++    if !ok {
++        log::error!("Failed to initialize libsodium");
++    }
++    ok
++}
++
+ pub fn global_init() -> bool {
++    if !init_sodium() {
++        return false;
++    }
+     #[cfg(all(target_os = "linux", feature = "drm"))]
+     crate::platform::linux::dispatch_wayland_display_probe();
+     #[cfg(target_os = "linux")]
+@@ -693,6 +706,11 @@ impl Drop for CheckTestNatType {
  }
  
  pub fn test_nat_type() {
@@ -2156,7 +2436,7 @@ index 53831cc..326f2ae 100644
      test_ipv6_sync();
      use std::sync::atomic::{AtomicBool, Ordering};
      std::thread::spawn(move || {
-@@ -1357,6 +1362,11 @@ pub fn get_local_option(key: &str) -> String {
+@@ -1371,6 +1389,11 @@ pub fn get_local_option(key: &str) -> String {
  }
  
  pub fn get_audit_server(api: String, custom: String, typ: String) -> String {
@@ -2168,7 +2448,7 @@ index 53831cc..326f2ae 100644
      let url = get_api_server(api, custom);
      if url.is_empty() || is_public(&url) {
          return "".to_owned();
-@@ -2141,6 +2151,28 @@ pub fn decode64<T: AsRef<[u8]>>(input: T) -> Result<Vec<u8>, base64::DecodeError
+@@ -2155,6 +2178,28 @@ pub fn decode64<T: AsRef<[u8]>>(input: T) -> Result<Vec<u8>, base64::DecodeError
      base64::decode(input)
  }
  
@@ -2197,7 +2477,7 @@ index 53831cc..326f2ae 100644
  pub async fn get_key(sync: bool) -> String {
      #[cfg(windows)]
      if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
-@@ -2158,7 +2190,8 @@ pub async fn get_key(sync: bool) -> String {
+@@ -2172,7 +2217,8 @@ pub async fn get_key(sync: bool) -> String {
          options.remove("key").unwrap_or_default()
      };
      if key.is_empty() {
@@ -2207,7 +2487,7 @@ index 53831cc..326f2ae 100644
      }
      key
  }
-@@ -2290,10 +2323,13 @@ async fn secure_tcp_impl(conn: &mut Stream, key: &str, log_on_success: bool) ->
+@@ -2304,10 +2350,13 @@ async fn secure_tcp_impl(conn: &mut Stream, key: &str, log_on_success: bool) ->
  /// when the server sent something else first, nothing parseable, or closed: `secure_tcp`
  /// tolerates that for servers from before the exchange, `secure_tcp_required` does not.
  async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> ResultType<bool> {
@@ -2224,7 +2504,7 @@ index 53831cc..326f2ae 100644
      match timeout(READ_TIMEOUT, conn.next()).await? {
          Some(Ok(bytes)) => {
              if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
-@@ -2302,16 +2338,15 @@ async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> Res
+@@ -2316,16 +2365,15 @@ async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> Res
                          if ex.keys.len() != 1 {
                              bail!("Handshake failed: invalid key exchange message");
                          }
@@ -2244,7 +2524,7 @@ index 53831cc..326f2ae 100644
                                  .and_then(|signed| {
                                      let params =
                                          signed.strip_prefix(hbb_common::tcp::KX_PARAMS_DOMAIN)?;
-@@ -2402,6 +2437,15 @@ pub fn get_rs_pk(str_base64: &str) -> Option<sign::PublicKey> {
+@@ -2416,6 +2464,15 @@ pub fn get_rs_pk(str_base64: &str) -> Option<sign::PublicKey> {
      }
  }
  
@@ -2260,7 +2540,7 @@ index 53831cc..326f2ae 100644
  pub fn decode_id_pk(signed: &[u8], key: &sign::PublicKey) -> ResultType<(String, [u8; 32])> {
      let (id, pk, _, _) = decode_id_pk_dtls(signed, key)?;
      Ok((id, pk))
-@@ -2493,6 +2537,10 @@ pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
+@@ -2507,6 +2564,10 @@ pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
  }
  
  pub fn load_custom_client() {
@@ -2271,7 +2551,7 @@ index 53831cc..326f2ae 100644
      #[cfg(debug_assertions)]
      if let Ok(data) = std::fs::read_to_string("./custom.txt") {
          read_custom_client(data.trim());
-@@ -2786,6 +2834,10 @@ async fn test_bind_ipv6() -> ResultType<SocketAddr> {
+@@ -2800,6 +2861,10 @@ async fn test_bind_ipv6() -> ResultType<SocketAddr> {
  }
  
  pub async fn test_ipv6() -> Option<tokio::task::JoinHandle<()>> {
@@ -2282,7 +2562,7 @@ index 53831cc..326f2ae 100644
      {
          // One look and one claim of the minute, under one lock: two connections arriving
          // together would otherwise both find it over and both probe.
-@@ -3619,4 +3671,36 @@ mod tests {
+@@ -3646,4 +3711,36 @@ mod tests {
          // non-WebRTC handshakes.
          assert_eq!(decode_id_pk(&signed, &pk).unwrap(), (id, their_pk));
      }
@@ -2320,10 +2600,10 @@ index 53831cc..326f2ae 100644
 +    }
  }
 diff --git a/src/core_main.rs b/src/core_main.rs
-index 19a2670..ca50ab9 100644
+index 0f62d1e..59b53e8 100644
 --- a/src/core_main.rs
 +++ b/src/core_main.rs
-@@ -93,7 +93,8 @@ pub fn core_main() -> Option<CoreMainAction> {
+@@ -94,7 +94,8 @@ pub fn core_main() -> Option<CoreMainAction> {
          }
          i += 1;
      }
@@ -2333,7 +2613,7 @@ index 19a2670..ca50ab9 100644
      if args.is_empty() {
          #[cfg(target_os = "linux")]
          let should_check_start_tray = crate::check_process("--server", false);
-@@ -365,12 +366,21 @@ pub fn core_main() -> Option<CoreMainAction> {
+@@ -366,12 +367,21 @@ pub fn core_main() -> Option<CoreMainAction> {
                  return None;
              }
          } else if args[0] == "--tray" {
@@ -2355,7 +2635,7 @@ index 19a2670..ca50ab9 100644
              crate::platform::install_service();
              return None;
          } else if args[0] == "--uninstall-service" {
-@@ -724,7 +734,7 @@ pub fn core_main() -> Option<CoreMainAction> {
+@@ -725,7 +735,7 @@ pub fn core_main() -> Option<CoreMainAction> {
  }
  
  fn import_config(path: &str) {
@@ -2364,7 +2644,7 @@ index 19a2670..ca50ab9 100644
      let path2 = path.replace(".toml", "2.toml");
      let path2 = std::path::Path::new(&path2);
      let path = std::path::Path::new(path);
-@@ -734,9 +744,9 @@ fn import_config(path: &str) {
+@@ -735,9 +745,9 @@ fn import_config(path: &str) {
          log::info!("Empty source config, skipped");
          return;
      }
@@ -2378,7 +2658,7 @@ index 19a2670..ca50ab9 100644
              log::info!("config written");
          }
 diff --git a/src/hbbs_http/sync.rs b/src/hbbs_http/sync.rs
-index aac220b..2b67671 100644
+index c934a79..0817458 100644
 --- a/src/hbbs_http/sync.rs
 +++ b/src/hbbs_http/sync.rs
 @@ -282,6 +282,10 @@ async fn start_hbbs_sync_async() {
@@ -2580,10 +2860,10 @@ index d321d12..9b58a9e 100644
 +    }
 +}
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
-index 206a88d..97789eb 100644
+index a09783d..77ac236 100644
 --- a/src/platform/windows.rs
 +++ b/src/platform/windows.rs
-@@ -2161,6 +2161,11 @@ pub fn prepare_custom_client_update() -> ResultType<bool> {
+@@ -2172,6 +2172,11 @@ pub fn prepare_custom_client_update() -> ResultType<bool> {
  }
  
  pub fn get_license_from_exe_name() -> ResultType<CustomServer> {
@@ -2595,7 +2875,7 @@ index 206a88d..97789eb 100644
      let mut exe = std::env::current_exe()?.to_str().unwrap_or("").to_owned();
      // if defined portable appname entry, replace original executable name with it.
      if let Ok(portable_exe) = std::env::var(PORTABLE_APPNAME_RUNTIME_ENV_KEY) {
-@@ -4186,7 +4191,7 @@ pub fn message_box(text: &str) {
+@@ -4201,7 +4206,7 @@ pub fn message_box(text: &str) {
          .encode_utf16()
          .chain(std::iter::once(0))
          .collect::<Vec<u16>>();
@@ -2604,7 +2884,7 @@ index 206a88d..97789eb 100644
          .encode_utf16()
          .chain(std::iter::once(0))
          .collect::<Vec<u16>>();
-@@ -4878,6 +4883,17 @@ pub(super) fn get_pids_with_first_arg_by_wmic<S1: AsRef<str>, S2: AsRef<str>>(
+@@ -4893,6 +4898,17 @@ pub(super) fn get_pids_with_first_arg_by_wmic<S1: AsRef<str>, S2: AsRef<str>>(
  mod tests {
      use super::*;
  
@@ -2623,7 +2903,7 @@ index 206a88d..97789eb 100644
      fn vbs_files_use_utf16le_with_bom_and_crlf() {
          const EXPECTED: &[u8] = &[0xFF, 0xFE, b'a', 0, b'\r', 0, b'\n', 0, b'b', 0];
 diff --git a/src/port_forward.rs b/src/port_forward.rs
-index 26f8cbc..dbc483f 100644
+index 356ea4a..8f00048 100644
 --- a/src/port_forward.rs
 +++ b/src/port_forward.rs
 @@ -69,6 +69,10 @@ fn rdp_display_name(lc: &Arc<RwLock<LoginConfigHandler>>, id: &str) -> String {
@@ -2647,17 +2927,17 @@ index 26f8cbc..dbc483f 100644
                  match claim {
                      Claim::Muxed(handle) => {
                          if let Err(e) = handle.open(&remote_host, remote_port, forward, Vec::new()) {
-@@ -169,6 +174,9 @@ async fn connect_and_login(
+@@ -170,6 +175,9 @@ async fn connect_and_login(
      remote_host: &str,
      remote_port: i32,
- ) -> ResultType<Option<Stream>> {
+ ) -> ResultType<Option<(Stream, Option<crate::kcp_stream::KcpStream>)>> {
 +    if cfg!(feature = "tauri") {
 +        bail!(LEGACY_TUNNEL_REFUSED);
 +    }
      let conn_type = if is_rdp {
          ConnType::RDP
      } else {
-@@ -376,6 +384,10 @@ async fn establish_tunnel(
+@@ -383,6 +391,10 @@ async fn establish_tunnel(
                  }
              }
          }
@@ -2668,7 +2948,7 @@ index 26f8cbc..dbc483f 100644
          Ok(Some(outcome)) => {
              tunnel.set_legacy();
              if outcome.local_eof {
-@@ -745,6 +757,24 @@ mod login_tests {
+@@ -782,6 +794,24 @@ mod login_tests {
          });
      }
  
@@ -2694,10 +2974,10 @@ index 26f8cbc..dbc483f 100644
      fn a_probing_login_asks_for_the_tunnel() {
          let rt = tokio::runtime::Builder::new_current_thread()
 diff --git a/src/rendezvous_mediator.rs b/src/rendezvous_mediator.rs
-index b1e523d..c1d6c1c 100644
+index 7e7ea5f..2a28996 100644
 --- a/src/rendezvous_mediator.rs
 +++ b/src/rendezvous_mediator.rs
-@@ -264,6 +264,18 @@ async fn wait_for_retry(delay: f32, restarted: tokio::sync::futures::Notified<'_
+@@ -293,6 +293,18 @@ async fn wait_for_retry(delay: f32, restarted: tokio::sync::futures::Notified<'_
      }
  }
  
@@ -2716,7 +2996,7 @@ index b1e523d..c1d6c1c 100644
  #[derive(Clone)]
  pub struct RendezvousMediator {
      addr: TargetAddr<'static>,
-@@ -304,7 +316,8 @@ impl RendezvousMediator {
+@@ -333,7 +345,8 @@ impl RendezvousMediator {
          #[cfg(target_os = "android")]
          let start_lan_listening = true;
          #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2726,7 +3006,7 @@ index b1e523d..c1d6c1c 100644
          if start_lan_listening {
              std::thread::spawn(move || {
                  allow_err!(super::lan::start_listening());
-@@ -326,6 +339,15 @@ impl RendezvousMediator {
+@@ -355,6 +368,15 @@ impl RendezvousMediator {
                  for host in servers.clone() {
                      let server = server.clone();
                      let timeout = timeout.clone();
@@ -2742,7 +3022,7 @@ index b1e523d..c1d6c1c 100644
                      futs.push(tokio::spawn(async move {
                          if let Err(err) = Self::start(server, host).await {
                              let err = format!("rendezvous mediator error: {err}");
-@@ -362,7 +384,38 @@ impl RendezvousMediator {
+@@ -391,7 +413,38 @@ impl RendezvousMediator {
          }
      }
  
@@ -2781,7 +3061,7 @@ index b1e523d..c1d6c1c 100644
          host.split(".")
              .next()
              .map(|x| {
-@@ -592,6 +645,10 @@ impl RendezvousMediator {
+@@ -621,6 +674,10 @@ impl RendezvousMediator {
                      _ => {}
                  }
              }
@@ -2792,7 +3072,7 @@ index b1e523d..c1d6c1c 100644
              _ => {}
          }
          Ok(())
-@@ -643,6 +700,14 @@ impl RendezvousMediator {
+@@ -672,6 +729,14 @@ impl RendezvousMediator {
                      if last_recv_msg.elapsed().as_millis() as u64 > rz.keep_alive as u64 * 3 / 2 {
                          bail!("Rendezvous connection is timeout");
                      }
@@ -2807,7 +3087,7 @@ index b1e523d..c1d6c1c 100644
                      if (!Config::get_key_confirmed() ||
                          !Config::get_host_key_confirmed(&rz.host_prefix)) &&
                          last_register_sent.map(|x| x.elapsed().as_millis() as i64).unwrap_or(REG_INTERVAL) >= REG_INTERVAL {
-@@ -717,48 +782,63 @@ impl RendezvousMediator {
+@@ -750,48 +815,63 @@ impl RendezvousMediator {
              secure,
          );
  
@@ -2906,7 +3186,7 @@ index b1e523d..c1d6c1c 100644
      }
  
      async fn handle_intranet(&self, fla: FetchLocalAddr, server: ServerPtr) -> ResultType<()> {
-@@ -884,7 +964,8 @@ impl RendezvousMediator {
+@@ -918,7 +998,8 @@ impl RendezvousMediator {
              return Ok(String::new());
          };
          let mut stream =
@@ -2916,7 +3196,7 @@ index b1e523d..c1d6c1c 100644
          let answer = stream.local_endpoint().to_owned();
          let session_key = stream.session_key().to_owned();
          let return_route = ph.socket_addr.clone();
-@@ -1044,7 +1125,9 @@ impl RendezvousMediator {
+@@ -1078,7 +1159,9 @@ impl RendezvousMediator {
              {
                  log::warn!("failed to create WebRTC server connection: {}", err);
              }
@@ -2927,7 +3207,7 @@ index b1e523d..c1d6c1c 100644
          });
  
          Ok(answer)
-@@ -1074,10 +1157,16 @@ impl RendezvousMediator {
+@@ -1108,10 +1191,16 @@ impl RendezvousMediator {
          // No enable-webrtc check here: it is LocalConfig, which the UI process writes and never
          // syncs over IPC, so this (server) process would read the private-server default of "N"
          // and refuse to answer in exactly the self-hosted deployments the transport is for.
@@ -2947,7 +3227,7 @@ index b1e523d..c1d6c1c 100644
          let webrtc_sdp_answer = if webrtc_viable {
              self.spawn_webrtc_answerer(
                  &ph,
-@@ -1341,7 +1430,7 @@ impl RendezvousMediator {
+@@ -1390,7 +1479,7 @@ impl RendezvousMediator {
      }
  }
  
@@ -2956,7 +3236,7 @@ index b1e523d..c1d6c1c 100644
      let mut port = Config::get_option("direct-access-port")
          .parse::<i32>()
          .unwrap_or(0);
-@@ -1404,7 +1493,8 @@ async fn direct_server(server: ServerPtr) {
+@@ -1453,7 +1542,8 @@ async fn direct_server(server: ServerPtr) {
                              server,
                              hbb_common::Stream::from(stream, local_addr),
                              addr,
@@ -2966,7 +3246,7 @@ index b1e523d..c1d6c1c 100644
                              ConnectionMeta::default(), // Direct connections don't have server-side user context.
                          )
                          .await
-@@ -1737,6 +1827,17 @@ mod tests {
+@@ -1786,6 +1876,17 @@ mod tests {
      };
      use hbb_common::protobuf::Message as _;
  
@@ -2984,8 +3264,8 @@ index b1e523d..c1d6c1c 100644
      #[tokio::test]
      async fn manual_restart_interrupts_retry_wait() {
          const WAKE_TIMEOUT: Duration = Duration::from_secs(1);
-@@ -1842,3 +1943,26 @@ mod tests {
-         assert!(AnswererSlot::take().is_some());
+@@ -1960,3 +2061,26 @@ mod tests {
+         ));
      }
  }
 +
@@ -3012,7 +3292,7 @@ index b1e523d..c1d6c1c 100644
 +    Config::set_option("tether-release-hint".to_owned(), value);
 +}
 diff --git a/src/server.rs b/src/server.rs
-index 8e4c56c..7fa5007 100644
+index a88e33a..6cadca4 100644
 --- a/src/server.rs
 +++ b/src/server.rs
 @@ -71,6 +71,8 @@ pub mod input_service {
@@ -3124,8 +3404,8 @@ index 8e4c56c..7fa5007 100644
      let mut msg_out = RendezvousMessage::new();
      let licence_key = crate::get_key(true).await;
      msg_out.set_request_relay(RequestRelay {
-@@ -974,3 +1015,23 @@ pub async fn stop_main_window_process() {
-         }
+@@ -1059,3 +1100,23 @@ mod windows_gui_startup_tests {
+         );
      }
  }
 +
@@ -3149,7 +3429,7 @@ index 8e4c56c..7fa5007 100644
 +    }
 +}
 diff --git a/src/server/connection.rs b/src/server/connection.rs
-index e9ea313..3956ae9 100644
+index 4b2eec8..868ceb7 100644
 --- a/src/server/connection.rs
 +++ b/src/server/connection.rs
 @@ -194,6 +194,10 @@ lazy_static::lazy_static! {
@@ -3280,7 +3560,7 @@ index e9ea313..3956ae9 100644
                          // Set the press state to false, use `down` only in `handle_key()`.
                          msg.press = false;
                          if press {
-@@ -1512,6 +1559,17 @@ impl Connection {
+@@ -1508,6 +1555,17 @@ impl Connection {
          if !self.check_whitelist(&addr).await {
              return false;
          }
@@ -3298,7 +3578,7 @@ index e9ea313..3956ae9 100644
          #[cfg(not(any(target_os = "android", target_os = "ios")))]
          if crate::is_server() && Config::get_option("allow-only-conn-window-open") == "Y" {
              if !crate::check_process("", !crate::platform::is_root()) {
-@@ -1787,6 +1845,12 @@ impl Connection {
+@@ -1783,6 +1841,12 @@ impl Connection {
          }
      }
  
@@ -3311,7 +3591,7 @@ index e9ea313..3956ae9 100644
      pub(super) fn normalize_port_forward_target(pf: &mut PortForward) -> (String, bool) {
          let mut is_rdp = false;
          if pf.host == "RDP" && pf.port == 0 {
-@@ -1936,6 +2000,19 @@ impl Connection {
+@@ -1932,6 +1996,19 @@ impl Connection {
              self.tx_from_authed.clone(),
              self.lr.clone(),
          ));
@@ -3331,7 +3611,7 @@ index e9ea313..3956ae9 100644
          self.session_last_recv_time = SESSIONS
              .lock()
              .unwrap()
-@@ -2216,6 +2293,9 @@ impl Connection {
+@@ -2212,6 +2289,9 @@ impl Connection {
                      dir
                  );
              }
@@ -3341,7 +3621,7 @@ index e9ea313..3956ae9 100644
              let dir = if is_allowed_dir { &dir } else { "" };
              if !wait_session_id_confirm {
                  self.read_dir(dir, show_hidden);
-@@ -2237,9 +2317,49 @@ impl Connection {
+@@ -2233,9 +2313,49 @@ impl Connection {
                  self.try_sub_monitor_services();
              }
          }
@@ -3391,7 +3671,7 @@ index e9ea313..3956ae9 100644
      fn try_sub_camera_displays(&mut self) {
          if let Some(s) = self.server.upgrade() {
              let mut s = s.write().unwrap();
-@@ -2894,6 +3014,11 @@ impl Connection {
+@@ -2890,6 +3010,11 @@ impl Connection {
              // Move the CloseReason forward, as this message needs to be received when unauthorized, especially for kcp.
              if let Some(misc::Union::CloseReason(s)) = &misc.union {
                  log::info!("receive close reason: {}", s);
@@ -3403,7 +3683,7 @@ index e9ea313..3956ae9 100644
                  self.on_close("Peer close", true).await;
                  raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
                  return false;
-@@ -2974,6 +3099,11 @@ impl Connection {
+@@ -2970,6 +3095,11 @@ impl Connection {
                          sleep(1.).await;
                          return false;
                      }
@@ -3415,7 +3695,7 @@ index e9ea313..3956ae9 100644
                      let (addr, _is_rdp) = Self::normalize_port_forward_target(&mut pf);
                      self.port_forward_address = addr;
                  }
-@@ -3044,7 +3174,21 @@ impl Connection {
+@@ -3040,7 +3170,21 @@ impl Connection {
                  crate::get_builtin_option(keys::OPTION_ALLOW_LOGON_SCREEN_PASSWORD) == "Y"
                      && is_logon();
  
@@ -3438,7 +3718,7 @@ index e9ea313..3956ae9 100644
                  || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()
              {
                  #[cfg(not(any(target_os = "android", target_os = "ios")))]
-@@ -3202,6 +3346,10 @@ impl Connection {
+@@ -3198,6 +3342,10 @@ impl Connection {
                      if self.is_authed_view_camera_conn() {
                          return true;
                      }
@@ -3449,7 +3729,7 @@ index e9ea313..3956ae9 100644
                      #[cfg(any(target_os = "android", target_os = "ios"))]
                      if let Err(e) = call_main_service_pointer_input("mouse", me.mask, me.x, me.y) {
                          log::debug!("call_main_service_pointer_input fail:{}", e);
-@@ -3338,6 +3486,11 @@ impl Connection {
+@@ -3334,6 +3482,11 @@ impl Connection {
                      if self.is_authed_view_camera_conn() {
                          return true;
                      }
@@ -3461,7 +3741,7 @@ index e9ea313..3956ae9 100644
                      if self.peer_keyboard_enabled() {
                          if is_enter(&me) {
                              CLICK_TIME.store(get_time(), Ordering::SeqCst);
-@@ -3639,6 +3792,67 @@ impl Connection {
+@@ -3635,6 +3788,67 @@ impl Connection {
                                  }
                              }
                          }
@@ -3529,7 +3809,7 @@ index e9ea313..3956ae9 100644
                          match fa.union {
                              Some(file_action::Union::ReadEmptyDirs(rd)) => {
                                  self.read_empty_dirs(&rd.path, rd.include_hidden);
-@@ -4032,10 +4246,21 @@ impl Connection {
+@@ -4028,10 +4242,21 @@ impl Connection {
                          .lock()
                          .unwrap()
                          .user_auto_adjust_fps(self.inner.id(), fps),
@@ -3555,7 +3835,7 @@ index e9ea313..3956ae9 100644
                      #[cfg(windows)]
                      Some(misc::Union::SelectedSid(sid)) => {
                          if let Some(current_process_sid) =
-@@ -4693,6 +4918,10 @@ impl Connection {
+@@ -4689,6 +4914,10 @@ impl Connection {
          let mut err;
          if !self.keyboard {
              err = "No permission".to_string();
@@ -3566,7 +3846,7 @@ index e9ea313..3956ae9 100644
          } else {
              err = "No need to elevate".to_string();
              if !crate::platform::is_installed() && !portable_client::running() {
-@@ -5310,6 +5539,7 @@ impl Connection {
+@@ -5306,6 +5535,7 @@ impl Connection {
              return;
          }
          self.closed = true;
@@ -3574,7 +3854,7 @@ index e9ea313..3956ae9 100644
          // If voice A,B -> C, and A,B has voice call
          // B disconnects, C will reset the voice call input.
          //
-@@ -5356,6 +5586,10 @@ impl Connection {
+@@ -5354,6 +5584,10 @@ impl Connection {
          msg_out.set_misc(misc);
          self.send(msg_out).await;
          raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
@@ -3585,7 +3865,7 @@ index e9ea313..3956ae9 100644
      }
  
      async fn handle_read_job_init_result(
-@@ -5813,6 +6047,90 @@ impl Connection {
+@@ -5811,6 +6045,90 @@ impl Connection {
          }
      }
  
@@ -3676,7 +3956,7 @@ index e9ea313..3956ae9 100644
      fn is_authed_remote_conn(&self) -> bool {
          if let Some(id) = self.authed_conn_id.as_ref() {
              return id.conn_type() == AuthConnType::Remote;
-@@ -7224,6 +7542,13 @@ mod test {
+@@ -7233,6 +7551,13 @@ mod test {
      // test that admits connections holds this first; a poisoned lock is still a lock.
      static UNAUTHORIZED_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
  
@@ -3690,7 +3970,7 @@ index e9ea313..3956ae9 100644
      fn unauthorized_count() -> usize {
          UNAUTHORIZED_CONNS.lock().unwrap().len()
      }
-@@ -7874,3 +8199,181 @@ mod test {
+@@ -7901,3 +8226,181 @@ mod test {
          assert!(!replaced_by(&conn(3, remote, key(7, "other")), 2, &mine));
      }
  }
@@ -6410,10 +6690,10 @@ index 0000000..058f212
 +}
 diff --git a/src/tauri_ui/remote.rs b/src/tauri_ui/remote.rs
 new file mode 100644
-index 0000000..0a92403
+index 0000000..1d50cc0
 --- /dev/null
 +++ b/src/tauri_ui/remote.rs
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,426 @@
 +use std::{
 +    collections::HashMap,
 +    sync::{
@@ -6520,6 +6800,7 @@ index 0000000..0a92403
 +        None,
 +        None,
 +        None,
++        "", // login method: the default, a password login (not "request approval")
 +    );
 +    session
 +}

@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # A tag can be moved upstream; the commit cannot. When updating a tag, update its commit too.
-RUSTDESK_TAG=1.5.1 RUSTDESK_COMMIT=23e5bb471a040d62f0a6ad52591fb30784265b73
+RUSTDESK_TAG=1.5.3 RUSTDESK_COMMIT=95cca3f661f635b3cc85c04935fe8d96d8f432ef
 SERVER_TAG=1.1.16 SERVER_COMMIT=73523b31cfd25d77dee862e6fc9f5e1fb5e485ef
 
 fetch() { # url tag dir commit

@@ -13,6 +13,30 @@ Work on the four points where AnyDesk is ahead (docs/performance.md "Follow-up t
 evening"): scrolling latency, colour detail, photos, stalls. Nothing released under this number
 yet.
 
+### Upstream RustDesk 1.5.3 (2026-11-11; in 0.6.2)
+
+The vendored RustDesk core moved from 1.5.1 to 1.5.3 (`scripts/bootstrap.sh`), after a review of
+all 89 open upstream pull requests and the 42 merged since the old pin. What was taken, what was
+left out and why, and how to move the pin: [docs/upstream.md](docs/upstream.md).
+
+- **macOS:** no crash at connect on Macs where the old `default-net` misread the network
+  interface list (upstream 16954, carried on top of the tag).
+- **Hosts** only dial a relay address they offered themselves, and relay uuids are checked
+  (16858). Before, anyone who could reach hbbs could make a host connect out to a chosen address.
+- **Windows service:** "Install as service" and uninstalling no longer fail where F-Secure blocks
+  the installer's named pipe or `C:\Windows\Temp` is a junction (16889, 16871, 16908); uninstall
+  removes the service also when the configuration sync fails (16865).
+- **Windows pipes:** other local users can no longer create instances of Tether's main and
+  service pipes, and a client checks who serves the pipe (16755, 16885, 16913). A new app
+  therefore does not talk to a still-running service of an older version; the installer stops
+  the service first.
+- **Clipboard:** the owner marker is written first, so a failed write is not echoed back (16695);
+  file sizes travel in the Windows file list, so pasting many files no longer asks per file
+  (16240, open upstream).
+- libsodium is initialised before first use (16974, open upstream).
+- Glue code: `LoginConfigHandler::initialize` takes a login method; Tether passes the default
+  (password login). Upstream's "request approval" is in the core but not offered in the UI.
+
 ### 0.6.1 (2026-11-11; files in dist/, ready to publish; frozen)
 
 Checked on the 0.6.1 files: `vm-e2e.mjs` 5/5 (TetherQS and viewer 0.6.1, direct egress), the file
