@@ -7,7 +7,19 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ## [Unreleased]
 
-### 0.6.1 (2026-11-11; built, not published yet)
+### 0.6.2 (in work)
+
+Work on the four points where AnyDesk is ahead (docs/performance.md "Follow-up the same
+evening"): scrolling latency, colour detail, photos, stalls. Nothing released under this number
+yet.
+
+### 0.6.1 (2026-11-11; files in dist/, ready to publish; frozen)
+
+Checked on the 0.6.1 files: `vm-e2e.mjs` 5/5 (TetherQS and viewer 0.6.1, direct egress), the file
+transfer checks through the UI, `mac-webview-drag-e2e.mjs` 4/4 (Mac host and Windows viewer
+0.6.1), Tether Manage 0.6.1 starts and unlocks a test vault. Not checked: the installer itself,
+the corporate-proxy path.
+
 
 0.6.0 was published on 2026-11-11 (release index serial 53) with the macOS host fixes and the
 review fixes below. What came after it that evening is 0.6.1 for all three apps: the file
