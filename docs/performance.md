@@ -772,7 +772,7 @@ been located. Tether's stalls after a full-page change are the open point of "Fr
 steps" above, seen here on a Windows host through the relay.
 
 Setup notes: after a host restart the Default Switch has a new range; the VM's test firewall rules
-(`Test CDP`) then need the host's subnet (`C:ms\perfwsubnet.ps1` through `vm-perf-exec.ps1`)
+(`Test CDP`) then need the host's subnet (`C:\vms\perf\fwsubnet.ps1` through `vm-perf-exec.ps1`)
 and the e2e scripts `VM_IP=<address>`. `vm-e2e.mjs` on 0.6.0 (direct egress): ready, connect and
 first frame in 1.1 s, recording declined and allowed pass; the relay-outage part needs corporate
 mode (not run).
