@@ -94,6 +94,7 @@ async function main() {
     const declined = await until("viewer shows declined", async () => (await text(v)).includes("declined"), 15000).catch(() => false);
     await sleep(3000);
     record("recording denied by customer: nothing recorded", !!declined && newFiles().length === 0, { declined_shown: !!declined, files: newFiles().length });
+    await sleep(8000); // a repeated recording request is shown at most once per 10 s (0.6.0)
     await toolbar("Record session");
     await until("consent prompt again", () => qs.getByRole("button", { name: "Allow", exact: true }).isVisible(), 20000);
     await qs.getByRole("button", { name: "Allow", exact: true }).click();

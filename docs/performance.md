@@ -719,10 +719,63 @@ the H.265 path is right (the colours are exact once the frames are sRGB).
 Same session otherwise: 26 pictures/s shown and received before and after (a still desktop),
 decode 0.6–0.7 ms, 1728×1116.
 
-Not verified: the cost of the conversion in the window server under full-screen motion (no stress
-run after the change); external displays (an sRGB display needs next to no conversion); colours
+Motion after the change (`tools/bench/stress-exp.sh mac-060-auto auto 0 4`, host and viewer 0.6.0,
+stress page in Edge on the Mac, direct LAN, 4 min): extra delay over idle, median / p95: scroll
+-5 / +6 ms, photo -10 / +4 ms, noise -3 / +15 ms, no stall of 0.5 s or more (0.5.15, same test:
+scroll +4 / +18, noise +10 / +24). The conversion costs no measurable latency.
+
+Not verified: external displays (an sRGB display needs next to no conversion); colours
 outside sRGB are clipped, as they are on an sRGB viewer anyway. Unchanged on purpose: a Retina
 display is streamed at its logical size (host option `tether-full-retina` for full pixels).
+
+# Tether 0.6.0 vs AnyDesk 9.8.3, repeated (2026-11-11)
+
+Same method as "Image quality vs AnyDesk" above (`quality-run.sh`, VM `tether-bench` with direct
+egress, TetherQS 0.6.0 and the 0.6.0 viewer at original size, AnyDesk for Linux on Xvfb in WSL,
+one product connected at a time). Both went through their relays: Tether's route was Relay also
+without forcing it (the Hyper-V Default Switch had moved to 172.19.80.0/20; see below), AnyDesk
+held TCP 443 to 57.128.101.79. TCP connect time from this PC: Tether's relays 15-18 ms, AnyDesk's
+15-16 ms. Raw results: `tools/bench/results/quality-0.6.0/`.
+
+Still page (3 runs each, settled picture):
+
+| | Tether 0.6.0 (AV1) | AnyDesk 9.8.3 |
+|---|---|---|
+| PSNR Y, all | **39.23 dB** | 35.17 dB |
+| PSNR Cb / Cr | 25.81 / 25.97 dB | **26.64 / 26.62 dB** |
+| SSIM / MS-SSIM Y | **0.9954 / 0.9981** | 0.9927 / 0.9975 |
+| Text 8-12 px: PSNR Y / sharp | **43.37 dB / 0.984** | 34.65 dB / 0.920 |
+| Coloured text: PSNR Y / Cb | **40.45** / 23.68 dB | 34.47 / **24.07** dB |
+| Photo: PSNR Y | 47.33 dB | **51.03 dB** |
+| VM sent: page-switch second + rest of 30 s | 337 + 109 kB | 286 + 62 kB |
+| VM CPU total / host app | 13.0 % / 0.7 % | 7.5 % / 1.4 % |
+
+Scrolling panel (60 s per run):
+
+| | Tether 0.6.0 | AnyDesk 9.8.3 |
+|---|---|---|
+| Latency median / p95, clean runs | 101 / 137, 102 / 138, 116 / 152 ms | **81 / 100, 81 / 99 ms** |
+| Runs with a stall | 2 of 5 (first seconds after a page switch: up to 6.9 s; one 3.0 s gap mid-run) | 0 of 2 |
+| Distinct pictures / s | 18.8-20.4 | 18.1 |
+| Still left half during the scroll, PSNR Y | **41.0-41.8 dB** | 27.4-36.4 dB |
+| VM sent | **162-182 kbit/s** | 447 kbit/s |
+| VM CPU total / host app | 12-16 % / 3.1-3.6 % | 14.9 % / 3.0 % |
+
+Reading: the picture is as on 2026-11-07 (Tether ahead on luma and text, AnyDesk on chroma and
+the photo). **Latency under scrolling is now AnyDesk's**: about 20-30 ms lower in the median and
+a tighter tail; on 2026-11-07 it was 129 / 163 ms (Tether) against 140 / 242 ms (AnyDesk).
+What it is not: the codec (VP9 111 / 145 ms, VP8 113 / 158 ms on the same session, at 5-6 times
+the bytes) and the distance to the relays (equal). Not separated: the two samplers differ (Tether:
+canvas read over CDP every 15 ms; AnyDesk: X grab every 5 ms), which costs Tether up to about
+10 ms of the gap; the rest lies in capture pacing, the viewer's queue or the relay hop and has not
+been located. Tether's stalls after a full-page change are the open point of "Freezes in ~3 s
+steps" above, seen here on a Windows host through the relay.
+
+Setup notes: after a host restart the Default Switch has a new range; the VM's test firewall rules
+(`Test CDP`) then need the host's subnet (`C:ms\perfwsubnet.ps1` through `vm-perf-exec.ps1`)
+and the e2e scripts `VM_IP=<address>`. `vm-e2e.mjs` on 0.6.0 (direct egress): ready, connect and
+first frame in 1.1 s, recording declined and allowed pass; the relay-outage part needs corporate
+mode (not run).
 
 # Viewer watchdog: frames arrive, no picture (2026-11-09)
 

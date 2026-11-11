@@ -1,0 +1,38 @@
+== anydesk (3 runs)
+  early    all: Y 35.17 Cb 26.64 Cr 26.62 dB, SSIM 0.9927, MS-SSIM 0.9975 | left: Y 36.61 SSIM 0.9907 | text: Y 34.65 sharp 0.920 fringe 33.1 | colour text: Y 34.47 Cb 24.07 fringe 51.9 | photo Y 51.03 | scroll panel sharp 0.933
+  settled  all: Y 35.17 Cb 26.64 Cr 26.62 dB, SSIM 0.9927, MS-SSIM 0.9975 | left: Y 36.61 SSIM 0.9907 | text: Y 34.65 sharp 0.920 fringe 33.1 | colour text: Y 34.47 Cb 24.07 fringe 51.9 | photo Y 51.03 | scroll panel sharp 0.933
+  VM: 92 kbit/s avg, switch second 286 kB, rest 62 kB, CPU 7.5 % (host app 1.4 %)
+== anydesks (2 runs)
+  s1       all: Y 18.54 Cb 25.56 Cr 25.84 dB, SSIM 0.9221, MS-SSIM 0.9144 | left: Y 27.36 SSIM 0.9680 | text: Y 24.29 sharp 0.913 fringe 33.3 | colour text: Y 26.24 Cb 22.01 fringe 54.5 | photo Y 44.95 | scroll panel sharp 0.962
+  s2       all: Y 21.61 Cb 26.44 Cr 26.46 dB, SSIM 0.9422, MS-SSIM 0.9659 | left: Y 36.41 SSIM 0.9864 | text: Y 34.71 sharp 0.934 fringe 33.2 | colour text: Y 34.25 Cb 24.10 fringe 51.8 | photo Y 44.95 | scroll panel sharp 0.960
+  s3       all: Y 21.60 Cb 26.45 Cr 26.46 dB, SSIM 0.9428, MS-SSIM 0.9626 | left: Y 36.41 SSIM 0.9864 | text: Y 34.71 sharp 0.934 fringe 33.2 | colour text: Y 34.25 Cb 24.10 fringe 51.8 | photo Y 44.95 | scroll panel sharp 0.951
+  VM: 447 kbit/s avg, switch second 81 kB, rest 2735 kB, CPU 14.9 % (host app 3.0 %)
+  latency median 81 ms, p95 99 ms (incl. clock offset), distinct frames/s 18.1
+== tether060 (3 runs)
+  early    all: Y 39.25 Cb 25.82 Cr 25.98 dB, SSIM 0.9954, MS-SSIM 0.9981 | left: Y 43.41 SSIM 0.9946 | text: Y 43.58 sharp 0.983 fringe 35.4 | colour text: Y 40.55 Cb 23.69 fringe 56.2 | photo Y 47.18 | scroll panel sharp 0.982
+  settled  all: Y 39.23 Cb 25.81 Cr 25.97 dB, SSIM 0.9954, MS-SSIM 0.9981 | left: Y 43.31 SSIM 0.9946 | text: Y 43.37 sharp 0.984 fringe 35.5 | colour text: Y 40.45 Cb 23.68 fringe 56.3 | photo Y 47.33 | scroll panel sharp 0.983
+  VM: 118 kbit/s avg, switch second 337 kB, rest 109 kB, CPU 13.0 % (host app 0.7 %)
+== tether060d (2 runs)
+  s1       all: Y 21.65 Cb 25.65 Cr 25.80 dB, SSIM 0.9473, MS-SSIM 0.9649 | left: Y 41.00 SSIM 0.9925 | text: Y 39.64 sharp 1.001 fringe 35.7 | colour text: Y 39.25 Cb 23.52 fringe 57.0 | photo Y 45.42 | scroll panel sharp 1.033
+  s2       all: Y 22.07 Cb 25.65 Cr 25.80 dB, SSIM 0.9492, MS-SSIM 0.9760 | left: Y 41.00 SSIM 0.9925 | text: Y 39.64 sharp 1.001 fringe 35.7 | colour text: Y 39.25 Cb 23.52 fringe 57.0 | photo Y 45.42 | scroll panel sharp 1.023
+  s3       all: Y 20.94 Cb 25.65 Cr 25.80 dB, SSIM 0.9441, MS-SSIM 0.9464 | left: Y 41.00 SSIM 0.9925 | text: Y 39.64 sharp 1.001 fringe 35.7 | colour text: Y 39.26 Cb 23.52 fringe 57.0 | photo Y 45.42 | scroll panel sharp 1.045
+  VM: 162 kbit/s avg, switch second 22 kB, rest 1003 kB, CPU 12.1 % (host app 3.6 %)
+  latency median 110 ms, p95 156 ms (incl. clock offset), distinct frames/s 20.4
+== tether060s (3 runs)
+  s1       all: Y 22.06 Cb 25.64 Cr 25.79 dB, SSIM 0.9496, MS-SSIM 0.9763 | left: Y 40.97 SSIM 0.9920 | text: Y 39.95 sharp 0.998 fringe 35.7 | colour text: Y 39.01 Cb 23.51 fringe 57.2 | photo Y 45.39 | scroll panel sharp 1.032
+  s2       all: Y 21.54 Cb 25.67 Cr 25.82 dB, SSIM 0.9475, MS-SSIM 0.9611 | left: Y 41.76 SSIM 0.9931 | text: Y 41.07 sharp 0.991 fringe 35.6 | colour text: Y 39.50 Cb 23.55 fringe 56.9 | photo Y 46.23 | scroll panel sharp 1.040
+  s3       all: Y 21.00 Cb 25.67 Cr 25.82 dB, SSIM 0.9450, MS-SSIM 0.9460 | left: Y 41.76 SSIM 0.9931 | text: Y 41.07 sharp 0.991 fringe 35.6 | colour text: Y 39.50 Cb 23.55 fringe 56.9 | photo Y 46.23 | scroll panel sharp 1.059
+  VM: 173 kbit/s avg, switch second 33 kB, rest 1062 kB, CPU 14.2 % (host app 3.1 %)
+  latency median 105 ms, p95 771 ms (incl. clock offset), distinct frames/s 18.8
+== tether060vp8 (1 runs)
+  s1       all: Y 20.67 Cb 25.70 Cr 25.85 dB, SSIM 0.9413, MS-SSIM 0.9415 | left: Y 41.05 SSIM 0.9914 | text: Y 39.90 sharp 0.992 fringe 35.5 | colour text: Y 39.13 Cb 23.59 fringe 56.6 | photo Y 45.92 | scroll panel sharp 1.004
+  s2       all: Y 22.01 Cb 25.70 Cr 25.85 dB, SSIM 0.9486, MS-SSIM 0.9744 | left: Y 41.05 SSIM 0.9914 | text: Y 39.91 sharp 0.992 fringe 35.5 | colour text: Y 39.13 Cb 23.59 fringe 56.6 | photo Y 45.92 | scroll panel sharp 0.976
+  s3       all: Y 21.42 Cb 25.70 Cr 25.85 dB, SSIM 0.9450, MS-SSIM 0.9576 | left: Y 41.06 SSIM 0.9915 | text: Y 39.91 sharp 0.992 fringe 35.5 | colour text: Y 39.13 Cb 23.59 fringe 56.6 | photo Y 45.92 | scroll panel sharp 0.991
+  VM: 773 kbit/s avg, switch second 105 kB, rest 4775 kB, CPU 14.0 % (host app 6.3 %)
+  latency median 113 ms, p95 158 ms (incl. clock offset), distinct frames/s 20.4
+== tether060vp9 (1 runs)
+  s1       all: Y 20.70 Cb 25.64 Cr 25.79 dB, SSIM 0.9405, MS-SSIM 0.9425 | left: Y 39.76 SSIM 0.9900 | text: Y 38.47 sharp 0.955 fringe 35.9 | colour text: Y 37.97 Cb 23.53 fringe 57.2 | photo Y 45.29 | scroll panel sharp 0.997
+  s2       all: Y 21.63 Cb 25.64 Cr 25.79 dB, SSIM 0.9447, MS-SSIM 0.9645 | left: Y 39.76 SSIM 0.9900 | text: Y 38.47 sharp 0.955 fringe 35.9 | colour text: Y 37.97 Cb 23.53 fringe 57.2 | photo Y 45.30 | scroll panel sharp 1.019
+  s3       all: Y 22.04 Cb 25.64 Cr 25.79 dB, SSIM 0.9481, MS-SSIM 0.9758 | left: Y 39.76 SSIM 0.9900 | text: Y 38.47 sharp 0.955 fringe 35.9 | colour text: Y 37.97 Cb 23.53 fringe 57.2 | photo Y 45.30 | scroll panel sharp 0.987
+  VM: 955 kbit/s avg, switch second 115 kB, rest 5901 kB, CPU 14.9 % (host app 6.5 %)
+  latency median 111 ms, p95 145 ms (incl. clock offset), distinct frames/s 20.7

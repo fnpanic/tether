@@ -18,8 +18,14 @@ procedure". 0.6.0 holds everything below under "Unreleased" plus the macOS host 
 
 Checked on the 0.6.0 files: the Windows viewer against the Mac host (WebKit drag e2e 4/4);
 TetherQS 0.6.0 as host with the Tether 0.6.0 viewer on one PC (Ready, session with a picture,
-direct, H.265); Tether Manage 0.6.0 starts and unlocks a test vault. Not checked: the installer
-itself, and TetherQS in the corporate-proxy VM (`vm-e2e.mjs`).
+direct, H.265); Tether Manage 0.6.0 starts and unlocks a test vault; TetherQS 0.6.0 in the bench
+VM with `vm-e2e.mjs` (ready, connect, recording declined and allowed; direct egress, the
+relay-outage part not run); the text drag in the WKWebView app itself on 0.6.0. Not checked: the
+installer itself, the corporate-proxy path.
+
+Against AnyDesk 9.8.3 (docs/performance.md "Tether 0.6.0 vs AnyDesk 9.8.3, repeated"): picture
+better on luma and text (39.2 against 35.2 dB), AnyDesk better on chroma and photos; scrolling
+latency through the relays 101-116 ms median against AnyDesk's 81 ms, cause not located.
 
 Known limit: nothing enforces the rule. Tether Manage's "Publish the latest builds" takes the
 highest version per app and platform from `dist/`, so a release with one platform's files
