@@ -7,6 +7,8 @@ import { GlRenderer, type SharpenMode } from "./sharpen";
 
 export const PKT_ENCODED = 0;
 export const PKT_RGBA = 1;
+/** Exact rows of a still picture (RGBA): `width`, `height` are the strip's, `pts` its first row. */
+export const PKT_EXACT = 2;
 export const CODEC = { vp8: 1, vp9: 2, av1: 3, h264: 4, h265: 5 } as const;
 export type CodecName = keyof typeof CODEC;
 
@@ -330,8 +332,26 @@ export class VideoPipeline {
     const p = parsePacket(buf);
     if (p.display !== this.display) return;
     this.packets++;
+    if (p.kind === PKT_EXACT) return this.exact(p);
+    // A new picture: strips still waiting belonged to the one before it.
+    this.strips.length = 0;
     if (p.kind === PKT_RGBA) return this.drawRgba(p);
     this.decode(p);
+  }
+
+  /** Exact rows of the still picture on screen. They follow its last video frame, which may still
+   * be in the decoder: then they wait until it is drawn (`output`). */
+  private strips: Packet[] = [];
+  private exact(p: Packet) {
+    if (this.pending.size) this.strips.push(p);
+    else this.drawStrip(p);
+  }
+
+  private drawStrip(p: Packet) {
+    const y = p.pts;
+    if (p.width !== this.w || y + p.height > this.h || p.data.length < p.width * p.height * 4) return;
+    if (this.gl) this.gl.strip(p.data, y, p.width, p.height);
+    else this.ctx!.putImageData(new ImageData(new Uint8ClampedArray(p.data.buffer as ArrayBuffer, p.data.byteOffset, p.width * p.height * 4), p.width, p.height), 0, y);
   }
 
   private resize(w: number, h: number) {
@@ -426,6 +446,7 @@ export class VideoPipeline {
       this.pending.delete(frame.timestamp);
     }
     frame.close();
+    if (!this.pending.size) for (const s of this.strips.splice(0)) this.drawStrip(s);
     this.tick();
   }
 

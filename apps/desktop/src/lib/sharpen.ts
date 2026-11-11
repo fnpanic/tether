@@ -179,6 +179,16 @@ export class GlRenderer {
     this.draw();
   }
 
+  /** Exact rows (RGBA) written into the picture on screen from row `y`; the next picture replaces it whole. */
+  strip(data: Uint8Array, y: number, w: number, h: number) {
+    const gl = this.gl;
+    if (gl.isContextLost() || w !== this.src.w || y + h > this.src.h) return;
+    // The shader swaps red and blue for a natively decoded (BGRA) picture: store the strip the same way.
+    if (this.bgra) for (let i = 0; i < w * h * 4; i += 4) [data[i], data[i + 2]] = [data[i + 2], data[i]];
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    this.draw();
+  }
+
   /** A natively decoded picture; BGRA is swizzled in the shader instead of in JS. */
   rgba(data: Uint8Array, w: number, h: number, bgra: boolean) {
     const gl = this.gl;

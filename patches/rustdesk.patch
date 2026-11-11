@@ -219,10 +219,31 @@ index 625f45d..333ff22 100644
 +[patch."https://github.com/rustdesk-org/webrtc"]
 +webrtc-sctp = { path = "../../crates/webrtc-sctp" }
 diff --git a/libs/base/protos/message.proto b/libs/base/protos/message.proto
-index 5f920bc..02650df 100644
+index 5f920bc..bd21a3c 100644
 --- a/libs/base/protos/message.proto
 +++ b/libs/base/protos/message.proto
-@@ -86,6 +86,8 @@ message LoginRequest {
+@@ -31,10 +31,20 @@ message VideoFrame {
+     EncodedVideoFrames h265s = 11;
+     EncodedVideoFrames vp8s = 12;
+     EncodedVideoFrames av1s = 13;
++    // Tether: exact pixels of a still picture, only for viewers with SupportedDecoding.exact_stills.
++    ExactStrip exact = 20;
+   }
+   int32 display = 14;
+ }
+ 
++// Tether: `height` full-width rows from row `y`: zstd of RGB, each pixel minus the one to its left.
++message ExactStrip {
++  uint32 y = 1;
++  uint32 width = 2;
++  uint32 height = 3;
++  bytes data = 4;
++}
++
+ message DisplayInfo {
+   sint32 x = 1;
+   sint32 y = 2;
+@@ -86,6 +96,8 @@ message LoginRequest {
    string avatar = 17;
    bytes trusted_device_v2_token = 18;
    bool trusted_device_v2_supported = 19;
@@ -231,6 +252,15 @@ index 5f920bc..02650df 100644
  }
  
  message Terminal {
+@@ -671,6 +683,8 @@ message SupportedDecoding {
+   int32 ability_av1 = 6;
+   CodecAbility i444 = 7;
+   Chroma prefer_chroma = 8;
++  // Tether: the viewer draws ExactStrip (VideoFrame.exact).
++  bool exact_stills = 20;
+ }
+ 
+ message OptionMessage {
 diff --git a/libs/base/src/config/keys.rs b/libs/base/src/config/keys.rs
 index 5f5bf8f..1228f95 100644
 --- a/libs/base/src/config/keys.rs
@@ -807,7 +837,7 @@ index d77c306..a12bfd0 100644
          (q_min, q_max)
      }
 diff --git a/libs/scrap/src/common/codec.rs b/libs/scrap/src/common/codec.rs
-index 606a4be..15e8d9a 100644
+index 606a4be..f2f10d7 100644
 --- a/libs/scrap/src/common/codec.rs
 +++ b/libs/scrap/src/common/codec.rs
 @@ -284,7 +284,10 @@ impl Encoder {
@@ -822,7 +852,28 @@ index 606a4be..15e8d9a 100644
                  // 4 Gb
                  auto_codec = CodecFormat::VP8
              }
-@@ -485,6 +488,13 @@ impl Decoder {
+@@ -400,6 +403,11 @@ impl Encoder {
+         }
+     }
+ 
++    /// Tether: this connection's viewer draws exact strips of a still picture.
++    pub fn exact_stills(id: i32) -> bool {
++        PEER_DECODINGS.lock().unwrap().get(&id).map_or(false, |d| d.exact_stills)
++    }
++
+     pub fn use_i444(config: &EncoderCfg) -> bool {
+         let decodings = PEER_DECODINGS.lock().unwrap().clone();
+         let prefer_i444 = decodings
+@@ -442,6 +450,8 @@ impl Decoder {
+             .into(),
+             prefer: prefer.into(),
+             prefer_chroma: prefer_chroma.into(),
++            // Tether's viewer (the Tauri app) draws exact strips of a still picture.
++            exact_stills: cfg!(feature = "tauri"),
+             ..Default::default()
+         };
+         #[cfg(feature = "hwcodec")]
+@@ -485,6 +495,13 @@ impl Decoder {
                      0
                  };
          }
@@ -836,7 +887,7 @@ index 606a4be..15e8d9a 100644
          for unsupported in mark_unsupported {
              match unsupported {
                  CodecFormat::VP8 => decoding.ability_vp8 = 0,
-@@ -822,9 +832,15 @@ impl Decoder {
+@@ -822,9 +839,15 @@ impl Decoder {
              return (PreferCodec::Auto, Chroma::I420);
          }
          let options = PeerConfig::load(id).options;
@@ -854,7 +905,7 @@ index 606a4be..15e8d9a 100644
          let codec = if codec == "vp8" {
              PreferCodec::VP8
          } else if codec == "vp9" {
-@@ -1017,6 +1033,12 @@ pub fn codec_thread_num(limit: usize) -> usize {
+@@ -1017,6 +1040,12 @@ pub fn codec_thread_num(limit: usize) -> usize {
      // libaom: MAX_NUM_THREADS = 64
      // libvpx: MAX_NUM_THREADS = 64
      // ffmpeg: MAX_AUTO_THREADS = 16
@@ -867,7 +918,7 @@ index 606a4be..15e8d9a 100644
      res = std::cmp::min(res, limit);
      // avoid frequent log
      let log = match THREAD_LOG_TIME.lock().unwrap().clone() {
-@@ -1143,8 +1165,11 @@ pub fn test_av1() {
+@@ -1143,8 +1172,11 @@ pub fn test_av1() {
                  non_key_frame_time,
                  pts.elapsed()
              );
@@ -881,7 +932,7 @@ index 606a4be..15e8d9a 100644
          };
          std::thread::spawn(move || {
              let v = f();
-@@ -1155,3 +1180,28 @@ pub fn test_av1() {
+@@ -1155,3 +1187,28 @@ pub fn test_av1() {
          });
      });
  }
@@ -2326,7 +2377,7 @@ index ea71ca4..fad142a 100644
 +    }
 +}
 diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
-index 1b197a8..983d20e 100644
+index 1b197a8..65d0ea5 100644
 --- a/src/client/io_loop.rs
 +++ b/src/client/io_loop.rs
 @@ -14,6 +14,9 @@ use crate::{
@@ -2419,8 +2470,14 @@ index 1b197a8..983d20e 100644
                  self.handler.lc.write().unwrap().record_state = start;
                  self.update_record_state();
              }
-@@ -1706,6 +1752,10 @@ impl<T: InvokeUiSession> Remote<T> {
+@@ -1704,8 +1750,16 @@ impl<T: InvokeUiSession> Remote<T> {
+                         self.send_toggle_virtual_display_msg(peer).await;
+                         self.send_toggle_privacy_mode_msg(peer).await;
                      }
++                    #[cfg(feature = "tauri")]
++                    if crate::ui::exact_passthrough(&self.handler.ui_handler, &vf) {
++                        return true;
++                    }
                      self.video_format = CodecFormat::from(&vf);
  
 +                    #[cfg(feature = "tauri")]
@@ -5709,10 +5766,28 @@ index 790f23b..e1b3490 100644
 +    }
 +}
 diff --git a/src/server/video_service.rs b/src/server/video_service.rs
-index a13aebb..493092d 100644
+index a13aebb..3195dce 100644
 --- a/src/server/video_service.rs
 +++ b/src/server/video_service.rs
-@@ -815,8 +815,10 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -65,6 +65,7 @@ use std::{
+ pub const OPTION_REFRESH: &'static str = "refresh";
+ 
+ mod static_refresh;
++pub mod exact_still;
+ 
+ #[cfg(windows)]
+ const DXGI_RECOVERY_LIMIT: usize = 3;
+@@ -726,6 +727,9 @@ fn run(vs: VideoService) -> ResultType<()> {
+     let mut yuv = Vec::new();
+     let mut mid_data = Vec::new();
+     let mut repeat_encode_counter = 0;
++    // Tether: exact pixels of a still picture, for the connections whose viewer draws them.
++    let mut exact = exact_still::ExactStill::default();
++    let mut exact_ids: HashSet<i32> = HashSet::new();
+     let repeat_encode_max = 10;
+     let mut encode_fail_counter = 0;
+     let mut first_frame = true;
+@@ -815,8 +819,10 @@ fn run(vs: VideoService) -> ResultType<()> {
  
          let time = now - start;
          let ms = (time.as_secs() * 1000 + time.subsec_millis() as u64) as i64;
@@ -5723,11 +5798,12 @@ index a13aebb..493092d 100644
                  repeat_encode_counter = 0;
                  if frame.valid() {
                      let screenshot_key = (vs.source, display_idx);
-@@ -866,8 +868,12 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -866,8 +872,13 @@ fn run(vs: VideoService) -> ResultType<()> {
                          }
                      }
  
 +                    static_refresh.restore_quality(&mut encoder, quality);
++                    exact.keep(&frame, !exact_ids.is_empty());
                      let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
 +                    #[cfg(feature = "tauri")]
 +                    fluxrt_stats::captured(t_got, t_cap0.elapsed() - t_got);
@@ -5736,7 +5812,32 @@ index a13aebb..493092d 100644
                      let result = handle_one_frame(
                          display_idx,
                          &sp,
-@@ -1007,8 +1013,11 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -882,6 +893,7 @@ fn run(vs: VideoService) -> ResultType<()> {
+                         capture_height,
+                     )?;
+                     static_refresh.on_frame_encoded(&result);
++                    exact_ids = result.send_conn_ids.iter().copied().filter(|id| Encoder::exact_stills(*id)).collect();
+                     frame_controller.set_send(now, result.send_conn_ids);
+                     send_counter += 1;
+                 }
+@@ -962,6 +974,16 @@ fn run(vs: VideoService) -> ResultType<()> {
+                     &mut encoder,
+                     &mut frame_controller,
+                 )?;
++                // Tether: the picture stands and is refined: its exact pixels, strip by strip.
++                if static_refresh.refined() && !exact_ids.is_empty() {
++                    let rate = (VIDEO_QOS.lock().unwrap().bitrate() as f64 * 125.0).max(exact_still::MIN_RATE);
++                    if let Some(msg) = exact.next_strip(display_idx, rate) {
++                        for id in exact_ids.iter() {
++                            sp.send_to(msg.clone(), *id);
++                        }
++                        frame_controller.set_send(now, exact_ids.clone());
++                    }
++                }
+             }
+             Err(err) => {
+                 #[cfg(windows)]
+@@ -1007,8 +1029,11 @@ fn run(vs: VideoService) -> ResultType<()> {
          }
  
          let mut fetched_conn_ids = HashSet::new();
@@ -5748,7 +5849,7 @@ index a13aebb..493092d 100644
          while wait_begin.elapsed().as_millis() < timeout_millis as _ {
              if vs.source.is_monitor() {
                  check_privacy_mode_changed(&sp, display_idx, &c)?;
-@@ -1018,8 +1027,28 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -1018,8 +1043,28 @@ fn run(vs: VideoService) -> ResultType<()> {
              if fetched_conn_ids.len() >= frame_controller.send_conn_ids.len() {
                  break;
              }
@@ -5777,7 +5878,7 @@ index a13aebb..493092d 100644
  
          let elapsed = now.elapsed();
          // may need to enable frame(timeout)
-@@ -1274,6 +1303,22 @@ fn refresh_allowed(unfed: bool, warmed_up: bool, latency_free: bool) -> bool {
+@@ -1274,6 +1319,22 @@ fn refresh_allowed(unfed: bool, warmed_up: bool, latency_free: bool) -> bool {
  }
  
  #[inline]
@@ -5800,7 +5901,7 @@ index a13aebb..493092d 100644
  fn handle_one_frame(
      display: usize,
      sp: &GenericService,
-@@ -1300,8 +1345,12 @@ fn handle_one_frame(
+@@ -1300,8 +1361,12 @@ fn handle_one_frame(
      let mut vpx_no_output = false;
      let first = *first_frame;
      *first_frame = false;
@@ -5813,7 +5914,7 @@ index a13aebb..493092d 100644
              *encode_fail_counter = 0;
              *encoder_warmed_up = true;
              vf.display = display as _;
-@@ -1315,6 +1364,8 @@ fn handle_one_frame(
+@@ -1315,6 +1380,8 @@ fn handle_one_frame(
              send_conn_ids = sp.send_video_frame(msg);
          }
          Err(e) => {
@@ -5822,7 +5923,7 @@ index a13aebb..493092d 100644
              vpx_no_output = e.is::<scrap::VpxNoOutput>();
              *encode_fail_counter += 1;
              // Encoding errors are not frequent except on Android
-@@ -1590,3 +1641,132 @@ mod tests {
+@@ -1590,3 +1657,132 @@ mod tests {
          assert!(refresh_allowed(true, false, false));
      }
  }
@@ -5955,8 +6056,174 @@ index a13aebb..493092d 100644
 +        *w = Window::default();
 +    }
 +}
+diff --git a/src/server/video_service/exact_still.rs b/src/server/video_service/exact_still.rs
+new file mode 100644
+index 0000000..369d422
+--- /dev/null
++++ b/src/server/video_service/exact_still.rs
+@@ -0,0 +1,160 @@
++//! Tether: the exact pixels of a still picture.
++//!
++//! Video is lossy and 4:2:0: small coloured text and photos stay a little off however long the
++//! picture stands. Once it stands still and the encoder has finished refining it, the host sends
++//! the captured pixels themselves in strips of a few rows, at a limited byte rate, to the viewers
++//! that asked for them (`SupportedDecoding.exact_stills`). The next captured picture starts over,
++//! so a moving picture never waits behind more than the one strip in flight.
++//! docs/performance.md "Exact still pictures".
++use base::message_proto::{video_frame, ExactStrip, Message, VideoFrame};
++use std::time::Instant;
++
++/// Rows per strip.
++const ROWS: usize = 32;
++/// Bytes per second the strips may use at least (the video bitrate when that is higher).
++pub(super) const MIN_RATE: f64 = 125_000.0;
++
++#[derive(Default)]
++pub(super) struct ExactStill {
++    bgra: Vec<u8>,
++    stride: usize,
++    w: usize,
++    h: usize, // 0: no pixels kept
++    next: usize,
++    debt: f64, // bytes sent ahead of the rate
++    last: Option<Instant>,
++}
++
++impl ExactStill {
++    /// A captured picture: keep its pixels if a viewer wants them, and start over.
++    pub(super) fn keep(&mut self, frame: &scrap::Frame, wanted: bool) {
++        use scrap::TraitPixelBuffer;
++        self.h = 0;
++        self.next = 0;
++        if !wanted {
++            return;
++        }
++        // No CPU pixels with a texture encoder: the feature is off there.
++        let scrap::Frame::PixelBuffer(f) = frame else {
++            return;
++        };
++        if f.pixfmt() != scrap::Pixfmt::BGRA {
++            return;
++        }
++        let (w, h) = (f.width(), f.height());
++        let stride = f.stride().first().copied().unwrap_or(0);
++        let data = f.data();
++        if w == 0 || stride < w * 4 || data.len() < stride * h {
++            return;
++        }
++        self.bgra.clear();
++        self.bgra.extend_from_slice(&data[..stride * h]);
++        (self.w, self.h, self.stride) = (w, h, stride);
++    }
++
++    /// The next strip of the kept picture, if there is one and the byte rate allows it.
++    pub(super) fn next_strip(&mut self, display: usize, rate: f64) -> Option<Message> {
++        if self.next >= self.h {
++            return None;
++        }
++        let now = Instant::now();
++        if let Some(last) = self.last.replace(now) {
++            self.debt = (self.debt - rate * now.duration_since(last).as_secs_f64().min(1.0)).max(0.0);
++        }
++        if self.debt > 0.0 {
++            return None;
++        }
++        let rows = ROWS.min(self.h - self.next);
++        let data = hbb_common::compress::compress(&filtered(&self.bgra, self.stride, self.w, self.next, rows));
++        self.debt = data.len() as f64;
++        let mut vf = VideoFrame::new();
++        vf.display = display as _;
++        vf.union = Some(video_frame::Union::Exact(ExactStrip {
++            y: self.next as _,
++            width: self.w as _,
++            height: rows as _,
++            data: data.into(),
++            ..Default::default()
++        }));
++        self.next += rows;
++        let mut msg = Message::new();
++        msg.set_video_frame(vf);
++        Some(msg)
++    }
++}
++
++/// RGB of `rows` rows from row `y`, each pixel minus the one to its left (wrapping): flat areas
++/// and text become runs of zeros, photos small numbers. `exact_rows` is the inverse.
++fn filtered(bgra: &[u8], stride: usize, w: usize, y: usize, rows: usize) -> Vec<u8> {
++    let mut out = Vec::with_capacity(w * rows * 3);
++    for row in bgra[y * stride..].chunks(stride).take(rows) {
++        let mut prev = [0u8; 3];
++        for p in row[..w * 4].chunks_exact(4) {
++            let rgb = [p[2], p[1], p[0]];
++            for c in 0..3 {
++                out.push(rgb[c].wrapping_sub(prev[c]));
++            }
++            prev = rgb;
++        }
++    }
++    out
++}
++
++/// The viewer side: opaque RGBA rows from a strip's decompressed data; `None` if the size is wrong.
++pub fn exact_rows(filtered: &[u8], w: usize, rows: usize) -> Option<Vec<u8>> {
++    if w == 0 || filtered.len() != w * rows * 3 {
++        return None;
++    }
++    let mut out = Vec::with_capacity(w * rows * 4);
++    for row in filtered.chunks_exact(w * 3) {
++        let mut px = [0u8; 3];
++        for d in row.chunks_exact(3) {
++            for c in 0..3 {
++                px[c] = px[c].wrapping_add(d[c]);
++            }
++            out.extend_from_slice(&[px[0], px[1], px[2], 255]);
++        }
++    }
++    Some(out)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn strip_round_trip_with_a_wide_stride() {
++        // 3x2 picture, stride 16 (4 bytes of padding per row), BGRA.
++        let mut bgra = vec![0u8; 32];
++        let px = [[10u8, 20, 30], [10, 20, 30], [250, 0, 7], [1, 2, 3], [255, 255, 255], [0, 0, 0]];
++        for (i, p) in px.iter().enumerate() {
++            let o = (i / 3) * 16 + (i % 3) * 4;
++            bgra[o..o + 4].copy_from_slice(&[p[2], p[1], p[0], 0]);
++        }
++        let f = filtered(&bgra, 16, 3, 0, 2);
++        assert_eq!(&f[3..6], &[0, 0, 0]); // the second pixel equals the first
++        let rgba = exact_rows(&f, 3, 2).unwrap();
++        for (i, p) in px.iter().enumerate() {
++            assert_eq!(&rgba[i * 4..i * 4 + 4], &[p[0], p[1], p[2], 255]);
++        }
++        assert!(exact_rows(&f, 3, 3).is_none());
++    }
++
++    #[test]
++    fn strips_cover_the_picture_once_and_respect_the_rate() {
++        let mut e = ExactStill { bgra: vec![7; 16 * 70], stride: 16, w: 4, h: 70, ..Default::default() };
++        let rows = |m: &Message| match &m.video_frame().union {
++            Some(video_frame::Union::Exact(s)) => (s.y, s.height),
++            _ => panic!("not a strip"),
++        };
++        assert_eq!(rows(&e.next_strip(0, 1e9).unwrap()), (0, 32));
++        // Sent ahead of a tiny rate: nothing more for now.
++        assert!(e.next_strip(0, 1.0).is_none());
++        e.debt = 0.0;
++        assert_eq!(rows(&e.next_strip(0, 1e9).unwrap()), (32, 32));
++        e.debt = 0.0;
++        assert_eq!(rows(&e.next_strip(0, 1e9).unwrap()), (64, 6));
++        e.debt = 0.0;
++        assert!(e.next_strip(0, 1e9).is_none());
++    }
++}
 diff --git a/src/server/video_service/static_refresh.rs b/src/server/video_service/static_refresh.rs
-index 32d4fec..cc8be88 100644
+index 32d4fec..ed1ee25 100644
 --- a/src/server/video_service/static_refresh.rs
 +++ b/src/server/video_service/static_refresh.rs
 @@ -1,6 +1,6 @@
@@ -6012,7 +6279,7 @@ index 32d4fec..cc8be88 100644
      #[cfg(all(windows, feature = "vram"))]
      has_texture: bool,
  }
-@@ -138,11 +153,19 @@ impl<'a> StaticRefresh<'a> {
+@@ -138,11 +153,24 @@ impl<'a> StaticRefresh<'a> {
              repeat_no_outputs: 0,
              repeat_failures: 0,
              source_ready: false,
@@ -6022,6 +6289,11 @@ index 32d4fec..cc8be88 100644
          }
      }
  
++    /// Tether: the still picture has had all its repeats (exact_still.rs sends its pixels then).
++    pub(super) fn refined(&self) -> bool {
++        self.source_ready && self.repeat_output_limit > 0 && self.repeat_output_counter >= self.repeat_output_limit
++    }
++
 +    /// Tether: a new captured frame is coded at the QoS ratio again, not at the refinement quality.
 +    pub(super) fn restore_quality(&mut self, encoder: &mut Encoder, quality: f32) {
 +        if self.boosted.take().is_some() {
@@ -6032,7 +6304,7 @@ index 32d4fec..cc8be88 100644
      pub(super) fn on_frame(&mut self, _frame: &EncodeInput) {
          self.repeat_output_counter = 0;
          self.repeat_output_limit = 0;
-@@ -195,7 +218,6 @@ impl<'a> StaticRefresh<'a> {
+@@ -195,7 +223,6 @@ impl<'a> StaticRefresh<'a> {
              self.hardware_backend,
          ));
          if !self.source.is_monitor()
@@ -6040,7 +6312,7 @@ index 32d4fec..cc8be88 100644
              || !self.source_ready
              || (self.repeat_failures >= MAX_REPEAT_FAILURES
                  && !matches!(
-@@ -209,7 +231,10 @@ impl<'a> StaticRefresh<'a> {
+@@ -209,7 +236,10 @@ impl<'a> StaticRefresh<'a> {
                  let elapsed = self.last_encode.elapsed();
                  #[cfg(test)]
                  let elapsed = self.elapsed_since_encode;
@@ -6052,7 +6324,7 @@ index 32d4fec..cc8be88 100644
                      || (self.repeat_output_counter == 0 && self.repeat_no_outputs == 0)
                  {
                      INITIAL_REPEAT_INTERVAL.max(spf)
-@@ -236,8 +261,21 @@ impl<'a> StaticRefresh<'a> {
+@@ -236,8 +266,21 @@ impl<'a> StaticRefresh<'a> {
                  Ok(())
              })?;
  
@@ -6075,7 +6347,7 @@ index 32d4fec..cc8be88 100644
                  Instant::now()
              } else {
                  // Align with the capture loop so encoding time does not skip the next tick.
-@@ -548,13 +586,13 @@ mod tests {
+@@ -548,13 +591,13 @@ mod tests {
      }
  
      #[test]
@@ -6091,7 +6363,7 @@ index 32d4fec..cc8be88 100644
              (VideoSource::Monitor, CodecFormat::VP9, &[][..]),
          ] {
              let mut refresh = new_refresh(source, codec_format, &sp, &recorder, 0, 1, 1);
-@@ -566,6 +604,83 @@ mod tests {
+@@ -566,6 +609,83 @@ mod tests {
          assert_eq!(calls.get(), 0);
      }
  
@@ -6362,10 +6634,10 @@ index 0000000..8911df8
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..058f212
+index 0000000..3102bfc
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,443 @@
 +//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
 +//!
 +//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
@@ -6424,6 +6696,8 @@ index 0000000..058f212
 +/// Packet kinds.
 +pub const PKT_ENCODED: u8 = 0;
 +pub const PKT_RGBA: u8 = 1;
++/// Exact rows of a still picture (RGBA): `w`, `h` are the strip's, `pts` its first row.
++pub const PKT_EXACT: u8 = 2;
 +/// Codec ids inside an encoded packet.
 +pub const CODEC_VP8: u8 = 1;
 +pub const CODEC_VP9: u8 = 2;
@@ -6457,6 +6731,28 @@ index 0000000..058f212
 +
 +fn codec_bit(codec: u8) -> u8 {
 +    1 << codec
++}
++
++/// An exact strip of a still picture (`VideoFrame.exact`): its rows go to the webview as RGBA.
++/// Returns `true` when `vf` was such a strip (it is never a picture to decode).
++pub fn exact_passthrough<T: InvokeUiSession>(handler: &T, vf: &VideoFrame) -> bool {
++    let Some(video_frame::Union::Exact(s)) = &vf.union else {
++        return false;
++    };
++    let Some(h) = (handler as &dyn std::any::Any).downcast_ref::<TauriHandler>() else {
++        return true;
++    };
++    let rows = crate::server::video_service::exact_still::exact_rows(
++        &hbb_common::compress::decompress(&s.data),
++        s.width as usize,
++        s.height as usize,
++    );
++    if let (Some(rows), Some(sink)) = (rows, sink()) {
++        let mut pkt = encode_video_header(PKT_EXACT, 0, 0, vf.display as usize, s.width, s.height, s.y as i64, rows.len());
++        pkt.extend_from_slice(&rows);
++        sink.video(&h.key(), pkt);
++    }
++    true
 +}
 +
 +/// Called from the client io loop for every received video frame. Returns `true` when the
