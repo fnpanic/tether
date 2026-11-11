@@ -1,18 +1,29 @@
 # Changelog
 
 All notable changes to Tether. Versions follow [Semantic Versioning](https://semver.org/);
-the desktop app version is kept in sync in `apps/desktop/package.json`,
-`apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`.
+from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in each app's
+`package.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json`
+(`apps/desktop`, `apps/quick`, `apps/manage`).
 
 ## [Unreleased]
 
 ### One version number for every app: 0.6.0 (2026-11-11; built, not published yet)
 
-From 0.6.0 on, Tether (technician app), TetherQS and Tether Manage carry **the same version on
-Windows and macOS**, and a release bumps, builds and publishes all of them together. Before, the
-numbers had drifted (Tether 0.5.35 on macOS / 0.5.33 on Windows, TetherQS 0.5.33 / 0.5.31, Tether
-Manage 0.5.15), and a Mac-only rebuild needed its own number. Procedure: docs/updates.md "Release
+From 0.6.0 on, Tether (technician app) and TetherQS on Windows and macOS and Tether Manage
+(Windows only) carry **the same version**, and a release bumps and builds all of them together.
+Before, the published numbers had drifted (Tether 0.5.35 on macOS / 0.5.33 on Windows, TetherQS
+0.5.33 / 0.5.31, Tether Manage 0.5.15), and a Mac-only rebuild needed its own number (0.5.36 /
+0.5.34 were built on 2026-11-11 and never published). Procedure: docs/updates.md "Release
 procedure". 0.6.0 holds everything below under "Unreleased" plus the macOS host fixes.
+
+Checked on the 0.6.0 files: the Windows viewer against the Mac host (WebKit drag e2e 4/4);
+TetherQS 0.6.0 as host with the Tether 0.6.0 viewer on one PC (Ready, session with a picture,
+direct, H.265); Tether Manage 0.6.0 starts and unlocks a test vault. Not checked: the installer
+itself, and TetherQS in the corporate-proxy VM (`vm-e2e.mjs`).
+
+Known limit: nothing enforces the rule. Tether Manage's "Publish the latest builds" takes the
+highest version per app and platform from `dist/`, so a release with one platform's files
+missing publishes the others without a warning.
 
 ### macOS host (2026-11-11; in 0.6.0)
 

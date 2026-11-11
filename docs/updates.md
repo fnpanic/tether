@@ -263,11 +263,16 @@ token). Tests of the Worker script: `npm test` in `server/cloudflare/worker`.
 
 ## Release procedure
 
-1. **One version for everything** (from 0.6.0): Tether, TetherQS and Tether Manage carry the same
-   number on Windows and macOS, and every release bumps, builds and publishes all of them, also
-   when only one app or platform changed. Set it in `apps/{desktop,quick,manage}`:
+1. **One version for everything** (from 0.6.0): Tether and TetherQS (Windows and macOS) and
+   Tether Manage (Windows only) carry the same number, and every release bumps and builds all of
+   them, also when only one app or platform changed. Set it in `apps/{desktop,quick,manage}`:
    `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and the app's own entry in
-   `src-tauri/Cargo.lock`.
+   `src-tauri/Cargo.lock`. Tether Manage is not in the release index (it is not published to
+   devices): build it with the same four variables (`npx tauri build` in `apps/manage`) and keep
+   `tether-manage.exe` as `dist/manage/Tether Manage <version>.exe`. Nothing enforces the rule:
+   before publishing, check that `dist/` holds every file of the new version (Windows setup,
+   TetherQS exe, Mac dmg, `.app.tar.gz`, TetherQS zip); "Publish the latest builds" takes the
+   highest version per app and platform it finds.
 2. Build with the four release variables (`TETHER_SERVER`, `TETHER_PUB_KEY`,
    `TETHER_ADMIN_PUB_KEY`, `TETHER_UPDATER_PUB_KEY`), see [deployment.md](deployment.md):
    technician `npx tauri build --bundles nsis` → `Tether_<version>_x64-setup.exe`; TetherQS
