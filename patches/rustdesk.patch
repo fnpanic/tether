@@ -173,10 +173,10 @@ index dbd9917..cbd4d66 100644
              .map(|tx| tx.send("".to_string()).ok());
 diff --git a/libs/enigo/src/macos/hid_post.rs b/libs/enigo/src/macos/hid_post.rs
 new file mode 100644
-index 0000000..d2d1ab7
+index 0000000..bce2920
 --- /dev/null
 +++ b/libs/enigo/src/macos/hid_post.rs
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,138 @@
 +//! Left-button drags through IOKit's HID event path (`IOHIDPostEvent`).
 +//!
 +//! The Screenshot app's selection (Cmd+Shift+5) grows only by the deltas of drags that enter at the
@@ -216,7 +216,10 @@ index 0000000..d2d1ab7
 +
 +extern "C" {
 +    static mach_task_self_: u32;
++    fn CGEventSourceCounterForEventType(state_id: i32, event_type: u32) -> u32;
 +}
++
++const CG_HID_SYSTEM_STATE: i32 = 1;
 +
 +/// Where the last HID event put the pointer: a drag carries the step from there as its delta.
 +static LAST: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
@@ -274,8 +277,24 @@ index 0000000..d2d1ab7
 +/// Right before the left button goes down at (x, y) (global points): the pointer got there by
 +/// CGEvents, which the HID side does not see, so a HID move to the same point (button still up)
 +/// lets the first drag's delta start from here.
++///
++/// The HID path is slower than a CGEvent: without the wait the move reaches the app after the
++/// press, as a plain move with the button down, and WebKit views then drop the text selection the
++/// drag should make (seen: a WKWebView text field, 2026-11-11). So wait until the window server
++/// has counted the move.
 +pub fn left_pressed(x: f64, y: f64, flags: u32) -> bool {
-+    post(NX_MOUSEMOVED, x, y, 0.0, 0.0, flags)
++    let moves = || unsafe { CGEventSourceCounterForEventType(CG_HID_SYSTEM_STATE, NX_MOUSEMOVED) };
++    let before = moves();
++    if !post(NX_MOUSEMOVED, x, y, 0.0, 0.0, flags) {
++        return false;
++    }
++    // shortcut: 30 ms cap, then the press goes out anyway (a late press is worse than a lost selection).
++    let start = std::time::Instant::now();
++    while moves() == before && start.elapsed() < std::time::Duration::from_millis(30) {
++        std::thread::sleep(std::time::Duration::from_micros(500));
++    }
++    log::trace!("HID sync move counted after {:?}", start.elapsed());
++    true
 +}
 +
 +/// A drag with the left button held, to (x, y).
