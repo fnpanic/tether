@@ -908,6 +908,64 @@ index 0000000..ab29c0a
 +        let _ = self.pool.Close();
 +    }
 +}
+diff --git a/libs/scrap/src/quartz/config.rs b/libs/scrap/src/quartz/config.rs
+index d5f992f..97b447f 100644
+--- a/libs/scrap/src/quartz/config.rs
++++ b/libs/scrap/src/quartz/config.rs
+@@ -4,7 +4,7 @@ use hbb_common::libc::c_void;
+ 
+ use super::ffi::*;
+ 
+-//TODO: Color space, YCbCr matrix.
++//TODO: YCbCr matrix.
+ pub struct Config {
+     /// Whether the cursor is visible.
+     pub cursor: bool,
+@@ -33,30 +33,41 @@ impl Config {
+                 &self.queue_length as *const _ as *const c_void,
+             );
+ 
+-            let keys: [CFStringRef; 4] = [
++            // Frames in sRGB: without this they come in the display's own space (Display P3 on a
++            // MacBook) and viewers, which show them as sRGB, get washed-out colours (sRGB red
++            // arrived as 233,51,35).
++            let srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
++            let keys: [CFStringRef; 5] = [
+                 kCGDisplayStreamShowCursor,
+                 kCGDisplayStreamPreserveAspectRatio,
+                 kCGDisplayStreamMinimumFrameTime,
+                 kCGDisplayStreamQueueDepth,
++                kCGDisplayStreamColorSpace,
+             ];
+-            let values: [*mut c_void; 4] = [
++            let values: [*mut c_void; 5] = [
+                 cfbool(self.cursor),
+                 cfbool(self.letterbox),
+                 throttle,
+                 queue_length,
++                srgb,
+             ];
++            // A null colour space (never seen) leaves the key out: the stream is created as before.
++            let count = if srgb.is_null() { 4 } else { 5 };
+ 
+             let res = CFDictionaryCreate(
+                 ptr::null_mut(),
+                 keys.as_ptr(),
+                 values.as_ptr(),
+-                4,
++                count,
+                 &kCFTypeDictionaryKeyCallBacks,
+                 &kCFTypeDictionaryValueCallBacks,
+             );
+ 
+             CFRelease(throttle);
+             CFRelease(queue_length);
++            if !srgb.is_null() {
++                CFRelease(srgb);
++            }
+ 
+             res
+         }
 diff --git a/libs/scrap/src/quartz/display.rs b/libs/scrap/src/quartz/display.rs
 index 137d648..cf71fab 100644
 --- a/libs/scrap/src/quartz/display.rs
@@ -985,6 +1043,20 @@ index 137d648..cf71fab 100644
 +        assert_eq!(super::even(1), 1);
 +    }
 +}
+diff --git a/libs/scrap/src/quartz/ffi.rs b/libs/scrap/src/quartz/ffi.rs
+index c55bc8c..b7d8185 100644
+--- a/libs/scrap/src/quartz/ffi.rs
++++ b/libs/scrap/src/quartz/ffi.rs
+@@ -162,6 +162,9 @@ extern "C" {
+     pub static kCGDisplayStreamPreserveAspectRatio: CFStringRef;
+     pub static kCGDisplayStreamMinimumFrameTime: CFStringRef;
+     pub static kCGDisplayStreamQueueDepth: CFStringRef;
++    pub static kCGDisplayStreamColorSpace: CFStringRef;
++    pub static kCGColorSpaceSRGB: CFStringRef;
++    pub fn CGColorSpaceCreateWithName(name: CFStringRef) -> *mut c_void;
+ 
+     pub fn CGDisplayStreamCreateWithDispatchQueue(
+         display: u32,
 diff --git a/src/client.rs b/src/client.rs
 index 597dc86..76085e4 100644
 --- a/src/client.rs
