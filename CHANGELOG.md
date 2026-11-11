@@ -6,7 +6,7 @@ the desktop app version is kept in sync in `apps/desktop/package.json`,
 
 ## [Unreleased]
 
-### macOS host (2026-11-11; on the build Mac, not released)
+### macOS host (2026-11-11; Tether 0.5.36 and TetherQS 0.5.34 for macOS, built, not published yet)
 
 - **Text could not be selected by dragging in WebKit views** (seen in a WKWebView app's text
   field; local input and other windows were fine). The HID move Tether posts right before a left
