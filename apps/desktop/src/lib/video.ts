@@ -7,7 +7,9 @@ import { GlRenderer, type SharpenMode } from "./sharpen";
 
 export const PKT_ENCODED = 0;
 export const PKT_RGBA = 1;
-/** Exact rows of a still picture (RGBA): `width`, `height` are the strip's, `pts` its first row. */
+/** Exact rows of a still picture. `codec` 0: `width`, `height` are the strip's, `pts` its first
+ * row, the data its hash (u32) and RGBA rows. `codec` 1: the strips held here that go back over
+ * the frame before (u32 pairs of first row and hash). */
 export const PKT_EXACT = 2;
 export const CODEC = { vp8: 1, vp9: 2, av1: 3, h264: 4, h265: 5 } as const;
 export type CodecName = keyof typeof CODEC;
@@ -336,25 +338,50 @@ export class VideoPipeline {
     this.decode(p);
   }
 
-  /** Exact rows of the still picture on screen. They follow its last video frame, which may still
-   * be in the decoder: then they wait until it is drawn (`output`). */
+  /** Exact rows of the parts of the picture that stand still (the host's exact_still.rs). They
+   * follow a video frame, which may still be in the decoder: then they wait until it is drawn
+   * (`output`). Every video frame replaces the whole picture; the host then names the strips
+   * that are unchanged and they go back over it from `held`. Only with WebCodecs decoding: a
+   * natively decoded picture takes another path and could arrive after its strips. */
   private strips: Packet[] = [];
+  private native = false; // the picture on screen was decoded natively (PKT_RGBA)
+  private held = new Map<number, { hash: number; rows: Uint8Array; h: number }>();
   private exact(p: Packet) {
+    if (this.native) return;
     if (this.pending.size) this.strips.push(p);
-    else this.drawStrip(p);
+    else this.drawExact([p]);
   }
 
-  private drawStrip(p: Packet) {
-    const y = p.pts;
-    if (p.width !== this.w || y + p.height > this.h || p.data.length < p.width * p.height * 4) return;
-    if (this.gl) this.gl.strip(p.data, y, p.width, p.height);
-    else this.ctx!.putImageData(new ImageData(new Uint8ClampedArray(p.data.buffer as ArrayBuffer, p.data.byteOffset, p.width * p.height * 4), p.width, p.height), 0, y);
+  private drawExact(ps: Packet[]) {
+    let drawn = false;
+    const rows = (y: number, data: Uint8Array, h: number) => {
+      if (y + h > this.h || data.length !== this.w * h * 4) return;
+      if (this.gl) this.gl.strip(data, y, this.w, h);
+      else this.ctx!.putImageData(new ImageData(new Uint8ClampedArray(data.buffer as ArrayBuffer, data.byteOffset, data.length), this.w, h), 0, y);
+      drawn = true;
+    };
+    for (const p of ps) {
+      if (p.width !== this.w) continue;
+      const v = new DataView(p.data.buffer, p.data.byteOffset, p.data.byteLength);
+      if (p.codec === 1) {
+        for (let i = 0; i + 8 <= v.byteLength; i += 8) {
+          const s = this.held.get(v.getUint32(i, true));
+          if (s && s.hash === v.getUint32(i + 4, true)) rows(v.getUint32(i, true), s.rows, s.h);
+        }
+      } else if (p.data.length === 4 + p.width * p.height * 4) {
+        const s = { hash: v.getUint32(0, true), rows: p.data.subarray(4), h: p.height };
+        this.held.set(p.pts, s);
+        rows(p.pts, s.rows, s.h);
+      }
+    }
+    if (drawn) this.gl?.draw();
   }
 
   private resize(w: number, h: number) {
     if (w === this.w && h === this.h) return;
     this.w = w;
     this.h = h;
+    this.held.clear(); // exact rows of the old size
     // The WebGL canvas is sized to its on-screen pixels instead (GlRenderer), the shader scales.
     if (!this.gl) {
       this.canvas.width = w;
@@ -390,6 +417,7 @@ export class VideoPipeline {
   }
 
   private decode(p: Packet) {
+    this.native = false;
     if (!this.decoder || this.decoder.state === "closed" || p.codec !== this.codec) {
       this.configure(p.codec);
     }
@@ -443,11 +471,12 @@ export class VideoPipeline {
       this.pending.delete(frame.timestamp);
     }
     frame.close();
-    if (!this.pending.size) for (const s of this.strips.splice(0)) this.drawStrip(s);
+    if (!this.pending.size && this.strips.length) this.drawExact(this.strips.splice(0));
     this.tick();
   }
 
   private drawRgba(p: Packet) {
+    this.native = true;
     this.fed++;
     if (this.devStall === "native") return this.cb.onRgbaDrawn?.();
     this.resize(p.width, p.height);
