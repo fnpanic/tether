@@ -7,7 +7,15 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ## [Unreleased]
 
-### One version number for every app: 0.6.0 (2026-11-11; built, not published yet)
+### 0.6.1 (2026-11-11; built, not published yet)
+
+0.6.0 was published on 2026-11-11 (release index serial 53) with the macOS host fixes and the
+review fixes below. What came after it that evening is 0.6.1 for all three apps: the file
+transfer fixes and the picture and latency changes in the next two sections. A published
+number is never built again: Tether Manage takes a version the relays already have as up to
+date, and devices that installed it would not take a second file under the same number.
+
+### One version number for every app: 0.6.0 (published 2026-11-11), 0.6.1 (built)
 
 From 0.6.0 on, Tether (technician app) and TetherQS on Windows and macOS and Tether Manage
 (Windows only) carry **the same version**, and a release bumps and builds all of them together.
@@ -31,7 +39,7 @@ Known limit: nothing enforces the rule. Tether Manage's "Publish the latest buil
 highest version per app and platform from `dist/`, so a release with one platform's files
 missing publishes the others without a warning.
 
-### File transfer (2026-11-11; in 0.6.0)
+### File transfer (2026-11-11; in 0.6.1)
 
 - **Going up to the drive root failed.** From `C:\Users` the viewer asked the host for `C:` (no
   backslash), which Windows reads as "the current folder on C:"; the request timed out
@@ -49,7 +57,7 @@ missing publishes the others without a warning.
   `C:\` and the drive list reached and a drive opened from it, "Access is denied" for
   `C:\Windows`, the two name messages.
 
-### Picture and latency (2026-11-11; in 0.6.0)
+### Picture and latency (2026-11-11; in 0.6.1)
 
 - Relay connections over WebSocket no longer use Nagle's algorithm (as the other paths already
   did not).
