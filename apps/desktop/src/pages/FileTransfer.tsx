@@ -5,6 +5,7 @@ import { Button, IconButton, Logo, Modal, TextField, TitleBar } from "../compone
 import { errorText } from "../lib/policy";
 import { clickSelect, emptySelection, moveSelect, selectAll } from "../lib/selection";
 import { passwordWhy, RESUME_GRACE_MS } from "../lib/login";
+import { join, parent } from "../lib/paths";
 
 interface Entry {
   name: string;
@@ -49,18 +50,6 @@ function fmtSize(n: number) {
   return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
 }
 
-function join(dir: string, name: string, sep: string) {
-  if (!dir) return name;
-  return dir.endsWith(sep) ? dir + name : dir + sep + name;
-}
-
-function parent(dir: string, sep: string) {
-  const t = dir.endsWith(sep) && dir.length > 1 ? dir.slice(0, -1) : dir;
-  const i = t.lastIndexOf(sep);
-  if (i <= 0) return sep === "/" ? "/" : t.length <= 3 ? "" : t.slice(0, i + 1);
-  return t.slice(0, i) || sep;
-}
-
 let nextJob = 1;
 // Jobs run side by side in the core (it interleaves them); a few at a time keeps each one moving.
 const MAX_RUNNING = 2;
@@ -75,7 +64,9 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
   const [pw, setPw] = useState("");
   const [remember, setRemember] = useState(false);
   const [existing, setExisting] = useState<Existing[]>([]);
-  const [newFolder, setNewFolder] = useState<string | null>(null);
+  const [newFolder, setNewFolder] = useState<{ remote: boolean; name: string } | null>(null);
+  // Folder creations under way: a refusal (no permission, name taken) has no job row to show it.
+  const creates = useRef(new Set<number>());
   const [waiting, setWaiting] = useState(false);
   // The session could not start (policy, update required): no listing will come.
   const [failed, setFailed] = useState(false);
@@ -142,13 +133,14 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           setJobs((js) => js.map((j) => (j.id === p.id ? { ...j, done: p.finished_size, speed: p.speed } : j)));
           break;
         case "job_done":
+          creates.current.delete(p.id);
           setJobs((js) => js.map((j) => (j.id === p.id ? { ...j, state: "done", done: j.total || j.done } : j)));
           loadRemote(remotePathRef.current);
           setLocal((l) => (loadLocal(l.path), l));
           break;
         case "job_error":
           // No job: the remote refused to list a folder (e.g. Tether's own files there).
-          if (!p.id) setError(errorText(p.err));
+          if (!p.id || creates.current.delete(p.id)) setError(errorText(p.err));
           setJobs((js) => js.map((j) => (j.id === p.id ? { ...j, state: "error", err: p.err } : j)));
           break;
         case "override_file":
@@ -288,6 +280,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           onOpen={(e) => loadLocal(join(local.path, e.name, localSep))}
           onUp={() => loadLocal(parent(local.path, localSep))}
           onRefresh={() => loadLocal(local.path)}
+          onNewFolder={() => setNewFolder({ remote: false, name: "" })}
           onTransfer={(es) => transfer("local", es)}
           transferIcon={<ArrowUpFromLine size={15} />}
           transferLabel="Upload"
@@ -307,7 +300,7 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           onTransfer={(es) => transfer("remote", es)}
           transferIcon={<ArrowDownToLine size={15} />}
           transferLabel="Download"
-          onNewFolder={() => setNewFolder("")}
+          onNewFolder={() => setNewFolder({ remote: true, name: "" })}
           onDelete={setToDelete}
           onDropFrom="local"
           onDrop={(names) => transfer("local", local.entries.filter((x) => names.includes(x.name)))}
@@ -319,23 +312,24 @@ export function FileTransfer({ sessionKey: key, peer }: { sessionKey: string; pe
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              const n = newFolder.trim();
+              const n = newFolder.name.trim();
               if (!n) return;
               setNewFolder(null);
-              invoke("fs_create_dir", { key, id: nextJob++, path: join(remote.path, n, remoteSep), isRemote: true }).then(
-                () => setTimeout(() => loadRemote(remote.path), 300),
-                (e) => setError(errorText(e)),
-              );
+              const id = nextJob++;
+              creates.current.add(id);
+              const path = newFolder.remote ? join(remote.path, n, remoteSep) : join(local.path, n, localSep);
+              // The listing is read again when the job reports done (`job_done`).
+              invoke("fs_create_dir", { key, id, path, isRemote: newFolder.remote }).catch((e) => setError(errorText(e)));
             }}
           >
             <h2 className="text-headline font-semibold">New folder</h2>
-            <p className="mt-2 text-callout text-muted">Created on the remote device in {remote.path || "the current folder"}.</p>
-            <TextField className="mt-4" aria-label="Folder name" placeholder="Folder name" value={newFolder} onChange={(e) => setNewFolder(e.target.value.slice(0, 255))} />
+            <p className="mt-2 text-callout text-muted">Created on {newFolder.remote ? "the remote device" : "this computer"} in {(newFolder.remote ? remote.path : local.path) || "the current folder"}.</p>
+            <TextField className="mt-4" aria-label="Folder name" placeholder="Folder name" value={newFolder.name} onChange={(e) => setNewFolder({ ...newFolder, name: e.target.value.slice(0, 255) })} />
             <div className="mt-6 flex gap-2">
               <Button type="button" className="flex-1" onClick={() => setNewFolder(null)}>
                 Cancel
               </Button>
-              <Button type="submit" variant="primary" className="flex-1" disabled={!newFolder.trim()}>
+              <Button type="submit" variant="primary" className="flex-1" disabled={!newFolder.name.trim()}>
                 Create
               </Button>
             </div>

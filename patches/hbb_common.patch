@@ -740,7 +740,7 @@ index f33f914..1703bbd 100644
      // session's final close (here via `Stream`'s Drop) is issued. Both land on the serialized
      // closer thread, so the first runs to completion and the second is a benign no-op — the pc
 diff --git a/src/websocket.rs b/src/websocket.rs
-index 3a98a84..c232d43 100644
+index 3a98a84..838514a 100644
 --- a/src/websocket.rs
 +++ b/src/websocket.rs
 @@ -19,7 +19,10 @@ use std::{
@@ -945,7 +945,7 @@ index 3a98a84..c232d43 100644
                          .await
                          .map(|(stream, _)| (stream, addr)),
                  )
-@@ -201,11 +294,11 @@ impl WsFramedStream {
+@@ -201,11 +294,14 @@ impl WsFramedStream {
              .await??
              .map(Either::Right)
          } else {
@@ -954,15 +954,18 @@ index 3a98a84..c232d43 100644
 -                Duration::from_millis(ms_timeout),
 -                connect_async_tls_with_config(request, ws_config, disable_nagle, connector),
 -            )
-+            // What connect_async_tls_with_config does (Nagle left on), with the socket counted.
++            // What connect_async_tls_with_config does, with the socket counted and Nagle off as on
++            // the proxy and TCP paths: a frame's last packet and every input message otherwise
++            // wait for the acknowledgement of the data before them (up to one round trip).
 +            timeout(Duration::from_millis(ms_timeout), async {
 +                let tcp = TcpStream::connect(target.as_str()).await.map_err(tungstenite::Error::Io)?;
++                tcp.set_nodelay(true).ok();
 +                client_async_tls_with_config(request, RxCount(tcp, rx.clone()), ws_config, connector).await
 +            })
              .await?
              .map(|(stream, _)| Either::Left(stream))
          };
-@@ -216,10 +309,10 @@ impl WsFramedStream {
+@@ -216,10 +312,10 @@ impl WsFramedStream {
                      Either::Left(stream) => {
                          // MaybeTlsStream::get_ref() handles Plain, NativeTls and Rustls,
                          // returning the underlying TcpStream for local_addr().
@@ -976,7 +979,7 @@ index 3a98a84..c232d43 100644
                  }
              }
              Err(e) => match (tls_type, is_tls_type_cached, danger_accept_invalid_cert) {
-@@ -303,15 +396,18 @@ impl WsFramedStream {
+@@ -303,15 +399,18 @@ impl WsFramedStream {
          local_addr: Option<SocketAddr>,
          ms_timeout: u64,
      ) -> ResultType<Self> {
@@ -997,7 +1000,7 @@ index 3a98a84..c232d43 100644
          };
  
          Ok(ws)
-@@ -397,9 +493,27 @@ impl WsFramedStream {
+@@ -397,9 +496,27 @@ impl WsFramedStream {
          Ok(())
      }
  
@@ -1025,7 +1028,7 @@ index 3a98a84..c232d43 100644
              let msg = match msg {
                  Ok(msg) => msg,
                  Err(e) => {
-@@ -452,6 +566,37 @@ impl WsFramedStream {
+@@ -452,6 +569,37 @@ impl WsFramedStream {
      }
  }
  
@@ -1063,7 +1066,7 @@ index 3a98a84..c232d43 100644
  pub fn is_ws_endpoint(endpoint: &str) -> bool {
      endpoint.starts_with("ws://") || endpoint.starts_with("wss://")
  }
-@@ -494,7 +639,9 @@ pub fn check_ws(endpoint: &str) -> String {
+@@ -494,7 +642,9 @@ pub fn check_ws(endpoint: &str) -> String {
          .map(|(_, p)| p)
          .unwrap_or(RELAY_PORT);
  
@@ -1074,7 +1077,7 @@ index 3a98a84..c232d43 100644
          // rendezvous
          (false, endpoint_port + 2)
      } else if endpoint_port == rendezvous_port - 1 {
-@@ -533,6 +680,144 @@ pub fn check_ws(endpoint: &str) -> String {
+@@ -533,6 +683,144 @@ pub fn check_ws(endpoint: &str) -> String {
      format!("{}://{}", protocol, address)
  }
  
@@ -1219,7 +1222,7 @@ index 3a98a84..c232d43 100644
  /// Port of the reverse proxy serving `/ws/id` and `/ws/relay` on this client's own servers, for
  /// when it cannot listen on the scheme's default port. Any other host, such as a peer's server or
  /// a relay on another machine, keeps the default port. IP endpoints never get here.
-@@ -583,15 +868,21 @@ mod tests {
+@@ -583,15 +871,21 @@ mod tests {
      use tungstenite::protocol::Role;
  
      async fn ws_from_tcp(stream: TcpStream, addr: SocketAddr) -> WsFramedStream {
@@ -1244,7 +1247,7 @@ index 3a98a84..c232d43 100644
          }
      }
  
-@@ -622,6 +913,39 @@ mod tests {
+@@ -622,6 +916,39 @@ mod tests {
          server.await.unwrap();
      }
  
@@ -1284,7 +1287,7 @@ index 3a98a84..c232d43 100644
      #[test]
      fn test_check_ws() {
          let options = Config::get_options();
-@@ -902,3 +1226,45 @@ mod tests {
+@@ -902,3 +1229,45 @@ mod tests {
          }
      }
  }
