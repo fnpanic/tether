@@ -911,10 +911,23 @@ index 606a4be..15e8d9a 100644
 +    }
 +}
 diff --git a/libs/scrap/src/common/mod.rs b/libs/scrap/src/common/mod.rs
-index 1670020..c249940 100644
+index 1670020..e4c4e99 100644
 --- a/libs/scrap/src/common/mod.rs
 +++ b/libs/scrap/src/common/mod.rs
-@@ -550,3 +550,28 @@ pub fn screen_size() -> (u16, u16, u16) {
+@@ -52,6 +52,12 @@ pub const STRIDE_ALIGN: usize = 64; // commonly used in libvpx vpx_img_alloc cal
+ pub const HW_STRIDE_ALIGN: usize = 0; // recommended by av_frame_get_buffer
+ 
+ pub mod aom;
++
++/// Tether, statistics only: how old the last captured picture was when the capturer took it
++/// (composed by the system until picked up), and how long the copy to memory took, in
++/// microseconds; 0 = the capturer does not know. Set by the Windows.Graphics.Capture path.
++pub static CAPTURE_AGE_US: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++pub static CAPTURE_COPY_US: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+ #[cfg(not(any(target_os = "ios")))]
+ pub mod camera;
+ pub mod record;
+@@ -550,3 +556,28 @@ pub fn screen_size() -> (u16, u16, u16) {
  pub fn is_start() -> Option<bool> {
      android::is_start()
  }
@@ -1033,10 +1046,10 @@ index 20c994e..5efcf13 100644
                      let r = self.load_frame(timeout)?;
 diff --git a/libs/scrap/src/dxgi/wgc.rs b/libs/scrap/src/dxgi/wgc.rs
 new file mode 100644
-index 0000000..ab29c0a
+index 0000000..56a1f29
 --- /dev/null
 +++ b/libs/scrap/src/dxgi/wgc.rs
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,175 @@
 +//! Windows.Graphics.Capture reader for hosts whose duplicated desktop image lives in system memory
 +//! (`DXGI_OUTDUPL_DESC::DesktopImageInSystemMemory`: GPU-less machines such as Hyper-V VMs, WARP /
 +//! display-only adapters). There, Desktop Duplication hands out frames in which an application
@@ -1061,6 +1074,12 @@ index 0000000..ab29c0a
 +use windows::Win32::Graphics::Gdi::HMONITOR;
 +use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
 +use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
++
++#[link(name = "kernel32")]
++extern "system" {
++    fn QueryPerformanceCounter(count: *mut i64) -> i32;
++    fn QueryPerformanceFrequency(freq: *mut i64) -> i32;
++}
 +
 +fn err(e: windows::core::Error) -> io::Error {
 +    io::Error::new(io::ErrorKind::Other, e.to_string())
@@ -1154,6 +1173,17 @@ index 0000000..ab29c0a
 +            }
 +            *ready = false;
 +        };
++        // Statistics: the frame's composition time is on the QPC clock (100 ns units).
++        let age_us = frame.SystemRelativeTime().ok().and_then(|t| {
++            let (mut now, mut freq) = (0i64, 0i64);
++            unsafe {
++                QueryPerformanceCounter(&mut now);
++                QueryPerformanceFrequency(&mut freq);
++            }
++            (freq > 0).then(|| ((now as i128 * 1_000_000 / freq as i128) as i64 - t.Duration / 10).clamp(0, u32::MAX as i64) as u32)
++        });
++        crate::CAPTURE_AGE_US.store(age_us.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
++        let t_copy = Instant::now();
 +        let size = frame.ContentSize().map_err(err)?;
 +        if size.Width as usize != self.width || size.Height as usize != self.height {
 +            // Resolution changed: the caller rebuilds the capturer.
@@ -1181,6 +1211,7 @@ index 0000000..ab29c0a
 +            let _ = frame.Close();
 +            mapped.map_err(err)?;
 +            self.mapped = true;
++            crate::CAPTURE_COPY_US.store(t_copy.elapsed().as_micros().min(u32::MAX as u128) as u32, std::sync::atomic::Ordering::Relaxed);
 +            let pitch = m.RowPitch as usize;
 +            Ok((slice::from_raw_parts(m.pData as *const u8, pitch * self.height), pitch))
 +        }
@@ -5678,26 +5709,34 @@ index 790f23b..e1b3490 100644
 +    }
 +}
 diff --git a/src/server/video_service.rs b/src/server/video_service.rs
-index a13aebb..fb778b0 100644
+index a13aebb..493092d 100644
 --- a/src/server/video_service.rs
 +++ b/src/server/video_service.rs
-@@ -815,6 +815,7 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -815,8 +815,10 @@ fn run(vs: VideoService) -> ResultType<()> {
  
          let time = now - start;
          let ms = (time.as_secs() * 1000 + time.subsec_millis() as u64) as i64;
 +        let t_cap0 = time::Instant::now();
          let res = match c.frame(spf) {
              Ok(frame) => {
++                let t_got = t_cap0.elapsed();
                  repeat_encode_counter = 0;
-@@ -866,6 +867,7 @@ fn run(vs: VideoService) -> ResultType<()> {
+                 if frame.valid() {
+                     let screenshot_key = (vs.source, display_idx);
+@@ -866,8 +868,12 @@ fn run(vs: VideoService) -> ResultType<()> {
                          }
                      }
  
 +                    static_refresh.restore_quality(&mut encoder, quality);
                      let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
++                    #[cfg(feature = "tauri")]
++                    fluxrt_stats::captured(t_got, t_cap0.elapsed() - t_got);
                      static_refresh.on_frame(&frame);
++                    let ms = pts_wall().unwrap_or(ms);
                      let result = handle_one_frame(
-@@ -1007,8 +1009,11 @@ fn run(vs: VideoService) -> ResultType<()> {
+                         display_idx,
+                         &sp,
+@@ -1007,8 +1013,11 @@ fn run(vs: VideoService) -> ResultType<()> {
          }
  
          let mut fetched_conn_ids = HashSet::new();
@@ -5709,7 +5748,7 @@ index a13aebb..fb778b0 100644
          while wait_begin.elapsed().as_millis() < timeout_millis as _ {
              if vs.source.is_monitor() {
                  check_privacy_mode_changed(&sp, display_idx, &c)?;
-@@ -1018,8 +1023,28 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -1018,8 +1027,28 @@ fn run(vs: VideoService) -> ResultType<()> {
              if fetched_conn_ids.len() >= frame_controller.send_conn_ids.len() {
                  break;
              }
@@ -5738,7 +5777,30 @@ index a13aebb..fb778b0 100644
  
          let elapsed = now.elapsed();
          // may need to enable frame(timeout)
-@@ -1300,8 +1325,12 @@ fn handle_one_frame(
+@@ -1274,6 +1303,22 @@ fn refresh_allowed(unfed: bool, warmed_up: bool, latency_free: bool) -> bool {
+ }
+ 
+ #[inline]
++/// Tether, for measurements only: with `TETHER_PTS_WALL=1` a frame's time stamp is the wall clock
++/// (ms, 31 bits) at the moment it is captured and converted, instead of the time since the
++/// service started. A viewer on a synchronised clock can then split the delay into "before the
++/// encoder" and "after it" (tools/bench/README.md).
++fn pts_wall() -> Option<i64> {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    if !*ON.get_or_init(|| std::env::var("TETHER_PTS_WALL").map_or(false, |v| v == "1")) {
++        return None;
++    }
++    let ms = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .ok()?
++        .as_millis();
++    Some((ms & 0x7fff_ffff) as i64)
++}
++
+ fn handle_one_frame(
+     display: usize,
+     sp: &GenericService,
+@@ -1300,8 +1345,12 @@ fn handle_one_frame(
      let mut vpx_no_output = false;
      let first = *first_frame;
      *first_frame = false;
@@ -5751,7 +5813,7 @@ index a13aebb..fb778b0 100644
              *encode_fail_counter = 0;
              *encoder_warmed_up = true;
              vf.display = display as _;
-@@ -1315,6 +1344,8 @@ fn handle_one_frame(
+@@ -1315,6 +1364,8 @@ fn handle_one_frame(
              send_conn_ids = sp.send_video_frame(msg);
          }
          Err(e) => {
@@ -5760,7 +5822,7 @@ index a13aebb..fb778b0 100644
              vpx_no_output = e.is::<scrap::VpxNoOutput>();
              *encode_fail_counter += 1;
              // Encoding errors are not frequent except on Android
-@@ -1590,3 +1621,97 @@ mod tests {
+@@ -1590,3 +1641,132 @@ mod tests {
          assert!(refresh_allowed(true, false, false));
      }
  }
@@ -5784,6 +5846,10 @@ index a13aebb..fb778b0 100644
 +        bytes: usize,
 +        max_frame: usize,
 +        enc_us: Vec<u32>,
++        get_us: Vec<u32>,  // capturer call: waiting for a picture and copying it
++        conv_us: Vec<u32>, // conversion to the encoder's format
++        age_us: Vec<u32>,  // how old the picture was when taken (scrap::CAPTURE_AGE_US)
++        copy_us: Vec<u32>, // the copy alone (scrap::CAPTURE_COPY_US)
 +        empty: u32,     // encode calls without output (errors, or a delayed hardware encoder)
 +        backlogs: u32,  // frames no connection took within video_qos::BACKLOG_MS
 +        timeouts: u32,  // ... nor within the 3 s wait
@@ -5810,6 +5876,21 @@ index a13aebb..fb778b0 100644
 +        w.max_frame = w.max_frame.max(bytes);
 +        w.enc_us.push(took.as_micros().min(u32::MAX as _) as u32);
 +        report(&mut w);
++    }
++
++    pub(super) fn captured(get: Duration, convert: Duration) {
++        use std::sync::atomic::Ordering::Relaxed;
++        let us = |d: Duration| d.as_micros().min(u32::MAX as _) as u32;
++        let mut w = STATS.lock().unwrap();
++        w.get_us.push(us(get));
++        w.conv_us.push(us(convert));
++        let (age, copy) = (scrap::CAPTURE_AGE_US.load(Relaxed), scrap::CAPTURE_COPY_US.load(Relaxed));
++        if age > 0 {
++            w.age_us.push(age);
++        }
++        if copy > 0 {
++            w.copy_us.push(copy);
++        }
 +    }
 +
 +    pub(super) fn no_output() {
@@ -5854,6 +5935,22 @@ index a13aebb..fb778b0 100644
 +            w.backlogs,
 +            w.timeouts,
 +            w.max_wait.as_millis(),
++        );
++        // Before the encoder: avg / p95 ms of each step ("-" = not known for this capturer).
++        let stat = |v: &mut Vec<u32>| {
++            if v.is_empty() {
++                return "-".to_owned();
++            }
++            v.sort_unstable();
++            let avg = v.iter().map(|&u| u as f64).sum::<f64>() / v.len() as f64;
++            format!("{:.1} / {:.1}", avg / 1000.0, ms(v[v.len() * 95 / 100]))
++        };
++        log::info!(
++            "fluxrt capture/min: get {} ms (picture age when taken {}, copy {}), convert {}",
++            stat(&mut w.get_us),
++            stat(&mut w.age_us),
++            stat(&mut w.copy_us),
++            stat(&mut w.conv_us),
 +        );
 +        *w = Window::default();
 +    }
