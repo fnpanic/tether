@@ -9,16 +9,15 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ### 0.6.2 (in work; nothing released under this number yet)
 
-- **Exact still pictures.** What stands still on the remote screen is now shown with the
-  host's own pixels once the video has refined it: text, coloured text and photos become exact
-  instead of "as good as the video codec gets", and stay exact while something else on the
-  screen changes (a cursor, a clock). Same still page as the AnyDesk comparison: brightness
-  81.1 dB (0.6.1: 39.5, AnyDesk 35.2), colour 71.4 / 71.9 dB (25.8 / 26.0, AnyDesk 26.6), small
-  and coloured text exact, photo 79.4 dB (48.8, AnyDesk 51.0); on a page that stands the
-  viewer's picture is the host's screen bit for bit. Cost: about 1 MB per full page change
-  instead of 0.45 MB, sent at the video bitrate over a few seconds; nothing for what moves.
-  Needs host and viewer 0.6.2; not on hosts with a GPU texture encoder, not in recordings
-  (docs/performance.md "Exact still pictures").
+- **Exact still pictures.** What stands still on the remote screen for a second is now shown
+  with the host's own pixels: text, coloured text and photos become exact instead of "as good
+  as the video codec gets", and stay exact while something else on the screen changes (a
+  cursor, a clock, a video in a corner; the bands that move stay on video). Same still page as
+  the AnyDesk comparison: the settled picture is the host's screen bit for bit (0.6.1: 39.5 dB
+  brightness, 25.8 dB colour, photo 48.8 dB; AnyDesk 35.2, 26.6, 51.0 dB). Cost: about 1 MB per
+  full page change instead of 0.45 MB, sent at the video bitrate over a few seconds; nothing
+  for what moves. Needs host and viewer 0.6.2; not on hosts with a GPU texture encoder, not in
+  recordings (docs/performance.md "Exact still pictures").
 - **Latency: measured, not changed.** The earlier "30-60 ms behind AnyDesk" came from two
   meters that counted differently. Delay to first appearance on the GPU-less test host: 57 ms on
   the direct route, 73 ms through the relay; AnyDesk through its relay 67-68 ms. The host's own

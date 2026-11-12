@@ -909,57 +909,62 @@ AnyDesk's own TCP relay would stall the same way; it was not hit in its two runs
 
 Video is lossy and 4:2:0, so small coloured text and photos stay a little off however long the
 picture stands (4:4:4 video costs too much in motion, see the follow-up above). From 0.6.2 the
-host sends the captured pixels themselves for what stands still, once the encoder has finished
-refining the picture (`src/server/video_service/exact_still.rs`):
+host sends the captured pixels themselves for what stands still
+(`src/server/video_service/exact_still.rs`):
 
-- full-width strips of 8 rows: RGB, each pixel minus the one to its left, zstd, with a hash;
-  inside a `VideoFrame` (`exact`, field 20), so they travel in order with the video and take
-  part in the loop's wait for the connection. About 32 kB of strips per loop pass, at the byte
-  rate of the video bitrate of the moment (floor 16 kB/s): a picture that starts moving again
-  waits behind a few tens of kB at most;
+- the picture is cut into full-width strips of 8 rows. A strip that has not changed for one
+  second is sent as it is: RGB, each pixel minus the one to its left, zstd, with a hash. This
+  happens also while other strips keep changing (a cursor that blinks, a clock, a video in a
+  corner): only the bands that move stay on video;
+- strips go out in passes without a video frame, one message per pass inside a `VideoFrame`
+  (`exact`, field 20), so they travel in order with the video and the loop waits for the
+  connection to take them. About 32 kB per pass while the whole picture stands and 8 kB while
+  something still moves, at the byte rate of the video bitrate of the moment (floor 16 kB/s): a
+  frame of new motion waits behind a few tens of kB at most;
 - only to viewers that advertise `SupportedDecoding.exact_stills` (the 0.6.2 technician app);
 - **what has not changed stays exact.** Every video frame replaces the viewer's whole picture,
-  so after each one (a captured frame or a repeat of a still one) the host names the strips that
-  are unchanged since they were sent (`ExactStrip.same`: first row and hash); the viewer puts
-  those back from its own copy (`VideoPipeline.held`) and only the strips that changed go
-  through video and are sent again when they stand. A blinking cursor or a clock costs the
-  strips it touches. Strips are full width: something moving in one corner keeps the whole
-  band it is in on video;
+  so the viewer puts the strips it holds back over each frame from its own copy
+  (`VideoPipeline.held`). Which ones it may use, the host says: the list of strips that are
+  unchanged since they were sent (`ExactStrips.same`: first row and hash) goes out before a
+  frame whenever it differs from the list sent last. A strip that changes is taken off the list
+  before the frame that shows the change; a new run of the video service and other viewers than
+  before start with an empty list. The viewer draws a strip only if the hash of its copy is the
+  listed one;
 - the viewer writes the rows into its picture texture (`GlRenderer.strip`, or `putImageData` on
-  the 2D canvas); rows that arrive while a video frame is still in the decoder wait for it.
-  With native decoding (WebCodecs failed) strips are ignored.
+  the 2D canvas); new rows that arrive while a video frame is still in the decoder wait for it.
+  With native decoding (WebCodecs failed) strips are kept but not drawn.
 
-Cost on the host: a copy of each captured picture (0.4 ms at 1080p on the VM, counted in the
-"convert" figure of `fluxrt capture/min`) and a comparison of the strips the viewers hold.
-Not covered: hosts whose encoder takes textures (GPU hosts with the VRAM encoders: no CPU
-pixels), recordings (they hold the video only), viewers before 0.6.2. `fluxrt video/min` does not
-count strip bytes.
+Cost on the host: a copy of each captured picture and a comparison with the one before
+(together 1.1 ms more per picture at 1080p on the VM, counted in the "convert" figure of
+`fluxrt capture/min`: 0.6 -> 1.7 ms), and two pictures of memory per display. Not covered: hosts
+whose encoder takes textures (GPU hosts with the VRAM encoders: no CPU pixels), recordings (they
+hold the video only), viewers before 0.6.2. `fluxrt video/min` does not count strip bytes.
 
 Still page of the AnyDesk comparison (`quality-run.sh static`, 2 runs, settled picture at :40;
 AnyDesk and 0.6.1 from the tables above):
 
 | | Tether 0.6.1 | Tether 0.6.2 | AnyDesk 9.8.3 |
 |---|---|---|---|
-| PSNR Y, all | 39.5 dB | **81.1 dB** | 35.2 dB |
-| PSNR Cb / Cr | 25.8 / 26.0 dB | **71.4 / 71.9 dB** | 26.6 / 26.6 dB |
-| Text 8-12 px: PSNR Y / fringe | 44.5 dB / 35.5 | **exact / 0** | 34.7 dB / 33.1 |
-| Coloured text: PSNR Y / Cb | 40.8 / 23.6 dB | **exact / exact** | 34.5 / 24.1 dB |
-| Photo: PSNR Y | 48.8 dB | **79.4 dB** | 51.0 dB |
-| Picture at :02 (2 s after the change): PSNR Y / Cb, text | 39.5 / 25.8 dB | 50.6 / 32.5 dB, text exact | 35.2 / 26.6 dB |
-| VM sent per page change | 420-480 kB | 1050 kB (435 kB in the first second, then 80-200 kB/s for 4 s) | about 350 kB |
+| PSNR Y, all | 39.5 dB | **identical** | 35.2 dB |
+| PSNR Cb / Cr | 25.8 / 26.0 dB | **identical** | 26.6 / 26.6 dB |
+| Text 8-12 px: PSNR Y / fringe | 44.5 dB / 35.5 | **identical** | 34.7 dB / 33.1 |
+| Coloured text: PSNR Y / Cb | 40.8 / 23.6 dB | **identical** | 34.5 / 24.1 dB |
+| Photo: PSNR Y | 48.8 dB | **identical** | 51.0 dB |
+| Picture at :02 (2 s after the change): PSNR Y / Cb, text | 39.5 / 25.8 dB | 50.9 / 32.5 dB, text identical | 35.2 / 26.6 dB |
+| VM sent per page change | 420-480 kB | 1070 kB (445 kB in the first second, then 150-200 kB/s for 4 s) | about 350 kB |
 
-("exact" = no differing pixel in that region. The page as a whole is not at the cap at :40
-because of pixels that differ between the two captures of that minute; on a page that stands
-(`quality.html?mode=static`) every measure is at the cap five seconds after it appears: the
-viewer's picture is the host's screen bit for bit.)
+("identical" = every measure at its cap in both runs: the viewer's picture is the host's
+screen bit for bit.)
 
-A change in one place (`probe.html`: a barcode redrawn on every frame, the rest still; viewer
-picture against the VM's own screenshot, row by row): all rows outside the barcode and the
-taskbar are identical (898 of 1080 rows; 16 pixels elsewhere differ by one level) while the
-video runs at 20 pictures/s and the VM sends 6 kB/s.
+A change in one place (`probe.html`, opened fresh: a barcode redrawn on every frame from the
+start, the rest still; viewer picture against the VM's own screenshot, row by row, 15 s after the
+page opened): every row outside the barcode (rows 8-71) and the taskbar is identical (968 of
+1080), while the video runs at 20 pictures/s and the VM sends 5-6 kB/s, as much as without the
+feature. (An intermediate version sent the list after every frame: 24 kB/s on this page.)
 
-Scrolling with the feature in the build (direct route): 87 ms median counted the old way,
-20.9 pictures/s, as before it.
+Scrolling with the feature in the build (direct route, two runs, taken more than a minute after
+the page started: a run right after a page start reads about 15 ms more): 102 and 103 ms median
+counted the old way, 21 pictures/s, as before it.
 
 Measuring note: `TETHER_PTS_WALL=1` on the host is for the delay split only. At first it
 stamped captured frames but not the repeats of a still picture, so the encoder saw time run
