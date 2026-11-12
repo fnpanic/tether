@@ -912,10 +912,11 @@ picture stands (4:4:4 video costs too much in motion, see the follow-up above). 
 host sends the captured pixels themselves for what stands still
 (`src/server/video_service/exact_still.rs`):
 
-- the picture is cut into full-width strips of 8 rows. A strip that has not changed for one
-  second is sent as it is: RGB, each pixel minus the one to its left, zstd, with a hash. This
-  happens also while other strips keep changing (a cursor that blinks, a clock, a video in a
-  corner): only the bands that move stay on video;
+- the picture is cut into full-width strips of 8 rows. A strip that has not changed for 1.5 s
+  is sent as it is: RGB, each pixel minus the one to its left, zstd, with a hash. This happens
+  also while other strips change now and then (a cursor that blinks, a clock): only the bands
+  that move stay on video. Something that changes in every pass of the capture loop (a video
+  at the full capture rate) leaves no pass for strips: the rest then waits until it pauses;
 - strips go out in passes without a video frame, one message per pass inside a `VideoFrame`
   (`exact`, field 20), so they travel in order with the video and the loop waits for the
   connection to take them. About 32 kB per pass while the whole picture stands and 8 kB while
@@ -927,9 +928,15 @@ host sends the captured pixels themselves for what stands still
   (`VideoPipeline.held`). Which ones it may use, the host says: the list of strips that are
   unchanged since they were sent (`ExactStrips.same`: first row and hash) goes out before a
   frame whenever it differs from the list sent last. A strip that changes is taken off the list
-  before the frame that shows the change; a new run of the video service and other viewers than
-  before start with an empty list. The viewer draws a strip only if the hash of its copy is the
-  listed one;
+  before the frame that shows the change. The viewer draws a strip only if the hash of its copy
+  is the listed one;
+- **a list never outlives its stream.** The viewer (`ExactRows` in `apps/desktop/src/lib/video.ts`,
+  unit-tested) drops its list at every key frame, at every new connection (`peer_info`) and at a
+  display switch, whatever the host did or did not send; the host sends its list again after a
+  key frame went out, starts a run and a changed set of viewers with an empty one (`forget`),
+  and tells a connection that has just subscribed before its first frame. Known limit on the
+  host side: a connection that subscribes within the few milliseconds between that step and
+  the frame of the same pass gets the frame first; the viewer's rule covers it;
 - the viewer writes the rows into its picture texture (`GlRenderer.strip`, or `putImageData` on
   the 2D canvas); new rows that arrive while a video frame is still in the decoder wait for it.
   With native decoding (WebCodecs failed) strips are kept but not drawn.
@@ -951,7 +958,7 @@ AnyDesk and 0.6.1 from the tables above):
 | Coloured text: PSNR Y / Cb | 40.8 / 23.6 dB | **identical** | 34.5 / 24.1 dB |
 | Photo: PSNR Y | 48.8 dB | **identical** | 51.0 dB |
 | Picture at :02 (2 s after the change): PSNR Y / Cb, text | 39.5 / 25.8 dB | 50.9 / 32.5 dB, text identical | 35.2 / 26.6 dB |
-| VM sent per page change | 420-480 kB | 1070 kB (445 kB in the first second, then 150-200 kB/s for 4 s) | about 350 kB |
+| VM sent per page change | 420-480 kB | 1070-1150 kB (about 440 kB in the first second, then 150-200 kB/s for 4-5 s) | about 350 kB |
 
 ("identical" = every measure at its cap in both runs: the viewer's picture is the host's
 screen bit for bit.)
@@ -965,6 +972,16 @@ feature. (An intermediate version sent the list after every frame: 24 kB/s on th
 Scrolling with the feature in the build (direct route, two runs, taken more than a minute after
 the page started: a run right after a page start reads about 15 ms more): 102 and 103 ms median
 counted the old way, 21 pictures/s, as before it.
+
+After a restart of the host's video (a refresh request while the still page is exact; viewer
+picture against the VM's screenshot): identical before; the first grab after the request has no
+identical row (fresh video, no old exact rows kept), the fourth is identical again.
+
+Review history of this feature (each by a reviewer that saw only the code, not the reasoning):
+the first two changed the design (unchanged strips stay exact, strips by their own still time,
+one message per pass); the third and fourth each found a way old exact rows could be drawn over
+a newer picture after a restart or reconnect, the fifth one more for a connection that joins a
+run that continues; the sixth found no such path left and named the known limit above.
 
 Measuring note: `TETHER_PTS_WALL=1` on the host is for the delay split only. At first it
 stamped captured frames but not the repeats of a still picture, so the encoder saw time run

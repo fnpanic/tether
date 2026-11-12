@@ -9,10 +9,10 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ### 0.6.2 (in work; nothing released under this number yet)
 
-- **Exact still pictures.** What stands still on the remote screen for a second is now shown
-  with the host's own pixels: text, coloured text and photos become exact instead of "as good
-  as the video codec gets", and stay exact while something else on the screen changes (a
-  cursor, a clock, a video in a corner; the bands that move stay on video). Same still page as
+- **Exact still pictures.** What stands still on the remote screen for a second and a half is
+  now shown with the host's own pixels: text, coloured text and photos become exact instead of
+  "as good as the video codec gets", and stay exact while something else on the screen changes
+  now and then (a cursor, a clock; the bands that move stay on video). Same still page as
   the AnyDesk comparison: the settled picture is the host's screen bit for bit (0.6.1: 39.5 dB
   brightness, 25.8 dB colour, photo 48.8 dB; AnyDesk 35.2, 26.6, 51.0 dB). Cost: about 1 MB per
   full page change instead of 0.45 MB, sent at the video bitrate over a few seconds; nothing

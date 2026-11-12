@@ -6174,10 +6174,10 @@ index a13aebb..ce3b817 100644
 +}
 diff --git a/src/server/video_service/exact_still.rs b/src/server/video_service/exact_still.rs
 new file mode 100644
-index 0000000..c8630ef
+index 0000000..3f0531f
 --- /dev/null
 +++ b/src/server/video_service/exact_still.rs
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,383 @@
 +//! Tether: the exact pixels of the parts of the picture that stand still.
 +//!
 +//! Video is lossy and 4:2:0: small coloured text and photos stay a little off however long the
@@ -6190,7 +6190,10 @@ index 0000000..c8630ef
 +//! key frame has gone out the host sends its list again (`key_frame_sent`, `relist`). And the
 +//! host tells a connection that has just subscribed, before its first frame, even when this
 +//! run continues and that frame is no key frame (`exact_before_frame` counts the connections
-+//! that still wait for their first frame; other viewers than before => `forget`).
++//! that still wait for their first frame; other viewers than before => `forget`). Known
++//! limit: a connection that subscribes in the few milliseconds between `exact_before_frame`
++//! and the frame's snapshot of the same pass gets that one frame first; the viewer's own rule
++//! (list dropped at every new connection) is what covers it.
 +//!
 +//! Every video frame replaces the viewer's whole picture, so the host keeps the viewer told
 +//! which strips have not changed since they were sent (`ExactStrips.same`: row and hash, sent
