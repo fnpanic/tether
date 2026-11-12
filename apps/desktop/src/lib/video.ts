@@ -615,6 +615,12 @@ export class VideoPipeline {
     this.exactRows.reconnect();
   }
 
+  /** A connection to the host is up (the first one or a new one): what the host listed as held
+   * was for the connection before. Not left to `resync`, which only some reconnects pass through. */
+  connected() {
+    this.exactRows.reconnect();
+  }
+
   /** The host's size of the shown display (peer_info), used to size frames (see renderSize). */
   expect(w: number, h: number) {
     this.expected = { w, h };

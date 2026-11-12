@@ -5232,23 +5232,28 @@ index 0000000..09bfe82
 +    }
 +}
 diff --git a/src/server/service.rs b/src/server/service.rs
-index dac9754..c2522cc 100644
+index dac9754..ca2fdcb 100644
 --- a/src/server/service.rs
 +++ b/src/server/service.rs
-@@ -211,6 +211,24 @@ impl<T: Subscriber + From<ConnInner>> ServiceTmpl<T> {
+@@ -211,6 +211,29 @@ impl<T: Subscriber + From<ConnInner>> ServiceTmpl<T> {
          }
      }
  
-+    /// Tether: the connections subscribed to this service now.
++    /// Tether: the connections subscribed to this service now, those that still wait for
++    /// their first frame included (a message sent to them now arrives before that frame).
 +    pub fn subscriber_ids(&self) -> Vec<i32> {
-+        self.0.read().unwrap().subscribes.keys().copied().collect()
++        let lock = self.0.read().unwrap();
++        lock.subscribes.keys().chain(lock.new_subscribes.keys()).copied().collect()
 +    }
 +
-+    /// Tether: to the subscribers among `ids`; returns those it went to (an id may be gone).
++    /// Tether: to the subscribers among `ids` (as `subscriber_ids` names them); returns those it
++    /// went to (an id may be gone).
 +    pub fn send_to_ids(&self, msg: Message, ids: &HashSet<i32>) -> HashSet<i32> {
 +        let msg = Arc::new(msg);
 +        let mut sent = HashSet::new();
-+        for (id, s) in self.0.write().unwrap().subscribes.iter_mut() {
++        let mut lock = self.0.write().unwrap();
++        let lock = &mut *lock;
++        for (id, s) in lock.subscribes.iter_mut().chain(lock.new_subscribes.iter_mut()) {
 +            if ids.contains(id) {
 +                s.send(msg.clone());
 +                sent.insert(*id);
@@ -6169,10 +6174,10 @@ index a13aebb..ce3b817 100644
 +}
 diff --git a/src/server/video_service/exact_still.rs b/src/server/video_service/exact_still.rs
 new file mode 100644
-index 0000000..27490ee
+index 0000000..c8630ef
 --- /dev/null
 +++ b/src/server/video_service/exact_still.rs
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,380 @@
 +//! Tether: the exact pixels of the parts of the picture that stand still.
 +//!
 +//! Video is lossy and 4:2:0: small coloured text and photos stay a little off however long the
@@ -6180,10 +6185,12 @@ index 0000000..27490ee
 +//! rows, for every strip that has not changed for a moment (`STILL`), at a limited byte rate, to
 +//! the viewers that asked for them (`SupportedDecoding.exact_stills`).
 +//!
-+//! A list must never outlive the stream it was sent for, and the viewer does not rely on being
-+//! told: it drops its list at every key frame (a new run of this service, a new connection and
-+//! another display all start with one; `ExactRows.video` in the app). So after a key frame has
-+//! gone out the host sends its list again (`key_frame_sent`, `relist`).
++//! A list must never outlive the stream it was sent for. The viewer drops its list at every key
++//! frame (`ExactRows.video` in the app), at every new connection and display switch; so after a
++//! key frame has gone out the host sends its list again (`key_frame_sent`, `relist`). And the
++//! host tells a connection that has just subscribed, before its first frame, even when this
++//! run continues and that frame is no key frame (`exact_before_frame` counts the connections
++//! that still wait for their first frame; other viewers than before => `forget`).
 +//!
 +//! Every video frame replaces the viewer's whole picture, so the host keeps the viewer told
 +//! which strips have not changed since they were sent (`ExactStrips.same`: row and hash, sent
