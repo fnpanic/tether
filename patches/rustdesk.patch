@@ -219,35 +219,42 @@ index 625f45d..333ff22 100644
 +[patch."https://github.com/rustdesk-org/webrtc"]
 +webrtc-sctp = { path = "../../crates/webrtc-sctp" }
 diff --git a/libs/base/protos/message.proto b/libs/base/protos/message.proto
-index 5f920bc..801d980 100644
+index 5f920bc..fea502d 100644
 --- a/libs/base/protos/message.proto
 +++ b/libs/base/protos/message.proto
-@@ -31,10 +31,24 @@ message VideoFrame {
+@@ -31,10 +31,31 @@ message VideoFrame {
      EncodedVideoFrames h265s = 11;
      EncodedVideoFrames vp8s = 12;
      EncodedVideoFrames av1s = 13;
-+    // Tether: exact pixels of a still picture, only for viewers with SupportedDecoding.exact_stills.
-+    ExactStrip exact = 20;
++    // Tether: exact pixels of what stands still, only for viewers with SupportedDecoding.exact_stills.
++    ExactStrips exact = 20;
    }
    int32 display = 14;
  }
  
 +// Tether: `height` full-width rows from row `y`: zstd of RGB, each pixel minus the one to its left;
-+// `hash` names these rows. Or, with `same`: the strips the viewer already holds and puts back
-+// over the video frame just sent (pairs of first row and hash; `height` = rows per strip).
++// `hash` names these rows.
 +message ExactStrip {
 +  uint32 y = 1;
-+  uint32 width = 2;
-+  uint32 height = 3;
-+  bytes data = 4;
-+  uint32 hash = 5;
-+  repeated uint32 same = 6;
++  uint32 height = 2;
++  bytes data = 3;
++  uint32 hash = 4;
++}
++
++// Tether: strips of a picture `width` wide, cut every `rows` rows. `strips`: new exact rows.
++// `same` (sent right after a video frame, without strips): the strips the viewer already holds
++// and puts back over that frame, as pairs of first row and hash.
++message ExactStrips {
++  uint32 width = 1;
++  uint32 rows = 2;
++  repeated ExactStrip strips = 3;
++  repeated uint32 same = 4;
 +}
 +
  message DisplayInfo {
    sint32 x = 1;
    sint32 y = 2;
-@@ -86,6 +100,8 @@ message LoginRequest {
+@@ -86,6 +107,8 @@ message LoginRequest {
    string avatar = 17;
    bytes trusted_device_v2_token = 18;
    bool trusted_device_v2_supported = 19;
@@ -256,7 +263,7 @@ index 5f920bc..801d980 100644
  }
  
  message Terminal {
-@@ -671,6 +687,8 @@ message SupportedDecoding {
+@@ -671,6 +694,8 @@ message SupportedDecoding {
    int32 ability_av1 = 6;
    CodecAbility i444 = 7;
    Chroma prefer_chroma = 8;
@@ -3526,7 +3533,7 @@ index a88e33a..6cadca4 100644
 +    }
 +}
 diff --git a/src/server/connection.rs b/src/server/connection.rs
-index 4b2eec8..868ceb7 100644
+index 4b2eec8..52d1149 100644
 --- a/src/server/connection.rs
 +++ b/src/server/connection.rs
 @@ -194,6 +194,10 @@ lazy_static::lazy_static! {
@@ -3603,7 +3610,19 @@ index 4b2eec8..868ceb7 100644
                          }
                          ipc::Data::RawMessage(bytes) => {
                              allow_err!(conn.stream.send_raw(bytes).await);
-@@ -1158,6 +1176,11 @@ impl Connection {
+@@ -1079,7 +1097,10 @@ impl Connection {
+                 Some((instant, value)) = rx_video.recv() => {
+                     if !conn.video_ack_required {
+                         if let Some(message::Union::VideoFrame(vf)) = &value.union {
+-                            video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
++                            // Tether: a list of held strips rides behind a frame and is not waited for.
++                            if !matches!(&vf.union, Some(video_frame::Union::Exact(e)) if e.strips.is_empty()) {
++                                video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
++                            }
+                         }
+                     }
+                     if let Err(err) = conn.stream.send(&value as &Message).await {
+@@ -1158,6 +1179,11 @@ impl Connection {
                              conn.on_close("privacy mode", false).await;
                              break;
                          }
@@ -3615,7 +3634,7 @@ index 4b2eec8..868ceb7 100644
                          #[cfg(all(target_os = "windows", feature = "flutter"))]
                          ipc::Data::PrinterData(data) => {
                              if Self::permission(keys::OPTION_ENABLE_REMOTE_PRINTER, &conn.control_permissions) {
-@@ -1260,10 +1283,31 @@ impl Connection {
+@@ -1260,10 +1286,31 @@ impl Connection {
          }
          #[cfg(target_os = "macos")]
          reset_input_ondisconn();
@@ -3647,7 +3666,7 @@ index 4b2eec8..868ceb7 100644
                          handle_mouse(
                              &mouse_input.msg,
                              mouse_input.conn_id,
-@@ -1274,6 +1318,9 @@ impl Connection {
+@@ -1274,6 +1321,9 @@ impl Connection {
                          );
                      }
                      MessageInput::Key((mut msg, press)) => {
@@ -3657,7 +3676,7 @@ index 4b2eec8..868ceb7 100644
                          // Set the press state to false, use `down` only in `handle_key()`.
                          msg.press = false;
                          if press {
-@@ -1508,6 +1555,17 @@ impl Connection {
+@@ -1508,6 +1558,17 @@ impl Connection {
          if !self.check_whitelist(&addr).await {
              return false;
          }
@@ -3675,7 +3694,7 @@ index 4b2eec8..868ceb7 100644
          #[cfg(not(any(target_os = "android", target_os = "ios")))]
          if crate::is_server() && Config::get_option("allow-only-conn-window-open") == "Y" {
              if !crate::check_process("", !crate::platform::is_root()) {
-@@ -1783,6 +1841,12 @@ impl Connection {
+@@ -1783,6 +1844,12 @@ impl Connection {
          }
      }
  
@@ -3688,7 +3707,7 @@ index 4b2eec8..868ceb7 100644
      pub(super) fn normalize_port_forward_target(pf: &mut PortForward) -> (String, bool) {
          let mut is_rdp = false;
          if pf.host == "RDP" && pf.port == 0 {
-@@ -1932,6 +1996,19 @@ impl Connection {
+@@ -1932,6 +1999,19 @@ impl Connection {
              self.tx_from_authed.clone(),
              self.lr.clone(),
          ));
@@ -3708,7 +3727,7 @@ index 4b2eec8..868ceb7 100644
          self.session_last_recv_time = SESSIONS
              .lock()
              .unwrap()
-@@ -2212,6 +2289,9 @@ impl Connection {
+@@ -2212,6 +2292,9 @@ impl Connection {
                      dir
                  );
              }
@@ -3718,7 +3737,7 @@ index 4b2eec8..868ceb7 100644
              let dir = if is_allowed_dir { &dir } else { "" };
              if !wait_session_id_confirm {
                  self.read_dir(dir, show_hidden);
-@@ -2233,9 +2313,49 @@ impl Connection {
+@@ -2233,9 +2316,49 @@ impl Connection {
                  self.try_sub_monitor_services();
              }
          }
@@ -3768,7 +3787,7 @@ index 4b2eec8..868ceb7 100644
      fn try_sub_camera_displays(&mut self) {
          if let Some(s) = self.server.upgrade() {
              let mut s = s.write().unwrap();
-@@ -2890,6 +3010,11 @@ impl Connection {
+@@ -2890,6 +3013,11 @@ impl Connection {
              // Move the CloseReason forward, as this message needs to be received when unauthorized, especially for kcp.
              if let Some(misc::Union::CloseReason(s)) = &misc.union {
                  log::info!("receive close reason: {}", s);
@@ -3780,7 +3799,7 @@ index 4b2eec8..868ceb7 100644
                  self.on_close("Peer close", true).await;
                  raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
                  return false;
-@@ -2970,6 +3095,11 @@ impl Connection {
+@@ -2970,6 +3098,11 @@ impl Connection {
                          sleep(1.).await;
                          return false;
                      }
@@ -3792,7 +3811,7 @@ index 4b2eec8..868ceb7 100644
                      let (addr, _is_rdp) = Self::normalize_port_forward_target(&mut pf);
                      self.port_forward_address = addr;
                  }
-@@ -3040,7 +3170,21 @@ impl Connection {
+@@ -3040,7 +3173,21 @@ impl Connection {
                  crate::get_builtin_option(keys::OPTION_ALLOW_LOGON_SCREEN_PASSWORD) == "Y"
                      && is_logon();
  
@@ -3815,7 +3834,7 @@ index 4b2eec8..868ceb7 100644
                  || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()
              {
                  #[cfg(not(any(target_os = "android", target_os = "ios")))]
-@@ -3198,6 +3342,10 @@ impl Connection {
+@@ -3198,6 +3345,10 @@ impl Connection {
                      if self.is_authed_view_camera_conn() {
                          return true;
                      }
@@ -3826,7 +3845,7 @@ index 4b2eec8..868ceb7 100644
                      #[cfg(any(target_os = "android", target_os = "ios"))]
                      if let Err(e) = call_main_service_pointer_input("mouse", me.mask, me.x, me.y) {
                          log::debug!("call_main_service_pointer_input fail:{}", e);
-@@ -3334,6 +3482,11 @@ impl Connection {
+@@ -3334,6 +3485,11 @@ impl Connection {
                      if self.is_authed_view_camera_conn() {
                          return true;
                      }
@@ -3838,7 +3857,7 @@ index 4b2eec8..868ceb7 100644
                      if self.peer_keyboard_enabled() {
                          if is_enter(&me) {
                              CLICK_TIME.store(get_time(), Ordering::SeqCst);
-@@ -3635,6 +3788,67 @@ impl Connection {
+@@ -3635,6 +3791,67 @@ impl Connection {
                                  }
                              }
                          }
@@ -3906,7 +3925,7 @@ index 4b2eec8..868ceb7 100644
                          match fa.union {
                              Some(file_action::Union::ReadEmptyDirs(rd)) => {
                                  self.read_empty_dirs(&rd.path, rd.include_hidden);
-@@ -4028,10 +4242,21 @@ impl Connection {
+@@ -4028,10 +4245,21 @@ impl Connection {
                          .lock()
                          .unwrap()
                          .user_auto_adjust_fps(self.inner.id(), fps),
@@ -3932,7 +3951,7 @@ index 4b2eec8..868ceb7 100644
                      #[cfg(windows)]
                      Some(misc::Union::SelectedSid(sid)) => {
                          if let Some(current_process_sid) =
-@@ -4689,6 +4914,10 @@ impl Connection {
+@@ -4689,6 +4917,10 @@ impl Connection {
          let mut err;
          if !self.keyboard {
              err = "No permission".to_string();
@@ -3943,7 +3962,7 @@ index 4b2eec8..868ceb7 100644
          } else {
              err = "No need to elevate".to_string();
              if !crate::platform::is_installed() && !portable_client::running() {
-@@ -5306,6 +5535,7 @@ impl Connection {
+@@ -5306,6 +5538,7 @@ impl Connection {
              return;
          }
          self.closed = true;
@@ -3951,7 +3970,7 @@ index 4b2eec8..868ceb7 100644
          // If voice A,B -> C, and A,B has voice call
          // B disconnects, C will reset the voice call input.
          //
-@@ -5354,6 +5584,10 @@ impl Connection {
+@@ -5354,6 +5587,10 @@ impl Connection {
          msg_out.set_misc(misc);
          self.send(msg_out).await;
          raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
@@ -3962,7 +3981,7 @@ index 4b2eec8..868ceb7 100644
      }
  
      async fn handle_read_job_init_result(
-@@ -5811,6 +6045,90 @@ impl Connection {
+@@ -5811,6 +6048,90 @@ impl Connection {
          }
      }
  
@@ -4053,7 +4072,7 @@ index 4b2eec8..868ceb7 100644
      fn is_authed_remote_conn(&self) -> bool {
          if let Some(id) = self.authed_conn_id.as_ref() {
              return id.conn_type() == AuthConnType::Remote;
-@@ -7233,6 +7551,13 @@ mod test {
+@@ -7233,6 +7554,13 @@ mod test {
      // test that admits connections holds this first; a poisoned lock is still a lock.
      static UNAUTHORIZED_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
  
@@ -4067,7 +4086,7 @@ index 4b2eec8..868ceb7 100644
      fn unauthorized_count() -> usize {
          UNAUTHORIZED_CONNS.lock().unwrap().len()
      }
-@@ -7901,3 +8226,181 @@ mod test {
+@@ -7901,3 +8229,181 @@ mod test {
          assert!(!replaced_by(&conn(3, remote, key(7, "other")), 2, &mine));
      }
  }
@@ -5799,7 +5818,7 @@ index 790f23b..e1b3490 100644
 +    }
 +}
 diff --git a/src/server/video_service.rs b/src/server/video_service.rs
-index a13aebb..c106163 100644
+index a13aebb..09d66d2 100644
 --- a/src/server/video_service.rs
 +++ b/src/server/video_service.rs
 @@ -65,6 +65,7 @@ use std::{
@@ -5849,33 +5868,30 @@ index a13aebb..c106163 100644
                      let result = handle_one_frame(
                          display_idx,
                          &sp,
-@@ -882,6 +897,17 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -882,6 +897,8 @@ fn run(vs: VideoService) -> ResultType<()> {
                          capture_height,
                      )?;
                      static_refresh.on_frame_encoded(&result);
 +                    // Tether: the frame replaced the viewers' picture: the strips they hold go back over it.
-+                    if !result.send_conn_ids.is_empty() {
-+                        let ids: HashSet<i32> = result.send_conn_ids.iter().copied().filter(|id| Encoder::exact_stills(*id)).collect();
-+                        if ids != exact_ids {
-+                            exact.forget();
-+                            exact_ids = ids;
-+                        }
-+                        if let Some(msg) = exact.held_msg(display_idx) {
-+                            sp.send_to_ids(msg, &exact_ids);
-+                        }
-+                    }
++                    exact_after_frame(&mut exact, &mut exact_ids, &result.send_conn_ids, &sp, display_idx);
                      frame_controller.set_send(now, result.send_conn_ids);
                      send_counter += 1;
                  }
-@@ -949,10 +975,16 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -900,6 +917,8 @@ fn run(vs: VideoService) -> ResultType<()> {
+ 
+         match res {
+             Err(ref e) if e.kind() == WouldBlock => {
++                // Tether: whether this pass sent a video frame (a repeat of the still picture).
++                let mut frame_sent = false;
+                 #[cfg(windows)]
+                 if dxgi_recovery_started
+                     .map(|started| started.elapsed() >= DXGI_RECOVERY_FRAME_GRACE)
+@@ -949,10 +968,13 @@ fn run(vs: VideoService) -> ResultType<()> {
                          )?
                          .send_conn_ids;
                          static_refresh.on_encoded(!send_conn_ids.is_empty());
-+                        if !send_conn_ids.is_empty() {
-+                            if let Some(msg) = exact.held_msg(display_idx) {
-+                                sp.send_to_ids(msg, &exact_ids);
-+                            }
-+                        }
++                        exact_after_frame(&mut exact, &mut exact_ids, &send_conn_ids, &sp, display_idx);
++                        frame_sent |= !send_conn_ids.is_empty();
                          frame_controller.set_send(now, send_conn_ids);
                          send_counter += 1;
                      }
@@ -5884,32 +5900,31 @@ index a13aebb..c106163 100644
                  static_refresh.try_encode(
                      &yuv,
                      spf,
-@@ -962,6 +994,24 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -962,6 +984,23 @@ fn run(vs: VideoService) -> ResultType<()> {
                      &mut encoder,
                      &mut frame_controller,
                  )?;
-+                // Tether: a repeat replaced the viewers' picture too.
++                // Tether: a repeat replaced the viewers' picture too (it went to `send_conn_ids`).
 +                if static_refresh.outputs() != repeats {
-+                    if let Some(msg) = exact.held_msg(display_idx) {
-+                        sp.send_to_ids(msg, &exact_ids);
-+                    }
++                    exact_after_frame(&mut exact, &mut exact_ids, &frame_controller.send_conn_ids, &sp, display_idx);
++                    frame_sent = true;
 +                }
-+                // Tether: the picture stands and is refined: the exact pixels of what the viewers
-+                // do not hold yet, strip by strip.
-+                if static_refresh.refined() && !exact_ids.is_empty() {
-+                    // As many bytes a second as the video may use on this link right now.
++                // Tether: no frame in this pass: the exact pixels of the strips that have stood
++                // still and that the viewers do not hold yet, in one message.
++                if !frame_sent && !exact_ids.is_empty() {
++                    // As many bytes a second as the video may use on this link right now, and less
++                    // per pass while something else on the picture still changes.
 +                    let rate = (VIDEO_QOS.lock().unwrap().bitrate() as f64 * 125.0).max(exact_still::MIN_RATE);
-+                    let mut sent = HashSet::new();
-+                    for msg in exact.next_strips(display_idx, rate) {
-+                        sent = sp.send_to_ids(msg, &exact_ids);
++                    let budget = if static_refresh.refined() { exact_still::PASS_BYTES } else { exact_still::PASS_BYTES_BUSY };
++                    if let Some(msg) = exact.next_strips(display_idx, rate, budget, exact_still::STILL) {
++                        // The loop waits until the connections have taken it, as for a frame.
++                        frame_controller.set_send(now, sp.send_to_ids(msg, &exact_ids));
 +                    }
-+                    // The loop waits until the connections have taken them, as for a frame.
-+                    frame_controller.set_send(now, sent);
 +                }
              }
              Err(err) => {
                  #[cfg(windows)]
-@@ -1007,8 +1057,11 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -1007,8 +1046,11 @@ fn run(vs: VideoService) -> ResultType<()> {
          }
  
          let mut fetched_conn_ids = HashSet::new();
@@ -5921,7 +5936,7 @@ index a13aebb..c106163 100644
          while wait_begin.elapsed().as_millis() < timeout_millis as _ {
              if vs.source.is_monitor() {
                  check_privacy_mode_changed(&sp, display_idx, &c)?;
-@@ -1018,8 +1071,28 @@ fn run(vs: VideoService) -> ResultType<()> {
+@@ -1018,8 +1060,28 @@ fn run(vs: VideoService) -> ResultType<()> {
              if fetched_conn_ids.len() >= frame_controller.send_conn_ids.len() {
                  break;
              }
@@ -5950,10 +5965,33 @@ index a13aebb..c106163 100644
  
          let elapsed = now.elapsed();
          // may need to enable frame(timeout)
-@@ -1274,6 +1347,22 @@ fn refresh_allowed(unfed: bool, warmed_up: bool, latency_free: bool) -> bool {
+@@ -1274,6 +1336,45 @@ fn refresh_allowed(unfed: bool, warmed_up: bool, latency_free: bool) -> bool {
  }
  
  #[inline]
++/// Tether: a video frame went to `sent` and replaced those viewers' whole picture. The viewers
++/// that draw exact strips are remembered (others than before hold nothing), and the strips they
++/// hold are named so that they put them back over the frame.
++fn exact_after_frame(
++    exact: &mut exact_still::ExactStill,
++    exact_ids: &mut HashSet<i32>,
++    sent: &HashSet<i32>,
++    sp: &GenericService,
++    display: usize,
++) {
++    if sent.is_empty() {
++        return;
++    }
++    let ids: HashSet<i32> = sent.iter().copied().filter(|id| Encoder::exact_stills(*id)).collect();
++    if ids != *exact_ids {
++        exact.forget();
++        *exact_ids = ids;
++    }
++    if let Some(msg) = exact.held_msg(display) {
++        sp.send_to_ids(msg, exact_ids);
++    }
++}
++
 +/// Tether, for measurements only: with `TETHER_PTS_WALL=1` a frame's time stamp is the wall clock
 +/// (ms, 31 bits) at the moment it is captured and converted, instead of the time since the
 +/// service started. A viewer on a synchronised clock can then split the delay into "before the
@@ -5973,7 +6011,7 @@ index a13aebb..c106163 100644
  fn handle_one_frame(
      display: usize,
      sp: &GenericService,
-@@ -1300,8 +1389,12 @@ fn handle_one_frame(
+@@ -1300,8 +1401,12 @@ fn handle_one_frame(
      let mut vpx_no_output = false;
      let first = *first_frame;
      *first_frame = false;
@@ -5986,7 +6024,7 @@ index a13aebb..c106163 100644
              *encode_fail_counter = 0;
              *encoder_warmed_up = true;
              vf.display = display as _;
-@@ -1315,6 +1408,8 @@ fn handle_one_frame(
+@@ -1315,6 +1420,8 @@ fn handle_one_frame(
              send_conn_ids = sp.send_video_frame(msg);
          }
          Err(e) => {
@@ -5995,7 +6033,7 @@ index a13aebb..c106163 100644
              vpx_no_output = e.is::<scrap::VpxNoOutput>();
              *encode_fail_counter += 1;
              // Encoding errors are not frequent except on Android
-@@ -1590,3 +1685,132 @@ mod tests {
+@@ -1590,3 +1697,132 @@ mod tests {
          assert!(refresh_allowed(true, false, false));
      }
  }
@@ -6130,30 +6168,34 @@ index a13aebb..c106163 100644
 +}
 diff --git a/src/server/video_service/exact_still.rs b/src/server/video_service/exact_still.rs
 new file mode 100644
-index 0000000..4bc21af
+index 0000000..08c8434
 --- /dev/null
 +++ b/src/server/video_service/exact_still.rs
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,326 @@
 +//! Tether: the exact pixels of the parts of the picture that stand still.
 +//!
 +//! Video is lossy and 4:2:0: small coloured text and photos stay a little off however long the
-+//! picture stands. Once it stands still and the encoder has finished refining it, the host sends
-+//! the captured pixels themselves in strips of a few rows, at a limited byte rate, to the viewers
-+//! that asked for them (`SupportedDecoding.exact_stills`).
++//! picture stands. The host therefore sends the captured pixels themselves, in strips of a few
++//! rows, for every strip that has not changed for a moment (`STILL`), at a limited byte rate, to
++//! the viewers that asked for them (`SupportedDecoding.exact_stills`).
 +//!
 +//! Every video frame replaces the viewer's whole picture, so after each one the host names the
-+//! strips that have not changed since they were sent (`ExactStrip.same`: row and hash); the
++//! strips that have not changed since they were sent (`ExactStrips.same`: row and hash); the
 +//! viewer puts those back from its own copy. A blinking cursor or a clock therefore costs the
-+//! strips it touches, not the whole picture.
++//! strips it touches, not the whole picture, and does not keep the rest from becoming exact.
 +//! docs/performance.md "Exact still pictures".
-+use base::message_proto::{video_frame, ExactStrip, Message, VideoFrame};
-+use std::time::Instant;
++use base::message_proto::{video_frame, ExactStrip, ExactStrips, Message, VideoFrame};
++use std::time::{Duration, Instant};
 +
 +/// Rows per strip: small, so that a strip of a photo (which hardly compresses) is a few tens of
 +/// kB and the first frame of new motion never waits long behind one.
 +pub const ROWS: usize = 8;
-+/// Bytes of strips per loop pass, about.
-+const PASS_BYTES: usize = 32 * 1024;
++/// A strip is sent once it has not changed for this long.
++pub(super) const STILL: Duration = Duration::from_secs(1);
++/// Bytes of strips per loop pass, about: while the whole picture stands, and while something
++/// else on it still changes (then a changed part's next frame waits behind less).
++pub(super) const PASS_BYTES: usize = 32 * 1024;
++pub(super) const PASS_BYTES_BUSY: usize = 8 * 1024;
 +/// Bytes per second the strips may use at least; normally the video bitrate of the moment, so a
 +/// link the QoS controller has throttled gets its exact picture slowly instead of being flooded.
 +pub(super) const MIN_RATE: f64 = 16_000.0;
@@ -6167,24 +6209,25 @@ index 0000000..4bc21af
 +    h: usize, // 0: no pixels kept
 +    /// Per strip: the hash of the rows the viewers hold (sent, and unchanged since).
 +    held: Vec<Option<u32>>,
-+    next: usize,
++    /// Per strip: when its pixels last changed.
++    changed: Vec<Instant>,
 +    debt: f64, // bytes sent ahead of the rate
 +    last: Option<Instant>,
 +}
 +
 +impl ExactStill {
 +    /// A captured picture: keep its pixels if a viewer wants them; strips that changed are no
-+    /// longer held.
++    /// longer held and start their still time over.
 +    pub(super) fn keep(&mut self, frame: &scrap::Frame, wanted: bool) {
 +        let px = if wanted { pixels(frame) } else { None };
-+        self.keep_pixels(px);
++        self.keep_pixels(px, Instant::now());
 +    }
 +
-+    fn keep_pixels(&mut self, px: Option<(&[u8], usize, usize, usize)>) {
-+        self.next = 0;
++    fn keep_pixels(&mut self, px: Option<(&[u8], usize, usize, usize)>, now: Instant) {
 +        let Some((data, w, h, stride)) = px else {
 +            self.h = 0;
 +            self.held.clear();
++            self.changed.clear();
 +            return;
 +        };
 +        let same_shape = (self.w, self.h, self.stride) == (w, h, stride);
@@ -6194,12 +6237,18 @@ index 0000000..4bc21af
 +        (self.w, self.h, self.stride) = (w, h, stride);
 +        if !same_shape || self.prev.len() != self.cur.len() {
 +            self.held = vec![None; h.div_ceil(ROWS)];
++            self.changed = vec![now; h.div_ceil(ROWS)];
 +            return;
 +        }
-+        for (i, held) in self.held.iter_mut().enumerate() {
-+            let rows = i * ROWS * stride..((i + 1) * ROWS).min(h) * stride;
-+            if held.is_some() && self.cur[rows.clone()] != self.prev[rows] {
-+                *held = None;
++        for i in 0..self.held.len() {
++            // Row by row without the padding behind a row, which a capturer may leave as it is.
++            let differs = (i * ROWS..((i + 1) * ROWS).min(h)).any(|r| {
++                let row = r * stride..r * stride + w * 4;
++                self.cur[row.clone()] != self.prev[row]
++            });
++            if differs {
++                self.held[i] = None;
++                self.changed[i] = now;
 +            }
 +        }
 +    }
@@ -6207,7 +6256,6 @@ index 0000000..4bc21af
 +    /// Other viewers than before: nobody is known to hold anything.
 +    pub(super) fn forget(&mut self) {
 +        self.held.iter_mut().for_each(|h| *h = None);
-+        self.next = 0;
 +    }
 +
 +    /// For after a video frame: the strips the viewers still hold, to be put back over it.
@@ -6219,56 +6267,62 @@ index 0000000..4bc21af
 +            .filter_map(|(i, h)| h.map(|h| [(i * ROWS) as u32, h]))
 +            .flatten()
 +            .collect();
-+        if same.is_empty() {
-+            return None;
-+        }
-+        Some(message(display, ExactStrip { width: self.w as _, height: ROWS as _, same, ..Default::default() }))
++        (!same.is_empty()).then(|| self.message(display, Vec::new(), same))
 +    }
 +
-+    /// The next strips of the kept picture that the viewers do not hold, as far as the byte rate
-+    /// allows in this pass.
-+    pub(super) fn next_strips(&mut self, display: usize, rate: f64) -> Vec<Message> {
-+        let mut out = Vec::new();
++    /// The strips the viewers do not hold and that have stood still for `still`, as far as
++    /// `budget` bytes go in this pass and the byte rate allows: one message, or none.
++    pub(super) fn next_strips(&mut self, display: usize, rate: f64, budget: usize, still: Duration) -> Option<Message> {
++        self.strips_at(display, rate, budget, still, Instant::now())
++    }
++
++    fn strips_at(&mut self, display: usize, rate: f64, budget: usize, still: Duration, now: Instant) -> Option<Message> {
 +        if self.h == 0 {
-+            return out;
++            return None;
 +        }
-+        let now = Instant::now();
 +        if let Some(last) = self.last.replace(now) {
 +            self.debt = (self.debt - rate * now.duration_since(last).as_secs_f64().min(1.0)).max(0.0);
 +        }
 +        if self.debt > 0.0 {
-+            return out;
++            return None;
 +        }
-+        let mut bytes = 0;
-+        while self.next < self.held.len() && bytes < PASS_BYTES {
-+            let i = self.next;
-+            self.next += 1;
-+            if self.held[i].is_some() {
++        let (mut strips, mut bytes) = (Vec::new(), 0);
++        for i in 0..self.held.len() {
++            if bytes >= budget {
++                break;
++            }
++            if self.held[i].is_some() || now.duration_since(self.changed[i]) < still {
 +                continue;
 +            }
 +            let rows = ROWS.min(self.h - i * ROWS);
 +            let raw = filtered(&self.cur, self.stride, self.w, i * ROWS, rows);
-+            let hash = fnv1a(&raw);
 +            let data = hbb_common::compress::compress(&raw);
++            if data.is_empty() {
++                continue; // not compressed: not sent, not held
++            }
++            let hash = fnv1a(&raw);
 +            bytes += data.len();
 +            self.held[i] = Some(hash);
-+            out.push(message(
-+                display,
-+                ExactStrip { y: (i * ROWS) as _, width: self.w as _, height: rows as _, data: data.into(), hash, ..Default::default() },
-+            ));
++            strips.push(ExactStrip { y: (i * ROWS) as _, height: rows as _, data: data.into(), hash, ..Default::default() });
 +        }
 +        self.debt = bytes as f64;
-+        out
++        (!strips.is_empty()).then(|| self.message(display, strips, Vec::new()))
 +    }
-+}
 +
-+fn message(display: usize, strip: ExactStrip) -> Message {
-+    let mut vf = VideoFrame::new();
-+    vf.display = display as _;
-+    vf.union = Some(video_frame::Union::Exact(strip));
-+    let mut msg = Message::new();
-+    msg.set_video_frame(vf);
-+    msg
++    fn message(&self, display: usize, strips: Vec<ExactStrip>, same: Vec<u32>) -> Message {
++        let mut vf = VideoFrame::new();
++        vf.display = display as _;
++        vf.union = Some(video_frame::Union::Exact(ExactStrips {
++            width: self.w as _,
++            rows: ROWS as _,
++            strips,
++            same,
++            ..Default::default()
++        }));
++        let mut msg = Message::new();
++        msg.set_video_frame(vf);
++        msg
++    }
 +}
 +
 +/// The CPU pixels of a captured frame (BGRA): data, width, height, stride. None for texture
@@ -6330,11 +6384,17 @@ index 0000000..4bc21af
 +mod tests {
 +    use super::*;
 +
-+    fn strip(m: &Message) -> &ExactStrip {
++    const NONE: Duration = Duration::ZERO;
++
++    fn exact(m: &Message) -> &ExactStrips {
 +        match &m.video_frame().union {
 +            Some(video_frame::Union::Exact(s)) => s,
-+            _ => panic!("not a strip"),
++            _ => panic!("not exact strips"),
 +        }
++    }
++
++    fn rows(m: &Option<Message>) -> Vec<(u32, u32)> {
++        m.as_ref().map_or(Vec::new(), |m| exact(m).strips.iter().map(|s| (s.y, s.height)).collect())
 +    }
 +
 +    #[test]
@@ -6356,50 +6416,86 @@ index 0000000..4bc21af
 +    }
 +
 +    #[test]
-+    fn strips_cover_the_picture_once_and_respect_the_rate() {
++    fn strips_cover_the_picture_once_in_one_message_and_respect_rate_and_budget() {
 +        // 4 px wide, 20 rows: strips of 8, 8 and 4 rows.
-+        let mut e = ExactStill::default();
++        let t = Instant::now();
 +        let pic = vec![7u8; 16 * 20];
-+        e.keep_pixels(Some((&pic, 4, 20, 16)));
-+        let got = e.next_strips(0, 1e9);
-+        assert_eq!(got.iter().map(|m| (strip(m).y, strip(m).height)).collect::<Vec<_>>(), [(0, 8), (8, 8), (16, 4)]);
++        let mut e = ExactStill::default();
++        e.keep_pixels(Some((&pic, 4, 20, 16)), t);
++        let m = e.strips_at(0, 1e9, 1 << 20, NONE, t);
++        assert_eq!(rows(&m), [(0, 8), (8, 8), (16, 4)]);
++        assert_eq!((exact(m.as_ref().unwrap()).width, exact(m.as_ref().unwrap()).rows), (4, 8));
 +        // Sent ahead of a tiny rate: nothing more for now; and nothing is left anyway.
-+        assert!(e.next_strips(0, 1.0).is_empty());
++        assert!(e.strips_at(0, 1.0, 1 << 20, NONE, t).is_none());
 +        e.debt = 0.0;
-+        assert!(e.next_strips(0, 1e9).is_empty());
++        assert!(e.strips_at(0, 1e9, 1 << 20, NONE, t).is_none());
++        // A budget of one byte: one strip per pass.
++        let mut e = ExactStill::default();
++        e.keep_pixels(Some((&pic, 4, 20, 16)), t);
++        for want in [vec![(0, 8)], vec![(8, 8)], vec![(16, 4)], vec![]] {
++            assert_eq!(rows(&e.strips_at(0, 1e9, 1, NONE, t)), want);
++            e.debt = 0.0;
++        }
 +    }
 +
 +    #[test]
 +    fn only_changed_strips_are_sent_again_and_the_rest_is_named_as_held() {
++        let t = Instant::now();
 +        let mut e = ExactStill::default();
++        // 3 px wide with a stride of 16: 4 bytes of padding behind each row.
 +        let mut pic = vec![7u8; 16 * 20];
-+        e.keep_pixels(Some((&pic, 4, 20, 16)));
++        e.keep_pixels(Some((&pic, 3, 20, 16)), t);
 +        // Nothing held before anything was sent.
 +        assert!(e.held_msg(0).is_none());
-+        let first = e.next_strips(0, 1e9);
-+        let hash = |y: u32| strip(first.iter().find(|m| strip(m).y == y).unwrap()).hash;
-+        // The same picture again (a repeat, a cursor blink elsewhere): all three strips are held.
-+        e.keep_pixels(Some((&pic, 4, 20, 16)));
-+        assert_eq!(strip(&e.held_msg(0).unwrap()).same, [0, hash(0), 8, hash(8), 16, hash(16)]);
++        let first = e.strips_at(0, 1e9, 1 << 20, NONE, t).unwrap();
++        let hash = |y: u32| exact(&first).strips.iter().find(|s| s.y == y).unwrap().hash;
++        // The same picture again, with other bytes in the padding behind each row: all held.
++        for r in 0..20 {
++            pic[r * 16 + 12] = r as u8;
++        }
++        e.keep_pixels(Some((&pic, 3, 20, 16)), t);
++        assert_eq!(exact(&e.held_msg(0).unwrap()).same, [0, hash(0), 8, hash(8), 16, hash(16)]);
 +        e.debt = 0.0;
-+        assert!(e.next_strips(0, 1e9).is_empty());
++        assert!(e.strips_at(0, 1e9, 1 << 20, NONE, t).is_none());
 +        // A change in row 9: the middle strip is no longer held and is the only one sent again.
 +        pic[9 * 16 + 4] = 99;
-+        e.keep_pixels(Some((&pic, 4, 20, 16)));
-+        assert_eq!(strip(&e.held_msg(0).unwrap()).same, [0, hash(0), 16, hash(16)]);
++        e.keep_pixels(Some((&pic, 3, 20, 16)), t);
++        assert_eq!(exact(&e.held_msg(0).unwrap()).same, [0, hash(0), 16, hash(16)]);
 +        e.debt = 0.0;
-+        let again = e.next_strips(0, 1e9);
-+        assert_eq!(again.iter().map(|m| strip(m).y).collect::<Vec<_>>(), [8]);
-+        assert_ne!(strip(&again[0]).hash, hash(8));
++        let again = e.strips_at(0, 1e9, 1 << 20, NONE, t).unwrap();
++        assert_eq!(rows(&Some(again.clone())), [(8, 8)]);
++        assert_ne!(exact(&again).strips[0].hash, hash(8));
 +        // Other viewers, another size, or no pixels: nothing is held.
 +        e.forget();
 +        assert!(e.held_msg(0).is_none());
 +        e.debt = 0.0;
-+        assert_eq!(e.next_strips(0, 1e9).len(), 3);
-+        e.keep_pixels(Some((&pic[..16 * 16], 4, 16, 16)));
++        assert_eq!(rows(&e.strips_at(0, 1e9, 1 << 20, NONE, t)).len(), 3);
++        e.keep_pixels(Some((&pic[..16 * 16], 3, 16, 16)), t);
 +        assert!(e.held_msg(0).is_none());
-+        e.keep_pixels(None);
-+        assert!(e.held_msg(0).is_none() && e.next_strips(0, 1e9).is_empty());
++        e.keep_pixels(None, t);
++        assert!(e.held_msg(0).is_none() && e.strips_at(0, 1e9, 1 << 20, NONE, t).is_none());
++    }
++
++    #[test]
++    fn a_strip_waits_until_it_has_stood_still_while_another_keeps_changing() {
++        let t = Instant::now();
++        let sec = Duration::from_secs(1);
++        let mut e = ExactStill::default();
++        let mut pic = vec![7u8; 16 * 20];
++        e.keep_pixels(Some((&pic, 4, 20, 16)), t);
++        // Too early for all of them.
++        assert!(e.strips_at(0, 1e9, 1 << 20, sec, t + sec / 2).is_none());
++        // A cursor blinks in the last strip every half second: the other two become exact.
++        pic[17 * 16] = 1;
++        e.keep_pixels(Some((&pic, 4, 20, 16)), t + sec / 2);
++        assert_eq!(rows(&e.strips_at(0, 1e9, 1 << 20, sec, t + sec)), [(0, 8), (8, 8)]);
++        pic[17 * 16] = 2;
++        e.keep_pixels(Some((&pic, 4, 20, 16)), t + sec);
++        e.debt = 0.0;
++        assert!(e.strips_at(0, 1e9, 1 << 20, sec, t + sec * 3 / 2).is_none());
++        // The cursor stops: a second later its strip follows.
++        e.debt = 0.0;
++        assert_eq!(rows(&e.strips_at(0, 1e9, 1 << 20, sec, t + sec * 2)), [(16, 4)]);
 +    }
 +}
 diff --git a/src/server/video_service/static_refresh.rs b/src/server/video_service/static_refresh.rs
@@ -6819,10 +6915,10 @@ index 0000000..8911df8
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..230fd03
+index 0000000..83f47ff
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,466 @@
 +//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
 +//!
 +//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
@@ -6930,29 +7026,35 @@ index 0000000..230fd03
 +        return true;
 +    };
 +    use crate::server::video_service::exact_still::{exact_rows, ROWS};
-+    let (w, rows) = (s.width as usize, s.height as usize);
++    let w = s.width as usize;
 +    // The host is not trusted with sizes: a strip is a few rows of a real screen.
-+    if w == 0 || w > 16384 || rows == 0 || rows > ROWS {
++    if w == 0 || w > 16384 || s.rows as usize != ROWS {
 +        return true;
 +    }
 +    let Some(sink) = sink() else { return true };
++    let key = h.key();
++    for strip in s.strips.iter().take(16384 / ROWS) {
++        let rows = strip.height as usize;
++        if rows == 0 || rows > ROWS {
++            continue;
++        }
++        // Decompressed to at most the size the strip must have (not the general 256 MB limit).
++        let Ok(raw) = zstd::bulk::decompress(&strip.data, w * rows * 3) else {
++            continue;
++        };
++        if let Some(rgba) = exact_rows(&raw, w, rows) {
++            let mut pkt = encode_video_header(PKT_EXACT, 0, 0, vf.display as usize, s.width, strip.height, strip.y as i64, 4 + rgba.len());
++            pkt.extend_from_slice(&strip.hash.to_le_bytes());
++            pkt.extend_from_slice(&rgba);
++            sink.video(&key, pkt);
++        }
++    }
 +    if !s.same.is_empty() {
-+        let mut pkt = encode_video_header(PKT_EXACT, 1, 0, vf.display as usize, s.width, s.height, 0, s.same.len() * 4);
-+        for v in s.same.iter().take(2 * 16384) {
++        let mut pkt = encode_video_header(PKT_EXACT, 1, 0, vf.display as usize, s.width, s.rows, 0, s.same.len() * 4);
++        for v in s.same.iter().take(2 * 16384 / ROWS) {
 +            pkt.extend_from_slice(&v.to_le_bytes());
 +        }
-+        sink.video(&h.key(), pkt);
-+        return true;
-+    }
-+    // Decompressed to at most the size the strip must have (not the general 256 MB limit).
-+    let Ok(raw) = zstd::bulk::decompress(&s.data, w * rows * 3) else {
-+        return true;
-+    };
-+    if let Some(rgba) = exact_rows(&raw, w, rows) {
-+        let mut pkt = encode_video_header(PKT_EXACT, 0, 0, vf.display as usize, s.width, s.height, s.y as i64, 4 + rgba.len());
-+        pkt.extend_from_slice(&s.hash.to_le_bytes());
-+        pkt.extend_from_slice(&rgba);
-+        sink.video(&h.key(), pkt);
++        sink.video(&key, pkt);
 +    }
 +    true
 +}

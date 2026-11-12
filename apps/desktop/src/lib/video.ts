@@ -346,7 +346,14 @@ export class VideoPipeline {
   private strips: Packet[] = [];
   private native = false; // the picture on screen was decoded natively (PKT_RGBA)
   private held = new Map<number, { hash: number; rows: Uint8Array; h: number }>();
+  private heldSize = { w: 0, h: 0 };
   private exact(p: Packet) {
+    if (p.codec === 0) {
+      // New rows are remembered at once, drawn or not: the host counts them as held from now on.
+      if (p.width !== this.w || p.pts + p.height > this.h || p.data.length !== 4 + p.width * p.height * 4) return;
+      const hash = new DataView(p.data.buffer, p.data.byteOffset, 4).getUint32(0, true);
+      this.held.set(p.pts, { hash, rows: p.data.subarray(4), h: p.height });
+    }
     if (this.native) return;
     if (this.pending.size) this.strips.push(p);
     else this.drawExact([p]);
@@ -368,11 +375,7 @@ export class VideoPipeline {
           const s = this.held.get(v.getUint32(i, true));
           if (s && s.hash === v.getUint32(i + 4, true)) rows(v.getUint32(i, true), s.rows, s.h);
         }
-      } else if (p.data.length === 4 + p.width * p.height * 4) {
-        const s = { hash: v.getUint32(0, true), rows: p.data.subarray(4), h: p.height };
-        this.held.set(p.pts, s);
-        rows(p.pts, s.rows, s.h);
-      }
+      } else rows(p.pts, p.data.subarray(4), p.height);
     }
     if (drawn) this.gl?.draw();
   }
@@ -381,7 +384,11 @@ export class VideoPipeline {
     if (w === this.w && h === this.h) return;
     this.w = w;
     this.h = h;
-    this.held.clear(); // exact rows of the old size
+    // Exact rows of another size are of no use; the same size again (a new canvas) keeps them.
+    if (w !== this.heldSize.w || h !== this.heldSize.h) {
+      this.held.clear();
+      this.heldSize = { w, h };
+    }
     // The WebGL canvas is sized to its on-screen pixels instead (GlRenderer), the shader scales.
     if (!this.gl) {
       this.canvas.width = w;
@@ -443,6 +450,7 @@ export class VideoPipeline {
     try {
       dec.decode(new EncodedVideoChunk({ type: p.key ? "key" : "delta", timestamp: ts, data: p.data }));
     } catch (e) {
+      this.pending.delete(ts); // it will never come out: nothing may wait for it
       console.warn("[video] decode threw", e);
       this.needKey("decode threw");
     }
