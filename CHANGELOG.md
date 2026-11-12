@@ -7,7 +7,14 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ## [Unreleased]
 
-### 0.6.2 (in work; nothing released under this number yet)
+### 0.6.2 (files ready in `dist/`, 2026-11-12; not published yet)
+
+Checked on these files: still page identical to the host's screen and identical again after a
+forced restart of the video; `vm-e2e.mjs` 5/5; scrolling 117/151 ms (median/p95), 21 pictures/s
+on the GPU-less test host; on the Mac the drag test 3/3 and a drag-select in the CloudBuddy
+text field. Not checked: installing over 0.6.1 with the setup, the corporate-proxy route,
+AnyDesk again on the same night (its numbers are from 0.6.1's comparison). Open: with exact
+stills a Mac host's pure red and orange arrive one level off (254,0,0 / 255,127,1).
 
 - **Exact still pictures.** What stands still on the remote screen for a second and a half is
   now shown with the host's own pixels: text, coloured text and photos become exact instead of
