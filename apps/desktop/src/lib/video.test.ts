@@ -161,7 +161,7 @@ describe("ExactRows", () => {
     expect(drawn(e)).toEqual([]);
   });
 
-  it("drops the list at a key frame that no list preceded, and on reconnect, display or size change", () => {
+  it("drops the list at every key frame, and on reconnect, display or size change", () => {
     const held = () => {
       const e = fresh();
       e.strip(2, 0, 8, 11, rows(1), false);
@@ -170,16 +170,25 @@ describe("ExactRows", () => {
       expect(drawn(e)).toEqual([[0, 1]]);
       return e;
     };
-    // The host's video service started anew (its "nothing is held" may not have arrived).
+    // A key frame: the host's video service started anew, or it is another connection.
     let e = held();
     e.video(true);
     expect(drawn(e)).toEqual([]);
-    // A key frame right after a list keeps that list.
+    // Also when a list arrived right before it (a list of the stream before, e.g. the last one
+    // of the connection before a reconnect that did not pass through `reconnect`).
     e = held();
     e.list(2, list(0, 11));
     e.video(true);
+    expect(drawn(e)).toEqual([]);
+    // The host sends its list again after a key frame: from then on the rows go back.
+    e.list(2, list(0, 11));
+    e.video(false);
     expect(drawn(e)).toEqual([[0, 1]]);
-    // ... but only for that frame's stream: the next key frame without a list drops it.
+    // Rows and a list of the display shown before that arrive after the switch, then the key frame.
+    e = held();
+    e.clear();
+    e.strip(2, 0, 8, 11, rows(1), false);
+    e.list(2, list(0, 11));
     e.video(true);
     expect(drawn(e)).toEqual([]);
     e = held();

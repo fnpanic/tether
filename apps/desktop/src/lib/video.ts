@@ -99,15 +99,14 @@ export interface ExactRow {
  * over it from the copy kept here, but only those the host's last list names with the hash
  * of the copy. The list is the host's word that a strip has not changed since it was sent.
  *
- * It must never outlive the stream it was sent for: a key frame starts a stream anew (a new run
- * of the host's video service, another connection, another display), so at a key frame the list
- * is dropped unless the host sent one right before that frame. This does not rely on the
- * host's "nothing is held" having arrived.
+ * It must never outlive the stream it was sent for. A key frame starts a stream anew (a new run
+ * of the host's video service, another connection, another display), so the list is dropped
+ * at every key frame, whatever else arrived or did not arrive: the host sends it again after
+ * a key frame. Nothing here relies on a message from the host having arrived.
  */
 export class ExactRows {
   private held = new Map<number, { hash: number; rows: Uint8Array; h: number }>();
   private listed = new Map<number, number>();
-  private listFresh = false; // a list arrived since the last video packet
   private waiting: ExactRow[] = [];
   private w = 0;
   private h = 0;
@@ -123,14 +122,12 @@ export class ExactRows {
   /** A video packet arrived; `key`: it is a key frame. Rows that waited were for the picture before. */
   video(key: boolean) {
     this.waiting.length = 0;
-    if (key && !this.listFresh) this.listed.clear();
-    this.listFresh = false;
+    if (key) this.listed.clear();
   }
 
   /** The host's list for the frames after it: u32 pairs of first row and hash, for a picture `width` wide. */
   list(width: number, pairs: DataView) {
     this.listed = new Map();
-    this.listFresh = true;
     if (width !== this.w) return;
     for (let i = 0; i + 8 <= pairs.byteLength; i += 8) this.listed.set(pairs.getUint32(i, true), pairs.getUint32(i + 4, true));
   }
@@ -162,7 +159,6 @@ export class ExactRows {
   /** Another connection to the host: its list was for the one before. */
   reconnect() {
     this.listed.clear();
-    this.listFresh = false;
     this.waiting.length = 0;
   }
 
@@ -419,7 +415,10 @@ export class VideoPipeline {
     if (p.display !== this.display) return;
     this.packets++;
     if (p.kind === PKT_EXACT) return this.exact(p);
-    this.exactRows.video(p.kind === PKT_ENCODED && p.key);
+    const key = p.kind === PKT_ENCODED && p.key;
+    this.exactRows.video(key);
+    // A key frame starts anew: a frame from before that the decoder swallowed is not awaited.
+    if (key) this.pending.clear();
     if (p.kind === PKT_RGBA) return this.drawRgba(p);
     this.decode(p);
   }

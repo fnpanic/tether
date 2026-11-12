@@ -5823,7 +5823,7 @@ index 790f23b..e1b3490 100644
 +    }
 +}
 diff --git a/src/server/video_service.rs b/src/server/video_service.rs
-index a13aebb..79a819a 100644
+index a13aebb..ce3b817 100644
 --- a/src/server/video_service.rs
 +++ b/src/server/video_service.rs
 @@ -65,6 +65,7 @@ use std::{
@@ -5960,7 +5960,7 @@ index a13aebb..79a819a 100644
  
          let elapsed = now.elapsed();
          // may need to enable frame(timeout)
-@@ -1274,6 +1333,44 @@ fn refresh_allowed(unfed: bool, warmed_up: bool, latency_free: bool) -> bool {
+@@ -1274,6 +1333,48 @@ fn refresh_allowed(unfed: bool, warmed_up: bool, latency_free: bool) -> bool {
  }
  
  #[inline]
@@ -5974,6 +5974,10 @@ index a13aebb..79a819a 100644
 +    sp: &GenericService,
 +    display: usize,
 +) {
++    // A key frame makes a viewer drop its list (it may start a stream anew): it gets it again.
++    if exact_still::key_frame_sent() {
++        exact.relist();
++    }
 +    let ids: HashSet<i32> = sp.subscriber_ids().into_iter().filter(|id| Encoder::exact_stills(*id)).collect();
 +    if ids != *exact_ids {
 +        exact.forget();
@@ -6005,7 +6009,7 @@ index a13aebb..79a819a 100644
  fn handle_one_frame(
      display: usize,
      sp: &GenericService,
-@@ -1300,8 +1397,12 @@ fn handle_one_frame(
+@@ -1300,10 +1401,15 @@ fn handle_one_frame(
      let mut vpx_no_output = false;
      let first = *first_frame;
      *first_frame = false;
@@ -6017,8 +6021,11 @@ index a13aebb..79a819a 100644
 +            fluxrt_stats::encoded(&vf, t_enc.elapsed());
              *encode_fail_counter = 0;
              *encoder_warmed_up = true;
++            exact_still::note_frame(&vf);
              vf.display = display as _;
-@@ -1315,6 +1416,8 @@ fn handle_one_frame(
+             let mut msg = Message::new();
+             msg.set_video_frame(vf);
+@@ -1315,6 +1421,8 @@ fn handle_one_frame(
              send_conn_ids = sp.send_video_frame(msg);
          }
          Err(e) => {
@@ -6027,7 +6034,7 @@ index a13aebb..79a819a 100644
              vpx_no_output = e.is::<scrap::VpxNoOutput>();
              *encode_fail_counter += 1;
              // Encoding errors are not frequent except on Android
-@@ -1590,3 +1693,132 @@ mod tests {
+@@ -1590,3 +1698,132 @@ mod tests {
          assert!(refresh_allowed(true, false, false));
      }
  }
@@ -6162,10 +6169,10 @@ index a13aebb..79a819a 100644
 +}
 diff --git a/src/server/video_service/exact_still.rs b/src/server/video_service/exact_still.rs
 new file mode 100644
-index 0000000..84d491e
+index 0000000..27490ee
 --- /dev/null
 +++ b/src/server/video_service/exact_still.rs
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,378 @@
 +//! Tether: the exact pixels of the parts of the picture that stand still.
 +//!
 +//! Video is lossy and 4:2:0: small coloured text and photos stay a little off however long the
@@ -6173,8 +6180,10 @@ index 0000000..84d491e
 +//! rows, for every strip that has not changed for a moment (`STILL`), at a limited byte rate, to
 +//! the viewers that asked for them (`SupportedDecoding.exact_stills`).
 +//!
-+//! The viewer never relies on having been told: it drops its list at every key frame that no
-+//! list preceded (a new run of this service, a new connection), see `VideoPipeline.push`.
++//! A list must never outlive the stream it was sent for, and the viewer does not rely on being
++//! told: it drops its list at every key frame (a new run of this service, a new connection and
++//! another display all start with one; `ExactRows.video` in the app). So after a key frame has
++//! gone out the host sends its list again (`key_frame_sent`, `relist`).
 +//!
 +//! Every video frame replaces the viewer's whole picture, so the host keeps the viewer told
 +//! which strips have not changed since they were sent (`ExactStrips.same`: row and hash, sent
@@ -6260,6 +6269,11 @@ index 0000000..84d491e
 +        self.listed = None;
 +    }
 +
++    /// A key frame went out: the viewers dropped their list and get it again before the next frame.
++    pub(super) fn relist(&mut self) {
++        self.listed = None;
++    }
++
 +    /// The strips the viewers hold: pairs of first row and hash.
 +    fn same(&self) -> Vec<u32> {
 +        self.held.iter().enumerate().filter_map(|(i, h)| h.map(|h| [(i * ROWS) as u32, h])).flatten().collect()
@@ -6329,6 +6343,28 @@ index 0000000..84d491e
 +        msg.set_video_frame(vf);
 +        msg
 +    }
++}
++
++thread_local! {
++    /// The video thread sent a key frame since `key_frame_sent` was last asked.
++    static KEY_SENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++}
++
++/// Called with every encoded frame the video thread sends.
++pub(super) fn note_frame(vf: &VideoFrame) {
++    use video_frame::Union::*;
++    let key = match &vf.union {
++        Some(Vp8s(f)) | Some(Vp9s(f)) | Some(Av1s(f)) | Some(H264s(f)) | Some(H265s(f)) => f.frames.iter().any(|f| f.key),
++        _ => false,
++    };
++    if key {
++        KEY_SENT.with(|k| k.set(true));
++    }
++}
++
++/// Whether this thread sent a key frame since the last call.
++pub(super) fn key_frame_sent() -> bool {
++    KEY_SENT.with(|k| k.replace(false))
 +}
 +
 +/// The CPU pixels of a captured frame (BGRA): data, width, height, stride. None for texture
@@ -6474,6 +6510,10 @@ index 0000000..84d491e
 +        let again = e.strips_at(0, 1e9, 1 << 20, NONE, t).unwrap();
 +        assert_eq!(rows(&Some(again.clone())), [(8, 8)]);
 +        assert_ne!(exact(&again).strips[0].hash, hash(8));
++        // A key frame went out (the viewers dropped their list): the same list is sent again.
++        e.relist();
++        assert_eq!(exact(&e.list_if_changed(0).unwrap()).same, [0, hash(0), 8, exact(&again).strips[0].hash, 16, hash(16)]);
++        assert!(e.list_if_changed(0).is_none());
 +        // Other viewers: nothing is held and they are told, even though the list was empty before.
 +        e.forget();
 +        assert!(exact(&e.list_if_changed(0).unwrap()).same.is_empty());
@@ -6512,7 +6552,7 @@ index 0000000..84d491e
 +    }
 +}
 diff --git a/src/server/video_service/static_refresh.rs b/src/server/video_service/static_refresh.rs
-index 32d4fec..52fad8b 100644
+index 32d4fec..f85492c 100644
 --- a/src/server/video_service/static_refresh.rs
 +++ b/src/server/video_service/static_refresh.rs
 @@ -1,6 +1,6 @@
@@ -6641,7 +6681,15 @@ index 32d4fec..52fad8b 100644
                  Instant::now()
              } else {
                  // Align with the capture loop so encoding time does not skip the next tick.
-@@ -548,13 +596,13 @@ mod tests {
+@@ -275,6 +323,7 @@ impl<'a> StaticRefresh<'a> {
+             };
+             self.repeat_output_counter += 1;
+             self.repeat_failures = 0;
++            super::exact_still::note_frame(&vf);
+             vf.display = self.display_idx as _;
+             let mut msg = Message::new();
+             msg.set_video_frame(vf);
+@@ -548,13 +597,13 @@ mod tests {
      }
  
      #[test]
@@ -6657,7 +6705,7 @@ index 32d4fec..52fad8b 100644
              (VideoSource::Monitor, CodecFormat::VP9, &[][..]),
          ] {
              let mut refresh = new_refresh(source, codec_format, &sp, &recorder, 0, 1, 1);
-@@ -566,6 +614,83 @@ mod tests {
+@@ -566,6 +615,83 @@ mod tests {
          assert_eq!(calls.get(), 0);
      }
  
