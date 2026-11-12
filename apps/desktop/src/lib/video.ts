@@ -9,7 +9,7 @@ export const PKT_ENCODED = 0;
 export const PKT_RGBA = 1;
 /** Exact rows of a still picture. `codec` 0: `width`, `height` are the strip's, `pts` its first
  * row, the data its hash (u32) and RGBA rows. `codec` 1: the strips held here that go back over
- * the frame before (u32 pairs of first row and hash). */
+ * every frame from now on (u32 pairs of first row and hash). */
 export const PKT_EXACT = 2;
 export const CODEC = { vp8: 1, vp9: 2, av1: 3, h264: 4, h265: 5 } as const;
 export type CodecName = keyof typeof CODEC;
@@ -338,28 +338,36 @@ export class VideoPipeline {
     this.decode(p);
   }
 
-  /** Exact rows of the parts of the picture that stand still (the host's exact_still.rs). They
-   * follow a video frame, which may still be in the decoder: then they wait until it is drawn
-   * (`output`). Every video frame replaces the whole picture; the host then names the strips
-   * that are unchanged and they go back over it from `held`. Only with WebCodecs decoding: a
-   * natively decoded picture takes another path and could arrive after its strips. */
+  /** Exact rows of the parts of the picture that stand still (the host's exact_still.rs). New
+   * rows follow a video frame, which may still be in the decoder: then they wait until it is
+   * drawn (`output`). Every video frame replaces the whole picture; the rows the host has
+   * listed as unchanged (`listed`: first row -> hash, the last list received) go back over it
+   * from `held`. Only with WebCodecs decoding: a natively decoded picture takes another path
+   * and could arrive after its rows. */
   private strips: Packet[] = [];
   private native = false; // the picture on screen was decoded natively (PKT_RGBA)
   private held = new Map<number, { hash: number; rows: Uint8Array; h: number }>();
   private heldSize = { w: 0, h: 0 };
+  private listed = new Map<number, number>();
   private exact(p: Packet) {
-    if (p.codec === 0) {
-      // New rows are remembered at once, drawn or not: the host counts them as held from now on.
-      if (p.width !== this.w || p.pts + p.height > this.h || p.data.length !== 4 + p.width * p.height * 4) return;
-      const hash = new DataView(p.data.buffer, p.data.byteOffset, 4).getUint32(0, true);
-      this.held.set(p.pts, { hash, rows: p.data.subarray(4), h: p.height });
+    if (p.codec === 1) {
+      // The list for the frames that follow it.
+      const v = new DataView(p.data.buffer, p.data.byteOffset, p.data.byteLength);
+      this.listed = new Map();
+      if (p.width === this.w) for (let i = 0; i + 8 <= v.byteLength; i += 8) this.listed.set(v.getUint32(i, true), v.getUint32(i + 4, true));
+      return;
     }
+    // New rows are remembered at once, drawn or not: the host counts them as held from now on.
+    if (p.width !== this.w || p.pts + p.height > this.h || p.data.length !== 4 + p.width * p.height * 4) return;
+    const hash = new DataView(p.data.buffer, p.data.byteOffset, 4).getUint32(0, true);
+    this.held.set(p.pts, { hash, rows: p.data.subarray(4), h: p.height });
     if (this.native) return;
     if (this.pending.size) this.strips.push(p);
-    else this.drawExact([p]);
+    else this.drawExact([p], false);
   }
 
-  private drawExact(ps: Packet[]) {
+  /** `listed`: first the rows held and listed (over a frame just drawn), then the new rows `ps`. */
+  private drawExact(ps: Packet[], listed: boolean) {
     let drawn = false;
     const rows = (y: number, data: Uint8Array, h: number) => {
       if (y + h > this.h || data.length !== this.w * h * 4) return;
@@ -367,16 +375,12 @@ export class VideoPipeline {
       else this.ctx!.putImageData(new ImageData(new Uint8ClampedArray(data.buffer as ArrayBuffer, data.byteOffset, data.length), this.w, h), 0, y);
       drawn = true;
     };
-    for (const p of ps) {
-      if (p.width !== this.w) continue;
-      const v = new DataView(p.data.buffer, p.data.byteOffset, p.data.byteLength);
-      if (p.codec === 1) {
-        for (let i = 0; i + 8 <= v.byteLength; i += 8) {
-          const s = this.held.get(v.getUint32(i, true));
-          if (s && s.hash === v.getUint32(i + 4, true)) rows(v.getUint32(i, true), s.rows, s.h);
-        }
-      } else rows(p.pts, p.data.subarray(4), p.height);
-    }
+    if (listed)
+      for (const [y, hash] of this.listed) {
+        const s = this.held.get(y);
+        if (s && s.hash === hash) rows(y, s.rows, s.h);
+      }
+    for (const p of ps) if (p.width === this.w) rows(p.pts, p.data.subarray(4), p.height);
     if (drawn) this.gl?.draw();
   }
 
@@ -387,6 +391,7 @@ export class VideoPipeline {
     // Exact rows of another size are of no use; the same size again (a new canvas) keeps them.
     if (w !== this.heldSize.w || h !== this.heldSize.h) {
       this.held.clear();
+      this.listed.clear();
       this.heldSize = { w, h };
     }
     // The WebGL canvas is sized to its on-screen pixels instead (GlRenderer), the shader scales.
@@ -479,7 +484,8 @@ export class VideoPipeline {
       this.pending.delete(frame.timestamp);
     }
     frame.close();
-    if (!this.pending.size && this.strips.length) this.drawExact(this.strips.splice(0));
+    // The frame replaced the whole picture: the exact rows held go back over it, then the new ones.
+    if (this.listed.size || this.strips.length) this.drawExact(this.pending.size ? [] : this.strips.splice(0), true);
     this.tick();
   }
 
