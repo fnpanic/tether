@@ -86,6 +86,93 @@ export const MAX_DECODE_QUEUE = 24;
  * Key-frame recovery: once the pipeline needs a key frame it requests one right away and again every
  * KEY_RETRY_MS until a key frame arrives, so a lost request never freezes the picture.
  */
+/** Rows to draw at row `y` of the picture (RGBA, `h` rows). */
+export interface ExactRow {
+  y: number;
+  rows: Uint8Array;
+  h: number;
+}
+
+/**
+ * The exact rows of what stands still on the host (its exact_still.rs sends them as strips of a
+ * few rows, each with a hash). Every video frame replaces the whole picture; the rows go back
+ * over it from the copy kept here, but only those the host's last list names with the hash
+ * of the copy. The list is the host's word that a strip has not changed since it was sent.
+ *
+ * It must never outlive the stream it was sent for: a key frame starts a stream anew (a new run
+ * of the host's video service, another connection, another display), so at a key frame the list
+ * is dropped unless the host sent one right before that frame. This does not rely on the
+ * host's "nothing is held" having arrived.
+ */
+export class ExactRows {
+  private held = new Map<number, { hash: number; rows: Uint8Array; h: number }>();
+  private listed = new Map<number, number>();
+  private listFresh = false; // a list arrived since the last video packet
+  private waiting: ExactRow[] = [];
+  private w = 0;
+  private h = 0;
+
+  /** The picture's size: rows of another size are of no use. */
+  size(w: number, h: number) {
+    if (w === this.w && h === this.h) return;
+    this.clear();
+    this.w = w;
+    this.h = h;
+  }
+
+  /** A video packet arrived; `key`: it is a key frame. Rows that waited were for the picture before. */
+  video(key: boolean) {
+    this.waiting.length = 0;
+    if (key && !this.listFresh) this.listed.clear();
+    this.listFresh = false;
+  }
+
+  /** The host's list for the frames after it: u32 pairs of first row and hash, for a picture `width` wide. */
+  list(width: number, pairs: DataView) {
+    this.listed = new Map();
+    this.listFresh = true;
+    if (width !== this.w) return;
+    for (let i = 0; i + 8 <= pairs.byteLength; i += 8) this.listed.set(pairs.getUint32(i, true), pairs.getUint32(i + 4, true));
+  }
+
+  /** New rows from the host. They are kept at once (the host counts them as held from now on).
+   * Returns them to draw now, or null: not for this picture, or `wait` (a frame is still in the
+   * decoder; `after` hands them out). */
+  strip(width: number, y: number, h: number, hash: number, rows: Uint8Array, wait: boolean): ExactRow | null {
+    if (width !== this.w || h <= 0 || y + h > this.h || rows.length !== width * h * 4) return null;
+    this.held.set(y, { hash, rows, h });
+    const row = { y, rows, h };
+    if (!wait) return row;
+    this.waiting.push(row);
+    return null;
+  }
+
+  /** A frame was drawn: the rows to put back over it (held, and listed with the hash of the
+   * copy), and with `flush` (nothing left in the decoder) the new rows that waited. */
+  after(flush: boolean): ExactRow[] {
+    const out: ExactRow[] = [];
+    for (const [y, hash] of this.listed) {
+      const s = this.held.get(y);
+      if (s && s.hash === hash) out.push({ y, rows: s.rows, h: s.h });
+    }
+    if (flush) out.push(...this.waiting.splice(0));
+    return out;
+  }
+
+  /** Another connection to the host: its list was for the one before. */
+  reconnect() {
+    this.listed.clear();
+    this.listFresh = false;
+    this.waiting.length = 0;
+  }
+
+  /** Another display, another size: nothing kept is of use. */
+  clear() {
+    this.held.clear();
+    this.reconnect();
+  }
+}
+
 export class KeyRecovery {
   waiting = false;
   requests = 0;
@@ -332,56 +419,31 @@ export class VideoPipeline {
     if (p.display !== this.display) return;
     this.packets++;
     if (p.kind === PKT_EXACT) return this.exact(p);
-    // A new picture: strips still waiting belonged to the one before it.
-    this.strips.length = 0;
+    this.exactRows.video(p.kind === PKT_ENCODED && p.key);
     if (p.kind === PKT_RGBA) return this.drawRgba(p);
     this.decode(p);
   }
 
-  /** Exact rows of the parts of the picture that stand still (the host's exact_still.rs). New
-   * rows follow a video frame, which may still be in the decoder: then they wait until it is
-   * drawn (`output`). Every video frame replaces the whole picture; the rows the host has
-   * listed as unchanged (`listed`: first row -> hash, the last list received) go back over it
-   * from `held`. Only with WebCodecs decoding: a natively decoded picture takes another path
-   * and could arrive after its rows. */
-  private strips: Packet[] = [];
+  /** Exact rows of what stands still on the host (`ExactRows`). Only drawn with WebCodecs
+   * decoding: a natively decoded picture takes another path and could arrive after its rows. */
+  private exactRows = new ExactRows();
   private native = false; // the picture on screen was decoded natively (PKT_RGBA)
-  private held = new Map<number, { hash: number; rows: Uint8Array; h: number }>();
-  private heldSize = { w: 0, h: 0 };
-  private listed = new Map<number, number>();
   private exact(p: Packet) {
-    if (p.codec === 1) {
-      // The list for the frames that follow it.
-      const v = new DataView(p.data.buffer, p.data.byteOffset, p.data.byteLength);
-      this.listed = new Map();
-      if (p.width === this.w) for (let i = 0; i + 8 <= v.byteLength; i += 8) this.listed.set(v.getUint32(i, true), v.getUint32(i + 4, true));
-      return;
-    }
-    // New rows are remembered at once, drawn or not: the host counts them as held from now on.
-    if (p.width !== this.w || p.pts + p.height > this.h || p.data.length !== 4 + p.width * p.height * 4) return;
-    const hash = new DataView(p.data.buffer, p.data.byteOffset, 4).getUint32(0, true);
-    this.held.set(p.pts, { hash, rows: p.data.subarray(4), h: p.height });
-    if (this.native) return;
-    if (this.pending.size) this.strips.push(p);
-    else this.drawExact([p], false);
+    const v = new DataView(p.data.buffer, p.data.byteOffset, p.data.byteLength);
+    if (p.codec === 1) return this.exactRows.list(p.width, v);
+    if (p.data.length < 4) return;
+    // New rows wait for the frame in the decoder; they are drawn after it (`output`).
+    const row = this.exactRows.strip(p.width, p.pts, p.height, v.getUint32(0, true), p.data.subarray(4), this.native || this.pending.size > 0);
+    if (row) this.drawRows([row]);
   }
 
-  /** `listed`: first the rows held and listed (over a frame just drawn), then the new rows `ps`. */
-  private drawExact(ps: Packet[], listed: boolean) {
-    let drawn = false;
-    const rows = (y: number, data: Uint8Array, h: number) => {
-      if (y + h > this.h || data.length !== this.w * h * 4) return;
-      if (this.gl) this.gl.strip(data, y, this.w, h);
-      else this.ctx!.putImageData(new ImageData(new Uint8ClampedArray(data.buffer as ArrayBuffer, data.byteOffset, data.length), this.w, h), 0, y);
-      drawn = true;
-    };
-    if (listed)
-      for (const [y, hash] of this.listed) {
-        const s = this.held.get(y);
-        if (s && s.hash === hash) rows(y, s.rows, s.h);
-      }
-    for (const p of ps) if (p.width === this.w) rows(p.pts, p.data.subarray(4), p.height);
-    if (drawn) this.gl?.draw();
+  private drawRows(rows: ExactRow[]) {
+    for (const r of rows) {
+      if (r.y + r.h > this.h || r.rows.length !== this.w * r.h * 4) continue;
+      if (this.gl) this.gl.strip(r.rows, r.y, this.w, r.h);
+      else this.ctx!.putImageData(new ImageData(new Uint8ClampedArray(r.rows.buffer as ArrayBuffer, r.rows.byteOffset, r.rows.length), this.w, r.h), 0, r.y);
+    }
+    if (rows.length) this.gl?.draw();
   }
 
   private resize(w: number, h: number) {
@@ -389,11 +451,7 @@ export class VideoPipeline {
     this.w = w;
     this.h = h;
     // Exact rows of another size are of no use; the same size again (a new canvas) keeps them.
-    if (w !== this.heldSize.w || h !== this.heldSize.h) {
-      this.held.clear();
-      this.listed.clear();
-      this.heldSize = { w, h };
-    }
+    this.exactRows.size(w, h);
     // The WebGL canvas is sized to its on-screen pixels instead (GlRenderer), the shader scales.
     if (!this.gl) {
       this.canvas.width = w;
@@ -479,13 +537,13 @@ export class VideoPipeline {
     this.timed(() => (this.gl ? this.gl.frame(src, w, h) : this.ctx!.drawImage(src, 0, 0, w, h)));
     if (src !== frame) src.close();
     const t0 = this.pending.get(frame.timestamp);
-    if (t0 !== undefined) {
-      this.decodeSum += performance.now() - t0;
-      this.pending.delete(frame.timestamp);
-    }
+    if (t0 !== undefined) this.decodeSum += performance.now() - t0;
+    // Frames come out in order: one the decoder swallowed must not count as still inside it
+    // (exact rows wait for `pending` to empty).
+    for (const ts of this.pending.keys()) if (ts <= frame.timestamp) this.pending.delete(ts);
     frame.close();
     // The frame replaced the whole picture: the exact rows held go back over it, then the new ones.
-    if (this.listed.size || this.strips.length) this.drawExact(this.pending.size ? [] : this.strips.splice(0), true);
+    if (!this.native) this.drawRows(this.exactRows.after(!this.pending.size));
     this.tick();
   }
 
@@ -555,6 +613,7 @@ export class VideoPipeline {
     this.key.expect(performance.now());
     this.startKeyRetry();
     this.pending.clear();
+    this.exactRows.reconnect();
   }
 
   /** The host's size of the shown display (peer_info), used to size frames (see renderSize). */
@@ -565,6 +624,7 @@ export class VideoPipeline {
   /** Switch the shown display; the next key frame repaints. */
   setDisplay(d: number) {
     this.display = d;
+    this.exactRows.clear();
     this.needKey("display switched");
   }
 

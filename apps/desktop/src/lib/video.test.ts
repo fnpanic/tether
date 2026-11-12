@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CODEC, decoderConfig, KEY_RETRY_MS, KeyRecovery, NATIVE_MS, STALL_FRAMES, STALL_MS, watchdog, WATCH0, watchNative, type Watch } from "./video";
+import { CODEC, decoderConfig, KEY_RETRY_MS, ExactRows, KeyRecovery, NATIVE_MS, STALL_FRAMES, STALL_MS, watchdog, WATCH0, watchNative, type Watch } from "./video";
 
 describe("decoderConfig", () => {
   it("decodes the software codecs with the host's BT.601 limited-range matrix", () => {
@@ -112,5 +112,116 @@ describe("watchdog", () => {
     expect(run(watchNative(WATCH0, 0), NATIVE_MS / 1000, 0, false).acts).toEqual([`${NATIVE_MS / 1000}:codec`]);
     const done: Watch = { ...WATCH0, stage: 2 };
     expect(watchNative(done, 0)).toBe(done);
+  });
+});
+
+describe("ExactRows", () => {
+  // A picture 2 px wide and 16 rows high: two strips of 8 rows.
+  const rows = (fill: number) => new Uint8Array(2 * 8 * 4).fill(fill);
+  const list = (...pairs: number[]) => new DataView(new Uint32Array(pairs).buffer);
+  const drawn = (e: ExactRows, flush = true) => e.after(flush).map((r) => [r.y, r.rows[0]]);
+  const fresh = () => {
+    const e = new ExactRows();
+    e.size(2, 16);
+    return e;
+  };
+
+  it("draws new rows at once, or after the frame that is still in the decoder", () => {
+    const e = fresh();
+    expect(e.strip(2, 0, 8, 11, rows(1), false)).toMatchObject({ y: 0, h: 8 });
+    expect(e.strip(2, 8, 8, 12, rows(2), true)).toBeNull();
+    expect(drawn(e, false)).toEqual([]); // another frame is still in the decoder
+    expect(drawn(e)).toEqual([[8, 2]]);
+    expect(drawn(e)).toEqual([]); // once
+  });
+
+  it("puts back over every frame only what the host's last list names with the copy's hash", () => {
+    const e = fresh();
+    e.strip(2, 0, 8, 11, rows(1), false);
+    e.strip(2, 8, 8, 12, rows(2), false);
+    // Not listed yet: a frame replaces the picture and nothing goes back over it.
+    e.video(false);
+    expect(drawn(e)).toEqual([]);
+    e.list(2, list(0, 11, 8, 12));
+    e.video(false);
+    expect(drawn(e)).toEqual([[0, 1], [8, 2]]);
+    e.video(false);
+    expect(drawn(e)).toEqual([[0, 1], [8, 2]]);
+    // Row 8 changed on the host: the list without it comes before the frame that shows the change.
+    e.list(2, list(0, 11));
+    e.video(false);
+    expect(drawn(e)).toEqual([[0, 1]]);
+    // A hash that is not the copy's (a strip that never arrived here): not drawn.
+    e.list(2, list(0, 11, 8, 99));
+    e.video(false);
+    expect(drawn(e)).toEqual([[0, 1]]);
+    // A list for another width names nothing.
+    e.list(3, list(0, 11));
+    e.video(false);
+    expect(drawn(e)).toEqual([]);
+  });
+
+  it("drops the list at a key frame that no list preceded, and on reconnect, display or size change", () => {
+    const held = () => {
+      const e = fresh();
+      e.strip(2, 0, 8, 11, rows(1), false);
+      e.list(2, list(0, 11));
+      e.video(false);
+      expect(drawn(e)).toEqual([[0, 1]]);
+      return e;
+    };
+    // The host's video service started anew (its "nothing is held" may not have arrived).
+    let e = held();
+    e.video(true);
+    expect(drawn(e)).toEqual([]);
+    // A key frame right after a list keeps that list.
+    e = held();
+    e.list(2, list(0, 11));
+    e.video(true);
+    expect(drawn(e)).toEqual([[0, 1]]);
+    // ... but only for that frame's stream: the next key frame without a list drops it.
+    e.video(true);
+    expect(drawn(e)).toEqual([]);
+    e = held();
+    e.reconnect();
+    e.video(false);
+    expect(drawn(e)).toEqual([]);
+    // After a reconnect the copy is still there for a list of the new connection.
+    e.list(2, list(0, 11));
+    e.video(false);
+    expect(drawn(e)).toEqual([[0, 1]]);
+    e = held();
+    e.clear();
+    e.list(2, list(0, 11));
+    e.video(false);
+    expect(drawn(e)).toEqual([]);
+    e = held();
+    e.size(2, 24);
+    e.list(2, list(0, 11));
+    e.video(false);
+    expect(drawn(e)).toEqual([]);
+    // The same size again (a new canvas) keeps everything.
+    e = held();
+    e.size(2, 16);
+    e.video(false);
+    expect(drawn(e)).toEqual([[0, 1]]);
+  });
+
+  it("refuses rows that are not for this picture and forgets rows that waited when a new frame comes", () => {
+    const e = fresh();
+    expect(e.strip(3, 0, 8, 1, rows(1), false)).toBeNull(); // another width
+    expect(e.strip(2, 16, 8, 1, rows(1), false)).toBeNull(); // below the picture
+    expect(e.strip(2, 0, 8, 1, new Uint8Array(5), false)).toBeNull(); // wrong size
+    expect(e.strip(2, 0, 0, 1, new Uint8Array(0), false)).toBeNull();
+    e.list(2, list(0, 1, 16, 1));
+    e.video(false);
+    expect(drawn(e)).toEqual([]);
+    // Rows that waited are not drawn over a newer frame, but they are kept for the list.
+    e.strip(2, 8, 8, 12, rows(2), true);
+    e.video(false);
+    expect(drawn(e)).toEqual([]);
+    e.list(2, list(8, 12));
+    e.video(false);
+    expect(drawn(e)).toEqual([[8, 2]]);
   });
 });

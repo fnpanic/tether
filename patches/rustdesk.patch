@@ -6162,16 +6162,19 @@ index a13aebb..79a819a 100644
 +}
 diff --git a/src/server/video_service/exact_still.rs b/src/server/video_service/exact_still.rs
 new file mode 100644
-index 0000000..d381131
+index 0000000..84d491e
 --- /dev/null
 +++ b/src/server/video_service/exact_still.rs
-@@ -0,0 +1,341 @@
+@@ -0,0 +1,345 @@
 +//! Tether: the exact pixels of the parts of the picture that stand still.
 +//!
 +//! Video is lossy and 4:2:0: small coloured text and photos stay a little off however long the
 +//! picture stands. The host therefore sends the captured pixels themselves, in strips of a few
 +//! rows, for every strip that has not changed for a moment (`STILL`), at a limited byte rate, to
 +//! the viewers that asked for them (`SupportedDecoding.exact_stills`).
++//!
++//! The viewer never relies on having been told: it drops its list at every key frame that no
++//! list preceded (a new run of this service, a new connection), see `VideoPipeline.push`.
 +//!
 +//! Every video frame replaces the viewer's whole picture, so the host keeps the viewer told
 +//! which strips have not changed since they were sent (`ExactStrips.same`: row and hash, sent
@@ -6185,8 +6188,9 @@ index 0000000..d381131
 +/// Rows per strip: small, so that a strip of a photo (which hardly compresses) is a few tens of
 +/// kB and the first frame of new motion never waits long behind one.
 +pub const ROWS: usize = 8;
-+/// A strip is sent once it has not changed for this long.
-+pub(super) const STILL: Duration = Duration::from_secs(1);
++/// A strip is sent once it has not changed for this long (not a whole second: a clock that
++/// ticks every second would have its strip sent and thrown away each time).
++pub(super) const STILL: Duration = Duration::from_millis(1500);
 +/// Bytes of strips per loop pass, about: while the whole picture stands, and while something
 +/// else on it still changes (then a changed part's next frame waits behind less).
 +pub(super) const PASS_BYTES: usize = 32 * 1024;
@@ -6924,10 +6928,10 @@ index 0000000..8911df8
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..434bfb9
+index 0000000..9d603ea
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
-@@ -0,0 +1,467 @@
+@@ -0,0 +1,469 @@
 +//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
 +//!
 +//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
@@ -7035,13 +7039,23 @@ index 0000000..434bfb9
 +        return true;
 +    };
 +    use crate::server::video_service::exact_still::{exact_rows, ROWS};
++    let Some(sink) = sink() else { return true };
++    let key = h.key();
++    // Without strips it is the list of held strips. It always goes on, whatever its size says
++    // (an empty one from a host without a picture yet has width 0): it replaces the list before.
++    if s.strips.is_empty() {
++        let mut pkt = encode_video_header(PKT_EXACT, 1, 0, vf.display as usize, s.width, s.rows, 0, s.same.len() * 4);
++        for v in s.same.iter().take(2 * 16384 / ROWS) {
++            pkt.extend_from_slice(&v.to_le_bytes());
++        }
++        sink.video(&key, pkt);
++        return true;
++    }
 +    let w = s.width as usize;
 +    // The host is not trusted with sizes: a strip is a few rows of a real screen.
 +    if w == 0 || w > 16384 || s.rows as usize != ROWS {
 +        return true;
 +    }
-+    let Some(sink) = sink() else { return true };
-+    let key = h.key();
 +    for strip in s.strips.iter().take(16384 / ROWS) {
 +        let rows = strip.height as usize;
 +        if rows == 0 || rows > ROWS {
@@ -7057,14 +7071,6 @@ index 0000000..434bfb9
 +            pkt.extend_from_slice(&rgba);
 +            sink.video(&key, pkt);
 +        }
-+    }
-+    // Without strips it is the list of held strips (an empty one too: nothing is held any more).
-+    if s.strips.is_empty() {
-+        let mut pkt = encode_video_header(PKT_EXACT, 1, 0, vf.display as usize, s.width, s.rows, 0, s.same.len() * 4);
-+        for v in s.same.iter().take(2 * 16384 / ROWS) {
-+            pkt.extend_from_slice(&v.to_le_bytes());
-+        }
-+        sink.video(&key, pkt);
 +    }
 +    true
 +}
