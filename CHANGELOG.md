@@ -7,7 +7,7 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ## [Unreleased]
 
-### 0.6.2 (files ready in `dist/`, 2026-11-12; not published yet)
+### 0.6.2 (published 2026-11-12, stable channel; this number is closed)
 
 Checked on these files: still page identical to the host's screen and identical again after a
 forced restart of the video; `vm-e2e.mjs` 5/5; scrolling 117/151 ms (median/p95), 21 pictures/s
