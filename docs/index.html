@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Tether: open-source, self-hosted remote desktop and remote support</title>
+<meta name="description" content="Tether is a free, open-source alternative to TeamViewer and AnyDesk that runs on your own server. End-to-end encrypted, fast, works through corporate proxies on TCP 443. Windows and macOS, built on the RustDesk core.">
+<link rel="canonical" href="https://fnpanic.github.io/tether/">
+<link rel="icon" href="img/logo.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Tether: open-source, self-hosted remote desktop">
+<meta property="og:description" content="A free alternative to TeamViewer and AnyDesk that runs on your own server. End-to-end encrypted, fast, TCP 443 only.">
+<meta property="og:url" content="https://fnpanic.github.io/tether/">
+<meta property="og:image" content="https://fnpanic.github.io/tether/img/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+/* Tokens from DESIGN.md, as in site/index.html. */
+:root{--canvas:#fff;--parchment:#f5f5f7;--ink:#1d1d1f;--ink-80:#333;--muted:#6e6e73;--hairline:rgba(0,0,0,.08);--accent:#0066cc;
+  --font:-apple-system,"SF Pro Text","Inter Variable",system-ui,sans-serif}
+@media (prefers-color-scheme:dark){:root{--canvas:#000;--parchment:#1c1c1e;--ink:#f5f5f7;--ink-80:#ccc;--muted:#98989d;--hairline:rgba(255,255,255,.1);--accent:#2997ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--ink);font:400 17px/1.47 var(--font);letter-spacing:-.022em}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:5px}
+header,main,footer{max-width:1040px;margin:0 auto;padding:0 24px}
+header{display:flex;align-items:center;gap:8px;min-height:52px;font-size:15px}
+header b{display:flex;align-items:center;gap:8px}header img{width:22px;height:22px}
+header nav{margin-left:auto;display:flex;gap:20px;flex-wrap:wrap}
+.hero{text-align:center;padding:64px 0 40px}
+h1{font-size:clamp(34px,6vw,56px);line-height:1.07;font-weight:600;letter-spacing:-.02em;margin:0 0 16px}
+.lead{font-size:21px;line-height:1.38;color:var(--ink-80);max-width:680px;margin:0 auto 28px}
+.btn{display:inline-block;padding:12px 24px;border-radius:999px;background:#0066cc;color:#fff;font-weight:600;margin:4px}
+.btn.ghost{background:none;color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.btn:hover{text-decoration:none;opacity:.9}
+.shot{width:100%;height:auto;border-radius:14px;border:1px solid var(--hairline);display:block}
+h2{font-size:32px;line-height:1.12;font-weight:600;letter-spacing:-.01em;margin:80px 0 24px;text-align:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.card{background:var(--parchment);border-radius:18px;padding:24px}
+.card h3{margin:0 0 8px;font-size:19px}.card p{margin:0;color:var(--ink-80);font-size:16px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+figure{margin:0}figcaption{font-size:14px;color:var(--muted);margin-top:8px;text-align:center}
+ol.steps{max-width:680px;margin:0 auto;padding-left:24px}ol.steps li{margin:10px 0}
+.note{max-width:680px;margin:0 auto 24px;color:var(--ink-80)}
+details{max-width:680px;margin:0 auto;border-top:1px solid var(--hairline);padding:14px 0}
+summary{font-weight:600;cursor:pointer}details p{margin:10px 0 0;color:var(--ink-80)}
+footer{margin-top:80px;padding-top:24px;padding-bottom:48px;border-top:1px solid var(--hairline);font-size:14px;color:var(--muted);text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <b><img src="img/logo.svg" alt="">Tether</b>
+  <nav><a href="site/">User guide</a><a href="site/architecture.html">Architecture</a><a href="https://github.com/fnpanic/tether">GitHub</a></nav>
+</header>
+<main>
+<section class="hero">
+  <h1>Tether: self-hosted remote desktop and remote support</h1>
+  <p class="lead">A free, open-source alternative to TeamViewer and AnyDesk that runs on your own server. End-to-end encrypted, fast, and built to work inside corporate networks.</p>
+  <p><a class="btn" href="https://github.com/fnpanic/tether#get-started">Get Tether on GitHub</a><a class="btn ghost" href="site/">Read the user guide</a></p>
+</section>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="img/home-dark.png">
+  <img class="shot" src="img/home-light.png" width="1650" height="900" alt="Tether main window: this device's ID and one-time password, and a field to connect to a remote device">
+</picture>
+
+<h2>Why teams choose Tether</h2>
+<div class="grid">
+  <div class="card"><h3>Private</h3><p>Sessions are end-to-end encrypted between the two devices. Your relay forwards ciphertext, and no vendor cloud sits in the middle. <a href="https://github.com/fnpanic/tether/blob/main/SECURITY.md">Security model</a></p></div>
+  <div class="card"><h3>Fast</h3><p>24–30 ms glass-to-glass at 2560×1440 and 57 fps on a GPU host, with hardware encoding and decoding. <a href="https://github.com/fnpanic/tether/blob/main/docs/benchmarks.md">How it was measured</a></p></div>
+  <div class="card"><h3>Gets through corporate networks</h3><p>Only outgoing TCP 443, through system proxies and TLS inspection. The customer opens no ports. <a href="https://github.com/fnpanic/tether/blob/main/docs/corporate-networks.md">Details for IT</a></p></div>
+  <div class="card"><h3>Quick support, nothing to install</h3><p>TetherQS is one portable file for the customer: no installer, no admin rights, and you can brand it. <a href="https://github.com/fnpanic/tether/blob/main/docs/quick-support.md">TetherQS</a></p></div>
+  <div class="card"><h3>Hundreds of hosts</h3><p>Tags, saved searches, bulk actions and a command palette for large inventories. <a href="https://github.com/fnpanic/tether/blob/main/docs/advanced.md">Advanced mode</a></p></div>
+  <div class="card"><h3>Central management</h3><p>Tether Manage signs policies and releases on the administrator's PC, with staged rollout of updates. <a href="https://github.com/fnpanic/tether/blob/main/docs/management.md">Tether Manage</a></p></div>
+</div>
+
+<h2>See it</h2>
+<div class="two">
+  <figure><img class="shot" loading="lazy" src="advanced/hosts-dark.png" alt="Host list with tags, saved searches and bulk actions"><figcaption>Advanced mode: the host inventory</figcaption></figure>
+  <figure><img class="shot" loading="lazy" src="img/manage-policy.png" alt="Policy editor with a draft and the effective policy"><figcaption>Tether Manage: the policy editor</figcaption></figure>
+</div>
+
+<h2>Get started</h2>
+<p class="note">There is no public Tether server and no generic download. Each deployment builds its own apps for its own relay.</p>
+<ol class="steps">
+  <li><a href="https://github.com/fnpanic/tether#deploy-the-relay">Put a relay on a Linux server</a> with Docker or systemd.</li>
+  <li><a href="https://github.com/fnpanic/tether#build">Build the apps</a> for Windows and macOS with your relay's address and keys.</li>
+  <li><a href="https://github.com/fnpanic/tether/blob/main/docs/updates.md">Publish them</a> to your users with Tether Manage.</li>
+</ol>
+
+<h2>Questions</h2>
+<details><summary>Is Tether free?</summary><p>Yes. Tether is open source under AGPL-3.0. You pay only for the server you run the relay on.</p></details>
+<details><summary>How is it different from RustDesk?</summary><p>Tether uses the RustDesk core for capture, codecs, input and encryption, with its own apps, its own low-latency streaming profile, a transport that needs only TCP 443, and signed central management. RustDesk supports more platforms (Linux, Android, iOS, web) and has ready-made downloads; Tether has Windows and macOS apps that you build yourself.</p></details>
+<details><summary>Can the relay operator watch sessions?</summary><p>Not by watching the traffic: the relay forwards ciphertext and never has the session keys. It knows device IDs, IP addresses and connection times, which is why you run it yourself.</p></details>
+<details><summary>Which platforms are supported?</summary><p>The apps run on Windows and macOS. The relay runs on Linux.</p></details>
+<details><summary>Where can I ask something?</summary><p>In the <a href="https://github.com/fnpanic/tether/discussions">discussions on GitHub</a>. Bugs go to <a href="https://github.com/fnpanic/tether/issues">issues</a>.</p></details>
+</main>
+<footer>Tether is open source under <a href="https://github.com/fnpanic/tether/blob/main/LICENSE">AGPL-3.0</a> and built on the <a href="https://github.com/rustdesk/rustdesk">RustDesk</a> core. It is not affiliated with RustDesk, TeamViewer or AnyDesk.</footer>
+</body>
+</html>

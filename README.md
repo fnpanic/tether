@@ -1,6 +1,86 @@
-# Tether
+<p align="center"><img src="apps/desktop/assets/logo.svg" width="96" alt="Tether logo"></p>
+<h1 align="center">Tether</h1>
+<p align="center"><b>Open-source, self-hosted remote desktop and remote support.</b><br>
+A free alternative to TeamViewer and AnyDesk that runs on your own server, built on the RustDesk core.</p>
+<p align="center">
+<a href="https://fnpanic.github.io/tether/">Website</a> ·
+<a href="https://fnpanic.github.io/tether/site/">User guide</a> ·
+<a href="https://fnpanic.github.io/tether/site/architecture.html">Architecture</a> ·
+<a href="CHANGELOG.md">Changelog</a> ·
+<a href="https://github.com/fnpanic/tether/discussions">Questions and feedback</a>
+</p>
 
-Fast, private, self-hosted remote desktop for Windows and macOS, with a Linux relay.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/home-dark.png">
+  <img src="docs/img/home-light.png" alt="Tether main window: this device's ID and one-time password, and a field to connect to a remote device">
+</picture>
+
+## Why Tether
+
+Tether is for IT teams and support technicians who want remote access without a vendor's cloud
+in the middle. You run the relay; the apps talk only to it.
+
+- **Private.** Sessions are end-to-end encrypted between the two devices, and Tether refuses
+  unencrypted sessions. The relay forwards ciphertext. What is protected and what is not:
+  [SECURITY.md](SECURITY.md), [docs/encryption.md](docs/encryption.md).
+- **Fast.** 24–30 ms glass-to-glass at 2560×1440 and 57 fps on a GPU host, with hardware
+  encoding and decoding. Method, numbers and a comparison with AnyDesk:
+  [docs/benchmarks.md](docs/benchmarks.md).
+- **Works in corporate networks.** Only outgoing TCP 443 (port 80 as fallback), through system
+  proxies and TLS inspection. No open ports on the customer's side:
+  [docs/corporate-networks.md](docs/corporate-networks.md).
+- **Quick support without installing.** TetherQS is one portable file for the customer: no
+  installer, no admin rights. You can brand it: [docs/quick-support.md](docs/quick-support.md).
+- **Hundreds of hosts.** Tags, saved searches, bulk actions and a command palette:
+  [docs/advanced.md](docs/advanced.md).
+- **Central management.** Tether Manage signs policies and releases on the administrator's PC;
+  the relay only serves them: [docs/management.md](docs/management.md).
+- **Also included:** unattended access, file transfer, recording with consent, 2FA, signed
+  updates with staged rollout, several relays with failover, Kubernetes, Grafana dashboards.
+
+| Hosts in Advanced mode | Policy editor in Tether Manage |
+| --- | --- |
+| ![Host list with tags, saved searches and bulk actions](docs/advanced/hosts-dark.png) | ![Policy editor with a draft and the effective policy](apps/manage/screenshots/manage-policy-editor-light.png) |
+
+## How it compares
+
+| | Tether | RustDesk (open source) | TeamViewer / AnyDesk |
+| --- | --- | --- | --- |
+| Source | Open, AGPL-3.0 | Open, AGPL-3.0 | Closed |
+| Server | Your own | Your own or public | Vendor's cloud |
+| Ports the apps need | TCP 443 only | TCP 21115–21117, UDP 21116 | Vendor ports, 443 as fallback |
+| Central policies | Included (Tether Manage) | RustDesk Server Pro (paid) | Paid plans |
+| Portable customer module | TetherQS | Portable client | QuickSupport / portable client |
+| Platforms | Windows, macOS; relay on Linux | Windows, macOS, Linux, Android, iOS, web | All major |
+| Ready-made downloads | No, you build for your relay | Yes | Yes |
+
+Tether is the younger and smaller project. If you need Linux or mobile clients, or a download
+that works in five minutes, use RustDesk. Tether is for teams that want a locked-down
+deployment that they control from end to end.
+
+## Get started
+
+There is no public Tether server and no generic download: each deployment builds its own apps
+with its relay's address and public keys compiled in.
+
+1. Put a relay on a Linux server: [Deploy the relay](#deploy-the-relay).
+2. Build the apps for it: [Build](#build). A fork can also build them with GitHub Actions
+   (`.github/workflows/desktop.yml`) once the four values are stored as repository secrets.
+3. Publish them to your users with Tether Manage: [docs/updates.md](docs/updates.md).
+
+To look at the interface without a server: `cd apps/desktop && npm ci && npm run dev` runs it in
+a browser with a mock backend.
+
+## Questions, ideas, bugs
+
+- Questions and ideas: [Discussions](https://github.com/fnpanic/tether/discussions).
+- Bugs: [Issues](https://github.com/fnpanic/tether/issues).
+- Security problems: privately, through [Report a vulnerability](https://github.com/fnpanic/tether/security/advisories/new). Threat model: [SECURITY.md](SECURITY.md).
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
+
+If Tether is useful to you, a star helps others find it.
+
+## How it is built
 
 - **Desktop app:** Tauri 2 + React. One binary is both viewer and host.
 - **Core:** a lightly patched fork of the RustDesk core (capture, codecs, input, NAT traversal,
