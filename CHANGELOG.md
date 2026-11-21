@@ -7,6 +7,8 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ## [Unreleased]
 
+- Browser mock (website demo, `npm run dev`): a session shows the host that was clicked instead of always Design-Studio; Disconnect, Cancel and full screen work in a browser tab (they called the desktop window API). No change in the installed apps.
+
 ### 0.6.2 (published 2026-11-12, stable channel; this number is closed)
 
 Checked on these files: still page identical to the host's screen and identical again after a

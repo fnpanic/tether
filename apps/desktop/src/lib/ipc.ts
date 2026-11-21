@@ -4,6 +4,16 @@ import { mock } from "./mock";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/** Close this window. In a browser (mock): the tab if a script opened it, else back to the home view. */
+export async function closeWindow() {
+  if (inTauri) return (await import("@tauri-apps/api/window")).getCurrentWindow().close();
+  window.close();
+  if (!window.closed) {
+    location.hash = "";
+    location.reload(); // the route is read once at start
+  }
+}
+
 export function invoke<T = void>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   return inTauri ? tauriInvoke<T>(cmd, args) : mock.invoke<T>(cmd, args);
 }

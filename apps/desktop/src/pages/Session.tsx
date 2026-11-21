@@ -23,7 +23,7 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { api, formatId, invoke, subscribe, videoChannel } from "../lib/ipc";
+import { api, closeWindow, formatId, inTauri, invoke, subscribe, videoChannel } from "../lib/ipc";
 import { CODEC, probeCodecs, VideoPipeline, watchdog, watchNative, WATCH0, type VideoStats } from "../lib/video";
 import { loadSharpen, saveSharpen, SHARPEN_MODES, type SharpenMode } from "../lib/sharpen";
 import { Button, IconButton, Logo, TitleBar, useToast } from "../components/ui";
@@ -642,6 +642,12 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
   const toggleFullscreen = () =>
     act(
       (async () => {
+        if (!inTauri) {
+          // Browser (mock): the page's own full screen.
+          const f = !document.fullscreenElement;
+          await (f ? document.documentElement.requestFullscreen() : document.exitFullscreen());
+          return setFullscreen(f);
+        }
         const w = (await import("@tauri-apps/api/window")).getCurrentWindow();
         const f = !(await w.isFullscreen());
         await w.setFullscreen(f);
@@ -655,6 +661,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
   const minimize = () =>
     act(
       (async () => {
+        if (!inTauri) return; // a browser tab cannot be minimized
         const w = (await import("@tauri-apps/api/window")).getCurrentWindow();
         if (await w.isFullscreen()) {
           await w.setFullscreen(false);
@@ -876,7 +883,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
           <button
             aria-label="Disconnect"
             title="Disconnect"
-            onClick={() => act(import("@tauri-apps/api/window").then((m) => m.getCurrentWindow().close()))}
+            onClick={() => act(closeWindow())}
             className="no-drag ml-1 grid h-9 w-9 place-items-center rounded-full bg-danger text-white transition hover:brightness-110"
           >
             <Power size={16} />
@@ -1149,7 +1156,7 @@ function QualityMenu({ value, onChange, sharpen, onSharpen }: { value: string; o
 function Overlay({ phase, name, peer, sessionKey: key, hostMissing, onLogin }: { phase: Phase; name: string; peer: string; sessionKey: string; hostMissing: string[]; onLogin: () => void }) {
   const [pw, setPw] = useState("");
   const [remember, setRemember] = useState(false);
-  const close = async () => (await import("@tauri-apps/api/window")).getCurrentWindow().close();
+  const close = closeWindow;
   return (
     <div className="absolute inset-0 flex flex-col">
       <TitleBar className="text-white">
@@ -1268,7 +1275,7 @@ function Spinner() {
 
 /** Over the dimmed last frame while the session reconnects on its own. */
 function ReconnectOverlay({ attempt, text }: { attempt: number; text: string }) {
-  const close = async () => (await import("@tauri-apps/api/window")).getCurrentWindow().close();
+  const close = closeWindow;
   return (
     <div className="absolute inset-0 grid place-items-center p-6">
       <div role="status" className="animate-rise flex w-[320px] max-w-full flex-col items-center gap-3 rounded-2xl border border-white/10 glass p-6 text-center shadow-float">

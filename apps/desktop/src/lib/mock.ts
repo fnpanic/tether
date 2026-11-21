@@ -75,7 +75,8 @@ export const mock = {
         window.open(`#/session/mock?peer=${a.peer}&conn=${a.conn ?? "default"}`, "_blank");
         return "mock" as T;
       case "session_start":
-        setTimeout(() => emit("session", "peer_info", { hostname: "Design-Studio", username: "maria", platform: "Mac OS", displays: [{ x: 0, y: 0, width: 2560, height: 1440 }, { x: 2560, y: 0, width: 1920, height: 1080 }], current_display: 0 }), 600);
+        const who = state.peers.find((p) => p.id === a.peer) ?? (a.peer ? (await fleet()).peers.find((p) => p.id === a.peer) : undefined) ?? { hostname: String(a.peer ?? ""), username: "", platform: "Windows" };
+        setTimeout(() => emit("session", "peer_info", { hostname: who.hostname, username: who.username, platform: who.platform, displays: [{ x: 0, y: 0, width: 2560, height: 1440 }, { x: 2560, y: 0, width: 1920, height: 1080 }], current_display: 0 }), 600);
         setTimeout(() => emit("session", "connection_type", { secured: true, direct: true, stream_type: "" }), 650);
         // One grey 16:9 picture (RGBA packet, see video.ts), so the stage and the toolbar show.
         setTimeout(() => (a.video as { onmessage?: (b: ArrayBuffer) => void } | null)?.onmessage?.(rgbaFrame(320, 180)), 700);
