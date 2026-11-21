@@ -50,13 +50,13 @@ footer{margin-top:80px;padding-top:24px;padding-bottom:48px;border-top:1px solid
 <body>
 <header>
   <b><img src="img/logo.svg" alt="">Tether</b>
-  <nav><a href="site/">User guide</a><a href="site/architecture.html">Architecture</a><a href="https://github.com/fnpanic/tether">GitHub</a></nav>
+  <nav><a href="demo/">Demo</a><a href="site/">User guide</a><a href="site/architecture.html">Architecture</a><a href="https://github.com/fnpanic/tether">GitHub</a></nav>
 </header>
 <main>
 <section class="hero">
   <h1>Tether: self-hosted remote desktop and remote support</h1>
   <p class="lead">A free, open-source alternative to TeamViewer and AnyDesk that runs on your own server. End-to-end encrypted, fast, and built to work inside corporate networks.</p>
-  <p><a class="btn" href="https://github.com/fnpanic/tether#get-started">Get Tether on GitHub</a><a class="btn ghost" href="site/">Read the user guide</a></p>
+  <p><a class="btn" href="https://github.com/fnpanic/tether#get-started">Get Tether on GitHub</a><a class="btn ghost" href="demo/">Try the interface in your browser</a></p>
 </section>
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="img/home-dark.png">
@@ -80,7 +80,7 @@ footer{margin-top:80px;padding-top:24px;padding-bottom:48px;border-top:1px solid
 </div>
 
 <h2>Get started</h2>
-<p class="note">There is no public Tether server and no generic download. Each deployment builds its own apps for its own relay.</p>
+<p class="note">There is no public Tether server and no generic download. Each deployment builds its own apps for its own relay. The <a href="https://github.com/fnpanic/tether/blob/main/docs/getting-started.md">step-by-step guide</a> takes you from an empty server to the first session. To look first, open the <a href="demo/">browser demo</a>: the real interface with sample data, connected to nothing.</p>
 <ol class="steps">
   <li><a href="https://github.com/fnpanic/tether#deploy-the-relay">Put a relay on a Linux server</a> with Docker or systemd.</li>
   <li><a href="https://github.com/fnpanic/tether#build">Build the apps</a> for Windows and macOS with your relay's address and keys.</li>
@@ -91,6 +91,7 @@ footer{margin-top:80px;padding-top:24px;padding-bottom:48px;border-top:1px solid
 <details><summary>Is Tether free?</summary><p>Yes. Tether is open source under AGPL-3.0. You pay only for the server you run the relay on.</p></details>
 <details><summary>How is it different from RustDesk?</summary><p>Tether uses the RustDesk core for capture, codecs, input and encryption, with its own apps, its own low-latency streaming profile, a transport that needs only TCP 443, and signed central management. RustDesk supports more platforms (Linux, Android, iOS, web) and has ready-made downloads; Tether has Windows and macOS apps that you build yourself.</p></details>
 <details><summary>Can the relay operator watch sessions?</summary><p>Not by watching the traffic: the relay forwards ciphertext and never has the session keys. It knows device IDs, IP addresses and connection times, which is why you run it yourself.</p></details>
+<details><summary>My antivirus warns about a Tether file. Why?</summary><p>Remote control tools are a category that scanners watch closely, and new, rarely downloaded files get machine-learning verdicts. The maintainer's release files are checked with Microsoft Defender and about 70 engines on VirusTotal. The results, including the detections that were found, are published in <a href="https://github.com/fnpanic/tether/blob/main/docs/release-checks.md">the release checks</a>. Signing your builds reduces such warnings.</p></details>
 <details><summary>Which platforms are supported?</summary><p>The apps run on Windows and macOS. The relay runs on Linux.</p></details>
 <details><summary>Where can I ask something?</summary><p>In the <a href="https://github.com/fnpanic/tether/discussions">discussions on GitHub</a>. Bugs go to <a href="https://github.com/fnpanic/tether/issues">issues</a>.</p></details>
 </main>

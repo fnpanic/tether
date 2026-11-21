@@ -316,14 +316,14 @@ docs/                    specs and runbooks (this site: docs/site/)</code></pre>
     <text class="s" x="36" y="432">VM.Standard.E2.1.Micro · 1/8 OCPU · 1 GB RAM · Oracle Linux 9 · 2 GB swap</text>
     <g transform="translate(0 -38)">
     <rect class="b" x="36" y="264" width="340" height="160" rx="18"/>
-    <text class="h" x="52" y="288">Relay 1 · tether-desk.duckdns.org</text>
+    <text class="h" x="52" y="288">Relay 1 · relay.example.com</text>
     <rect class="ba" x="52" y="302" width="150" height="36" rx="8"/><text x="127" y="325" text-anchor="middle">Caddy</text>
     <rect class="b" x="214" y="302" width="150" height="36" rx="8"/><text x="289" y="325" text-anchor="middle">hbbs</text>
     <rect class="b" x="52" y="348" width="150" height="36" rx="8"/><text x="127" y="371" text-anchor="middle">hbbr</text>
     <rect class="b" x="214" y="348" width="150" height="36" rx="8"/><text x="289" y="371" text-anchor="middle">tether-api</text>
     <text class="s" x="52" y="408">server key pair · drain 300 s</text>
     <rect class="b" x="404" y="264" width="340" height="160" rx="18"/>
-    <text class="h" x="420" y="288">Relay 2 · tether-desk2.duckdns.org</text>
+    <text class="h" x="420" y="288">Relay 2 · relay2.example.com</text>
     <rect class="ba" x="420" y="302" width="150" height="36" rx="8"/><text x="495" y="325" text-anchor="middle">Caddy</text>
     <rect class="b" x="582" y="302" width="150" height="36" rx="8"/><text x="657" y="325" text-anchor="middle">hbbs</text>
     <rect class="b" x="420" y="348" width="150" height="36" rx="8"/><text x="495" y="371" text-anchor="middle">hbbr</text>
@@ -354,7 +354,7 @@ docs/                    specs and runbooks (this site: docs/site/)</code></pre>
 <div class="tw"><table>
 <thead><tr><th>Item</th><th>Relay 1</th><th>Relay 2</th></tr></thead>
 <tbody>
-<tr><td>Name</td><td><a href="https://tether-desk.duckdns.org">tether-desk.duckdns.org</a></td><td><a href="https://tether-desk2.duckdns.org">tether-desk2.duckdns.org</a></td></tr>
+<tr><td>Name</td><td><a href="https://relay.example.com">relay.example.com</a></td><td><a href="https://relay2.example.com">relay2.example.com</a></td></tr>
 <tr><td>Services</td><td colspan="2"><code>tether-hbbs</code>, <code>tether-hbbr</code>, <code>tether-https</code> (Caddy), <code>tether-api</code>, <code>tether-ddns.timer</code>; unprivileged users, systemd sandboxing (<code>ProtectSystem=strict</code>, <code>ProtectHome</code>, <code>NoNewPrivileges</code>, <code>PrivateTmp</code>)</td></tr>
 <tr><td>Data</td><td colspan="2"><code>/var/lib/tether</code> (key pair <code>id_ed25519</code> and peer DB; back it up), <code>/var/lib/tether-api</code> (policy, devices, releases, tickets, custom apps)</td></tr>
 <tr><td>Relay list (<code>RELAY_SERVERS</code>)</td><td><code>tether-desk…|http://127.0.0.1:21121/readyz,tether-desk2…|https://tether-desk2…/readyz/relay</code></td><td>the mirror image</td></tr>

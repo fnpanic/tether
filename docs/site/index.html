@@ -197,8 +197,8 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
     <text class="s" x="30" y="112">enters ID + password</text>
     <rect class="g" x="325" y="30" width="210" height="116" rx="18"/>
     <text class="h" x="345" y="62">Your relay</text>
-    <text class="s" x="345" y="84">tether-desk.duckdns.org</text>
-    <text class="s" x="345" y="102">tether-desk2.duckdns.org</text>
+    <text class="s" x="345" y="84">relay.example.com</text>
+    <text class="s" x="345" y="102">relay2.example.com</text>
     <text class="s" x="345" y="124">forwards ciphertext only</text>
     <rect class="b" x="640" y="40" width="210" height="96" rx="18"/>
     <text class="h" x="660" y="72">Customer</text>
@@ -219,7 +219,7 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
 <h2 id="tech-install">Install Tether (technicians)</h2>
 <h3 id="tech-install-win">Windows</h3>
 <ol class="steps">
-  <li>Open your organisation's download page, for example <a href="https://tether-desk.duckdns.org">https://tether-desk.duckdns.org</a>. It detects your operating system, marks it “Your computer” and offers the matching installer. The Windows / macOS switch shows the other one.</li>
+  <li>Open your organisation's download page, for example <a href="https://relay.example.com">https://relay.example.com</a>. It detects your operating system, marks it “Your computer” and offers the matching installer. The Windows / macOS switch shows the other one.</li>
   <li>Run <code>Tether_&lt;version&gt;_x64-setup.exe</code>. It installs per machine to <code>C:\Program Files\Tether</code>, so Windows asks for administrator rights (UAC).</li>
   <li>Upgrades install in place. The installer closes every running Tether process itself and reopens Tether afterwards; after a manual upgrade use <strong>Run Tether</strong> on the finish page.</li>
 </ol>
@@ -441,7 +441,7 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
   <li><strong>Admin public key</strong> → build variable <code>TETHER_ADMIN_PUB_KEY</code>, and <code>ADMIN_PUB_KEY=…</code> in <code>/etc/tether/api.env</code> on every relay (then restart <code>tether-api</code>). Several keys can be listed, comma-separated, for a key rotation.</li>
   <li><strong>Update signing public key</strong> → build variable <code>TETHER_UPDATER_PUB_KEY</code> for both apps.</li>
 </ul>
-<p><strong>Relay address</strong>: one or more <code>https://</code> addresses, comma-separated, for example <code>https://tether-desk.duckdns.org, https://tether-desk2.duckdns.org</code>. Tether Manage publishes policy, releases, the download page, tickets and custom apps to every relay, and merges the device lists. The Status screen shows “Connected, admin key accepted” when a relay trusts your key.</p>
+<p><strong>Relay address</strong>: one or more <code>https://</code> addresses, comma-separated, for example <code>https://relay.example.com, https://relay2.example.com</code>. Tether Manage publishes policy, releases, the download page, tickets and custom apps to every relay, and merges the device lists. The Status screen shows “Connected, admin key accepted” when a relay trusts your key.</p>
 
 <h2 id="adm-policy">Policy editor</h2>
 <p>The policy is one signed document for all devices. Every setting is a <em>feature</em> (the full list is generated in <code>docs/policy.md</code>), and each layer can set it to one of these states:</p>
@@ -533,7 +533,7 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <!-- ============================ HELP ============================ -->
 <h2 id="faq">FAQ</h2>
 <h4>Does the customer have to open ports or change the firewall?</h4>
-<p>No. Tether only makes outgoing TLS connections on TCP 443 to your relay names (port 80 as a fallback). IT only needs to allow <code>tether-desk.duckdns.org</code> and <code>tether-desk2.duckdns.org</code> with WebSocket upgrades and long-lived connections.</p>
+<p>No. Tether only makes outgoing TLS connections on TCP 443 to your relay names (port 80 as a fallback). IT only needs to allow <code>relay.example.com</code> and <code>relay2.example.com</code> with WebSocket upgrades and long-lived connections.</p>
 <h4>Does it work behind a corporate proxy or Zscaler-style TLS inspection?</h4>
 <p>Yes. Tether finds the system proxy (environment variables, WinINet, PAC files, WPAD; macOS system settings) and checks it again every minute. If the proxy re-signs TLS with a company certificate that Windows trusts, Tether accepts it. The proxy then sees device IDs and connection requests, but the session itself stays end-to-end encrypted.</p>
 <h4>Can the relay operator watch sessions?</h4>

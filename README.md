@@ -4,6 +4,8 @@
 A free alternative to TeamViewer and AnyDesk that runs on your own server, built on the RustDesk core.</p>
 <p align="center">
 <a href="https://fnpanic.github.io/tether/">Website</a> ·
+<a href="https://fnpanic.github.io/tether/demo/">Try the demo</a> ·
+<a href="docs/getting-started.md">Getting started</a> ·
 <a href="https://fnpanic.github.io/tether/site/">User guide</a> ·
 <a href="https://fnpanic.github.io/tether/site/architecture.html">Architecture</a> ·
 <a href="CHANGELOG.md">Changelog</a> ·
@@ -60,16 +62,21 @@ deployment that they control from end to end.
 
 ## Get started
 
-There is no public Tether server and no generic download: each deployment builds its own apps
-with its relay's address and public keys compiled in.
+**Look first:** the [browser demo](https://fnpanic.github.io/tether/demo/) is the real interface
+with sample data. It connects to nothing, so a session there shows an empty picture.
 
-1. Put a relay on a Linux server: [Deploy the relay](#deploy-the-relay).
-2. Build the apps for it: [Build](#build). A fork can also build them with GitHub Actions
-   (`.github/workflows/desktop.yml`) once the four values are stored as repository secrets.
-3. Publish them to your users with Tether Manage: [docs/updates.md](docs/updates.md).
+**Run it:** there is no public Tether server and no generic download. Each deployment builds its
+own apps with its relay's address and public keys compiled in.
+[docs/getting-started.md](docs/getting-started.md) goes from an empty server to the first
+session:
 
-To look at the interface without a server: `cd apps/desktop && npm ci && npm run dev` runs it in
-a browser with a mock backend.
+1. Build Tether Manage and create your keys.
+2. Install the relay on a Linux server.
+3. Build the apps for it, on your PC or in a fork with GitHub Actions.
+4. Publish them to your users with Tether Manage.
+
+**Antivirus warnings:** the maintainer's release files are checked with Microsoft Defender and
+VirusTotal. The results, detections included, are in [docs/release-checks.md](docs/release-checks.md).
 
 ## Questions, ideas, bugs
 

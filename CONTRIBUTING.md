@@ -23,6 +23,8 @@ as code.
   `cd apps/desktop && npm ci && npm run dev`.
 - Before a pull request: `npx tsc --noEmit && npx vitest run` in the app you changed, and
   `cargo test` in its `src-tauri`.
+- The browser demo on the website is a build of the desktop UI. After UI changes rebuild it:
+  `cd apps/desktop && npx vite build --base=./ --outDir ../../docs/demo --emptyOutDir`.
 - Changes to the RustDesk core go into `patches/` ([docs/upstream.md](docs/upstream.md)).
   If the change would help RustDesk too, please offer it upstream as well.
 - If you change a security control, update [SECURITY.md](SECURITY.md) in the same change.
