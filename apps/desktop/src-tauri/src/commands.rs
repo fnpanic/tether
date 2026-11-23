@@ -60,7 +60,7 @@ pub struct Status {
     /// -1 not ready, 0 connecting, 1 ready
     status: i32,
     key_confirmed: bool,
-    /// Unattended access is on (Windows: the service runs).
+    /// Unattended access is on (Windows: the service runs; macOS: the launchd jobs are installed).
     installed: bool,
     version: String,
 }
@@ -163,8 +163,15 @@ fn remove_peer(id: String) -> R<()> {
 async fn install_service(window: tauri::WebviewWindow) -> R<()> {
     main_only(&window)?;
     crate::policy::require("security.unattended", "Your organisation does not allow unattended access.")?;
+    #[cfg(target_os = "macos")]
+    if !api::is_installed() {
+        return Err("Move Tether into the Applications folder first, then start it from there.".to_owned());
+    }
     // Windows: on success the core restarts Tether, so this only returns on failure or cancel.
     if blocking(api::install_service).await? {
+        // macOS: the launchd agent takes over as host once this process is gone, then Tether reopens.
+        #[cfg(target_os = "macos")]
+        tauri::Manager::app_handle(&window).exit(0);
         Ok(())
     } else {
         Err("The service was not installed (cancelled, or see the log).".to_owned())

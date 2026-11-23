@@ -67,6 +67,14 @@ fn main() -> ExitCode {
         // The server role enforces the core options: keep its policy current too.
         policy::start(false);
     }
+    // macOS launchd roles (unattended access): no tray icon from the core's `--server` loop (as on
+    // Windows), no App Nap for the thread that injects input, and make way for an updated bundle.
+    #[cfg(target_os = "macos")]
+    if matches!(args.first().map(String::as_str), Some("--server" | "--service")) {
+        hbb_common::config::BUILTIN_SETTINGS.write().unwrap().insert("hide-tray".to_owned(), "Y".to_owned());
+        librustdesk::platform::macos::disable_app_nap();
+        librustdesk::platform::macos::exit_when_replaced();
+    }
 
     #[cfg(windows)]
     if let Some(code) = librustdesk::platform::handle_service_control() {

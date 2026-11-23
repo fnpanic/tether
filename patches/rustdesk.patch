@@ -2921,7 +2921,7 @@ index f6e48a1..600a09e 100644
  pub(crate) mod update_hash;
  #[cfg(target_os = "macos")]
 diff --git a/src/platform/macos.rs b/src/platform/macos.rs
-index d321d12..9b58a9e 100644
+index d321d12..3c355d8 100644
 --- a/src/platform/macos.rs
 +++ b/src/platform/macos.rs
 @@ -96,6 +96,8 @@ const PRIVILEGED_UPDATE_BODY: &str = r#"
@@ -2945,7 +2945,44 @@ index d321d12..9b58a9e 100644
      }
  }
  
-@@ -2215,3 +2220,17 @@ mod update_tests {
+@@ -367,8 +372,27 @@ fn correct_app_name(s: &str) -> String {
+     if let Some(bundleid) = get_bundle_id() {
+         s = s.replace("com.carriez.rustdesk", &bundleid);
+     }
++    // Tether: the launchd files and the config folder are named after get_full_name(), which is
++    // what is_installed_daemon() looks for (upstream's ORG is "com.carriez", so it never differed).
++    s = s.replace("com.carriez.RustDesk", &crate::get_full_name());
+     s = s.replace("rustdesk", &crate::get_app_name().to_lowercase());
+     s = s.replace("RustDesk", &crate::get_app_name());
++    // Tether: a bundle with one binary (no `service` beside it) runs both launchd jobs from it.
++    if let Ok(exe) = std::env::current_exe() {
++        if let (false, Some(name)) = (
++            exe.with_file_name("service").exists(),
++            exe.file_name().and_then(|n| n.to_str()),
++        ) {
++            s = s.replace(
++                "/Contents/MacOS/service</string>",
++                &format!("/Contents/MacOS/{name}</string>\n        <string>--service</string>"),
++            );
++            s = s.replace(
++                &format!("/Contents/MacOS/{}</string>", crate::get_app_name()),
++                &format!("/Contents/MacOS/{name}</string>"),
++            );
++        }
++    }
+     s
+ }
+ 
+@@ -858,6 +882,8 @@ pub fn lock_screen() {
+ pub fn start_os_service() {
+     log::info!("Username: {}", crate::username());
+     // Silent auto-update — runs as root via LaunchDaemon, no osascript dialog needed
++    // Tether: never; its own signed updater replaces the bundle (see exit_when_replaced).
++    #[cfg(not(feature = "tauri"))]
+     crate::updater::start_auto_update_macos();
+     if let Err(err) = crate::ipc::start("_service") {
+         log::error!("Failed to start ipc_service: {}", err);
+@@ -2215,3 +2241,86 @@ mod update_tests {
          std::fs::remove_dir_all(test_dir).unwrap();
      }
  }
@@ -2963,6 +3000,88 @@ index d321d12..9b58a9e 100644
 +        let _: id = msg_send![token, retain];
 +    }
 +}
++
++/// Tether, Settings > Install as service: asks for an administrator, writes both launchd files,
++/// starts the root daemon and waits for the result. This process hosts until now and holds the
++/// IPC socket, so the agent (`--server`) is loaded only once it has exited, and Tether is then
++/// reopened: on `true` the caller must quit.
++pub fn install_daemon() -> bool {
++    if !is_installed() {
++        log::error!("install daemon: not running from /Applications");
++        return false;
++    }
++    let body = |name: &str| {
++        PRIVILEGES_SCRIPTS_DIR
++            .get_file(name)
++            .and_then(|f| f.contents_utf8())
++            .map(correct_app_name)
++    };
++    let (Some(script), Some(daemon), Some(agent)) =
++        (body("install.scpt"), body("daemon.plist"), body("agent.plist"))
++    else {
++        return false;
++    };
++    let status = Command::new("osascript")
++        .arg("-e")
++        .arg(script)
++        .arg(daemon)
++        .arg(agent)
++        .arg(&get_active_username())
++        .status();
++    let installed = is_installed_daemon(false);
++    log::info!("install daemon: osascript {:?}, installed: {}", status, installed);
++    if !installed {
++        return false;
++    }
++    let agent_plist = format!("/Library/LaunchAgents/{}_server.plist", crate::get_full_name());
++    let app = format!("/Applications/{}.app", crate::get_app_name());
++    Command::new("/bin/sh")
++        .arg("-c")
++        .arg("while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; launchctl load -w \"$2\"; sleep 3; open \"$3\"")
++        .arg("sh")
++        .arg(std::process::id().to_string())
++        .arg(agent_plist)
++        .arg(app)
++        .spawn()
++        .map_err(|e| log::error!("install daemon: handoff failed: {}", e))
++        .is_ok()
++}
++
++/// Tether, launchd roles (`--service` as root, `--server`): an update replaces the app bundle
++/// under the running process. Once the binary on disk is another file and no session runs, exit
++/// with a failure code, so that launchd (KeepAlive) starts the new one.
++pub fn exit_when_replaced() {
++    use std::os::unix::fs::MetadataExt;
++    let Ok(exe) = std::env::current_exe() else {
++        return;
++    };
++    let file = move || std::fs::metadata(&exe).map(|m| (m.ino(), m.mtime())).ok();
++    let Some(started) = file() else {
++        return;
++    };
++    std::thread::spawn(move || loop {
++        std::thread::sleep(std::time::Duration::from_secs(10));
++        if file().is_some_and(|now| now != started)
++            && crate::server::AUTHED_CONNS.lock().unwrap().is_empty()
++        {
++            log::info!("the app was replaced on disk: exit, launchd starts the new one");
++            std::process::exit(1);
++        }
++    });
++}
+diff --git a/src/platform/privileges_scripts/install.scpt b/src/platform/privileges_scripts/install.scpt
+index acf86ab..52d5fce 100644
+--- a/src/platform/privileges_scripts/install.scpt
++++ b/src/platform/privileges_scripts/install.scpt
+@@ -8,7 +8,7 @@ on run {daemon_file, agent_file, user}
+ 
+   set sh2 to "echo " & quoted form of agent_file & " > /Library/LaunchAgents/com.carriez.RustDesk_server.plist && chown root:wheel /Library/LaunchAgents/com.carriez.RustDesk_server.plist;"
+ 
+-  set sh3 to "cp -rf " & prefs_toml & " /var/root/Library/Preferences/com.carriez.RustDesk/;"
++  set sh3 to "mkdir -p /var/root/Library/Preferences/com.carriez.RustDesk/; cp -rf " & prefs_toml & " /var/root/Library/Preferences/com.carriez.RustDesk/;"
+ 
+   set sh4 to "cp -rf " & prefs2_toml & " /var/root/Library/Preferences/com.carriez.RustDesk/;"
+ 
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
 index a09783d..77ac236 100644
 --- a/src/platform/windows.rs
@@ -6986,10 +7105,10 @@ index 0000000..8911df8
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..9d603ea
+index 0000000..25a4fa0
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,476 @@
 +//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
 +//!
 +//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
@@ -7376,10 +7495,14 @@ index 0000000..9d603ea
 +    /// (UAC prompt), with the user's settings imported; never the core's full self-install
 +    /// (`install_me` replaces the install folder and registry). On success the core restarts the
 +    /// app so its server role moves into the service, i.e. this returns only on failure or cancel.
++    /// macOS: a root LaunchDaemon and a LaunchAgent (admin prompt); on `true` the caller quits and
++    /// Tether is reopened beside the agent, which hosts from then on.
 +    pub fn install_service() -> bool {
 +        #[cfg(windows)]
 +        return !crate::platform::install_service();
-+        #[cfg(not(windows))]
++        #[cfg(target_os = "macos")]
++        return crate::platform::macos::install_daemon();
++        #[cfg(not(any(windows, target_os = "macos")))]
 +        {
 +            crate::ui_interface::install_me(
 +                "desktopicon startmenu".to_owned(),
@@ -7391,11 +7514,14 @@ index 0000000..9d603ea
 +        }
 +    }
 +
-+    /// Unattended access is on: the Windows service runs (elsewhere: the core's install check).
++    /// Unattended access is on: the Windows service runs, the macOS launchd files exist
++    /// (elsewhere: the core's install check).
 +    pub fn is_service_installed() -> bool {
 +        #[cfg(windows)]
 +        return crate::platform::windows::is_self_service_running();
-+        #[cfg(not(windows))]
++        #[cfg(target_os = "macos")]
++        return crate::platform::macos::is_installed_daemon(false);
++        #[cfg(not(any(windows, target_os = "macos")))]
 +        return crate::ui_interface::is_installed();
 +    }
 +
