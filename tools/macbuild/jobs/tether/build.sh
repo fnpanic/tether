@@ -54,7 +54,9 @@ cp /bin/ls "$B/sign/ls-test"
 codesign -f -s "Tether Code Signing" --keychain "$kc" "$B/sign/ls-test" || fail "codesign refuses the certificate"
 log "codesign test ok"
 
-export HOMEBREW_NO_AUTO_UPDATE=1
+# No upgrades of installed tools: brew sandboxes its downloads, which fails inside the runner's sandbox
+# (sandbox_apply: Operation not permitted, 2026-11-23 when cmake and pkgconf were outdated).
+export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
 brew install cmake ninja pkg-config || fail "brew"
 # shellcheck source=/dev/null
 . "$S/keys.env"
