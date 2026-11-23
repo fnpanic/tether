@@ -1,4 +1,6 @@
-# Unattended access (Windows service)
+# Unattended access (Windows service, macOS launchd)
+
+Windows first; the Mac is described under [macOS](#macos).
 
 First verified end to end on 2026-11-07 with **Tether 0.5.23**, which needed three workarounds (bugs below).
 Re-verified the same day **without any workaround** on the `svcfix` build (0.5.23 + the fixes listed under
@@ -181,3 +183,98 @@ node apps/desktop/e2e/unattended-drive.mjs restart
 Logs in the VM: service/server `C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\Tether\log\server\`,
 settings import `…\log\import-config\`, installer CLI `C:\Users\<user>\AppData\Roaming\Tether\log\install-service\`,
 user app and CM `C:\Users\<user>\AppData\Roaming\Tether\log\` (`cm\`).
+
+## macOS
+
+From 0.6.3. Settings → Unattended access → *Install as service* → *Install* (shown while the
+service is not installed and policy `security.unattended` allows it), or from Terminal
+`/Applications/Tether.app/Contents/MacOS/tether --install-service` (exit code 1 when cancelled or
+failed). Tether must run from `/Applications`.
+
+What it installs, after the macOS administrator prompt ("Tether wants to install daemon and
+agent"):
+
+| File | Runs | As | When |
+|---|---|---|---|
+| `/Library/LaunchDaemons/app.tether.Tether_service.plist` | `tether --service` | root | from boot. No host: it keeps root's copy of the settings (ID, key, passwords) in step with the user's, over a local socket. |
+| `/Library/LaunchAgents/app.tether.Tether_server.plist` | `tether --server` | the signed-in user | in every user session (the host there, also with Tether closed and behind the lock screen) |
+| the same file | `tether --server` | root | at the login window (nobody signed in) |
+
+The user's settings (`~/Library/Preferences/app.tether.Tether/Tether.toml`, `Tether2.toml`) are
+copied to `/var/root/Library/Preferences/app.tether.Tether/` at install, so the login window
+answers under the same ID and permanent password; later changes reach root through the daemon.
+Tether then quits, the agent takes the host role and Tether opens again a few seconds later as a
+window onto that host. *Install as service* is gone from Settings while both files exist.
+With `--install-service` a running Tether is closed by the agent and opened again.
+
+While the agent runs, opening Tether (Dock, Finder, `open`) is answered by the agent, which starts
+the window as its child process. The agent's launchd file therefore has `AbandonProcessGroup`:
+without it launchd closes the window whenever the agent restarts.
+
+- **Permissions** (Screen Recording, Accessibility) belong to the app's signature, so the agent
+  uses what Tether was given; nothing new to allow.
+- **No menu bar icon** from the background host, as on Windows; the connection window appears
+  when someone connects. Started by the agent it has its own Dock icon (it cannot borrow the main
+  window's, [macos.md](macos.md#windows-and-the-dock)).
+- **Updates:** the updater replaces `/Applications/Tether.app` as before. The agent and the
+  daemon check every 10 s whether their binary on disk is another file and then exit as soon as
+  no session runs; launchd starts them from the new app.
+- **Remove:** `/Applications/Tether.app/Contents/MacOS/tether --uninstall-service` (administrator
+  prompt; unloads the daemon, deletes both files, ends the agent). An open Tether window notices
+  after 15 s that nobody hosts and hosts itself again, as before the install; with Tether closed
+  the Mac is unreachable until Tether is opened. Do this before moving Tether to the Trash:
+  otherwise launchd keeps trying to start the missing program.
+- **Policy** at the login window: root's `--server` has its own configuration folder, as the
+  Windows service has ([Policy in the service](#policy-in-the-service)).
+
+Limits:
+
+- **FileVault:** after a restart the Mac asks for the disk password before macOS and the network
+  start. Nothing can connect until someone has unlocked the disk at the Mac (or the restart was
+  made with `sudo fdesetup authrestart`). After signing out, and behind the lock screen, the Mac
+  stays reachable.
+- The root daemon and the login-window host run the program in `/Applications/Tether.app`, which
+  a user of the `admin` group can replace without a password. Same as upstream RustDesk and other
+  drag-installed apps with a root helper; see [SECURITY.md](../SECURITY.md).
+- Installing needs a person at the Mac: a technician connected through Tether cannot click
+  Tether's own window, and macOS does not accept remote input in its administrator prompt.
+
+How it differs from the core (RustDesk) it is built on: the core's install script names its
+launchd files `com.carriez.<app>_…` and points them at `<app>.app/Contents/MacOS/service` and
+`…/MacOS/<app>`; Tether looks for `app.tether.Tether_…` and has one binary `tether`. The names
+and paths are corrected where the scripts are read (`correct_app_name`,
+`vendor/rustdesk/src/platform/macos.rs`), the root folder is created before the copy, the
+daemon does not run the core's own auto-update, and the install waits for the result
+(`install_daemon`) instead of running in the background.
+
+### Checked on the build Mac (2026-11-23)
+
+MacBook Pro (Apple silicon), macOS 27.2.1, FileVault on, user in the `admin` group, behind a
+corporate proxy; arm64 test builds of 0.6.3 signed with "Tether Code Signing"; technician: a
+Windows viewer on a hidden desktop (`C:ms
+ight\mac56.mjs`), commands on the Mac through a
+shell. The administrator prompts were answered by the person at the Mac.
+
+| Step | Result | Notes |
+|---|---|---|
+| `tether --install-service` with Tether open | PASS | Prompt answered after 71 s, exit code 0. Both files written (`root:wheel`, names and paths as in the table above), `tether --service` running as root, agent running as the user (first start refused: the open Tether still held the socket; second start hosts), Tether reopened as the agent's child. |
+| Settings reach the agent | PASS | Agent log `sync config from root`; same ID as before, registered on both relays through the proxy 1 s after its start. |
+| Session with the permanent password | PASS | Direct (LAN), picture 1728×1116; a pointer move to 60 % / 40 % of the screen arrived at 0.600 / 0.399; connection window started by the agent. File transfer (a build runner download) too. |
+| App replaced on disk | PASS | Binary touched during a session: the agent kept running; 44 s after the viewer closed (the core holds an ended connection that long) it exited with code 1 and launchd started it again; the daemon restarted within 25 s. The Tether window stayed open. |
+| Real replacement (build runner swap, service installed) | PASS | Daemon restarted itself 8 s after the swap, agent and window back on the new build, online again. |
+| `tether --uninstall-service` with Tether open | PASS | Prompt answered, exit code 0; both files and both launchd jobs gone; the open window logged `no host for 15 s: hosting from the main window's process` and was registered on both relays 1 s later; a session and a file transfer worked afterwards. |
+
+Before the real install the agent role was tried without administrator rights (the same agent
+file in `~/Library/LaunchAgents`): host under launchd, session with picture and input, restart
+after a touched binary. That run showed the window being closed with the agent, hence
+`AbandonProcessGroup`.
+
+Not checked:
+
+- **The login window.** Nobody was signed out: root's `--server` there, its picture and input,
+  and policy in that role are as the core provides them, unverified with Tether.
+- **The *Install* button in Settings.** It calls the same function as `--install-service`; what
+  differs (Tether quits by itself before the agent is loaded) was not clicked through.
+- A restart of the Mac, fast user switching, an Intel Mac, the universal build in this role, a
+  cancelled prompt, and an update through the in-app updater (the swap above replaces the bundle
+  the same way).

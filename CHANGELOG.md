@@ -7,6 +7,26 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ## [Unreleased]
 
+### 0.6.3 (2026-11-23)
+
+- **Unattended access on macOS.** Settings → Unattended access → *Install as service* now exists
+  on the Mac as on Windows: after an administrator prompt Tether installs a background service
+  (a root LaunchDaemon and a LaunchAgent), hosts from it and reopens. The Mac is then reachable
+  with the permanent password without Tether being open, from the moment a user signs in, and at
+  the login window after signing out. `tether --install-service` does the same from Terminal
+  (exit code 1 when cancelled); `tether --uninstall-service` removes it. Before, the row never
+  appeared on a Mac in `/Applications`, and the core's own install wrote launchd files under
+  names Tether does not look for, pointing to a `service` binary the app does not have. After an
+  update the background processes notice the replaced app and restart from it once no session
+  runs. Checked on the build Mac (macOS 27.2, arm64 test build): install and removal from
+  Terminal with the administrator prompt, a session with picture and input through the agent, a
+  replaced app with the service installed. Not checked: the login window (nobody was signed out),
+  the *Install* button itself, a restart, an Intel Mac. Limits (FileVault after a restart):
+  [docs/unattended.md](docs/unattended.md#macos).
+- Mac build job: Homebrew no longer upgrades installed tools during a build (its download sandbox
+  fails inside the runner's sandbox, which stopped the build on 2026-11-23); the swap on the build
+  Mac works with the service installed.
+
 - Browser mock (website demo, `npm run dev`): a session shows the host that was clicked instead of always Design-Studio; Disconnect, Cancel and full screen work in a browser tab (they called the desktop window API). No change in the installed apps.
 
 ### 0.6.2 (published 2026-11-12, stable channel; this number is closed)

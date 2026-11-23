@@ -10,12 +10,20 @@ STAGE=/Applications/.Tether.app.new
 PREV=/Applications/.Tether.app.prev
 PAT='^/Applications/\.?Tether\.app[^/]*/Contents/MacOS/tether'
 log() { echo "[$(date +%H:%M:%S)] $*"; }
-running() { pgrep -f "$PAT" >/dev/null; }
+# This user's processes only: the root daemon of unattended access restarts itself.
+running() { pgrep -U "$(id -u)" -f "$PAT" >/dev/null; }
+# By pid: with unattended access launchd starts a new agent at once, so "no process left" never comes
+# true (2026-11-23: 20 s wait, then KILL of the agent that already ran the new build).
 stop() {
-  pkill -TERM -f "$PAT"
-  for _ in $(seq 20); do running || return 0; sleep 1; done
+  local old
+  old=$(pgrep -U "$(id -u)" -f "$PAT") || return 0
+  # shellcheck disable=SC2086
+  kill -TERM $old 2>/dev/null
+  # shellcheck disable=SC2086
+  for _ in $(seq 20); do kill -0 $old 2>/dev/null || return 0; sleep 1; done
   log "still running: KILL"
-  pkill -KILL -f "$PAT"; sleep 1
+  # shellcheck disable=SC2086
+  kill -KILL $old 2>/dev/null; sleep 1
 }
 # Up = running, the host started its rendezvous connection, and still running 30 s later.
 up() {

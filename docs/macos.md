@@ -143,6 +143,12 @@ What the apps do about it (0.5.4):
   (technician). Fix: Fix Accessibility, switch the app on, then quit and reopen it. Don't press
   Fix again while the switch is on and the app has not been reopened: Fix clears the entry.
 
+## Unattended access
+
+Settings → Unattended access → *Install as service* installs a root LaunchDaemon and a LaunchAgent
+that hosts without Tether being open, also at the login window:
+[unattended.md](unattended.md#macos).
+
 ## Remote input and App Nap
 
 On a Mac host, remote mouse and keyboard input is injected on Tether's main thread. Tether
