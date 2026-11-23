@@ -128,6 +128,8 @@ pub fn run(args: Vec<String>) {
                     #[cfg(target_os = "macos")]
                     librustdesk::platform::macos::disable_app_nap();
                     librustdesk::ui::api::start_status_sync();
+                    #[cfg(target_os = "macos")]
+                    host_when_agent_gone();
                     main_window(app.handle())?;
                     tray(app.handle())?;
                     policy::start(true);
@@ -518,6 +520,24 @@ fn cm_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 fn cm_show_socket(identifier: &str) -> std::path::PathBuf {
     // $TMPDIR is per user on macOS; the identifier carries the dev profile.
     std::env::temp_dir().join(format!("{identifier}-cm.sock"))
+}
+
+/// Main process, macOS: the launchd agent that hosted is gone for good (`--uninstall-service`)
+/// while this window is open. After 15 s without a host, host from this process again, as before
+/// the service was installed; `start_server(false, ..)` only does so when no server answers.
+#[cfg(target_os = "macos")]
+fn host_when_agent_gone() {
+    std::thread::spawn(|| {
+        let mut down = 0;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            down = if librustdesk::ui::api::get_connect_status().status_num == -1 { down + 1 } else { 0 };
+            if down == 3 && !librustdesk::common::is_server_running() {
+                hbb_common::log::info!("no host for 15 s: hosting from the main window's process");
+                std::thread::spawn(|| librustdesk::start_server(false, false));
+            }
+        }
+    });
 }
 
 /// Main process: tells the `--cm` process the Dock icon was clicked. True if that toggled the
