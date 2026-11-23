@@ -2704,7 +2704,7 @@ index 4bc5bc2..ae0b4a4 100644
 +    }
  }
 diff --git a/src/core_main.rs b/src/core_main.rs
-index 0f62d1e..59b53e8 100644
+index 0f62d1e..101450b 100644
 --- a/src/core_main.rs
 +++ b/src/core_main.rs
 @@ -94,7 +94,8 @@ pub fn core_main() -> Option<CoreMainAction> {
@@ -2717,7 +2717,7 @@ index 0f62d1e..59b53e8 100644
      if args.is_empty() {
          #[cfg(target_os = "linux")]
          let should_check_start_tray = crate::check_process("--server", false);
-@@ -366,12 +367,21 @@ pub fn core_main() -> Option<CoreMainAction> {
+@@ -366,12 +367,28 @@ pub fn core_main() -> Option<CoreMainAction> {
                  return None;
              }
          } else if args[0] == "--tray" {
@@ -2735,11 +2735,18 @@ index 0f62d1e..59b53e8 100644
 +                    "service installation failed or was cancelled, see the install-service log"
 +                )));
 +            }
-+            #[cfg(not(windows))]
++            // Tether, macOS: the same install as Settings > Install as service (admin prompt).
++            #[cfg(all(target_os = "macos", feature = "tauri"))]
++            if !crate::platform::macos::install_daemon() {
++                return Some(CoreMainAction::ExitFailure(hbb_common::anyhow::anyhow!(
++                    "service installation failed or was cancelled"
++                )));
++            }
++            #[cfg(not(any(windows, all(target_os = "macos", feature = "tauri"))))]
              crate::platform::install_service();
              return None;
          } else if args[0] == "--uninstall-service" {
-@@ -725,7 +735,7 @@ pub fn core_main() -> Option<CoreMainAction> {
+@@ -725,7 +742,7 @@ pub fn core_main() -> Option<CoreMainAction> {
  }
  
  fn import_config(path: &str) {
@@ -2748,7 +2755,7 @@ index 0f62d1e..59b53e8 100644
      let path2 = path.replace(".toml", "2.toml");
      let path2 = std::path::Path::new(&path2);
      let path = std::path::Path::new(path);
-@@ -735,9 +745,9 @@ fn import_config(path: &str) {
+@@ -735,9 +752,9 @@ fn import_config(path: &str) {
          log::info!("Empty source config, skipped");
          return;
      }
@@ -2921,7 +2928,7 @@ index f6e48a1..600a09e 100644
  pub(crate) mod update_hash;
  #[cfg(target_os = "macos")]
 diff --git a/src/platform/macos.rs b/src/platform/macos.rs
-index d321d12..3c355d8 100644
+index d321d12..0c58305 100644
 --- a/src/platform/macos.rs
 +++ b/src/platform/macos.rs
 @@ -96,6 +96,8 @@ const PRIVILEGED_UPDATE_BODY: &str = r#"
@@ -2982,7 +2989,7 @@ index d321d12..3c355d8 100644
      crate::updater::start_auto_update_macos();
      if let Err(err) = crate::ipc::start("_service") {
          log::error!("Failed to start ipc_service: {}", err);
-@@ -2215,3 +2241,86 @@ mod update_tests {
+@@ -2215,3 +2241,87 @@ mod update_tests {
          std::fs::remove_dir_all(test_dir).unwrap();
      }
  }
@@ -3004,7 +3011,8 @@ index d321d12..3c355d8 100644
 +/// Tether, Settings > Install as service: asks for an administrator, writes both launchd files,
 +/// starts the root daemon and waits for the result. This process hosts until now and holds the
 +/// IPC socket, so the agent (`--server`) is loaded only once it has exited, and Tether is then
-+/// reopened: on `true` the caller must quit.
++/// reopened: on `true` the caller must quit. From the command line (`--install-service`) a running
++/// Tether is closed by the agent instead (ipc.rs, `Data::Close`) and opened again here.
 +pub fn install_daemon() -> bool {
 +    if !is_installed() {
 +        log::error!("install daemon: not running from /Applications");
@@ -3037,7 +3045,7 @@ index d321d12..3c355d8 100644
 +    let app = format!("/Applications/{}.app", crate::get_app_name());
 +    Command::new("/bin/sh")
 +        .arg("-c")
-+        .arg("while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; launchctl load -w \"$2\"; sleep 3; open \"$3\"")
++        .arg("while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; launchctl load -w \"$2\"; sleep 5; open \"$3\"")
 +        .arg("sh")
 +        .arg(std::process::id().to_string())
 +        .arg(agent_plist)
