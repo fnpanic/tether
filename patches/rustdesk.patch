@@ -3077,6 +3077,21 @@ index d321d12..0c58305 100644
 +        }
 +    });
 +}
+diff --git a/src/platform/privileges_scripts/agent.plist b/src/platform/privileges_scripts/agent.plist
+index 28f9c02..4550eef 100644
+--- a/src/platform/privileges_scripts/agent.plist
++++ b/src/platform/privileges_scripts/agent.plist
+@@ -20,6 +20,10 @@
+             <key>AfterInitialDemand</key>
+             <false />
+         </dict>
++        <!-- Tether: "open Tether.app" is answered by this job, which starts the window as its child;
++             without this launchd would close that window whenever the job restarts (after an update). -->
++        <key>AbandonProcessGroup</key>
++        <true />
+         <key>ThrottleInterval</key>
+         <integer>1</integer>
+         <key>RunAtLoad</key>
 diff --git a/src/platform/privileges_scripts/install.scpt b/src/platform/privileges_scripts/install.scpt
 index acf86ab..52d5fce 100644
 --- a/src/platform/privileges_scripts/install.scpt
