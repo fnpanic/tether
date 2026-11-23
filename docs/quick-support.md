@@ -92,7 +92,8 @@ Config, ID, logs: `%APPDATA%\Tether-QS` (`APP_NAME = "Tether-QS"`), separate fro
 technician app. The webview stores its cache under `%LOCALAPPDATA%\net.tether.quick`.
 
 Networking is the technician app's 443-only policy (copied `netpolicy.rs`): WebSocket/TLS to the
-relay only, no UDP, system proxy (env, WinHTTP static/PAC/WPAD) detected and refreshed every
+relay, plus the direct paths beside it (LAN, WebRTC with STUN/TURN on UDP 21116) when no proxy is
+in use and policy `network.direct` allows them ([corporate-networks.md](corporate-networks.md)); system proxy (env, WinHTTP static/PAC/WPAD) detected and refreshed every
 minute. Policy, heartbeat and update requests use the same proxy and the Windows trust store.
 
 ## ID

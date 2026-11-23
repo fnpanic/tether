@@ -163,7 +163,7 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
       <li><a href="#adm-relays">Relays and public keys</a></li>
       <li><a href="#adm-policy">Policy editor</a></li>
       <li><a href="#adm-publish">Publish a policy</a></li>
-      <li><a href="#adm-devices">Devices</a></li>
+      <li><a href="#adm-devices">Devices, sessions and team</a></li>
       <li><a href="#adm-releases">Releases</a></li>
       <li><a href="#adm-download">Download page</a></li>
       <li><a href="#adm-custom">Custom apps and private links</a></li>
@@ -177,14 +177,14 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
 </details>
 
 <main>
-<p class="eyebrow">Tether 0.4</p>
+<p class="eyebrow">Tether 0.6.3</p>
 <h1 id="overview">User guide</h1>
-<p class="lead">Tether is a self-hosted remote-support product. A technician connects to a customer's computer by its ID, the customer agrees, and the screen, keyboard, mouse, clipboard and files travel end-to-end encrypted through your own relay servers.</p>
+<p class="lead">Tether is a self-hosted remote-support product. A technician connects to a customer's computer by its ID, the customer agrees, and the screen, keyboard, mouse, clipboard and files travel end-to-end encrypted through your own relay servers, or directly between the two computers when the network allows it.</p>
 
 <div class="cards">
-  <div class="card"><h4>Technician app</h4><p>“Tether”. Installed on technicians' Windows PCs and Macs. Connects to devices and can also be reached itself.</p><a href="#tech-install">For technicians</a></div>
-  <div class="card"><h4>TetherQS</h4><p>The quick-support program for customers. One portable file: no installation, no admin rights. It only receives sessions.</p><a href="#qs-start">For customers</a></div>
-  <div class="card"><h4>Tether Manage</h4><p>For administrators. Holds the signing keys, publishes policies, releases, the download page and branded support apps.</p><a href="#adm-first">For administrators</a></div>
+  <div class="card"><h4>Technician app</h4><p>“Tether”. Installed on technicians' Windows PCs and Macs. Connects to devices and can also be reached itself, also unattended.</p><a href="#tech-install">For technicians</a></div>
+  <div class="card"><h4>TetherQS</h4><p>The quick-support program for customers, for Windows and macOS. Nothing to install, no admin rights. It only receives sessions.</p><a href="#qs-start">For customers</a></div>
+  <div class="card"><h4>Tether Manage</h4><p>For administrators, on a Windows PC. Holds the signing keys, publishes policies, releases, the download page and branded support apps.</p><a href="#adm-first">For administrators</a></div>
 </div>
 
 <figure>
@@ -212,7 +212,7 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
     <text class="ta" x="300" y="184">end-to-end encrypted: the relay cannot see the session</text>
   </svg>
   </div>
-  <figcaption>Both sides only make outgoing connections on TCP 443 (port 80 as a fallback). Nothing has to be opened on the customer's firewall.</figcaption>
+  <figcaption>Both sides connect out to the relay on TCP 443 (port 80 as a fallback). Nothing has to be opened on the customer's firewall. When the network allows it, the session itself can take a direct path instead (same network, IPv6 or NAT hole punching); behind a proxy only the 443 connection leaves the network.</figcaption>
 </figure>
 
 <!-- ============================ TECHNICIANS ============================ -->
@@ -231,7 +231,7 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
   <li>The current builds are not notarized. On first start, Control-click the app → <strong>Open</strong> → <strong>Open</strong>. On macOS 15 and later, try once, then <strong>System Settings → Privacy &amp; Security → Open Anyway</strong>; macOS asks for an administrator password for that step (it changes a macOS security setting; Tether itself needs no admin rights). Without the password: <code>xattr -dr com.apple.quarantine /Applications/Tether.app</code> in Terminal.</li>
   <li>To be controlled remotely, allow <strong>Screen Recording</strong> and <strong>Accessibility</strong> in <strong>System Settings → Privacy &amp; Security</strong>, then quit and reopen Tether.</li>
 </ol>
-<div class="note warn"><strong>macOS asks for Screen Recording although it is allowed?</strong> macOS ties Screen Recording and Accessibility to the app's signature; builds before 0.5.3 had a new one with every update, so the entry you see belongs to the old version. In Terminal run <code>tccutil reset ScreenCapture app.tether.desktop</code> and <code>tccutil reset Accessibility app.tether.desktop</code> (TetherQS: <code>net.tether.quick</code>), quit and reopen the app and allow it once more. From 0.5.3 on, the Mac apps are signed with one fixed certificate and keep the permissions across updates. While a permission is missing, Tether and TetherQS show a warning with buttons that open the right settings page, and the technician is told what is missing instead of waiting for the first image.</div>
+<div class="note warn"><strong>macOS asks for Screen Recording although it is allowed?</strong> macOS ties Screen Recording and Accessibility to the app's signature; builds before 0.5.3 had a new one with every update, so the entry you see belongs to the old version. In Terminal run <code>tccutil reset ScreenCapture app.tether.desktop</code> and <code>tccutil reset Accessibility app.tether.desktop</code> (TetherQS: <code>net.tether.quick</code>), quit and reopen the app and allow it once more. From 0.5.3 on, the Mac apps are signed with one fixed certificate and keep the permissions across updates. While a permission is missing, Tether and TetherQS show a warning with <strong>Fix Screen Recording</strong> / <strong>Fix Accessibility</strong> buttons, which clear the old entry and open the right settings page (switch the app on, then choose Quit &amp; Reopen), and the technician is told what is missing instead of waiting for the first image.</div>
 
 <h2 id="tech-home">Your ID and password</h2>
 <p>The main window has two halves.</p>
@@ -245,9 +245,9 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
   <li>Ask the customer for the ID shown in their TetherQS (or Tether) window. Spaces do not matter: <code>123 456 789</code> works.</li>
   <li>Type the ID under <strong>Remote device</strong> and click <strong>Connect</strong>. To open file transfer instead of the screen, use the <strong>Transfer files</strong> button next to it.</li>
   <li>A session window opens. Either enter the customer's one-time password, or wait while the customer clicks <strong>Accept</strong> on their side. Which of the two is possible depends on your organisation's policy.</li>
-  <li>The picture appears. The toolbar shows a shield when the session is end-to-end encrypted.</li>
+  <li>The picture appears. The toolbar shows a shield when the session is end-to-end encrypted, and which path it took (see <a href="#tech-toolbar">the session toolbar</a>).</li>
 </ol>
-<p>A recent device can be opened again with one click on its card. Tether remembers the password for a device only if you leave “Remember” switched on in the password prompt.</p>
+<p>A recent device can be opened again with one click on its card. Tether remembers the password for a device only if you tick “Remember password for this device” in the password prompt (off by default). Connecting to your own ID is refused (“That is this device's own ID: it cannot connect to itself.”).</p>
 <div class="note"><strong>Always encrypted.</strong> Tether refuses any connection that cannot be end-to-end encrypted. There is no “continue insecurely” button.</div>
 
 <h2 id="tech-hosts">Hundreds of hosts: Advanced mode</h2>
@@ -262,7 +262,7 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
 <p>Details for administrators and the full search syntax: <code>docs/advanced.md</code>.</p>
 
 <h2 id="tech-cli">Command line and <code>tether://</code> links</h2>
-<p>The technician app (<code>C:\Program Files\Tether\tether.exe</code>) can be started from scripts, ticket systems and intranet pages.</p>
+<p>The technician app (<code>C:\Program Files\Tether\tether.exe</code>; macOS <code>/Applications/Tether.app/Contents/MacOS/tether</code>) can be started from scripts, ticket systems and intranet pages.</p>
 <div class="tw"><table>
 <thead><tr><th>Command</th><th>What it does</th></tr></thead>
 <tbody>
@@ -272,46 +272,51 @@ footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--hairline);fon
 <tr><td><code>--view-only</code></td><td>Watch only, send no mouse or keyboard input</td></tr>
 <tr><td><code>--fullscreen</code></td><td>Open the session in full screen</td></tr>
 <tr><td><code>--get-id</code>, <code>--version</code></td><td>Print this device's ID or the version</td></tr>
-<tr><td><code>--check-update</code></td><td>Check for an update now, e.g. <code>update 0.3.1 available (installed 0.3.0)</code></td></tr>
+<tr><td><code>--check-update</code></td><td>Check for an update now, e.g. <code>update 0.6.3 available (installed 0.6.2)</code></td></tr>
 <tr><td><code>--policy-refresh</code></td><td>Fetch and apply the organisation policy now</td></tr>
-<tr><td><code>--diagnostics &lt;out.zip&gt;</code></td><td>Write a diagnostics archive</td></tr>
+<tr><td><code>--diagnostics &lt;out.zip&gt;</code></td><td>Write a diagnostics archive (<code>TetherQS --diagnostics &lt;out.zip&gt;</code> writes TetherQS's)</td></tr>
+<tr><td><code>--diag-upload &lt;code&gt;</code></td><td>Send the diagnostics to support with a ticket code, like <strong>Send to support</strong> (also <code>TetherQS --diag-upload &lt;code&gt;</code>)</td></tr>
+<tr><td><code>--install-service</code></td><td>Set up unattended access, like Settings → Unattended access → <strong>Install as service</strong> (administrator prompt; Windows, and macOS from 0.6.3). Exit code 1 when cancelled or failed.</td></tr>
+<tr><td><code>--uninstall-service</code></td><td>Remove unattended access again (administrator prompt)</td></tr>
 <tr><td><code>--help</code></td><td>Show the list</td></tr>
 </tbody></table></div>
 <pre><code># PowerShell: connect with a password from a secret store, without showing it on the command line
 Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\tether.exe" --connect 123456789 --password-stdin</code></pre>
-<p><strong>Links.</strong> The installer registers <code>tether://connect/&lt;id&gt;</code>. Put it into a ticket template, for example <code>tether://connect/{{device.tether_id}}</code>. Links never carry a password and accept nothing else, so a link alone never gives anyone access. If Tether is already running, the session opens in that app.</p>
+<p><strong>Links.</strong> The installer registers <code>tether://connect/&lt;id&gt;</code>. Put it into a ticket template, for example <code>tether://connect/{{device.tether_id}}</code>. Links never carry a password and accept nothing else, so a link alone never gives anyone access. If Tether is already running, the session opens in that app (Windows and macOS); if a session window to that device is already open, it comes to the front instead of a second one.</p>
 <div class="note warn"><strong>Passwords on the command line</strong> (<code>--connect &lt;id&gt; &lt;password&gt;</code> or <code>--password</code>) are visible in the process list and in shell history. Use them only for tests. Exit codes are listed under <a href="#exit-codes">Exit codes</a>.</div>
 
 <h2 id="tech-toolbar">The session toolbar</h2>
 <p>The toolbar floats at the top of the session window and hides itself after about two seconds. To bring it back, point at the small tab at the top centre of the picture for a moment or click it; the rest of the top edge belongs to the remote screen, so title bars and tabs there can be clicked. The toolbar never appears while you hold a mouse button (dragging), and it hides again shortly after the mouse leaves it. Pin it to keep it visible. Every button either works or tells you why it did not.</p>
-<p>On the left it shows the device name, a coloured dot for the connection quality, a shield when the session is end-to-end encrypted (hover it to see the peer's fingerprint for an out-of-band check) and a <span class="pill">RELAY</span> badge: Tether sessions always run through your relay.</p>
+<p>On the left it shows the device name, a coloured dot for the connection quality, a shield when the session is end-to-end encrypted (hover it to see the peer's fingerprint for an out-of-band check) and a badge for the path the session took: <span class="pill">RELAY</span> (through your relay over 443), <span class="pill">RELAY (UDP)</span> (through your relay, over UDP), <span class="pill">DIRECT (LAN)</span> (same network), <span class="pill">DIRECT (IPV6)</span> or <span class="pill">P2P</span> (directly through both routers). The first path that completes the end-to-end key exchange wins, so a direct attempt never slows the session down; behind a proxy only the relay and same-network paths are used, and policy <code>network.direct</code> can turn direct paths off. A <span class="pill">VIEW ONLY</span> badge marks a session that sends no input.</p>
 <div class="tw"><table>
 <thead><tr><th>Button</th><th>What it does</th></tr></thead>
 <tbody>
 <tr><td>1, 2, 3 …</td><td>Switch between the remote displays (only shown when the device has more than one)</td></tr>
 <tr><td>Fit to window / Original size</td><td>Scale the remote screen to the window, or show it pixel for pixel</td></tr>
-<tr><td>Image quality</td><td><strong>Sharp text</strong> (best image quality), <strong>Balanced</strong> (quality and speed, default) or <strong>Speed</strong> (lowest latency and bandwidth). Below it, <strong>Sharpening</strong>: <strong>Auto</strong> (default) makes text and fine lines crisper when the remote screen is shown smaller or larger than its own size, <strong>Strong</strong> sharpens more, also at original size, <strong>Off</strong> shows the picture as received. Your choice is remembered for all sessions on this PC.</td></tr>
+<tr><td>Image quality</td><td><strong>Sharp text</strong> (best image quality), <strong>Balanced</strong> (quality and speed, default) or <strong>Speed</strong> (lowest latency and bandwidth). Below it, <strong>Sharpening</strong>: <strong>Auto</strong> (default) makes text and fine lines crisper when the remote screen is shown smaller or larger than its own size, <strong>Strong</strong> sharpens more, also at original size, <strong>Off</strong> shows the picture as received. Your choice is remembered for all sessions on this PC. Independent of this setting, what stands still on the remote screen for about 1.5 seconds is replaced by the host's exact pixels, so text and photos become sharp and true to colour (host and viewer 0.6.2 or later; not on hosts that encode with a GPU texture encoder, and not in recordings).</td></tr>
 <tr><td>Statistics</td><td>Overlay with frame rate, codec, latency, bitrate and decoder health (longest gap, key-frame requests, dropped frames), the time to draw a picture and the sharpening in use</td></tr>
-<tr><td>Remote actions</td><td>A menu with <strong>Send Ctrl+Alt+Del</strong>, <strong>Lock screen…</strong> and <strong>Restart…</strong>. Ctrl+Alt+Del is greyed out with the reason when the remote PC has no Tether service (TetherQS). Lock and restart ask first; without the service the question warns that you will not see the lock screen or be able to sign back in, and that TetherQS does not start again after a restart.</td></tr>
+<tr><td>Remote actions</td><td>A menu with <strong>Send Ctrl+Alt+Del</strong> (Windows hosts), <strong>Request admin access</strong> (TetherQS on Windows: the customer confirms one UAC prompt), <strong>Lock screen…</strong> and <strong>Restart…</strong>. Ctrl+Alt+Del is greyed out with the reason when the remote PC has no Tether service (TetherQS). Lock and restart ask first; without the service the question warns that you will not see the lock screen or be able to sign back in, and that TetherQS does not start again after a restart. After a restart of a computer with the service, the session reconnects by itself.</td></tr>
 <tr><td>Chat</td><td>Opens a chat panel with the remote user. Their replies show as a red badge on the button (the toolbar stays visible until you read them); on their side the chat appears in TetherQS or the Tether connection window, with a flashing taskbar button.</td></tr>
 <tr><td>Transfer files</td><td>Opens a file-transfer window that belongs to this session: no second password and no second accept for the customer</td></tr>
 <tr><td>Record session</td><td>Asks the remote user for permission and records once they allow it (see <a href="#tech-record">Recording</a>). Hidden if your policy turns recording off.</td></tr>
+<tr><td>Keyboard</td><td>Shortcut mapping between PC and Mac (towards a Mac, Ctrl works as ⌘ and the Win key as Control; on by default when the platforms differ), <strong>Send system keys</strong> (Windows technician app: Win, Win+R, Alt+Space … go to the remote computer), <strong>Send Alt+Tab</strong>, and <strong>Send ⌘⌥Esc</strong> (Force Quit) to a Mac. <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Home</kbd> gives the keyboard back to this computer and moves it to the toolbar; <kbd>Esc</kbd> or a click into the picture returns it.</td></tr>
 <tr><td>Full screen</td><td>Full screen on and off</td></tr>
+<tr><td>Minimize</td><td>Minimizes the session window</td></tr>
 <tr><td>Pin toolbar</td><td>Keeps the toolbar visible</td></tr>
 <tr><td><span class="pill"><span class="dot danger"></span>Disconnect</span></td><td>The red button ends the session</td></tr>
 </tbody></table></div>
-<p>Some functions can be disabled by your organisation or by the remote user (control, clipboard, file transfer, audio, restart). The <strong>Send Ctrl+Alt+Del</strong> and UAC prompts on a TetherQS customer PC need <a href="#qs-admin">admin access</a>.</p>
+<p>Some functions can be disabled by your organisation or by the remote user (control, clipboard, file transfer, audio, restart). <strong>Send Ctrl+Alt+Del</strong> needs Tether installed with its service on the remote PC; UAC prompts on a TetherQS customer PC need <a href="#qs-admin">admin access</a>. While a UAC prompt is open there without admin access, a notice at the top of the picture says so and the session keeps running.</p>
 
 <h2 id="tech-files">File transfer</h2>
 <p>Open it from the toolbar while you are connected, with <strong>Transfer files</strong> on the main window, or with <code>tether --connect &lt;id&gt; --file-transfer</code>. When opened from a running session it belongs to that session: the customer is not asked again, TetherQS shows “Transferring files” on the session card instead of a second connection, and <strong>Disconnect</strong> there ends both. File transfer is end-to-end encrypted like the screen. In tests a 64 MB file arrived intact (SHA-256 verified) through a proxy that only allowed port 443.</p>
-<p>The window shows this computer on the left and the remote device on the right. Select files and folders as in a file manager: click selects one, <strong>Ctrl</strong>+click (<strong>Cmd</strong> on a Mac) adds or removes one, <strong>Shift</strong>+click selects a range and <strong>Ctrl+A</strong> selects everything in the pane you are in; the arrow keys (with <strong>Shift</strong> to extend), <strong>Enter</strong> and <strong>Delete</strong> work too. <strong>Upload</strong> / <strong>Download</strong> sends the whole selection (“Download 3 items”), or drag the selection to the other pane; folders are copied with everything in them. Each item is its own transfer with its own progress bar, two run at a time and the rest wait as “Queued”; the header shows how many have finished and the overall progress. <strong>Delete</strong> on the remote pane removes all selected items after one confirmation.</p>
+<p>The window shows this computer on the left and the remote device on the right. Select files and folders as in a file manager: click selects one, <strong>Ctrl</strong>+click (<strong>Cmd</strong> on a Mac) adds or removes one, <strong>Shift</strong>+click selects a range and <strong>Ctrl+A</strong> selects everything in the pane you are in; the arrow keys (with <strong>Shift</strong> to extend), <strong>Enter</strong> and <strong>Delete</strong> work too. <strong>Upload</strong> / <strong>Download</strong> sends the whole selection (“Download 3 items”), or drag the selection to the other pane; folders are copied with everything in them. Each item is its own transfer with its own progress bar, two run at a time and the rest wait as “Queued”; the header shows how many have finished and the overall progress. <strong>Delete</strong> on the remote pane removes all selected items after one confirmation. Tether asks before it overwrites a file. <strong>New folder</strong> works on both sides, and going up from a drive root shows the list of drives.</p>
 
 <h2 id="tech-record">Recording with consent</h2>
 <ol class="steps">
   <li>Click <strong>Record session</strong>. The button shows “Waiting for the remote user to allow recording”.</li>
-  <li>The remote user sees the question (default: “The technician wants to record this session. Allow?”) and chooses <strong>Allow</strong> or <strong>Deny</strong>.</li>
+  <li>The remote user sees the question (default: “The technician wants to record this session. Allow?”) and chooses <strong>Allow</strong> or <strong>Deny</strong> (TetherQS: <strong>Don't allow</strong>).</li>
   <li>After Allow, a red <span class="pill"><span class="dot danger"></span>REC</span> pill with a timer appears and recording starts. After Deny you see “Recording declined by the other party” and nothing is written.</li>
-  <li>Click again to stop. The remote user can also revoke the permission at any time; recording stops at once.</li>
+  <li>Click again to stop. On a Tether host the remote user can also revoke the permission at any time with the “Record the session” switch; recording stops at once. A TetherQS customer ends it by ending the session.</li>
 </ol>
 <p>Recordings are WebM/MP4 files of the stream you receive that any video player opens. When a recording stops, a card <strong>Recording saved</strong> shows the file name with <strong>Open</strong> and <strong>Show in folder</strong> (and the upload status if your organisation uploads recordings). The camera button next to Settings in the main window opens <strong>Recordings</strong>, which lists all recordings (date, device, length, size) with Play, Show in folder and Delete, and an <strong>Open folder</strong> button.</p>
 <p>They are stored in <code>%USERPROFILE%\Videos\Tether</code> (macOS <code>~/Movies/Tether</code>) and named <code>2026-11-05_14-03-22_&lt;device name&gt;_&lt;ID&gt;.webm</code>. <strong>Settings → Recording</strong> shows the folder in use and lets you choose another one, unless your organisation sets the folder; it also shows whether recordings are uploaded to a share or an HTTPS address and when old ones are deleted.</p>
@@ -328,7 +333,7 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <p>Tether does not retry after a wrong password, when the other side rejected or ended the session, or when a policy or required update blocks the session.</p>
 
 <h2 id="tech-settings">Settings and unattended access</h2>
-<p><strong>Settings</strong> has the sections Security, Unattended access, Appearance, Network, Diagnostics and About. Settings your organisation controls show a “Managed by your organisation” badge and cannot be changed.</p>
+<p><strong>Settings</strong> has the sections Security, Unattended access, Recording, Appearance, Network, Diagnostics and About. Settings your organisation controls show a “Managed by your organisation” badge and cannot be changed.</p>
 <div class="tw"><table>
 <thead><tr><th>Setting</th><th>Meaning</th></tr></thead>
 <tbody>
@@ -336,41 +341,44 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <tr><td>Allow control, clipboard, file transfer, share audio</td><td>What someone connecting to <em>this</em> device may do</td></tr>
 <tr><td>Permanent password</td><td>For unattended access. At least 12 characters from at least 3 character classes (at most 128).</td></tr>
 <tr><td>Accepted passwords</td><td>One-time, permanent, or both</td></tr>
-<tr><td>Install as service</td><td>Starts with the computer and stays reachable when nobody is signed in. Needs administrator rights.</td></tr>
+<tr><td>Install as service</td><td>Starts with the computer and stays reachable when nobody is signed in. Needs administrator rights. Windows, and from 0.6.3 also macOS (see below). Shown only while the service is not installed and your organisation allows unattended access.</td></tr>
 <tr><td>Two-factor authentication</td><td>An authenticator code (TOTP, 6 digits) is required after the password. It takes effect only after you have entered one valid code.</td></tr>
-<tr><td>Theme</td><td>System, light or dark</td></tr>
-<tr><td>Network</td><td>Shows the relay server and its public key</td></tr>
+<tr><td>Recording</td><td>The recording folder (changeable unless your organisation sets it), and the recording mode, upload and retention your organisation sets</td></tr>
+<tr><td>Home view, Theme</td><td>Simple or Advanced home view; System, light or dark</td></tr>
+<tr><td>Network</td><td>ID server, relay server and public key; empty means your organisation's built-in server. Can only be changed when your organisation allows it.</td></tr>
+<tr><td>About</td><td>Version, applied policy and <strong>Check for updates</strong></td></tr>
 </tbody></table></div>
 <p>Repeated wrong passwords are throttled and then blocked, and the one-time password changes after too many failures.</p>
+<p><strong>Unattended access on a Mac</strong> (from 0.6.3). Tether must be in Applications. After the macOS administrator prompt, <strong>Install</strong> sets up a background service (a LaunchDaemon and a LaunchAgent); Tether quits and opens again a few seconds later. The Mac is then reachable with the permanent password also with Tether closed, behind the lock screen and at the login window after signing out. From Terminal: <code>/Applications/Tether.app/Contents/MacOS/tether --install-service</code>; <code>--uninstall-service</code> removes it (do that before moving Tether to the Trash). Updates replace the app as before; the background processes restart from the new version once no session runs. Limits: with FileVault, nothing can connect after a restart until someone has unlocked the disk at the Mac; installing needs a person at the Mac (a technician cannot click Tether's own window or the macOS password prompt). The service uses the Screen Recording and Accessibility permissions Tether already has; there is nothing new to allow. On Windows, <code>tether.exe --uninstall-service</code> or uninstalling Tether removes the service.</p>
 
 <h2 id="tech-diag">Diagnostics and support</h2>
-<p><strong>Settings → Diagnostics</strong> shows what Tether sees: version, ID, system, the applied policy (serial, group and layers), the server, the proxy in use, DNS, and one row per connection route with its time. <strong>Test connection</strong> tries every route now (ports 443 and 80, each through the proxy and directly).</p>
+<p><strong>Settings → Diagnostics</strong> shows what Tether sees: version, update state, ID, system, the applied policy (serial, group and layers), the server, the proxy in use, DNS, and one row per connection route with its time. <strong>Test connection</strong> tries every route now (ports 443 and 80, each through the proxy and directly).</p>
 <ul>
   <li><strong>Verbose logging (1 hour)</strong>: turn it on, quit Tether from the tray and start it again, reproduce the problem within the hour.</li>
   <li><strong>Export diagnostics</strong> writes <code>tether-diagnostics-&lt;time&gt;.zip</code> to Downloads. Passwords, keys, salts and tokens in the configuration are replaced by <code>&lt;redacted&gt;</code>. The log files are not redacted and can contain device IDs, IP addresses and file names.</li>
-  <li><strong>Send to support</strong>: enter the 8-character code your support desk gives you and click <strong>Send to support</strong>. A code works once and for 24 hours.</li>
+  <li><strong>Send to support</strong>: enter the 8-character code your support desk gives you and click <strong>Send to support</strong>. A code works once and for 24 hours. Tether tries every relay in turn. From the command line: <code>tether --diag-upload &lt;code&gt;</code>.</li>
   <li><strong>Open log folder</strong> opens <code>%APPDATA%\Tether\log\</code> (macOS: <code>~/Library/Logs/Tether/</code>).</li>
 </ul>
 
 <h2 id="tech-updates">Updates</h2>
-<p>Tether checks for updates 5 seconds after start, every 6 hours (policy <code>update.check-hours</code>) and after every policy change. Every update is signed by your organisation and checked before it is installed.</p>
+<p>Tether checks for updates shortly after start (within a minute), every 6 hours (policy <code>update.check-hours</code>), after every policy change, and when the relay announces a new release, so a published release usually reaches devices within a couple of minutes. <strong>Settings → About → Check for updates</strong> checks at once. Every update is signed by your organisation, listed in a release index signed with your organisation's admin key, and checked against it before it is installed. Your organisation may roll a release out in stages, so not every device gets it at the same moment.</p>
 <div class="tw"><table>
 <thead><tr><th>You see</th><th>Meaning</th></tr></thead>
 <tbody>
 <tr><td>Card “Update available”: <strong>Install and restart</strong> / <strong>Later</strong></td><td>Optional update; sessions keep working</td></tr>
 <tr><td>“Update required”, no Later</td><td>Mandatory update or a minimum version. Sessions are blocked until it is installed.</td></tr>
-<tr><td>“Tether will update” with a countdown</td><td>Forced update: installs after the countdown (default 60 s) and restarts</td></tr>
+<tr><td>“Tether will update” with a countdown</td><td>Forced update: installs after the countdown (default 60 s) and restarts. While a session runs it says “Will update after this session.” and waits: an update never ends a running session.</td></tr>
 <tr><td>“Your organisation installs updates for you”</td><td>Automatic updates are off; IT deploys the new version</td></tr>
 <tr><td>“… none is available yet”</td><td>A newer version is required but not published yet. Contact your administrator.</td></tr>
 </tbody></table></div>
-<p>On Windows the installer runs in passive mode (progress only). If you are not an administrator, Windows shows a UAC prompt.</p>
+<p>On Windows the installer runs in passive mode (progress only). If you are not an administrator, Windows shows a UAC prompt. On macOS the updater replaces Tether.app in place.</p>
 
 <!-- ============================ CUSTOMERS ============================ -->
 <h2 id="qs-start">Start TetherQS (customers)</h2>
-<p>Your support technician sends you a link or points you to the download page. TetherQS is one file. It does not install anything, needs no administrator rights and leaves no service behind: when you close the window, support ends.</p>
+<p>Your support technician sends you a link or points you to the download page. TetherQS does not install anything, needs no administrator rights and leaves no service behind: when you close the window, support ends.</p>
 <ol class="steps">
   <li><strong>Windows:</strong> download <code>TetherQS.exe</code> (or the branded file your support company gave you, such as <code>ACME-Support.exe</code>) and double-click it. Windows 10 21H2 and later and Windows 11 already contain the WebView2 component it needs; if it is missing, a message tells you where to get it.</li>
-  <li><strong>Mac:</strong> download <code>TetherQS-&lt;version&gt;-universal.zip</code>, unzip it, move <strong>TetherQS</strong> out of Downloads (for example to the Desktop) and open it with Control-click → <strong>Open</strong>. Allow Screen Recording and Accessibility when asked.</li>
+  <li><strong>Mac</strong> (macOS 11 or newer, Apple silicon and Intel): download <code>TetherQS-&lt;version&gt;-universal.zip</code> (or the branded zip from your support company), unzip it, move <strong>TetherQS</strong> out of Downloads (for example to the Desktop) and open it with Control-click → <strong>Open</strong> (macOS 15 and later: try once, then <strong>System Settings → Privacy &amp; Security → Open Anyway</strong>). Allow Screen Recording and Accessibility when asked.</li>
   <li>The status pill shows <span class="pill"><span class="dot"></span>Connecting</span> and then <span class="pill"><span class="dot ok"></span>Ready</span>. <span class="pill"><span class="dot warn"></span>Offline</span> means it cannot reach the server; see <a href="#trouble">Troubleshooting</a>.</li>
 </ol>
 
@@ -382,66 +390,67 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
   <li><strong>New password</strong> makes a new one; the old one stops working.</li>
   <li>Some organisations accept by click only. Then no password is shown at all and you just click <strong>Accept</strong>.</li>
 </ul>
-<div class="note new"><strong>Masked password.</strong> Hiding the password with an eye button is how the technician app already works; TetherQS gets the same behaviour in the current release. If your TetherQS still shows the password in plain text, it is an older version.</div>
 
 <h2 id="qs-accept">Accept or decline</h2>
 <p>When your technician connects, a card appears with <strong>who</strong> is connecting (name and ID), whether they want to see and control the screen or transfer files, and <strong>what</strong> they will be allowed to do. Only accept if you know this person.</p>
 <ul>
-  <li>Switch individual permissions on or off before you accept: <strong>Control</strong> (mouse and keyboard), <strong>Files</strong> (file transfer), clipboard, audio and restart. Greyed-out switches are fixed by your support company.</li>
+  <li>Switch individual permissions on or off before you accept: <strong>Control mouse and keyboard</strong>, <strong>Use the clipboard</strong>, <strong>Transfer files</strong>, <strong>Hear this computer's sound</strong>, <strong>Restart this computer</strong> and <strong>Block my mouse and keyboard</strong>. Greyed-out switches are fixed by your support company. The name shown is chosen by the other side and is not verified; neither Accept nor Decline is pre-selected.</li>
   <li>Click <strong>Accept</strong> to start, or <strong>Decline</strong> to refuse. Accept lets your technician in right away; they do not need the password then. (Telling them the one-time password works too.) A short message confirms it, and the card changes to the session view.</li>
-  <li>While someone asks or is connected, the window sits in the bottom-right corner of your screen, so it is always in the same place and out of the way. Afterwards it moves back to the middle.</li>
+  <li>While someone asks or is connected, the window sits in the bottom-right corner of your screen, so it is always in the same place and out of the way. When the session starts it minimizes to the taskbar (Dock on a Mac); click it to bring it back. Afterwards it moves back to the middle.</li>
   <li>If your organisation uses passwords only, a session with the correct password starts without the card.</li>
 </ul>
 
 <h2 id="qs-session">During the session</h2>
 <ul>
-  <li>The card shows the technician, the elapsed time and indicators for Control, Files and <span class="pill"><span class="dot danger"></span>REC</span>.</li>
+  <li>The card shows the technician, the elapsed time and indicators for <strong>Control</strong>, <strong>Transferring files</strong> and <span class="pill"><span class="dot danger"></span>Recording allowed</span>.</li>
   <li>You can switch permissions off at any time.</li>
+  <li><strong>Chat</strong>: a tab next to Permissions on the card. A message from your technician brings the window back and opens the tab; you can reply there.</li>
   <li>The red <strong>Disconnect</strong> button ends the session immediately. Closing the window does the same.</li>
 </ul>
 <h3 id="qs-consent">If your technician wants to record</h3>
-<p>You are asked first, every time: “The technician wants to record this session. Allow?” (your support company may use its own wording). If you choose <strong>Deny</strong>, nothing is recorded. If you choose <strong>Allow</strong>, the REC indicator appears, and you can withdraw the permission at any time with the “Record the session” switch.</p>
+<p>You are asked first, every time: “The technician wants to record this session. Allow?” (your support company may use its own wording). If you choose <strong>Don't allow</strong>, nothing is recorded. If you choose <strong>Allow</strong>, the “Recording allowed” indicator appears for the rest of the session; to stop the recording, end the session with <strong>Disconnect</strong>.</p>
 
 <h2 id="qs-admin">Allow admin access</h2>
-<p>TetherQS runs as a normal user. Windows hides its administrator prompts (UAC) and elevated windows from normal programs, so your technician would see a black or frozen screen there.</p>
+<p>On Windows, TetherQS runs as a normal user. Windows hides its administrator prompts (UAC) and elevated windows from normal programs, so your technician would not see them or could not use them.</p>
 <ol class="steps">
   <li>Click <strong>Allow admin access</strong> (if your support company offers it).</li>
   <li>Confirm the Windows prompt. If you are not an administrator yourself, someone with administrator credentials can type them in.</li>
   <li>During a session this happens in place and the session continues. Outside a session TetherQS restarts and keeps the same ID and password.</li>
 </ol>
-<p>The technician can also request admin access from inside the session; you confirm the same prompt. If you decline, TetherQS keeps running without admin rights.</p>
+<p>The technician can also request admin access from inside the session; you confirm the same prompt. If you decline, TetherQS keeps running without admin rights. If your support company turned admin access off, the button is hidden and a request from the technician is refused.</p>
 
 <h2 id="qs-custom">Branded support apps</h2>
 <p>Your support company can give you its own version of TetherQS through a private link. It is the same program, with:</p>
 <ul>
-  <li>the company's name in the title bar and as the file name (<code>&lt;Name&gt;-Support.exe</code>),</li>
+  <li>the company's name in the title bar and as the file name (<code>&lt;Name&gt;-Support.exe</code>, on a Mac <code>&lt;Name&gt;-Support.zip</code>),</li>
   <li>its logo, accent colour and welcome text,</li>
   <li>settings chosen for its customers (for example “accept by click only”).</li>
 </ul>
-<p>The branding is signed by the support company; TetherQS checks the signature and falls back to the standard look if anything is wrong. The link works only until the date the company set, and can be withdrawn at any time. Branded apps are available for Windows.</p>
+<p>The branding is signed by the support company; TetherQS checks the signature and falls back to the standard look if anything is wrong. The link works only until the date the company set, and can be withdrawn at any time. The same link gives you the Windows or the Mac version, whichever computer you open it on. The branding stays when TetherQS updates itself.</p>
 
 <h2 id="qs-help">Help and updates</h2>
-<p>The <strong>?</strong> in the title bar opens <strong>Help</strong>: version, ID, server, whether the server is reachable and how fast, the proxy in use, whether admin access is on, and the policy serial. It also opens without a network: the server check runs on its own (at most 5 s, with <strong>Retry</strong>) and shows the error if the server cannot be reached. Your technician may ask you to read these out.</p>
-<p>TetherQS updates itself when it starts and every few hours. It downloads the new version, checks its signature, swaps the file and restarts with the same ID and password. No admin rights are needed. If an update is required, the <strong>Accept</strong> button stays disabled with “An update is required before your technician can connect.” until you click <strong>Update</strong>.</p>
+<p>The <strong>?</strong> in the title bar opens <strong>Help</strong>: version, ID, servers, whether each server is reachable and how fast, the proxy in use, whether admin access is on, the policy serial and the update state. It also opens without a network: the server check runs on its own (at most 5 s, with <strong>Retry</strong>) and shows the error if the server cannot be reached. Your technician may ask you to read these out. <strong>Send to support</strong> there takes the 8-character code your support desk gives you and sends TetherQS's diagnostics (logs and settings, no passwords). <strong>Check for updates</strong> checks at once and shows the result.</p>
+<p>TetherQS updates itself when it starts, every few hours and soon after a new release is published. It downloads the new version, checks its signature, swaps the file and restarts with the same ID and password. No admin rights are needed. It never swaps itself during a session: <strong>Update</strong> then says “The update restarts TetherQS: end the session first.”, and a forced update waits until the session has ended. If an update is required, the <strong>Accept</strong> button stays disabled with “An update is required before your technician can connect.” until you click <strong>Update</strong>.</p>
 
 <!-- ============================ ADMINS ============================ -->
 <h2 id="adm-first">First run, keys and backup (administrators)</h2>
-<p>Tether Manage (<code>apps/manage</code>) runs on the administrator's PC. Its screens are Status, Policy, Devices, Releases, Download page, Diagnostics, and Keys and server. Its data lives in <code>%APPDATA%\Tether-Manage</code> (override with <code>TETHER_MANAGE_DIR</code>).</p>
+<p>Tether Manage (<code>apps/manage</code>) runs on the administrator's Windows PC and carries the same version number as Tether and TetherQS. Its screens are Status and relays, Policy, Devices, Sessions, Team, Releases, Download page, Custom apps, Diagnostics and Keys. Its data lives in <code>%APPDATA%\Tether-Manage</code> (override with <code>TETHER_MANAGE_DIR</code>).</p>
 <ol class="steps">
   <li>On first start choose <strong>Create keys</strong> (or <strong>Import a backup instead</strong>). Tether Manage creates the <strong>admin key</strong> (Ed25519, signs policies and every admin request) and the <strong>updater key</strong> (minisign, signs installers and TetherQS).</li>
   <li>Choose a passphrase of at least 8 characters. The keys are sealed with it (argon2id, 64 MiB, 3 passes, then XChaCha20-Poly1305). There is no recovery.</li>
-  <li>Immediately use <strong>Keys and server → Export backup…</strong>. It writes <code>tether-manage-keys.tmkeys</code>, still encrypted. Keep the backup and the passphrase in two different safe places.</li>
+  <li>Immediately use <strong>Keys → Export backup…</strong>. It writes <code>tether-manage-keys.tmkeys</code>, still encrypted. Keep the backup and the passphrase in two different safe places.</li>
   <li>Later starts ask you to <strong>Unlock</strong> with the passphrase. The keys stay in memory until the app closes.</li>
 </ol>
 <div class="note warn"><strong>Losing both the passphrase and the backup means rebuilding every client.</strong> The public halves of both keys are compiled into the technician app and TetherQS. Without the private keys nothing you publish will be accepted by installed clients. To work from a second PC, import the same backup there.</div>
 
 <h2 id="adm-relays">Relays and public keys</h2>
-<p><strong>Keys and server</strong> shows only public keys:</p>
+<p><strong>Keys</strong> shows only public keys:</p>
 <ul>
   <li><strong>Admin public key</strong> → build variable <code>TETHER_ADMIN_PUB_KEY</code>, and <code>ADMIN_PUB_KEY=…</code> in <code>/etc/tether/api.env</code> on every relay (then restart <code>tether-api</code>). Several keys can be listed, comma-separated, for a key rotation.</li>
   <li><strong>Update signing public key</strong> → build variable <code>TETHER_UPDATER_PUB_KEY</code> for both apps.</li>
 </ul>
-<p><strong>Relay address</strong>: one or more <code>https://</code> addresses, comma-separated, for example <code>https://relay.example.com, https://relay2.example.com</code>. Tether Manage publishes policy, releases, the download page, tickets and custom apps to every relay, and merges the device lists. The Status screen shows “Connected, admin key accepted” when a relay trusts your key.</p>
+<p><strong>Keys → Server key</strong> replaces the key the relays sign device identities with, without reinstalling any client (<code>docs/key-rotation.md</code>).</p>
+<p><strong>Relays</strong> (on <strong>Status and relays</strong>): add each relay by host name, for example <code>relay.example.com</code> and <code>relay2.example.com</code> (<code>https://</code> is added), then <strong>Save relay list</strong>. Each address must be the relay's own <code>https://</code> host name, with an optional port and nothing else. Tether Manage publishes policy, releases, the download page, tickets, custom apps and the team roster to every relay, and merges the device and session lists. The first relay is used for reads and for the links of custom apps. Each row shows <strong>Admin key accepted</strong> when the relay trusts your key (or the error), and the policy serial it serves (<strong>Live</strong> or <strong>Behind</strong>). When a relay does not answer, a publish waits until you tick “Publish to the others anyway”.</p>
 
 <h2 id="adm-policy">Policy editor</h2>
 <p>The policy is one signed document for all devices. Every setting is a <em>feature</em> (the full list is generated in <code>docs/policy.md</code>), and each layer can set it to one of these states:</p>
@@ -473,75 +482,81 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 </ol>
 <p>Devices reject a policy that is not signed by your admin key and any serial lower than the last one they accepted, so an old or tampered policy can never be pushed. The Devices screen shows which serial each device runs and highlights older ones.</p>
 
-<h2 id="adm-devices">Devices</h2>
-<p>Every app that reported in during the last 180 days (up to 10 000 devices). Each device sends a small heartbeat after each policy check.</p>
+<h2 id="adm-devices">Devices, sessions and team</h2>
+<p>Every app that reported in during the last 180 days (up to 50 000 devices), read from every relay. Each device sends a small heartbeat after each policy check. Filters: search, <strong>All / Active today</strong>, OS, version, profile and group.</p>
 <div class="tw"><table>
 <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
 <tbody>
 <tr><td>ID / uuid</td><td>Tether ID and the install uuid (assignments follow the uuid, so they survive ID changes but not a fresh install)</td></tr>
 <tr><td>Profile</td><td><code>technician</code> or <code>customer</code></td></tr>
 <tr><td>Version, OS</td><td>App version, operating system and build</td></tr>
-<tr><td>Policy</td><td>Serial the device applied; highlighted if older than the published one</td></tr>
+<tr><td>Policy</td><td>Serial the device applied: <strong>Current</strong>, or <strong>Stale</strong> when older than the published one</td></tr>
 <tr><td>Last seen, IP</td><td>Time of the last heartbeat; address the server saw (behind a proxy, the proxy's address)</td></tr>
 <tr><td>Group</td><td>Group assignment in the draft</td></tr>
 </tbody></table></div>
+<p><strong>Sessions</strong> lists what the hosts reported about incoming connections, from every relay: time, host, technician, IP, action (connected, session started, files sent or received with their paths, disconnected) and duration, for the last 24 hours up to 90 days, with search and <strong>Export CSV</strong>. Hosts post these records without a device key, so read them as a log of what hosts reported, not as proof.</p>
+<p><strong>Team</strong> lets technicians without the admin key see the organisation's devices in Advanced mode and share tags, names, rules and saved searches. Each technician app has its own key, shown with its fingerprint under <strong>Team</strong> in the Hosts view; add it here with a name (compare the fingerprint on the phone), choose <strong>Can edit shared tags</strong> and <strong>Can read session history</strong>, and <strong>Publish…</strong>. Removing someone and publishing locks them out.</p>
 
 <h2 id="adm-releases">Releases</h2>
 <ol class="steps">
-  <li>Build with the four release variables <code>TETHER_SERVER</code>, <code>TETHER_PUB_KEY</code>, <code>TETHER_ADMIN_PUB_KEY</code>, <code>TETHER_UPDATER_PUB_KEY</code> (macOS: <code>bash scripts/build-macos.sh</code> on a Mac).</li>
-  <li><strong>Quickest:</strong> Unlock Tether Manage → <strong>Releases</strong> → <strong>Publish the latest builds</strong> → <strong>Choose…</strong> the <code>dist</code> folder once → <strong>Publish N new builds…</strong>. Every build newer than what the relays publish is signed and published, then the download page is rebuilt. The steps below publish one file, with Mandatory, Minimum version or Forced if needed.</li>
+  <li>Build with the four release variables <code>TETHER_SERVER</code>, <code>TETHER_PUB_KEY</code>, <code>TETHER_ADMIN_PUB_KEY</code>, <code>TETHER_UPDATER_PUB_KEY</code> (macOS: <code>bash scripts/build-macos.sh</code> on a Mac). From 0.6.0 Tether, TetherQS and Tether Manage share one version number on Windows and macOS: bump and build all of them together, and never build a published number again.</li>
+  <li><strong>Quickest:</strong> Unlock Tether Manage → <strong>Releases</strong> → <strong>Publish the latest builds</strong> → <strong>Choose…</strong> the <code>dist</code> folder once → <strong>Publish N new builds…</strong>. Its review sheet sets the <strong>Rollout</strong> and <strong>Security release</strong> (see below) for all of them. Every build newer than what the relays publish is signed and published (to all relays at the same time, with progress per relay), then, on <code>stable</code>, the download page is rebuilt. It takes the highest version per app and platform it finds, so check that every platform's files are in the folder. The steps below publish one file (<strong>Sign and publish a new release</strong>), with Mandatory, Minimum version or Forced if needed.</li>
   <li>Unlock Tether Manage → <strong>Releases</strong> → <strong>Choose…</strong> the file. App, platform and version are read from the file name.</li>
-  <li>Pick the channel (<code>test</code> first, later <code>stable</code>), write notes and set <strong>Mandatory</strong>, <strong>Minimum version</strong> or <strong>Forced</strong> only if needed.</li>
-  <li><strong>Sign and publish.</strong> The file goes up first, then its <code>.sig</code>, then <code>latest.json</code>, so a client never sees a manifest that points to a missing file. Each relay's manifest points at that relay.</li>
-  <li>Check <strong>Files on the server</strong>, run <code>tether --check-update</code> on a test device, watch the Version column on <strong>Devices</strong>, and republish the <strong>Download page</strong>.</li>
+  <li>Pick the channel (<code>test</code> first, later <code>stable</code>), write notes and set <strong>Mandatory</strong>, <strong>Minimum version</strong> or <strong>Forced</strong> only if needed. <strong>Rollout</strong>: <strong>Standard</strong> (1 % at once, 10 % after 1 h, 50 % after 6 h, 100 % after 24 h), <strong>Fast</strong> (10 %, 100 % after 1 h), <strong>Immediately</strong>, or <strong>Custom</strong> (your own shares and hours, at most 30 days). <strong>Security release</strong> skips the ramp. A device below a minimum version gets the release at once.</li>
+  <li><strong>Sign and publish.</strong> The file goes up first, then its <code>.sig</code>, then the signed release index (from then on the release is live on that relay), then the old-style <code>latest.json</code> for apps before 0.5.24. Each relay's index points at that relay's own files, and is only written once the relay has every file it names. Devices check every download against the signed index, so a relay or download mirror cannot swap a file.</li>
+  <li>Check <strong>Releases on the first relay</strong>, run <code>tether --check-update</code> on a test device, watch the Version column on <strong>Devices</strong>, and republish the <strong>Download page</strong> if it was not rebuilt.</li>
 </ol>
-<p><strong>Staged rollout:</strong> create a group <code>pilot</code> with <code>update.channel</code> locked to <code>test</code>, assign the pilot devices, publish the release to <code>test</code>, then to <code>stable</code>. A pre-release such as <code>0.3.1-test</code> sorts below <code>0.3.1</code>, so pilots move to the final release by themselves. Switching channel never downgrades. Never publish a version lower than the one already in a channel.</p>
+<p><strong>Rollouts</strong> lists the releases of a channel with <strong>Halt</strong> (devices that have not installed it yet stop, even if they already downloaded it), <strong>Resume</strong> and <strong>Everyone now</strong>. <strong>Publish to missing relays</strong> brings a relay that missed a publish up to date. <strong>Clean up old releases…</strong> deletes old versions on every relay after a review (it keeps the published one, a number of older ones you choose, and anything the download page links); <strong>Clean up after each publish</strong> does it automatically. <strong>Cancel</strong> stops a publish until the release index is being written; after that it is live, and Halt stops it.</p>
+<p><strong>Pilot channel:</strong> create a group <code>pilot</code> with <code>update.channel</code> locked to <code>test</code>, assign the pilot devices, publish the release to <code>test</code>, then to <code>stable</code>. A pre-release such as <code>0.3.1-test</code> sorts below <code>0.3.1</code>, so pilots move to the final release by themselves. Switching channel never downgrades. Never publish a version lower than the one already in a channel.</p>
 
 <h2 id="adm-download">Download page</h2>
-<p>Generates the page at <code>https://&lt;relay&gt;/</code>: a title, an introduction and which apps to offer. It has a Windows and a macOS section; visitors see their own OS first, marked “Your computer”, and the switch works without JavaScript. Apps without a stable release for an OS show “Not available yet”. The links point to the current <strong>stable</strong> release, so republish the page after every release.</p>
+<p>Generates the page at <code>https://&lt;relay&gt;/</code>. <strong>Design: Standard (built-in)</strong> takes a title, an introduction and which apps to offer. It has a Windows and a macOS section; visitors see their own OS first, marked “Your computer”, and the switch works without JavaScript. Apps without a stable release for an OS show “Not available yet”. <strong>Custom HTML</strong> publishes your own template with placeholders for links, versions, sizes and checksums (<code>docs/download-page.md</code>); it is checked before publishing. The links point to the current <strong>stable</strong> release. <strong>Publish the latest builds</strong> on <code>stable</code> rebuilds the page; after a release published another way, republish it.</p>
 
 <h2 id="adm-custom">Custom apps and private links</h2>
 <p>A custom app is a branded TetherQS for one customer or contract. You choose:</p>
 <ul>
-  <li>a <strong>name</strong> (1–64 characters; shown as the window title and used as the file name <code>&lt;Name&gt;-Support.exe</code>),</li>
-  <li>an <strong>accent colour</strong> (<code>#rrggbb</code>), a <strong>welcome text</strong> (up to 400 characters) and a <strong>PNG logo</strong> (up to 96 KiB),</li>
-  <li><strong>settings</strong> for everyone who uses this download (customer-module features only, such as approve mode or permissions),</li>
-  <li>an <strong>expiry</strong> (at most 366 days) and the update channel.</li>
+  <li>a <strong>name</strong> (1–64 characters; shown as the window title and used as the file name <code>&lt;Name&gt;-Support.exe</code> or <code>&lt;Name&gt;-Support.zip</code>),</li>
+  <li>an <strong>accent colour</strong> (<code>#rrggbb</code>), a <strong>welcome text</strong> (up to 400 characters) and a <strong>logo</strong> (PNG, JPEG, SVG or WebP; scaled to at most 256 × 256 px and 96 KiB),</li>
+  <li><strong>settings</strong> for everyone who uses this download (customer-module features only, such as approve mode or permissions; they cannot switch on what the policy locks),</li>
+  <li>an <strong>expiry</strong> (1–366 days, default 30) and the update channel.</li>
 </ul>
 <ol>
   <li>Open <strong>Custom apps</strong> and click <strong>New custom app</strong>.</li>
-  <li>Fill in name, logo, colour, welcome text, settings and expiry, then click <strong>Create &lt;name&gt;</strong>.</li>
+  <li>Fill in name, logo, colour, welcome text, settings and expiry, click <strong>Review…</strong>, then <strong>Create &lt;name&gt;</strong>.</li>
   <li>Copy the <strong>private link</strong> and send it to the customer.</li>
 </ol>
-<p>Per row: <strong>Edit</strong> changes the app (only on the PC that created it: “Created on another PC” otherwise), <strong>New link</strong> replaces the link and <strong>Revoke</strong> deletes it.</p>
-<p>Tether Manage signs this profile with the admin key and stores it on every relay under the same random link, <code>https://&lt;relay&gt;/q/&lt;token&gt;</code>, so the link works on any relay. Each download is the current TetherQS of that channel with the signed profile attached; it keeps its branding through self-updates. The list shows downloads and the last download per app.</p>
+<p>Per row: <strong>Edit</strong> changes the app and keeps the link (only on the PC that created it: “Created on another PC” otherwise), <strong>+30 days</strong> extends the link, <strong>New link</strong> replaces the link and <strong>Revoke</strong> deletes it.</p>
+<p>Tether Manage signs this profile with the admin key and stores it on every relay under the same random link, <code>https://&lt;relay&gt;/q/&lt;token&gt;</code>, so the link works on any relay. Each download is the current TetherQS of that channel with the signed profile attached (the Windows file stays code-signed); it keeps its branding through self-updates. The same link serves both systems: a Mac browser gets the TetherQS zip, everything else the <code>.exe</code>; add <code>/mac</code> or <code>/windows</code> to the link to choose. For Macs, publish a macOS TetherQS release in the app's channel. The list shows downloads and the last download per app.</p>
 <ul>
   <li><strong>Revoke</strong> deletes the app: its link stops working at once.</li>
   <li>Saving an app again with a new link makes the old link stop working.</li>
   <li>Unknown, revoked and expired links all answer the same “not found”, and links are limited to 30 requests per minute per address. Links are not listed anywhere public; share them only with the customer.</li>
-  <li>Custom apps are Windows-only for now.</li>
+  <li>Apps already downloaded keep working after a revoke (on a Mac: once they have been started).</li>
 </ul>
 
 <h2 id="adm-tickets">Diagnostics tickets</h2>
 <ol class="steps">
   <li><strong>Diagnostics → Create ticket</strong> with a note (who and what, up to 256 characters). The ticket is opened on every relay with the same code.</li>
   <li>Read the 8-character code to the user. Codes avoid look-alike characters (no I, O, 0, 1) and work for 24 hours and one upload.</li>
-  <li>The user enters it under <strong>Settings → Diagnostics → Send to support</strong>.</li>
-  <li>Refresh the list: the ticket shows size and time. <strong>Open</strong> shows the files and <code>diagnostics.json</code>; <strong>Save zip…</strong> stores the bundle. Uploads are kept for 7 days.</li>
+  <li>The user enters it under <strong>Settings → Diagnostics → Send to support</strong> (technician app) or <strong>Help (?) → Send to support</strong> (TetherQS).</li>
+  <li>Refresh the list: the ticket shows size and time, whichever relay the upload went to. <strong>Open</strong> shows the files and <code>diagnostics.json</code>; <strong>Save zip…</strong> stores the bundle. Uploads are kept for 7 days.</li>
+  <li><strong>Close</strong> the ticket when the case is done: no more uploads, and it moves to <strong>Archived</strong>, kept 90 days with its upload. <strong>Delete</strong> removes a ticket and its upload from every relay for good.</li>
 </ol>
 
 <!-- ============================ HELP ============================ -->
 <h2 id="faq">FAQ</h2>
 <h4>Does the customer have to open ports or change the firewall?</h4>
-<p>No. Tether only makes outgoing TLS connections on TCP 443 to your relay names (port 80 as a fallback). IT only needs to allow <code>relay.example.com</code> and <code>relay2.example.com</code> with WebSocket upgrades and long-lived connections.</p>
+<p>No. Tether connects out with TLS on TCP 443 to your relay names (port 80 as a fallback). IT only needs to allow <code>relay.example.com</code> and <code>relay2.example.com</code> with WebSocket upgrades and long-lived connections. Without a proxy, Tether also tries faster direct paths (UDP to the relay's port 21116 for NAT traversal, and the local network); if they are blocked, the session stays on 443 and loses at most a fraction of a second. Behind a proxy nothing but the 443 connection leaves the network.</p>
 <h4>Does it work behind a corporate proxy or Zscaler-style TLS inspection?</h4>
 <p>Yes. Tether finds the system proxy (environment variables, WinINet, PAC files, WPAD; macOS system settings) and checks it again every minute. If the proxy re-signs TLS with a company certificate that Windows trusts, Tether accepts it. The proxy then sees device IDs and connection requests, but the session itself stays end-to-end encrypted.</p>
 <h4>Can the relay operator watch sessions?</h4>
 <p>Not by watching the traffic: the relay forwards ciphertext and never has the session keys. It knows device IDs, IP addresses and connection times, which is why you run the relay yourself. The relay's private server key vouches for which device is which, so someone who controls the ID server and holds that key could impersonate a device; keep the relays and the key secured. Details: <code>docs/encryption.md</code> in the repository.</p>
 <h4>Can a technician connect without the customer noticing?</h4>
 <p>Only to a device where unattended access was set up with a permanent password. TetherQS always shows an incoming session, and recording always needs the other side's consent.</p>
+<h4>Does the session always go through the relay?</h4>
+<p>No. Two computers on the same network connect directly (<strong>Direct (LAN)</strong>), and without a proxy Tether also tries a direct path over IPv6 or through both routers (<strong>Direct (IPv6)</strong>, <strong>P2P</strong>) or your relay over UDP (<strong>Relay (UDP)</strong>). Every path is end-to-end encrypted and checks the same password, Accept and permissions. Policy <code>network.direct</code> set to <code>off</code> keeps every session on the relay.</p>
 <h4>What happens if one relay fails?</h4>
-<p>Devices are registered with every relay. A running session moves to the other relay in about a second; new sessions use whichever relay answers.</p>
+<p>Devices are registered with every relay. A session running through the failed relay reconnects through another one by itself (about a second in tests; longer while the relays notice the failure); new sessions use whichever relay answers. Relays can also be set up as backups that take sessions only while no main relay is healthy.</p>
 <h4>Why is a setting greyed out?</h4>
 <p>Your organisation's policy locks it. Settings → Diagnostics → Policy shows the serial, group and the layers that applied.</p>
 
@@ -574,9 +589,13 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <tr><td>“Waiting for the remote user to allow recording” never ends</td><td>Nobody is at the host, or the question is behind other windows</td><td>Ask the remote user to answer. Unattended hosts cannot be recorded.</td></tr>
 <tr><td>Black or frozen screen when a UAC prompt opens on a TetherQS PC</td><td>TetherQS runs as a normal user</td><td>Ask the customer to click <strong>Allow admin access</strong> and confirm the prompt</td></tr>
 <tr><td>TetherQS update: “signature does not match”</td><td>Upload still in progress, or signed with another key</td><td>Wait for the upload to finish; otherwise republish the release</td></tr>
-<tr><td>“This code is not valid or was already used.”</td><td>Typo, older than 24 h, or used</td><td>Create a new ticket</td></tr>
+<tr><td>TetherQS does not offer a release that was just published</td><td>It has not checked yet, or the staged rollout has not reached it</td><td><strong>Help → Check for updates</strong>; Help shows the result per server</td></tr>
+<tr><td>Same network, but the badge shows <strong>Relay</strong> instead of <strong>Direct (LAN)</strong></td><td>Policy <code>network.direct</code> is off, the Windows firewall rule is missing (installed Tether: reinstall), the Mac's application firewall is on, or the two are in different subnets or on a guest Wi-Fi</td><td>Check the policy and the firewall; the session works through the relay meanwhile</td></tr>
+<tr><td>“This code is not valid, has expired or was already used.”</td><td>Typo, older than 24 h, used, or the ticket was closed</td><td>Create a new ticket</td></tr>
+<tr><td>“Could not reach the support server. …”</td><td>No relay took the code and at least one could not be reached; the code may be open on that one</td><td>Try again later, or use <strong>Export diagnostics</strong> and another channel</td></tr>
 <tr><td>“Your organisation does not allow sending diagnostics.”</td><td>Policy <code>diagnostics.upload</code> is off</td><td>Use <strong>Export diagnostics</strong> and another channel</td></tr>
-<tr><td>Mac: “Waiting for the first image…”, black screen or input ignored</td><td>Screen Recording or Accessibility not granted, or the entry is from an older build (macOS keeps asking although it looks allowed)</td><td><code>tccutil reset ScreenCapture app.tether.desktop</code> (TetherQS: <code>net.tether.quick</code>), same for <code>Accessibility</code>, quit and reopen, allow once more</td></tr>
+<tr><td>Mac: “Waiting for the first image…”, black screen or input ignored</td><td>Screen Recording or Accessibility not granted, or the entry is from an older build (macOS keeps asking although it looks allowed)</td><td>On the Mac, <strong>Fix Screen Recording</strong> / <strong>Fix Accessibility</strong> in Tether or TetherQS, switch the app on and choose Quit &amp; Reopen. By hand: <code>tccutil reset ScreenCapture app.tether.desktop</code> (TetherQS: <code>net.tether.quick</code>), same for <code>Accessibility</code>, quit and reopen, allow once more</td></tr>
+<tr><td>Clicks and keys do nothing in a Tether window on the remote computer; “The Tether window on the remote computer can only be used by the person at that computer.”</td><td>Intended: remote input never reaches Tether's own windows on the host</td><td>Ask the person at that computer to click, or switch to another window with Alt+Tab</td></tr>
 </tbody></table></div>
 <p>A bundle larger than 2 MiB is sent without logs and configuration; ask for an exported file in that case.</p>
 
@@ -585,8 +604,8 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 <thead><tr><th>Code</th><th>Meaning</th><th>Typical cause</th></tr></thead>
 <tbody>
 <tr><td>0</td><td>OK</td><td></td></tr>
-<tr><td>1</td><td>Error</td><td>Unexpected server answer, the zip could not be written</td></tr>
-<tr><td>2</td><td>Bad arguments</td><td>Unknown option, invalid ID, password given twice or longer than 128 characters</td></tr>
+<tr><td>1</td><td>Error</td><td>Unexpected server answer, the zip could not be written, <code>--install-service</code> cancelled or failed</td></tr>
+<tr><td>2</td><td>Bad arguments</td><td>Unknown option, invalid ID, this device's own ID, password given twice or longer than 128 characters</td></tr>
 <tr><td>3</td><td>Offline</td><td>No route to the relay (443/80, proxy/direct)</td></tr>
 <tr><td>4</td><td>Policy signature rejected</td><td>Client built with other keys</td></tr>
 <tr><td>5</td><td>Not allowed by policy</td><td>e.g. <code>connect.outgoing</code> is off</td></tr>
@@ -594,7 +613,7 @@ Get-Secret -Name 'host-123456789' -AsPlainText | &amp; "C:\Program Files\Tether\
 </tbody></table></div>
 <p>Note: <code>tether.exe</code> is a GUI program. In PowerShell use <code>Start-Process … -Wait -PassThru</code> to get the exit code.</p>
 
-<footer>Tether 0.4 · Written from the repository documentation (README, CHANGELOG, SECURITY, docs/*.md) on 2026-11-04. How it works inside: <a href="architecture.html">Architecture</a>. Licensed AGPL-3.0, inherited from RustDesk.</footer>
+<footer>Tether 0.6.3 · Written from the code and the repository documentation (README, CHANGELOG, SECURITY, docs/*.md) on 2026-11-23. How it works inside: <a href="architecture.html">Architecture</a>. Licensed AGPL-3.0, inherited from RustDesk.</footer>
 </main>
 </div>
 <script>

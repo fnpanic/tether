@@ -19,7 +19,7 @@ Usage: tether [command]
       --password-env <VAR>          read the password from environment variable VAR
       --file-transfer               open file transfer instead of the remote screen
       --view-only                   do not send mouse or keyboard input
-      --relay                       always use the relay (Tether always does)
+      --relay                       accepted for compatibility, no effect
       --fullscreen                  open the session window in full screen
   --view-camera <id> / --terminal <id>   open the camera view / a terminal instead (same options)
   tether://connect/<id>             same as --connect <id> (links never carry passwords)

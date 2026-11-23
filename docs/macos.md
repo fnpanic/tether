@@ -1,8 +1,10 @@
 # macOS build
 
-`scripts/build-macos.sh` builds both apps on a Mac as **unsigned universal** binaries (one build runs
-on Apple silicon and Intel, macOS 11 or newer). Builds are ad-hoc signed (`codesign -s -`), which
-Apple silicon requires, but not signed with an Apple Developer ID and not notarized.
+`scripts/build-macos.sh` builds both apps on a Mac as **universal** binaries (one build runs
+on Apple silicon and Intel, macOS 11 or newer). Release builds from the Mac build runner are signed
+with the self-signed `Tether Code Signing` certificate (see "Stable signature" below); without it a
+build is ad-hoc signed (`codesign -s -`), which Apple silicon requires. Neither is an Apple
+Developer ID, and nothing is notarized.
 
 ## Prerequisites
 

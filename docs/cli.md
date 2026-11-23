@@ -3,7 +3,8 @@
 The technician app (`tether.exe`, installed to `C:\Program Files\Tether`) accepts the commands
 below. Source of truth: `apps/desktop/src-tauri/src/cli.rs` (`tether --help` prints the same
 list). Arguments Tether does not know are passed to the RustDesk core unchanged (`--server`,
-`--cm`, `--service`, `--install-service`, …); they are internal and not covered here.
+`--cm`, `--service`, …); they are internal and not covered here, except the two service commands
+below.
 
 ## Commands
 
@@ -13,11 +14,13 @@ list). Arguments Tether does not know are passed to the RustDesk core unchanged 
 | `--connect <id> [password]` | Open a session window to `<id>` | – |
 | `tether://connect/<id>` | Same as `--connect <id>`, without a password | – |
 | `--get-id` | Print this device's Tether ID | the ID |
-| `--version` | Print the version | e.g. `0.3.1` |
-| `--check-update` | Check the update channel now | `update 0.3.1 available (installed 0.3.0)` or `0.3.1 is up to date` |
+| `--version` | Print the version | e.g. `0.6.3` |
+| `--check-update` | Check the update channel now | `update 0.6.3 available (installed 0.6.2)` or `0.6.3 is up to date` |
 | `--policy-refresh` | Fetch the organisation policy and the server key list ([key-rotation.md](key-rotation.md)) now and apply them | `policy serial 12 (defaults, profile, group:pilot)` |
 | `--diag-upload <code>` | Send the diagnostics to support with a ticket code, as Settings › Diagnostics › Send to support ([troubleshooting.md](troubleshooting.md#send-to-support)); `TetherQS --diag-upload <code>` sends TetherQS's | `sent` |
 | `--diagnostics <out.zip>` | Write a diagnostics archive ([troubleshooting.md](troubleshooting.md#export-diagnostics)); `TetherQS --diagnostics <out.zip>` writes TetherQS's | `wrote <out.zip>` |
+| `--install-service` | Install unattended access, as Settings › Unattended access › *Install as service* (administrator prompt; Windows and, from 0.6.3, macOS with Tether in `/Applications`) ([unattended.md](unattended.md)) | exit code 1 when cancelled or failed |
+| `--uninstall-service` | Remove it again (administrator prompt) | – |
 | `--help`, `-h`, `/?` | Show the help | the help text |
 
 `--get-id`, `--version`, `--check-update`, `--policy-refresh` and `--help` take no further
@@ -32,7 +35,7 @@ arguments. Output goes to the console the command was started from (stdout; erro
 | `<password>` (positional) or `--password <pw>` | Password on the command line (see the security note) |
 | `--file-transfer` | Open file transfer instead of the remote screen |
 | `--view-only` | Do not send mouse or keyboard input |
-| `--relay` | Always use the relay. Accepted for compatibility; Tether always uses the relay. |
+| `--relay` | Accepted for compatibility and ignored: Tether picks the route itself (relay, and direct paths per policy `network.direct`, [policy.md](policy.md#direct-connections-networkdirect)). |
 | `--fullscreen` | Open the session window in full screen |
 
 Rules:

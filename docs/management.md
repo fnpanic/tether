@@ -388,7 +388,7 @@ today, and devices not yet on the live policy.
 | IP | Address the server saw (behind a proxy: the proxy's public address) |
 | Group | Assignment in the draft (publish it from the top bar) |
 
-The server keeps at most 10 000 devices and drops entries older than 180 days.
+The server keeps at most 50 000 devices and drops entries older than 180 days.
 
 ## Sessions
 
