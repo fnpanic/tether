@@ -7,7 +7,16 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ## [Unreleased]
 
-### 0.6.3 (2026-11-23)
+### 0.6.3 (2026-11-23; files in dist/, ready to publish; frozen)
+
+Six files in `dist/` (Windows setup and TetherQS signed; Mac files universal, as built by the
+runner, SHA-256 equal on the Mac and the PC). Checked on them: Defender finds nothing in any of
+the six; the Windows 0.6.3 viewer to the Mac running the universal 0.6.3 (picture, pointer where
+it was sent); the build Mac's own swap to the universal build. The Windows files were built
+before the last three commits, which change macOS-only code, the Mac job scripts and docs. Not
+checked: VirusTotal (`scripts/release-checks.sh`, uploads the files), installing the Windows
+setup over 0.6.2, TetherQS and Tether Manage 0.6.3 in use, `vm-e2e.mjs`, and what the first
+entry lists.
 
 - **Unattended access on macOS.** Settings → Unattended access → *Install as service* now exists
   on the Mac as on Windows: after an administrator prompt Tether installs a background service
