@@ -1,6 +1,6 @@
 // Small pieces of the Advanced mode UI: tag chips, key hints, status dots, the tag input.
 import { useMemo, useRef, useState, type ReactNode } from "react";
-import { CircleCheck, CircleDashed, CircleDot, CircleX, Minus, TriangleAlert, Unlink2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleCheck, CircleDashed, CircleDot, CircleX, Minus, TriangleAlert, Unlink2, X } from "lucide-react";
 import { normTag, tagColor, type HealthState, type Online, type Store } from "../../lib/hosts/model";
 
 export function TagDot({ tag, meta, size = 7 }: { tag: string; meta: Store["tags"]; size?: number }) {
@@ -148,3 +148,17 @@ export function TagInput({ known, onAdd, placeholder = "Add tag", autoFocus, inp
     </div>
   );
 }
+
+/** A fold header: a button with a chevron, the label and, at the right, `extra`. */
+export function Fold({ label, open, onToggle, extra }: { label: string; open: boolean; onToggle: () => void; extra?: ReactNode }) {
+  return (
+    <button type="button" aria-expanded={open} onClick={onToggle} className="flex h-7 w-full items-center gap-1 rounded-md text-left text-footnote text-muted hover:text-ink">
+      {open ? <ChevronDown size={12} aria-hidden /> : <ChevronRight size={12} aria-hidden />}
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {extra}
+    </button>
+  );
+}
+
+/** A unix time as a medium local date and short time; "" for none. */
+export const day = (t: number | null | undefined) => (t ? new Date(t * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "");

@@ -165,7 +165,7 @@ function healthFleet(org: { uuid: string; id: string }[], names: Map<string, str
   return out;
 }
 
-// Software lists (team_status_sbom): made-up programs. agent-only-1 has a list, agent-only-2 is a list the relay
+// Software lists (team_status_sbom): made-up programs (26, and 200 more on agent-only-1). agent-only-1 has a list, agent-only-2 is a list the relay
 // dropped since the summary (404), agent-only-3 holds JSON that is not a software list.
 const PROGRAMS: [string, string, string][] = [
   ["Aster Notes", "4.2.1", "Aster Labs"], ["Birchwood Reader", "11.0.3", "Birchwood Software"], ["Cobalt Archive Tool", "7.15", "Cobalt Systems"], ["Dunmore Backup Agent", "3.8.0", "Dunmore Data"],
@@ -197,6 +197,8 @@ function sbomText(uuid: string, at: number): string {
     components: [
       { type: "operating-system", name: "Windows 11 Pro", version: "10.0.22631" },
       ...PROGRAMS.map(([name, version, publisher]) => ({ type: "application", name, version, publisher })),
+      // More than 200 programs: the table draws 200 until "Show all".
+      ...Array.from({ length: 200 }, (_, i) => ({ type: "application", name: `Sample Tool ${String(i + 1).padStart(3, "0")}`, version: `1.${i}`, publisher: "Sample Works" })),
       { type: "application", name: "Records Server", version: "26.3.2", publisher: "Example Health Software", properties: [prop("tether:product", "true"), prop("tether:role", "server")] },
     ],
   });

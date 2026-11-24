@@ -303,10 +303,13 @@ async function run(name) {
   const sw = p.getByTestId("software-section");
   check(tag("Software is collapsed and says when the list is from"), (await until(() => sw.isVisible())) && /as of /.test(await sw.textContent()) && (await sw.getByRole("table").count()) === 0 && (await calls("team_status_sbom")).length === 0);
   await sw.getByRole("button", { name: /^Software/ }).click();
-  check(tag("opening Software asks the relay and lists the programs"), (await until(() => sw.getByRole("table").isVisible())) && (await calls("team_status_sbom")).length === 1 && (await sw.getByRole("row").count()) === 27, `${await sw.getByRole("row").count()} rows`);
-  check(tag("Software header counts the programs"), /26 programs, as of /.test(await sw.getByRole("button", { name: /^Software/ }).textContent()));
+  check(tag("opening Software asks the relay and lists the programs"), (await until(() => sw.getByRole("table").isVisible())) && (await calls("team_status_sbom")).length === 1 && (await sw.getByRole("row").count()) === 201, `${await sw.getByRole("row").count()} rows`);
+  check(tag("Software header counts the programs"), /226 programs, as of /.test(await sw.getByRole("button", { name: /^Software/ }).textContent()));
   check(tag("the product comes first, then by name"), /^Records Server/.test(await sw.getByRole("row").nth(1).textContent()) && /^Aster Notes/.test(await sw.getByRole("row").nth(2).textContent()));
   check(tag("Software shows the device line and the truncated line"), (await sw.getByText("Example Devices Analyzer Station 7010, serial 7XK2LAB0001, 16 GB").isVisible()) && (await sw.getByText("12 more programs are not in the list").isVisible()));
+  check(tag("Software draws 200 rows and offers Show all"), await sw.getByRole("button", { name: "Show all 226" }).isVisible());
+  await sw.getByRole("button", { name: "Show all 226" }).click();
+  check(tag("Show all draws every program"), (await sw.getByRole("row").count()) === 227 && !(await sw.getByRole("button", { name: /^Show all/ }).isVisible()), `${await sw.getByRole("row").count()} rows`);
   const swFilter = sw.getByRole("textbox", { name: "Filter software by name or publisher" });
   await swFilter.fill("oAk");
   check(tag("the filter matches the name, case-insensitive"), (await sw.getByRole("row").count()) === 2 && (await sw.getByRole("cell", { name: "Oakham Image Editor" }).isVisible()));

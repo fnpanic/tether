@@ -295,12 +295,18 @@ pub fn status_host(relay: &str, uuid: &str) -> R<Value> {
 /// and exports it byte for byte). The relay stores any JSON object, so nothing here parses it.
 pub fn status_sbom(relay: &str, uuid: &str) -> R<String> {
     own_relay_host(relay, uuid)?;
-    let (c, _, b) = call_via(Some(&[relay.to_owned()]), "GET", &format!("/api/team/status/{uuid}/sbom"), None, &[], SBOM_MAX).map_err(|e| if e.starts_with("the answer is larger than") { too_large() } else { e })?;
+    let (c, _, b) = call_via(Some(&[relay.to_owned()]), "GET", &format!("/api/team/status/{uuid}/sbom"), None, &[], SBOM_MAX).map_err(over_limit)?;
     sbom_text(c, b)
 }
 
-fn too_large() -> String {
-    "too-large: The software list is too large to show.".into()
+/// `tether_trust::read_limited` has no typed error: its text for an answer over the limit is matched here, and a test
+/// pins it against the real function.
+fn over_limit(e: String) -> String {
+    if e.starts_with("the answer is larger than") {
+        "too-large: The software list is too large to show.".into()
+    } else {
+        e
+    }
 }
 
 /// 404 is "no document" (none stored, or the feature is off on that relay), not "no team access".
@@ -521,7 +527,11 @@ mod tests {
         assert!(sbom_text(200, vec![0xff, 0xfe]).unwrap_err().starts_with("bad answer"));
         assert!(sbom_text(403, vec![]).unwrap_err().contains("membership"));
         assert!(sbom_text(429, vec![]).unwrap_err().contains("Too many"));
-        assert!(too_large().starts_with("too-large:"));
+        // An answer over the limit (the real reader, so a change of its text fails here) is "too large"; other errors pass.
+        let e = tether_trust::read_limited(std::io::Cursor::new(vec![b'x'; SBOM_MAX + 1]), SBOM_MAX).unwrap_err();
+        assert!(over_limit(e).starts_with("too-large:"));
+        assert!(tether_trust::read_limited(std::io::Cursor::new(vec![b'x'; SBOM_MAX]), SBOM_MAX).is_ok());
+        assert_eq!(over_limit("offline: connection refused".into()), "offline: connection refused");
         // Host and relay are checked before anything is sent.
         assert_eq!(status_sbom("relay.example", "../x").unwrap_err(), "invalid host id");
         assert_eq!(status_sbom("relay.example", "0123456789abcdef0123456789abcdef").unwrap_err(), "unknown server");
