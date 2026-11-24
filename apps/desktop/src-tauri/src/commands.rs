@@ -467,6 +467,9 @@ async fn ask_agent(peer: &impl AgentPeer, action: &str, status_wait: std::time::
     };
     let rx = peer.ask_agent(action);
     Ok(match hbb_common::tokio::time::timeout(agent_wait(action, status_wait), rx).await {
+        // The host stopped waiting, the action goes on: the dialog says so and offers to ask again
+        // (`status` shows the outcome). The sentence is the viewer's own, not the host's.
+        Ok(Ok(a)) if a.state == "running" => crate::agent::AgentAnswer { state: "running".into(), detail: librustdesk::ui::agent::RUNNING.into(), ..Default::default() },
         Ok(Ok(a)) => from_wire(a),
         Ok(Err(_)) => crate::agent::AgentAnswer { state: "failed".into(), detail: "the session ended or asked again".into(), ..Default::default() },
         Err(_) if action == AgentAction::Status => crate::agent::AgentAnswer { state: "too-old".into(), detail: "Tether on this computer is too old (needs 0.7.0)".into(), ..Default::default() },
@@ -474,7 +477,10 @@ async fn ask_agent(peer: &impl AgentPeer, action: &str, status_wait: std::time::
     })
 }
 
-/// The session's health agent dialog: `action` is `status`, `install` or `remove`.
+/// The session's health agent dialog: `action` is `status`, `install` or `remove`. `state` is one of
+/// `not-installed`, `installed`, `installed-by-hand`, `removed-locally`, `removed-by-tether`,
+/// `failed`, `running` (still going on the host: ask `status` again), `busy`, `not-allowed`,
+/// `needs-service`, `not-supported`, `too-old`; anything else is shown as a generic line with `detail`.
 #[tauri::command]
 async fn session_agent(key: String, action: String) -> R<crate::agent::AgentAnswer> {
     let s = core::session(&key).ok_or_else(|| "Not connected to the remote device.".to_owned())?;
@@ -1139,7 +1145,7 @@ mod tests {
     // --- health agent through a session (viewer command, host wiring, core message handling)
 
     use librustdesk::ui::agent::{self as core_agent, Action, InFlight, TetherAgentAnswer, TetherAgentRequest};
-    use std::{cell::RefCell, time::Duration};
+    use std::{cell::RefCell, rc::Rc, time::{Duration, Instant}};
 
     fn rt() -> hbb_common::tokio::runtime::Runtime {
         hbb_common::tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap()
@@ -1209,6 +1215,17 @@ mod tests {
     }
 
     #[test]
+    fn session_agent_running_says_ask_again() {
+        // The host stopped waiting while the install goes on: not "failed", and the host's own
+        // text is not shown.
+        let peer = FakePeer::new(Some(wire("running", "\u{1b}[2Jinjected")));
+        let a = rt().block_on(super::ask_agent(&peer, "install", Duration::from_millis(50))).unwrap();
+        assert_eq!(a.state, "running");
+        assert_eq!(a.detail, core_agent::RUNNING);
+        assert!(a.detail.contains("ask again"), "{}", a.detail);
+    }
+
+    #[test]
     fn host_wiring_carries_only_the_answer_fields() {
         let a = crate::agent::AgentAnswer { state: "failed".into(), version: "0.2.0".into(), installed_by: "policy".into(), detail: "token expired".into(), at: 9 };
         let w = super::to_wire(a.clone());
@@ -1227,21 +1244,19 @@ mod tests {
     }
 
     #[test]
-    fn core_accepts_a_request_only_after_login_with_control() {
-        // Before login: nothing, not even an answer.
-        assert_eq!(core_agent::check(&request(1), false, true), Err(None));
-        assert_eq!(core_agent::check(&request(1), false, false), Err(None));
+    fn core_accepts_a_request_only_with_control() {
+        // (Before login the core has no arm for the message: it is never checked or answered.)
         // Logged in without control (view only, or the permission switched off): refused.
-        let refused = core_agent::check(&request(1), true, false).unwrap_err().unwrap();
+        let refused = core_agent::check(&request(1), false).unwrap_err();
         assert_eq!(refused.state, "not-allowed");
         assert!(refused.detail.contains("control"), "{}", refused.detail);
-        assert!(core_agent::check(&request(0), true, false).is_err());
+        assert!(core_agent::check(&request(0), false).is_err());
         // An action outside the closed set (a newer viewer): refused, never run.
-        let unknown = core_agent::check(&request(7), true, true).unwrap_err().unwrap();
+        let unknown = core_agent::check(&request(7), true).unwrap_err();
         assert_eq!(unknown.state, "not-supported");
-        assert_eq!(core_agent::check(&request(0), true, true), Ok(Action::Status));
-        assert_eq!(core_agent::check(&request(1), true, true), Ok(Action::Install));
-        assert_eq!(core_agent::check(&request(2), true, true), Ok(Action::Remove));
+        assert_eq!(core_agent::check(&request(0), true), Ok(Action::Status));
+        assert_eq!(core_agent::check(&request(1), true), Ok(Action::Install));
+        assert_eq!(core_agent::check(&request(2), true), Ok(Action::Remove));
     }
 
     #[test]
@@ -1252,11 +1267,12 @@ mod tests {
         let back = Message::parse_from_bytes(&m.write_to_bytes().unwrap()).unwrap();
         let Some(message::Union::Misc(misc)) = back.union else { panic!("not misc") };
         let Some(misc::Union::TetherAgentRequest(r)) = misc.union else { panic!("not the request") };
-        assert_eq!(core_agent::check(&r, true, true), Ok(Action::Remove));
-        let m = core_agent::answer_message(wire("installed", "x"));
+        assert_eq!(core_agent::check(&r, true), Ok(Action::Remove));
+        let m = core_agent::answer_message(Action::Install, wire("installed", "x"));
         let back = Message::parse_from_bytes(&m.write_to_bytes().unwrap()).unwrap();
         let Some(message::Union::Misc(misc)) = back.union else { panic!("not misc") };
-        assert_eq!(misc.union, Some(misc::Union::TetherAgentAnswer(wire("installed", "x"))));
+        // The answer echoes the request's action.
+        assert_eq!(misc.union, Some(misc::Union::TetherAgentAnswer(TetherAgentAnswer { action: Action::Install.into(), ..wire("installed", "x") })));
         // A Misc variant this build does not know (field 1003, as 1001 and 1002 are to an old
         // peer) parses to no variant, which every Misc match in the core ignores (`_ => {}`).
         let mut bytes = core_agent::request_message(Action::Install).write_to_bytes().unwrap();
@@ -1270,11 +1286,32 @@ mod tests {
 
     #[test]
     fn core_one_request_in_flight_per_connection() {
-        let f = InFlight::default();
-        let g = f.start().expect("first");
-        assert!(f.clone().start().is_none(), "second while the first runs");
+        let mut f = InFlight::default();
+        let t = Instant::now();
+        let g = f.start(Action::Status, t).expect("first");
+        assert!(f.start(Action::Status, t).is_none(), "second while the first runs");
+        assert!(f.start(Action::Install, t).is_none(), "an install while one runs");
         drop(g);
-        assert!(f.start().is_some(), "free again");
+        assert!(f.start(Action::Status, t).is_some(), "free again");
+    }
+
+    #[test]
+    fn core_install_or_remove_at_most_every_ten_seconds() {
+        assert_eq!(core_agent::CHANGE_PACE, Duration::from_secs(10));
+        let mut f = InFlight::default();
+        let t = Instant::now();
+        drop(f.start(Action::Install, t).expect("first install"));
+        // Finished at once (a refusal), yet the next change within 10 s is busy.
+        assert!(f.start(Action::Remove, t + Duration::from_secs(5)).is_none());
+        assert!(f.start(Action::Install, t + Duration::from_millis(9999)).is_none());
+        // `status` changes nothing and is not paced.
+        drop(f.start(Action::Status, t + Duration::from_secs(5)).expect("status"));
+        drop(f.start(Action::Remove, t + Duration::from_secs(10)).expect("after 10 s"));
+        // A request refused as busy does not move the window.
+        let held = f.start(Action::Status, t + Duration::from_secs(30)).unwrap();
+        assert!(f.start(Action::Install, t + Duration::from_secs(30)).is_none());
+        drop(held);
+        drop(f.start(Action::Install, t + Duration::from_secs(31)).expect("not paced by the busy one"));
     }
 
     #[test]
@@ -1293,13 +1330,183 @@ mod tests {
         let t = std::time::Instant::now();
         let late = rt.block_on(core_agent::host_answer(Action::Install, Some(slow), Duration::from_millis(50)));
         assert!(t.elapsed() < Duration::from_millis(300));
-        assert_eq!(late.state, "failed");
-        assert!(late.detail.contains("no answer"), "{}", late.detail);
+        // The action goes on: "running", and a later status shows the outcome.
+        assert_eq!(late.state, "running");
+        assert_eq!(late.detail, core_agent::RUNNING);
+    }
+
+    /// What `serve` did: answers sent, connection-window notices, audit posts (with whether the
+    /// connection's request guard was still held when the post ran).
+    #[derive(Default)]
+    struct Served {
+        sent: Vec<TetherAgentAnswer>,
+        cm: Vec<(String, String)>,
+        posted: Vec<(serde_json::Value, bool)>,
+    }
+
+    fn serve(action: Action, handler: core_agent::Handler, post: impl FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = hbb_common::ResultType<()>>>>, post_wait: Duration) -> (Served, bool) {
+        use librustdesk::ui::agent::{message, misc};
+        let gate = Rc::new(RefCell::new(InFlight::default()));
+        let guard = gate.borrow_mut().start(action, Instant::now()).unwrap();
+        let out = Rc::new(RefCell::new(Served::default()));
+        let (o1, o2, o3, g3) = (out.clone(), out.clone(), out.clone(), gate.clone());
+        rt().block_on(core_agent::serve(
+            action,
+            Some(handler),
+            Duration::from_secs(5),
+            guard,
+            move |m| {
+                let Some(message::Union::Misc(misc)) = m.union else { panic!("not misc") };
+                let Some(misc::Union::TetherAgentAnswer(a)) = misc.union else { panic!("not an answer") };
+                o1.borrow_mut().sent.push(a);
+            },
+            move |a, outcome| o2.borrow_mut().cm.push((a.to_owned(), outcome)),
+            move |info| {
+                let held = g3.borrow_mut().start(Action::Status, Instant::now()).is_none();
+                o3.borrow_mut().posted.push((info, held));
+                post()
+            },
+            post_wait,
+        ));
+        let free = gate.borrow_mut().start(Action::Status, Instant::now() + Duration::from_secs(60)).is_some();
+        let served = Rc::try_unwrap(out).ok().unwrap().into_inner();
+        (served, free)
+    }
+
+    fn ok_post() -> std::pin::Pin<Box<dyn std::future::Future<Output = hbb_common::ResultType<()>>>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    #[test]
+    fn core_serve_audits_only_what_the_app_did() {
+        fn refused(_: Action) -> TetherAgentAnswer {
+            TetherAgentAnswer { state: "needs-service".into(), ..Default::default() }
+        }
+        fn busy(_: Action) -> TetherAgentAnswer {
+            TetherAgentAnswer { state: "busy".into(), ..Default::default() }
+        }
+        fn installed(_: Action) -> TetherAgentAnswer {
+            TetherAgentAnswer { state: "installed".into(), ..Default::default() }
+        }
+        // Refused or busy: answered, but no audit record and no line in the connection window.
+        for h in [refused as core_agent::Handler, busy] {
+            let (s, free) = serve(Action::Install, h, ok_post, Duration::from_secs(1));
+            assert_eq!(s.sent.len(), 1);
+            assert!(s.posted.is_empty() && s.cm.is_empty(), "{:?}", s.sent[0].state);
+            assert!(free);
+        }
+        // Status changes nothing.
+        let (s, _) = serve(Action::Status, installed, ok_post, Duration::from_secs(1));
+        assert!(s.posted.is_empty() && s.cm.is_empty());
+        // Acted: one post, made while the connection's guard is still held, freed afterwards.
+        let (s, free) = serve(Action::Install, installed, ok_post, Duration::from_secs(1));
+        assert_eq!(s.sent[0].state, "installed");
+        assert_eq!(s.sent[0].action.enum_value(), Ok(Action::Install));
+        assert_eq!(s.posted.len(), 1);
+        assert_eq!(s.posted[0].0, serde_json::json!({"agent": "install", "result": "installed"}));
+        assert!(s.posted[0].1, "guard held during the post");
+        assert!(free, "guard freed after the post");
+        // The host's connection window is told the finished outcome.
+        assert_eq!(s.cm, [("install".to_owned(), "installed".to_owned())]);
+    }
+
+    #[test]
+    fn core_serve_post_is_one_bounded_attempt() {
+        fn removed(_: Action) -> TetherAgentAnswer {
+            TetherAgentAnswer { state: "removed-by-tether".into(), ..Default::default() }
+        }
+        // A relay that never answers: given up after the bound, the guard is freed.
+        let t = Instant::now();
+        let (s, free) = serve(Action::Remove, removed, || Box::pin(std::future::pending()), Duration::from_millis(50));
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        assert_eq!(s.posted.len(), 1);
+        assert!(free);
+        // A failed post is only logged (no retry: the closure is called once).
+        let (s, free) = serve(Action::Remove, removed, || Box::pin(async { hbb_common::bail!("status 502") }), Duration::from_secs(1));
+        assert_eq!(s.posted.len(), 1);
+        assert_eq!(s.sent[0].state, "removed-by-tether");
+        assert!(free);
+        assert!(core_agent::AUDIT_POST_WAIT <= Duration::from_secs(10));
+    }
+
+    #[test]
+    fn core_serve_running_is_audited_but_not_shown_as_finished() {
+        fn slow(_: Action) -> TetherAgentAnswer {
+            std::thread::sleep(Duration::from_millis(400));
+            TetherAgentAnswer { state: "installed".into(), ..Default::default() }
+        }
+        let gate = RefCell::new(InFlight::default());
+        let guard = gate.borrow_mut().start(Action::Install, Instant::now()).unwrap();
+        let (sent, cm, posted) = (RefCell::new(vec![]), RefCell::new(vec![]), RefCell::new(vec![]));
+        rt().block_on(core_agent::serve(
+            Action::Install,
+            Some(slow),
+            Duration::from_millis(50),
+            guard,
+            |m| sent.borrow_mut().push(m),
+            |a, o| cm.borrow_mut().push((a, o)),
+            |info| {
+                posted.borrow_mut().push(info);
+                async { Ok(()) }
+            },
+            Duration::from_secs(1),
+        ));
+        assert_eq!(posted.into_inner(), [serde_json::json!({"agent": "install", "result": "running"})]);
+        assert!(cm.into_inner().is_empty(), "not finished yet");
+        assert_eq!(sent.into_inner().len(), 1);
+    }
+
+    #[test]
+    fn core_detail_is_bounded_and_clean_on_both_sides() {
+        use librustdesk::ui::agent::{message, misc};
+        let long = format!("a\u{1b}[2J\r\nb{}", "\u{e9}".repeat(600));
+        let hostile = TetherAgentAnswer { state: format!("installed\n{}", "x".repeat(100)), detail: long, ..Default::default() };
+        // Host: the answer builder cleans before sending.
+        let m = core_agent::answer_message(Action::Install, hostile.clone());
+        let Some(message::Union::Misc(misc)) = m.union else { panic!() };
+        let Some(misc::Union::TetherAgentAnswer(a)) = misc.union else { panic!() };
+        assert_eq!(a.detail.chars().count(), core_agent::DETAIL_MAX);
+        assert_eq!(core_agent::DETAIL_MAX, 512);
+        assert!(a.detail.starts_with("a[2Jb\u{e9}"), "{}", &a.detail[..10]);
+        assert!(!a.detail.chars().any(char::is_control));
+        assert!(!a.state.contains('\n') && a.state.chars().count() <= 64);
+        // Viewer: an answer from the peer is cleaned again on receipt.
+        let w = core_agent::Waiter::default();
+        let (tx, mut rx) = hbb_common::tokio::sync::oneshot::channel();
+        *w.lock().unwrap() = Some((Action::Install, tx));
+        core_agent::deliver(&w, TetherAgentAnswer { action: Action::Install.into(), ..hostile });
+        let got = rx.try_recv().unwrap();
+        assert_eq!(got.detail.chars().count(), 512);
+        assert!(!got.detail.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn viewer_drops_an_answer_to_another_action() {
+        let w = core_agent::Waiter::default();
+        let (tx, mut rx) = hbb_common::tokio::sync::oneshot::channel();
+        *w.lock().unwrap() = Some((Action::Install, tx));
+        // A late status answer while the install is awaited, and an answer without the echo (a
+        // host before it: read as status): dropped, the install is still awaited.
+        core_agent::deliver(&w, TetherAgentAnswer { action: Action::Status.into(), ..wire("not-installed", "") });
+        core_agent::deliver(&w, wire("not-installed", ""));
+        assert!(rx.try_recv().is_err());
+        assert!(w.lock().unwrap().is_some());
+        core_agent::deliver(&w, TetherAgentAnswer { action: Action::Install.into(), ..wire("installed", "ok") });
+        assert_eq!(rx.try_recv().unwrap().state, "installed");
+        // Nobody waiting: dropped.
+        core_agent::deliver(&w, TetherAgentAnswer { action: Action::Install.into(), ..wire("installed", "ok") });
+        assert!(w.lock().unwrap().is_none());
     }
 
     #[test]
     fn core_audit_record_names_only_action_and_outcome() {
         assert_eq!(core_agent::audit_info(Action::Status, &wire("installed", "")), None);
+        // Nothing done, nothing recorded (a session member cannot fill the relay with refusals).
+        for s in ["not-supported", "needs-service", "not-allowed", "busy"] {
+            assert_eq!(core_agent::audit_info(Action::Install, &wire(s, "")), None, "{s}");
+            assert_eq!(core_agent::audit_info(Action::Remove, &wire(s, "")), None, "{s}");
+        }
+        assert!(core_agent::audit_info(Action::Install, &wire("running", "")).is_some());
         let a = TetherAgentAnswer { state: "installed".into(), version: "0.2.0".into(), installed_by: "session".into(), detail: "C:\\secret\\path token=abc".into(), at: 5, ..Default::default() };
         let info = core_agent::audit_info(Action::Install, &a).unwrap();
         assert_eq!(info, serde_json::json!({"agent": "install", "result": "installed"}));
