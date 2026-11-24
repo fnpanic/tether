@@ -163,7 +163,9 @@ devices that sign with their own key, and members that read what the devices pos
 runs nothing on a device and opens no port on it.
 
 - **Device keys are pinned.** A device generates an Ed25519 key and enrols with an admin-signed
-  token. The relay pins the key to the device's uuid in `status/keys.jsonl`. Every report and removal is signed (`Tether-Sig: device-v1`, message prefix
+  token, the request signed with that key: enrolling needs a valid token **and** the private key of
+  the key being pinned (without the signature: `401 enrolment needs the device's signature`). The
+  relay pins the key to the device's uuid in `status/keys.jsonl`. Every enrolment, report and removal is signed (`Tether-Sig: device-v1`, message prefix
   `tether-device-v1`) over the relay's host name, the method, the path, the time, a nonce and the
   body hash, so a captured request is worth nothing at another relay and cannot be replayed
   (±300 s, nonces kept 601 s in memory, `seq` must increase on every post). A device key never
@@ -212,21 +214,14 @@ runs nothing on a device and opens no port on it.
   customer (`customer`, 1 to 32 characters `[A-Za-z0-9._-]`); the relay sets it on the pin of the
   device that enrols with it. A device cannot name or change it: neither the enrolment request nor
   a report has the field, and a request with it is refused (`400`). A token holder can enrol new
-  devices under the token's customer. An existing device's customer changes only with that
-  device's own key: the same uuid with the same public key enrolling again with a token that names
-  another customer (or any customer, when it had none) must carry the device's request signature
-  (`Tether-Sig: device-v1`, as for a status post), or the relay answers `401 changing the customer
-  needs the device's signature` and changes nothing. With it, the device gets the token's customer
-  (journal: `status: customer of <uuid> set to <customer> by token <id>`; the pin keeps the token
-  it first enrolled with). While the device's pin exists, knowing its uuid and public key is
-  therefore not enough to move it (the public key is on the device and in the relay's
-  `status/keys.jsonl`; no route returns it). Where there is no pin for that uuid on a relay
-  (after a team member or admin removed the device, after the pin was dropped for 180 days
-  without a report, or on a relay the device never enrolled on), a first enrolment is accepted
-  unsigned (old agents) or signed with the key in the request, so a token holder who also knows
-  that uuid and public key could create the pin there under the token's customer. A signature
-  that is present but wrong is refused on every enrolment, and an unsigned
-  enrolment that changes no customer is accepted as before. Every roster member sees every device whatever its customer: the customer
+  devices, with new keys of their own, under the token's customer. Every enrolment is signed with
+  the private key of the key it pins (`Tether-Sig: device-v1`, as for a status post), so an
+  existing device's pin, link and customer cannot be taken or changed without that device's key:
+  the same device enrolling again with a token that names another customer (or any customer, when
+  it had none) gets it (journal: `status: customer of <uuid> set to <customer> by token <id>`; the
+  pin keeps the token it first enrolled with), and knowing a device's uuid and public key is not
+  enough to create a pin for it either, also where a relay has none (removed, dropped after 180
+  days without a report, or never enrolled there). Every roster member sees every device whatever its customer: the customer
   groups devices inside one deployment, and organisations that must not see each other's machines
   need separate deployments ([docs/several-organisations.md](docs/several-organisations.md)).
 - **What a token holder cannot do.** Read any report, summary or history (those routes need a
@@ -249,7 +244,7 @@ runs nothing on a device and opens no port on it.
 - **Limits** (all before the signature check and the parser, so the cheap path stays cheap):
   64 KiB per post, one accepted post per uuid per 60 s, 10 correctly signed but refused posts per
   uuid per minute, 60 failed signatures or unknown uuids per minute per IP (IPv6: per /64), 30 new
-  enrolments or refused tokens per minute per IP. A forged post that names a device's uuid is not
+  enrolments, refused tokens or unsigned enrolments per minute per IP. A forged post that names a device's uuid is not
   counted against that device. The relay paces devices with `next` (`STATUS_TARGET_RPS`) and
   `STATUS=off` turns every status route into `503` at once, before any body is read.
 - **Fail closed.** When `status/keys.jsonl` or `status/revoked.json` cannot be read (anything but

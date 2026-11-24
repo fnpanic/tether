@@ -172,8 +172,9 @@ fn publish_to_a_local_relay() {
     let tok = out.trim();
     assert!(status::verify_token(tok, &[k.admin.verifying_key()], now()).is_ok());
     let dev = tether_trust::generate_key();
-    let body = serde_json::json!({"uuid": "dev-e2e-0001", "pubkey": tether_trust::key_to_b64(&dev.verifying_key()), "token": tok});
-    let r = c.post(format!("{base}/api/status/enroll")).body(body.to_string()).send().unwrap();
+    let body = serde_json::json!({"uuid": "dev-e2e-0001", "pubkey": tether_trust::key_to_b64(&dev.verifying_key()), "token": tok}).to_string();
+    let sig = reqauth::sign_device_request(&dev, "dev-e2e-0001", &base, "POST", "/api/status/enroll", body.as_bytes(), now());
+    let r = c.post(format!("{base}/api/status/enroll")).header(reqauth::HEADER, sig).body(body).send().unwrap();
     assert_eq!(r.status(), 200);
     let a: serde_json::Value = serde_json::from_slice(&r.bytes().unwrap()).unwrap();
     assert_eq!(a["releases"], 3, "monitor.json serial 3 after the refresh");
@@ -182,8 +183,9 @@ fn publish_to_a_local_relay() {
     // A token issued for one Tether ID: journaled without the token, enrols one device with that ID.
     let enrol = |uuid: &str, token: &str| {
         let dev = tether_trust::generate_key();
-        let body = serde_json::json!({"uuid": uuid, "pubkey": tether_trust::key_to_b64(&dev.verifying_key()), "token": token});
-        let r = c.post(format!("{base}/api/status/enroll")).body(body.to_string()).send().unwrap();
+        let body = serde_json::json!({"uuid": uuid, "pubkey": tether_trust::key_to_b64(&dev.verifying_key()), "token": token}).to_string();
+        let sig = reqauth::sign_device_request(&dev, uuid, &base, "POST", "/api/status/enroll", body.as_bytes(), now());
+        let r = c.post(format!("{base}/api/status/enroll")).header(reqauth::HEADER, sig).body(body).send().unwrap();
         (r.status().as_u16(), r.text().unwrap())
     };
     let (ok, out, err) = tool(&dir, &["token", "--label", "front desk", "--days", "1", "--tether-id", "123456789"]);

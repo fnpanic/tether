@@ -40,8 +40,10 @@ report format below are open and checked by the relay, which does not interpret 
 1. An administrator creates an **enrolment token** (valid 1 to 30 days) and gives it to the
    agent's installer.
 2. The agent generates its own Ed25519 key and enrols: `POST /api/status/enroll` with the token,
-   its uuid, its public key and, when Tether is installed, its Tether ID. The relay checks the
-   token, pins the key to the uuid and answers how long to wait before the next post. The Tether
+   its uuid, its public key and, when Tether is installed, its Tether ID, signed with that key
+   (the `Tether-Sig: device-v1` header of a status post; every enrolment needs it). The relay
+   checks the token and the signature, pins the key to the uuid and answers how long to wait
+   before the next post. The Tether
    ID the agent names is only a **claim**: it becomes the device's Tether ID when the token was
    issued for that ID, or when a team member confirms it ([Linking an agent to its
    host](#linking-an-agent-to-its-host)).
@@ -329,19 +331,14 @@ one customer inside this deployment. Only an enrolment token sets it:
 - A device that enrols with a token naming a customer gets that customer. The relay keeps it with
   the pin in `keys.jsonl`.
 - **Changing it:** the same device (same uuid and key) enrolling again with a token that names a
-  customer other than the one it has (or any customer, if it had none) gets the new one only when
-  the enrolment carries the device's own signature (the `Tether-Sig: device-v1` header of a
-  status post). Without it the relay answers `401 changing the customer needs the device's
-  signature` and the device keeps its customer. When it changes, tether-api writes `status: customer of <uuid> set to
+  customer other than the one it has (or any customer, if it had none) gets the new one. Every
+  enrolment is signed with the device's own key (without the signature the relay answers `401
+  enrolment needs the device's signature`), so only the device itself can do this: a token holder
+  who knows a device's uuid and public key can neither move its pin nor create one for it where
+  none exists. When it changes, tether-api writes `status: customer of <uuid> set to
   <customer> by token <id>` to its journal. The pin keeps the token it first enrolled with, so
   `monitor-publish devices --token` still lists it under that one; only the journal line names the
-  token that changed it. While the device's pin exists, knowing its uuid and public key is not
-  enough to move it (the public key is on the device and in the relay's `status/keys.jsonl`; no
-  route returns it). Where a relay has no pin for that uuid (the device was removed, the pin was
-  dropped after 180 days without a report, or the device never enrolled on that relay), a first
-  enrolment is accepted unsigned (old agents) or signed with the key in the request, so a token
-  holder who also knows that uuid and public key could create the pin there under the token's
-  customer.
+  token that changed it.
 - A token without a customer changes nothing: a device that has one keeps it.
 - To take a customer away, remove the device ([Removing a device](#removing-a-device)) and let it
   enrol again with a token without one.
@@ -592,13 +589,13 @@ Enrolment, the signature, the answers and the status codes: [api.md](api.md#devi
   and root) and every member of the team roster. Reports are not encrypted end to end. They
   contain the machine's name, the names and versions of installed products, and the titles, values
   and hints the agent writes; keep personal data out of them. See [PRIVACY.md](../PRIVACY.md).
-- **Who can write:** only a device with a key that was pinned with a valid enrolment token. Each
-  post is signed; a device key is never accepted as an admin or member key and the reverse.
+- **Who can write:** only a device with a key that was pinned with a valid enrolment token, by an
+  enrolment signed with that key. Each post is signed; a device key is never accepted as an admin or member key and the reverse.
 - **The token** allows enrolling new devices until it expires or is revoked; one issued for a
   Tether ID enrols one device per relay, with that ID (two relays, two devices: a [link
   conflict](#link-conflicts) the app shows instead of choosing). It cannot read anything or
   remove a device. A token that names a customer sets that customer also on a device that is
-  already enrolled, when that device enrols with it again and signs that enrolment with its own key
+  already enrolled, when that device enrols with it again (like every enrolment, signed with its own key)
   ([Customer reference](#customer-reference)). A device's Tether ID is shown only when a token was issued for it or a team member
   confirmed it. Both are the word of a trusted person, not a proof by Tether on that machine:
   [SECURITY.md](../SECURITY.md#device-status-health-reports).

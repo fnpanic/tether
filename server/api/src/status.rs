@@ -967,8 +967,8 @@ impl App {
         Err(text(503, "status store unavailable").with_header(hdr("Retry-After", "3600")))
     }
 
-    /// `POST /api/status/enroll`: the token is admin-signed; the device's own signature is needed
-    /// only to change the customer of an existing pin.
+    /// `POST /api/status/enroll`: the token is admin-signed, and the request is signed by the device
+    /// with the key it enrols.
     pub(crate) fn status_enroll(&mut self, rq: &Request, body: &Body, url: &str) -> Result<Resp, Resp> {
         self.status_open()?;
         let body = body.bytes(st::ENROLL_MAX as u64)?;
@@ -998,6 +998,11 @@ impl App {
             }
             r
         };
+        // Every enrolment proves possession of the key it pins (verified after the token). Without a
+        // header it is refused before the token is checked, counted as a refused token is.
+        if header(rq, reqauth::HEADER).is_none() {
+            return Err(refused(&mut self.status, text(401, "enrolment needs the device's signature")));
+        }
         let tok = match st::verify_token(&req.token, &self.keys, t) {
             Ok(tok) if !self.status.revoked.contains_key(&tok.id) => tok,
             Ok(_) => return Err(refused(&mut self.status, text(401, "token revoked"))),
@@ -1006,19 +1011,12 @@ impl App {
         if old.as_ref().is_some_and(|p| p.key != key) {
             return Err(text(409, "uuid is enrolled with another key"));
         }
-        // The device's own signature is optional, but checked when present (against the key it enrols).
-        let signed = header(rq, reqauth::HEADER).is_some();
-        if signed {
-            let (uuid, sig) = Self::device_header(rq)?;
-            if uuid != req.uuid {
-                return Err(text(401, "signature names another uuid"));
-            }
-            self.device_verify_key(rq, &sig, Some(&key), "POST", url, body)?;
+        // The device's signature, against the key it enrols (for an existing pin: the pinned key).
+        let (uuid, sig) = Self::device_header(rq)?;
+        if uuid != req.uuid {
+            return Err(text(401, "signature names another uuid"));
         }
-        // A token holder may enrol new devices for its customer, but only a device can move itself.
-        if !signed && old.as_ref().is_some_and(|o| tok.customer.is_some() && o.customer != tok.customer) {
-            return Err(text(401, "changing the customer needs the device's signature"));
-        }
+        self.device_verify_key(rq, &sig, Some(&key), "POST", url, body)?;
         // A token issued for a Tether ID: that ID, for one device. Any other token: what the
         // device names is only a claim, until a team member links it.
         let first_use = tok.tether_id.is_some() && !self.status.used.contains_key(&tok.id);

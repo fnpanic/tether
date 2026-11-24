@@ -131,7 +131,7 @@ fn enroll(s: &Srv, dev: &SigningKey, uuid: &str, tether_id: Option<&str>, token:
     if let Some(t) = tether_id {
         b["tether_id"] = t.into();
     }
-    s.req("POST", "/api/status/enroll", &[], b.to_string().as_bytes())
+    signed(s, dev, uuid, "POST", "/api/status/enroll", b.to_string().as_bytes())
 }
 
 fn post(s: &Srv, dev: &SigningKey, uuid: &str, body: &str) -> Reply {
@@ -416,15 +416,24 @@ fn enrollment_limits_and_tether_id_rules() {
     let r = enroll(&s, &a, "dev-0001", Some("555"), &tok);
     assert_eq!((r.status, r.text()), (409, "tether_id is pinned to another value".into()));
 
-    // 30 refused tokens from one IP, then new enrollments from it wait; the same key again is free.
-    let ip = [("X-Forwarded-For", "203.0.113.20")];
+    // 30 refused enrolments from one IP (refused tokens, and unsigned ones, which count the same),
+    // then new enrollments from it wait; the same key again is free.
+    let ip = "203.0.113.20";
     let from_ip = |dev: &SigningKey, uuid: &str, token: &str| {
-        let b = json!({"uuid": uuid, "pubkey": key_to_b64(&dev.verifying_key()), "token": token});
-        s.req("POST", "/api/status/enroll", &ip, b.to_string().as_bytes())
+        let b = json!({"uuid": uuid, "pubkey": key_to_b64(&dev.verifying_key()), "token": token}).to_string();
+        let sig = reqauth::sign_device_request(dev, uuid, RELAY, "POST", "/api/status/enroll", b.as_bytes(), now());
+        s.req("POST", "/api/status/enroll", &[("X-Forwarded-For", ip), (reqauth::HEADER, &sig)], b.as_bytes())
     };
     let expired = status::make_token("t", now() - 1, None, None, &admin).unwrap().0;
     for i in 0..30 {
-        assert_eq!(from_ip(&a, &format!("dev-1{i:03}"), &expired).status, 401, "attempt {i}");
+        let uuid = format!("dev-1{i:03}");
+        let r = if i % 2 == 0 {
+            from_ip(&a, &uuid, &expired)
+        } else {
+            let b = json!({"uuid": uuid, "pubkey": key_to_b64(&a.verifying_key()), "token": tok});
+            s.req("POST", "/api/status/enroll", &[("X-Forwarded-For", ip)], b.to_string().as_bytes())
+        };
+        assert_eq!(r.status, 401, "attempt {i}");
     }
     let r = from_ip(&a, "dev-2000", &tok);
     assert_eq!((r.status, r.text(), r.header("Retry-After")), (429, "too many requests".into(), Some("60".into())));
@@ -579,9 +588,11 @@ fn removals_do_not_rebuild_the_summary_and_the_keys_log_is_compacted() {
     let (e1, built) = (r.header("ETag"), r.json()["built"].clone());
     for i in 0..40 {
         let u = format!("dev-1{i:03}");
-        let b = json!({"uuid": u, "pubkey": key_to_b64(&generate_key().verifying_key()), "token": tok});
+        let k = generate_key();
+        let b = json!({"uuid": u, "pubkey": key_to_b64(&k.verifying_key()), "token": tok}).to_string();
+        let sig = reqauth::sign_device_request(&k, &u, RELAY, "POST", "/api/status/enroll", b.as_bytes(), now());
         let ip = format!("203.0.113.{i}"); // 30 new pins per IP and minute
-        assert_eq!(s.req("POST", "/api/status/enroll", &[("X-Forwarded-For", &ip)], b.to_string().as_bytes()).status, 200);
+        assert_eq!(s.req("POST", "/api/status/enroll", &[("X-Forwarded-For", &ip), (reqauth::HEADER, &sig)], b.as_bytes()).status, 200);
         assert_eq!(s.admin(&admin, "DELETE", &format!("/api/admin/status/{u}"), b"").status, 204);
     }
     let r = team_get(&s, &m, "/api/team/status");
@@ -1510,17 +1521,38 @@ fn enroll_signed(s: &Srv, signer: &SigningKey, dev: &SigningKey, uuid: &str, tok
     signed(s, signer, uuid, "POST", "/api/status/enroll", &enroll_body(dev, uuid, token))
 }
 
-const NEEDS_SIG: &str = "changing the customer needs the device's signature";
+const NEEDS_SIG: &str = "enrolment needs the device's signature";
+
+fn enroll_unsigned(s: &Srv, dev: &SigningKey, uuid: &str, tether_id: Option<&str>, token: &str) -> Reply {
+    let mut b = json!({"uuid": uuid, "pubkey": key_to_b64(&dev.verifying_key()), "token": token});
+    if let Some(t) = tether_id {
+        b["tether_id"] = t.into();
+    }
+    s.req("POST", "/api/status/enroll", &[], b.to_string().as_bytes())
+}
 
 #[test]
-fn unsigned_customer_change_is_refused() {
+fn unsigned_enrolment_is_refused() {
     let (s, admin) = server();
     let a = generate_key();
-    assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, Some("4711")).0).status, 200);
-    let r = enroll(&s, &a, "dev-0001", None, &customer_token(&admin, Some("0815")).0);
+    // A first enrolment: no pin.
+    let r = enroll_unsigned(&s, &a, "dev-0001", None, &customer_token(&admin, Some("4711")).0);
     assert_eq!((r.status, r.text().as_str()), (401, NEEDS_SIG));
+    assert_eq!(s.admin(&admin, "GET", "/api/admin/status/devices", b"").json()["devices"].as_array().unwrap().len(), 0);
+    assert!(!s.dir.join("status/keys.jsonl").exists() || live_pins(&s.dir).is_empty());
+    // A re-enrolment: without a customer change, with one, with a first customer, with a claim.
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, Some("4711")).0).status, 200);
+    let b = generate_key();
+    assert_eq!(enroll(&s, &b, "dev-0002", None, &customer_token(&admin, None).0).status, 200);
+    for (dev, uuid, customer, claim) in [(&a, "dev-0001", Some("4711"), None), (&a, "dev-0001", None, None), (&a, "dev-0001", Some("0815"), None), (&b, "dev-0002", Some("0815"), None), (&a, "dev-0001", None, Some("123456789"))] {
+        let r = enroll_unsigned(&s, dev, uuid, claim, &customer_token(&admin, customer).0);
+        assert_eq!((r.status, r.text().as_str()), (401, NEEDS_SIG), "{uuid} {customer:?}");
+    }
     let m = member(&s, &admin);
-    assert_eq!(team_get(&s, &m, "/api/team/status/dev-0001").json()["customer"], "4711");
+    let h = team_get(&s, &m, "/api/team/status/dev-0001").json();
+    assert_eq!((&h["customer"], &h["claimed_id"]), (&json!("4711"), &Value::Null));
+    assert_eq!(team_get(&s, &m, "/api/team/status/dev-0002").json()["customer"], Value::Null);
+    assert_eq!(live_pins(&s.dir), ["dev-0001", "dev-0002"]);
     assert!(!s.journal().contains("customer of"), "{}", s.journal());
 }
 
@@ -1544,10 +1576,10 @@ fn customer_change_signed_by_another_key_is_refused() {
     assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, Some("4711")).0).status, 200);
     assert_eq!(enroll(&s, &b, "dev-0002", None, &customer_token(&admin, None).0).status, 200);
     let r = enroll_signed(&s, &b, &a, "dev-0001", &customer_token(&admin, Some("0815")).0);
-    assert_eq!(r.status, 401, "{}", r.text());
+    assert_eq!((r.status, r.text().as_str()), (401, "signature does not match"));
     // A header naming another uuid than the body.
     let r = signed(&s, &b, "dev-0002", "POST", "/api/status/enroll", &enroll_body(&a, "dev-0001", &customer_token(&admin, Some("0815")).0));
-    assert_eq!(r.status, 401, "{}", r.text());
+    assert_eq!((r.status, r.text().as_str()), (401, "signature names another uuid"));
     let m = member(&s, &admin);
     assert_eq!(team_get(&s, &m, "/api/team/status/dev-0001").json()["customer"], "4711");
 }
@@ -1562,7 +1594,7 @@ fn replayed_signed_customer_change_is_refused() {
     assert_eq!(s.req("POST", "/api/status/enroll", &[(reqauth::HEADER, &sig)], &body).status, 200);
     let other = enroll_body(&a, "dev-0001", &customer_token(&admin, Some("1234")).0);
     let r = s.req("POST", "/api/status/enroll", &[(reqauth::HEADER, &sig)], &other);
-    assert_eq!(r.status, 401, "{}", r.text());
+    assert_eq!((r.status, r.text().as_str()), (401, "signature does not match"));
     // The very same request again: its nonce is used.
     let r = s.req("POST", "/api/status/enroll", &[(reqauth::HEADER, &sig)], &body);
     assert_eq!((r.status, r.text().as_str()), (401, "replayed request"));
@@ -1571,15 +1603,15 @@ fn replayed_signed_customer_change_is_refused() {
 }
 
 #[test]
-fn unsigned_re_enrol_without_customer_change_still_works() {
+fn re_enrol_without_customer_change_works() {
     let (s, admin) = server();
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, Some("4711")).0).status, 200);
     assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, None).0).status, 200);
     assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, Some("4711")).0).status, 200);
-    // A signature that is there but wrong is refused even so.
+    // A signature by another key is refused even so.
     let r = enroll_signed(&s, &generate_key(), &a, "dev-0001", &customer_token(&admin, None).0);
-    assert_eq!(r.status, 401, "{}", r.text());
+    assert_eq!((r.status, r.text().as_str()), (401, "signature does not match"));
     // A new device may sign its first enrolment with its own key.
     let b = generate_key();
     assert_eq!(enroll_signed(&s, &b, &b, "dev-0002", &customer_token(&admin, Some("0815")).0).status, 200);
@@ -1597,26 +1629,14 @@ fn signed_first_enrolment_is_accepted() {
 }
 
 #[test]
-fn first_enrolment_signed_with_another_key_is_refused() {
+fn first_enrolment_needs_the_key_of_the_request() {
     let (s, admin) = server();
-    let a = generate_key();
-    let r = enroll_signed(&s, &generate_key(), &a, "dev-0001", &customer_token(&admin, None).0);
-    assert_eq!(r.status, 401, "{}", r.text());
-    assert_ne!(r.text(), "unknown device");
+    let (a, b) = (generate_key(), generate_key());
+    // The body carries key A, the signature is made with key B: knowing A is not enough.
+    let r = enroll_signed(&s, &b, &a, "dev-0001", &customer_token(&admin, Some("4711")).0);
+    assert_eq!((r.status, r.text().as_str()), (401, "signature does not match"));
     assert_eq!(s.admin(&admin, "GET", "/api/admin/status/devices", b"").json()["devices"].as_array().unwrap().len(), 0);
-}
-
-#[test]
-fn first_customer_on_an_existing_pin_needs_the_signature() {
-    let (s, admin) = server();
-    let a = generate_key();
-    assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, None).0).status, 200);
-    let tok = customer_token(&admin, Some("4711")).0;
-    let r = enroll(&s, &a, "dev-0001", None, &tok);
-    assert_eq!((r.status, r.text().as_str()), (401, NEEDS_SIG));
-    assert_eq!(enroll_signed(&s, &a, &a, "dev-0001", &tok).status, 200);
-    let m = member(&s, &admin);
-    assert_eq!(team_get(&s, &m, "/api/team/status/dev-0001").json()["customer"], "4711");
+    assert!(!s.dir.join("status/keys.jsonl").exists() || live_pins(&s.dir).is_empty());
 }
 
 #[test]
@@ -1625,9 +1645,9 @@ fn a_device_cannot_name_its_customer() {
     let a = generate_key();
     let tok = customer_token(&admin, None).0;
     let mut b = json!({"uuid": "dev-0001", "pubkey": key_to_b64(&a.verifying_key()), "token": tok, "customer": "x"});
-    assert_eq!(s.req("POST", "/api/status/enroll", &[], b.to_string().as_bytes()).status, 400);
+    assert_eq!(signed(&s, &a, "dev-0001", "POST", "/api/status/enroll", b.to_string().as_bytes()).status, 400);
     b.as_object_mut().unwrap().remove("customer");
-    assert_eq!(s.req("POST", "/api/status/enroll", &[], b.to_string().as_bytes()).status, 200);
+    assert_eq!(signed(&s, &a, "dev-0001", "POST", "/api/status/enroll", b.to_string().as_bytes()).status, 200);
     let r = post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok").replacen(r#""v":1,"#, r#""v":1,"customer":"x","#, 1));
     assert_eq!(r.status, 400, "{}", r.text());
     let m = member(&s, &admin);

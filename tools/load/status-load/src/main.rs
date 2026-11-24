@@ -279,8 +279,10 @@ fn admin_req(addr: &str, key: &SigningKey, method: &str, path: &str, body: &[u8]
 }
 
 fn enrol(addr: &str, token: &str, i: usize, net: u8) -> io::Result<Reply> {
-    let b = json!({"uuid": uuid(i), "pubkey": key_to_b64(&device_key(i).verifying_key()), "token": token}).to_string();
-    req(addr, "POST", "/api/status/enroll", &[("X-Forwarded-For", &ip(net, i))], b.as_bytes())
+    let key = device_key(i);
+    let b = json!({"uuid": uuid(i), "pubkey": key_to_b64(&key.verifying_key()), "token": token}).to_string();
+    let sig = reqauth::sign_device_request(&key, &uuid(i), RELAY, "POST", "/api/status/enroll", b.as_bytes(), now());
+    req(addr, "POST", "/api/status/enroll", &[("X-Forwarded-For", &ip(net, i)), (reqauth::HEADER, &sig)], b.as_bytes())
 }
 
 fn run(a: &BTreeMap<String, String>) -> bool {

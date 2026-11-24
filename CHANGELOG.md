@@ -11,8 +11,10 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 - **Health of supported machines in the host list.** A relay can now store health reports from a
   monitoring agent, a separate program that is not part of Tether: a device enrols once with a
-  short-lived token an administrator creates (`scripts/status-token.sh`), then signs every report
-  with its own key (`Tether-Sig: device-v1`). The host list shows a health dot and Health,
+  short-lived token an administrator creates (`scripts/status-token.sh`), signing the enrolment
+  with its own key, then signs every report with it (`Tether-Sig: device-v1`; an enrolment without
+  it gets `401 enrolment needs the device's signature`, so enrolling proves possession of the key
+  being pinned). The host list shows a health dot and Health,
   Products and Agent columns, finds hosts with `health:`, `product:`, `version:`, `role:`,
   `check:`, `agent:` and `since:`, and has a built-in view *Needs attention* (critical, not
   reporting, or in a link conflict). The host detail gains a Health section with the failing checks first, setup items,
@@ -66,11 +68,10 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   Tether on the machine ([SECURITY.md](SECURITY.md#device-status-health-reports)).
 - **Customer reference.** An enrolment token can name a customer (`monitor-publish token
   --customer 4711`, or the 4th argument of `scripts/status-token.sh`; 1 to 32 characters
-  `A-Z a-z 0-9 . _ -`). The relay sets it on the device that enrols with the token. On a device
-  that is already enrolled it changes only when that enrolment carries the device's own signature
-  (`Tether-Sig: device-v1`, as for a report; the journal says so); unsigned, the relay answers
-  `401 changing the customer needs the device's signature`, so a token holder who knows another
-  device's uuid and key can no longer move it. A token without one changes nothing, and a device
+  `A-Z a-z 0-9 . _ -`). The relay sets it on the device that enrols with the token, also on one
+  that is already enrolled (the journal says so). As every enrolment is signed with the device's
+  own key, a token holder who knows another device's uuid and public key can neither move it nor
+  create a pin for it. A token without one changes nothing, and a device
   cannot name it. The team summary, the host detail and `GET /api/admin/status/devices` return
   it; the host list has a Customer column, the search term `customer:` and the field in both
   exports; `monitor-publish devices --customer` lists one customer's devices. A relay from before
