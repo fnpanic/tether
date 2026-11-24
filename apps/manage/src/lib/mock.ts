@@ -248,7 +248,7 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       const each = (k: string, l: Layer) => l["health.enrol-grant"]?.value && (layers[k] = { status: "valid", id: "0123456789abcdef0123456789abcdef", exp: now + 300 * 86400, customer: null, made_here: true, renew: false, why: null });
       Object.entries(a.bundle.profiles as Record<string, Layer>).forEach(([p, l]) => each(`profile:${p}`, l));
       Object.entries(a.bundle.groups as Record<string, { overrides: Layer }>).forEach(([g, x]) => each(`group:${g}`, x.overrides));
-      return { layers, pending: [] };
+      return { layers, pending: [], live_revoked: [] };
     },
     policy_preview: () => resolve(a.bundle, a.profile, a.device),
     policy_diff: () => diff(a.from, a.to),

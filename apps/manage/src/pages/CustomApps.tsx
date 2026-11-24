@@ -87,7 +87,7 @@ function Logo({ png, accent, size = 40 }: { png?: string; accent?: string; size?
 function Editor({ form, set, features, onReview, onClose }: { form: Form; set: (f: Form) => void; features: Feature[]; onReview: () => void; onClose: () => void }) {
   const [logoError, setLogoError] = useState<string | null>(null);
   // Name, colour and welcome text have their own fields above.
-  const areas = byArea(features, "customer", (f) => !["customer.title", "customer.accent-color", "customer.welcome"].includes(f.id));
+  const areas = byArea(features, "customer", (f) => !["customer.title", "customer.accent-color", "customer.welcome", "health.agent", "health.enrol-grant"].includes(f.id));
   const ok = form.name.trim() && form.days >= 1 && form.days <= 366 && (!form.accent || /^#[0-9a-fA-F]{6}$/.test(form.accent));
   return (
     <Modal

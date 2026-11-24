@@ -5,7 +5,7 @@ import { useApp } from "../App";
 import { api, host, invoke, PROFILES, when, type Bundle, type Device, type Effective, type Feature, type Layer, type Rule } from "../lib/ipc";
 import { byArea, FeatureRow, sameRule, shown, type Lang } from "../components/features";
 import { ChangeList } from "../components/publish";
-import { GrantRow } from "../components/grant";
+import { GrantRow, PendingLines } from "../components/grant";
 import { GRANT, layerKey, type GrantsInfo } from "../lib/grants";
 import { liveCount, unchecked } from "../lib/live";
 import { Badge, Button, Card, ErrorText, IconButton, Label, Modal, PageHeader, SELECTED, Segmented, Select, StatusDot, Table, TextField } from "../components/ui";
@@ -204,8 +204,10 @@ export function Policy() {
   const [only, setOnly] = useState<"all" | "set" | "unpublished">("all");
   const [newGroup, setNewGroup] = useState<{ name: string; profile: string } | null>(null);
   const [grants, setGrants] = useState<GrantsInfo>({ layers: {}, pending: [] });
-  const reloadGrants = () => invoke<GrantsInfo>("grants_info", { bundle: draft }).then(setGrants, () => {});
-  useEffect(() => void reloadGrants(), [draft]);
+  const reloadGrants = () => invoke<GrantsInfo>("grants_info", { bundle: draft, live: live?.bundle ?? null }).then(setGrants, () => {});
+  useEffect(() => void reloadGrants(), [draft, live]);
+  // Still to revoke for a group that was deleted since: shown once, at the top of the health area.
+  const orphans = grants.pending.filter((p) => p.layer.startsWith("group:") && !draft.groups[p.layer.slice(6)]);
 
   useEffect(() => {
     invoke<Feature[]>("features").then(setFeatures);
@@ -329,6 +331,7 @@ export function Policy() {
               {areas.map(([area, list]) => (
                 <div key={area} className="mt-4">
                   <h3 className="mb-1 text-caption font-semibold capitalize text-muted">{area}</h3>
+                  {area === "health" && <PendingLines pending={orphans} named onReload={reloadGrants} toast={toast} />}
                   {list.map((f) =>
                     f.id === GRANT ? (
                       <GrantRow
@@ -337,8 +340,10 @@ export function Policy() {
                         lang={lang}
                         layerKey={layerKey(scope.kind, scope.name)}
                         layer={layer}
+                        profile={scope.kind === "group" ? draft.profiles[profile] ?? {} : undefined}
                         info={grants.layers[layerKey(scope.kind, scope.name)]}
                         pending={grants.pending.filter((p) => p.layer === layerKey(scope.kind, scope.name))}
+                        liveRevoked={!!grants.live_revoked?.includes(layerKey(scope.kind, scope.name))}
                         onChange={setLayer}
                         onReload={reloadGrants}
                         toast={toast}

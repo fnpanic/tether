@@ -3,23 +3,49 @@
 import { useEffect, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { host, invoke, when, type Feature, type Layer, type RelayResult } from "../lib/ipc";
-import { afterRevoke, grantBadge, grantOf, needsGrant, withGrant, type GrantInfo, type PendingRevoke } from "../lib/grants";
+import { afterRevoke, grantBadge, grantOf, needsGrant, noGrant, pendingText, revokeOutcome, withGrant, type GrantInfo, type PendingRevoke } from "../lib/grants";
 import type { Lang } from "./features";
 import { Badge, Button, ErrorText, TextField } from "./ui";
 
-/** One line per relay: what a revoke did there. */
-const outcome = (rs: RelayResult[]) => {
-  const bad = rs.filter((r) => !r.ok);
-  return bad.length ? `Not revoked on ${bad.map((r) => `${host(r.server)} (${r.error})`).join(", ")}. Use Revoke again.` : `Revoked on ${rs.length ? rs.map((r) => host(r.server)).join(", ") : "every relay"}.`;
-};
+/** Grants still to revoke, each with Revoke again; `named` adds the layer (for a deleted group). */
+export function PendingLines({ pending, named, onReload, toast }: { pending: PendingRevoke[]; named?: boolean; onReload: () => void; toast: (m: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const again = async () => {
+    setBusy(true);
+    try {
+      toast(revokeOutcome(await invoke<RelayResult[]>("grants_revoke_pending"), host));
+    } catch (e: any) {
+      toast(e.message);
+    } finally {
+      setBusy(false);
+      onReload();
+    }
+  };
+  return (
+    <>
+      {pending.map((p) => (
+        <p key={p.id} className="flex flex-wrap items-center gap-2 text-footnote text-warn">
+          {pendingText(p, host, named ? p.layer.replace(/^group:(.*)$/, "group $1 (deleted)").replace(/^profile:(.*)$/, "the $1 profile") : undefined)}
+          <Button size="sm" variant="ghost" disabled={busy} onClick={again}>
+            Revoke again
+          </Button>
+        </p>
+      ))}
+    </>
+  );
+}
 
-export function GrantRow({ f, lang, layerKey, layer, info, pending, onChange, onReload, toast }: {
+export function GrantRow({ f, lang, layerKey, layer, profile, info, pending, liveRevoked, onChange, onReload, toast }: {
   f: Feature;
   lang: Lang;
   layerKey: string;
   layer: Layer;
+  /** A group's profile layer (its grant is inherited when the group has none). */
+  profile?: Layer;
   info?: GrantInfo;
   pending: PendingRevoke[];
+  /** The published policy still carries a grant of this layer that is revoked. */
+  liveRevoked: boolean;
   onChange: (next: Layer) => void;
   onReload: () => void;
   toast: (m: string) => void;
@@ -33,6 +59,7 @@ export function GrantRow({ f, lang, layerKey, layer, info, pending, onChange, on
   const [error, setError] = useState<string | null>(null);
   const now = Math.floor(Date.now() / 1000);
   const badge = info && grantBadge(info, now);
+  const none = noGrant(layer, profile);
 
   const run = async (what: () => Promise<void>) => {
     setBusy(true);
@@ -53,14 +80,13 @@ export function GrantRow({ f, lang, layerKey, layer, info, pending, onChange, on
       toast(token ? "New grant in the draft. Publish: each relay revokes the old one once it serves the new policy." : "Grant created in the draft. Publish to send it.");
     });
   const revoke = async () => {
-    if (!(await ask(`Revoke this grant on every relay now? New installs and re-enrolments with it stop at once; installed agents keep working.${needs ? " The draft sets health.agent of this layer to manual (nothing installed is removed); publish it." : ""}`, { title: "Revoke grant", kind: "warning" }))) return;
+    if (!(await ask(`Revoke this grant, and any older grant of this layer not yet revoked everywhere, on every relay now? New installs and re-enrolments with it stop at once; installed agents keep working.${needs ? " The draft sets health.agent of this layer to manual (nothing installed is removed); publish it." : ""}`, { title: "Revoke grant", kind: "warning" }))) return;
     run(async () => {
       const rs = await invoke<RelayResult[]>("grant_revoke", { layer: layerKey, token });
       onChange(afterRevoke(layer));
-      toast(outcome(rs));
+      toast(revokeOutcome(rs, host, true));
     });
   };
-  const again = () => run(async () => toast(outcome(await invoke<RelayResult[]>("grants_revoke_pending"))));
 
   return (
     <div data-feature={f.id} className={`flex flex-col gap-2 border-b border-l-[3px] border-b-hairline py-2.5 pl-3 pr-1 last:border-b-0 ${token ? "border-l-ink bg-tile-2" : "border-l-transparent"}`}>
@@ -69,15 +95,16 @@ export function GrantRow({ f, lang, layerKey, layer, info, pending, onChange, on
           <p className="flex flex-wrap items-center gap-2 text-caption" title={lang === "en" ? f.de : f.en}>
             <span className={token ? "font-semibold" : ""}>{lang === "en" ? f.en : f.de}</span>
             {badge && <Badge tone={badge.tone}>{badge.text}</Badge>}
-            {!token && needs && <Badge tone="warn">Needed: health.agent is {needs}</Badge>}
+            {!token && none.badge && <Badge tone="warn">{none.badge}</Badge>}
           </p>
           <p className="font-mono text-footnote text-muted">
             {f.id} ·{" "}
             {token
               ? `grant ${info?.id ?? "?"} · expires ${when(info?.exp)}${info?.customer ? ` · customer ${info.customer}` : " · no customer"}${info && !info.made_here ? " · made on another PC" : ""}`
-              : "no grant"}
+              : none.line}
           </p>
           {info?.why && <p className="text-footnote text-danger">{info.why}</p>}
+          {liveRevoked && <p className="text-footnote text-danger">The published policy still has the revoked grant, so machines keep trying to enrol with it: publish the draft so machines stop trying.</p>}
         </div>
         <div className="ml-auto flex items-center gap-2">
           <div className="w-40">
@@ -93,15 +120,7 @@ export function GrantRow({ f, lang, layerKey, layer, info, pending, onChange, on
           )}
         </div>
       </div>
-      {pending.map((p) => (
-        <p key={p.id} className="flex flex-wrap items-center gap-2 text-footnote text-warn">
-          {p.state === "replaced" ? `Old grant ${p.id} is revoked on each relay once it serves the published policy; still to do on ` : `Revoked grant ${p.id} not yet revoked on `}
-          {p.relays.map(host).join(", ")}.
-          <Button size="sm" variant="ghost" disabled={busy} onClick={again}>
-            Revoke again
-          </Button>
-        </p>
-      ))}
+      <PendingLines pending={pending} onReload={onReload} toast={toast} />
       <ErrorText error={error} />
     </div>
   );

@@ -578,7 +578,20 @@ async fn policy_draft(app: State<'_, App>) -> R<Bundle> {
 
 #[tauri::command]
 fn policy_save_draft(app: State<App>, bundle: Bundle) -> R<()> {
-    app.write("policy/draft.json", &serde_json::to_vec_pretty(&bundle).unwrap())
+    save_draft(&app, &bundle)
+}
+
+/// The draft, and in the grant journal: a replaced grant the draft carries again while it is revoked
+/// nowhere is current again (a Renew whose draft was discarded). A damaged journal does not stop the save.
+fn save_draft(app: &App, b: &Bundle) -> R<()> {
+    app.write("policy/draft.json", &serde_json::to_vec_pretty(b).unwrap())?;
+    let _g = grants::LOCK.lock().unwrap();
+    if let Ok(mut j) = grant_journal(app) {
+        if grants::restore(&mut j, b) {
+            app.write(grants::JOURNAL, &serde_json::to_vec_pretty(&j).unwrap())?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -706,28 +719,33 @@ fn policy_diff(from: Option<Bundle>, to: Bundle) -> Vec<live::Change> {
 /// as done only when it serves the new serial.
 #[tauri::command]
 async fn policy_publish(app: State<'_, App>, bundle: Bundle, skip: Option<Vec<String>>) -> R<Value> {
+    publish(&app, bundle, skip).await
+}
+
+async fn publish(app: &App, bundle: Bundle, skip: Option<Vec<String>>) -> R<Value> {
     let mut b = bundle;
-    publish_check(&app, &b)?;
+    publish_check(app, &b)?;
     let key = app.admin_key()?;
     // An unreachable relay gets the document later (policy_sync); the serial only has to be above
     // every policy this admin key signed that a relay serves, and this PC's own published ones.
     // Not `/api/admin/status` policy_serial: that is whatever the relay claims (see next_serial).
     let vk = key.verifying_key();
     let (servers, left) = app.chosen(&skip)?;
-    let live: Vec<u64> = futures_util::future::join_all(servers.iter().map(|sv| live_doc(sv, &vk))).await.into_iter().filter_map(|d| d.bundle.map(|b| b.serial)).collect();
-    b.serial = next_serial(live.into_iter().chain(app.published().into_keys()), "policy")?;
+    let docs = futures_util::future::join_all(servers.iter().map(|sv| live_doc(sv, &vk))).await;
+    b.serial = next_serial(docs.iter().filter_map(|d| d.bundle.as_ref().map(|b| b.serial)).chain(app.published().into_keys()), "policy")?;
     b.issued_at = api::now();
     let payload = serde_json::to_vec(&b).unwrap();
     let doc = serde_json::to_vec(&envelope::sign(&payload, &key)).unwrap();
-    let mut results = put_policy(&app, &servers, &doc, b.serial, &key.verifying_key()).await;
+    let mut results = put_policy(app, &servers, &doc, b.serial, &key.verifying_key()).await;
     if let Some(e) = none_ok(&results) {
         return Err(e);
     }
-    // Renewed grants are revoked only on the relays that now serve this policy (without them).
-    let ids = grants::ids_in(&b);
-    let served = results.iter().filter(|r| r.ok).map(|r| (r.server.clone(), Some(ids.clone()))).collect();
-    revoke_and_note(&app, served, &mut results).await;
+    // What every relay of the list serves now: this policy, the one read before (publish failed), or
+    // not known (left out); renewed grants are revoked only once all of them are without it.
+    let before: BTreeMap<&String, &LiveDoc> = servers.iter().zip(&docs).collect();
+    let served = served_now(app, &results, &grants::ids_in(&b), |sv| before.get(sv).and_then(|d| d.bundle.as_ref()));
     results.extend(left);
+    revoke_and_note(app, served, &mut results).await;
     app.write(&format!("policy/published/{}.json", b.serial), &payload)?;
     app.write("policy/draft.json", &serde_json::to_vec_pretty(&b).unwrap())?;
     Ok(json!({ "serial": b.serial, "relays": results }))
@@ -757,6 +775,10 @@ async fn put_policy(app: &App, servers: &[String], doc: &[u8], serial: u64, key:
 /// any relay serves, by PUTting that same signed document (docs/relay-ha.md).
 #[tauri::command]
 async fn policy_sync(app: State<'_, App>) -> R<Vec<RelayResult>> {
+    sync(&app).await
+}
+
+async fn sync(app: &App) -> R<Vec<RelayResult>> {
     let key = app.admin_key()?.verifying_key();
     let servers = app.servers();
     let got = futures_util::future::join_all(servers.iter().map(|sv| live_doc(sv, &key))).await;
@@ -766,14 +788,22 @@ async fn policy_sync(app: State<'_, App>) -> R<Vec<RelayResult>> {
         return Err(none_found("No relay serves a policy signed by this app's admin key. Publish one first.".into(), docs.len(), down));
     };
     let behind: Vec<String> = docs.iter().filter(|(_, d)| d.bundle.as_ref().map(|b| b.serial) != Some(serial)).map(|(s, _)| s.clone()).collect();
-    let mut out = put_policy(&app, &behind, &raw, serial, &key).await;
+    let mut out = put_policy(app, &behind, &raw, serial, &key).await;
     for (sv, _) in docs.iter().filter(|(s, _)| !behind.contains(s)) {
         out.push(RelayResult::of(sv, Ok(json!({ "serial": serial, "already": true }))));
     }
     let ids = docs.iter().find_map(|(_, d)| d.bundle.as_ref().filter(|b| b.serial == serial)).map(grants::ids_in).unwrap_or_default();
-    let served = out.iter().filter(|r| r.ok).map(|r| (r.server.clone(), Some(ids.clone()))).collect();
-    revoke_and_note(&app, served, &mut out).await;
+    let before: BTreeMap<&String, &LiveDoc> = docs.iter().map(|(s, d)| (s, d)).collect();
+    let served = served_now(app, &out, &ids, |sv| before.get(sv).and_then(|d| d.bundle.as_ref()));
+    revoke_and_note(app, served, &mut out).await;
     Ok(out)
+}
+
+/// Per relay of the list, the grant ids it serves now: `ids` where `results` says it took the
+/// policy, else those of what it served before (`None`: not known).
+fn served_now<'a>(app: &App, results: &[RelayResult], ids: &std::collections::BTreeSet<String>, before: impl Fn(&String) -> Option<&'a Bundle>) -> Vec<(String, Option<std::collections::BTreeSet<String>>)> {
+    let took = |sv: &String| results.iter().any(|r| r.ok && &r.server == sv);
+    app.servers().into_iter().map(|sv| { let got = if took(&sv) { Some(ids.clone()) } else { before(&sv).map(grants::ids_in) }; (sv, got) }).collect()
 }
 
 // ---- health monitoring agent: enrolment grants (grants.rs) ----
@@ -803,50 +833,73 @@ fn grant_create(app: State<App>, layer: String, customer: String, old: Option<St
     grant_new(&app, &layer, &customer, old.as_deref())
 }
 
-/// Revoke a grant on every relay now (Revoke without Renew); the editor then sets the layer's
-/// `health.agent` to manual.
+/// Revoke a layer's grants on every relay now (Revoke without Renew): the current one and any it
+/// replaced that is not revoked everywhere yet; the editor then sets the layer's `health.agent` to manual.
 #[tauri::command]
 async fn grant_revoke(app: State<'_, App>, layer: String, token: String) -> R<Vec<RelayResult>> {
+    revoke_layer_now(&app, &layer, &token).await
+}
+
+async fn revoke_layer_now(app: &App, layer: &str, token: &str) -> R<Vec<RelayResult>> {
     app.admin_key()?;
     {
         let _g = grants::LOCK.lock().unwrap();
-        let mut j = grant_journal(&app)?;
-        if !grants::retire(&mut j, &token, &layer, grants::GrantState::Revoked) {
+        let mut j = grant_journal(app)?;
+        if !grants::revoke_layer(&mut j, token, layer) {
             return Err("This is not an enrolment grant; there is nothing to revoke.".into());
         }
         app.write(grants::JOURNAL, &serde_json::to_vec_pretty(&j).unwrap())?;
     }
-    grants_revoke_pending(app).await
+    revoke_pending(app).await
 }
 
-/// The grant of each layer of `bundle` that carries one, and the retired grants not yet revoked
-/// on every relay.
+/// The grant of each layer of `bundle` that carries one, the retired grants not yet revoked on
+/// every relay, and the layers of `live` (the published policy) whose grant is revoked here.
 #[tauri::command]
-fn grants_info(app: State<App>, bundle: Bundle) -> R<Value> {
+fn grants_info(app: State<App>, bundle: Bundle, live: Option<Bundle>) -> R<Value> {
     let keys = [app.admin_key()?.verifying_key()];
     let j = grant_journal(&app)?;
     let now = api::now();
-    let layers: BTreeMap<String, grants::Info> = grants::layers(&bundle).into_iter().filter_map(|(k, l)| Some((k, grants::info(grants::grant_in(l)?, &keys, &j, now)))).collect();
-    Ok(json!({ "layers": layers, "pending": grants::pending(&j, &app.servers(), now) }))
+    let info = |b: &Bundle| -> BTreeMap<String, grants::Info> { grants::layers(b).into_iter().filter_map(|(k, l)| Some((k, grants::info(grants::grant_in(l)?, &keys, &j, now)))).collect() };
+    let live_revoked: Vec<String> = live.as_ref().map(info).unwrap_or_default().into_iter().filter(|(_, i)| i.status == "revoked").map(|(k, _)| k).collect();
+    Ok(json!({ "layers": info(&bundle), "pending": grants::pending(&j, &app.servers(), now), "live_revoked": live_revoked }))
 }
 
 /// Revoke again what is pending: each relay's live policy decides where a renewed grant may go.
 #[tauri::command]
 async fn grants_revoke_pending(app: State<'_, App>) -> R<Vec<RelayResult>> {
+    revoke_pending(&app).await
+}
+
+/// One result per relay and grant, with the grant's `id` in `detail`.
+async fn revoke_pending(app: &App) -> R<Vec<RelayResult>> {
     let key = app.admin_key()?.verifying_key();
     let servers = app.servers();
     let docs = futures_util::future::join_all(servers.iter().map(|sv| live_doc(sv, &key))).await;
     let served = servers.into_iter().zip(docs).map(|(sv, d)| (sv, d.bundle.as_ref().map(grants::ids_in))).collect();
-    let done = revoke_grants(&app, served).await?;
-    Ok(done.into_iter().map(|(sv, id, r)| RelayResult::of(&sv, r.map(|()| json!({ "note": format!("Grant {id} revoked") })).map_err(|e| format!("Grant {id} not revoked: {e}")))).collect())
+    let (done, _) = revoke_grants(app, served).await?;
+    Ok(done
+        .into_iter()
+        .map(|(sv, id, r)| {
+            let mut res = RelayResult::of(&sv, r.map(|()| json!({ "note": format!("Grant {id} revoked") })).map_err(|e| format!("Grant {id} not revoked: {e}")));
+            res.detail["id"] = json!(id);
+            res
+        })
+        .collect())
 }
 
 /// Send the revocations [`grants::targets`] names (`POST /api/admin/status/revoke`) and record
-/// each relay that confirmed. One result per relay and grant.
-async fn revoke_grants(app: &App, served: Vec<(String, Option<std::collections::BTreeSet<String>>)>) -> R<Vec<(String, String, R<()>)>> {
-    let targets = {
+/// each relay that confirmed. One result per relay and grant, and the replaced grants held back
+/// with the relays still missing a policy without them.
+async fn revoke_grants(app: &App, served: Vec<(String, Option<std::collections::BTreeSet<String>>)>) -> R<(Vec<(String, String, R<()>)>, Vec<(String, Vec<String>)>)> {
+    let (targets, held) = {
         let _g = grants::LOCK.lock().unwrap();
-        grants::targets(&grant_journal(app)?, &served, api::now())
+        let mut j = grant_journal(app)?;
+        let now = api::now();
+        let t = grants::targets(&mut j, &served, now);
+        app.write(grants::JOURNAL, &serde_json::to_vec_pretty(&j).unwrap())?;
+        let held = j.iter().filter(|e| e.state == grants::GrantState::Replaced && e.exp > now && e.revoked_on.is_empty() && !e.waiting.is_empty()).map(|e| (e.id.clone(), e.waiting.clone())).collect();
+        (t, held)
     };
     let got = futures_util::future::join_all(targets.iter().map(|(sv, id, exp)| app.call_on(sv, "POST", "/api/admin/status/revoke", serde_json::to_vec(&json!({ "id": id, "exp": exp })).unwrap(), "application/json"))).await;
     let out: Vec<(String, String, R<()>)> = targets.into_iter().zip(got).map(|((sv, id, _), r)| (sv, id, r.map(|_| ()))).collect();
@@ -858,7 +911,7 @@ async fn revoke_grants(app: &App, served: Vec<(String, Option<std::collections::
         }
         app.write(grants::JOURNAL, &serde_json::to_vec_pretty(&j).unwrap())?;
     }
-    Ok(out)
+    Ok((out, held))
 }
 
 /// After a publish: revoke renewed grants on the relays that serve the new policy, and note the
@@ -866,7 +919,14 @@ async fn revoke_grants(app: &App, served: Vec<(String, Option<std::collections::
 async fn revoke_and_note(app: &App, served: Vec<(String, Option<std::collections::BTreeSet<String>>)>, results: &mut [RelayResult]) {
     const AGAIN: &str = "Use Revoke again under Policy, Health monitoring.";
     match revoke_grants(app, served).await {
-        Ok(done) => {
+        Ok((done, held)) => {
+            for (id, waiting) in held {
+                let line = format!("Old enrolment grant {id} stays valid until every relay serves a policy without it; not yet on {}.", waiting.join(", "));
+                for res in results.iter_mut().filter(|r| r.ok) {
+                    let prev = res.detail["note"].as_str().map(|p| format!("{p}\n")).unwrap_or_default();
+                    res.detail["note"] = json!(format!("{prev}{line}"));
+                }
+            }
             for (sv, id, r) in done {
                 let Some(res) = results.iter_mut().find(|x| x.server == sv) else { continue };
                 let (field, line) = match r {
@@ -2505,6 +2565,9 @@ fn custom_expiry(now: u64, days: u64) -> R<u64> {
 
 /// The `PUT /api/admin/custom/<id>` body (docs/api.md, "Custom apps").
 fn custom_body(p: &CustomProfile, key: &SigningKey, token: &str, expires: u64, channel: &str) -> R<Value> {
+    if let Some(id) = p.layer.keys().find(|id| id.starts_with("health.")) {
+        return Err(format!("A custom app cannot set {id}: its signed profile has no serial and cannot be revoked. Set the health monitoring agent in the policy (Policy, Health monitoring)."));
+    }
     p.validate()?;
     let doc = envelope::sign(&serde_json::to_vec(p).unwrap(), key);
     Ok(json!({ "profile": doc, "token": token, "expires": expires, "channel": channel }))
@@ -3227,14 +3290,208 @@ mod tests {
         // Journalled without the token.
         let j = fs::read_to_string(app.path(grants::JOURNAL)).unwrap();
         assert!(j.contains("\"group:monitored\"") && j.contains("\"4711\"") && !j.contains(&token), "{j}");
-        // Renew: the old one is replaced (revoked once the relays serve the new policy) and blocks publish.
+        // Renew: the old one is replaced, still valid while it is revoked nowhere (a discarded Renew
+        // publishes as before); once a relay revoked it, it blocks publish.
         let renewed = grant_new(&app, "group:monitored", "", Some(&token)).unwrap();
+        publish_check(&app, &b).unwrap();
+        let mut j = grant_journal(&app).unwrap();
+        grants::mark_revoked_on(&mut j, "a", &grants::peek(&token).unwrap().id);
+        app.write(grants::JOURNAL, &serde_json::to_vec(&j).unwrap()).unwrap();
         assert!(publish_check(&app, &b).unwrap_err().contains("was revoked"));
         b.groups.get_mut("monitored").unwrap().overrides.get_mut(grants::GRANT).unwrap().value = Some(renewed);
         publish_check(&app, &b).unwrap();
         // A bundle the trust crate refuses is still refused first.
         b.assignments.insert("u".into(), "nope".into());
         assert!(publish_check(&app, &b).unwrap_err().contains("unknown group"));
+    }
+
+    /// A relay for the grant tests: serves the last policy PUT to it at `GET /api/policy`, answers
+    /// the PUT and `POST /api/admin/status/revoke` with the status codes in `codes` (changeable),
+    /// and records each request as "METHOD path body".
+    fn fake_relay() -> (String, std::sync::Arc<Mutex<(u16, u16)>>, std::sync::Arc<Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::Arc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let (codes, seen) = (Arc::new(Mutex::new((200u16, 200u16))), Arc::new(Mutex::new(Vec::new())));
+        let (c, log) = (codes.clone(), seen.clone());
+        std::thread::spawn(move || {
+            let mut policy: Option<Vec<u8>> = None;
+            for s in listener.incoming().flatten() {
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                if r.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = h.split_once(':') {
+                        if k.eq_ignore_ascii_case("content-length") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                let mut body = vec![0; len];
+                let _ = r.read_exact(&mut body);
+                let mut parts = line.split_whitespace();
+                let (method, path) = (parts.next().unwrap_or("").to_owned(), parts.next().unwrap_or("").to_owned());
+                log.lock().unwrap().push(format!("{method} {path} {}", String::from_utf8_lossy(&body)));
+                let (put, revoke) = *c.lock().unwrap();
+                let (code, text) = match (method.as_str(), path.as_str()) {
+                    ("GET", "/api/policy") => policy.clone().map_or((404, b"not found".to_vec()), |p| (200, p)),
+                    ("PUT", "/api/admin/policy") if put == 200 => {
+                        policy = Some(body);
+                        (200, b"{}".to_vec())
+                    }
+                    ("PUT", "/api/admin/policy") => (put, b"down".to_vec()),
+                    ("POST", "/api/admin/status/revoke") => (revoke, if revoke == 200 { b"{}".to_vec() } else { b"down".to_vec() }),
+                    _ => (404, b"not found".to_vec()),
+                };
+                let _ = write!(&s, "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", text.len());
+                let _ = (&s).write_all(&text);
+            }
+        });
+        (server, codes, seen)
+    }
+
+    fn revokes(seen: &Mutex<Vec<String>>) -> Vec<String> {
+        seen.lock().unwrap().iter().filter(|l| l.starts_with("POST /api/admin/status/revoke")).cloned().collect()
+    }
+
+    fn with_relays(name: &str, relays: &[&String]) -> App {
+        let app = temp_app(name);
+        app.write("settings.json", json!({ "server": relays.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",") }).to_string().as_bytes()).unwrap();
+        *app.keys.lock().unwrap() = Some(Keys::generate().unwrap());
+        app
+    }
+
+    fn with_grant(token: &str) -> Bundle {
+        let mut b: Bundle = serde_json::from_str(r#"{"serial":0,"issued_at":0,"groups":{"monitored":{"profile":"technician","overrides":{"health.agent":{"state":"on","value":"install"}}}}}"#).unwrap();
+        b.groups.get_mut("monitored").unwrap().overrides.insert(grants::GRANT.into(), policy::Rule { state: policy::State::On, value: Some(token.into()) });
+        b
+    }
+
+    /// Renew, publish, a relay that failed, Bring up to date and Revoke again, with fake relays:
+    /// the old grant is revoked on all relays or on none, and what each step says.
+    #[test]
+    fn a_renewed_grant_is_revoked_only_once_every_relay_serves_the_new_policy() {
+        let _one = api::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let ((a, _, seen_a), (b, codes_b, seen_b)) = (fake_relay(), fake_relay());
+        let app = with_relays("renew-relays", &[&a, &b]);
+        let old = grant_new(&app, "group:monitored", "", None).unwrap();
+        tauri::async_runtime::block_on(publish(&app, with_grant(&old), None)).unwrap();
+        let new = grant_new(&app, "group:monitored", "", Some(&old)).unwrap();
+        let old_id = grants::peek(&old).unwrap().id;
+        // b refuses the new policy: a serves it, b still the old one, so the old grant is revoked nowhere.
+        codes_b.lock().unwrap().0 = 500;
+        let out = tauri::async_runtime::block_on(publish(&app, with_grant(&new), None)).unwrap();
+        assert!(revokes(&seen_a).is_empty() && revokes(&seen_b).is_empty(), "{:?}", revokes(&seen_a));
+        let note = out["relays"][0]["detail"]["note"].as_str().unwrap();
+        assert_eq!(note, format!("Old enrolment grant {old_id} stays valid until every relay serves a policy without it; not yet on {b}."));
+        let j = grant_journal(&app).unwrap();
+        assert_eq!(grants::pending(&j, &app.servers(), api::now())[0]["waiting"], json!([b]));
+        // Bring up to date: b takes it, the old grant goes to both at once.
+        codes_b.lock().unwrap().0 = 200;
+        let out = tauri::async_runtime::block_on(sync(&app)).unwrap();
+        assert_eq!((revokes(&seen_a).len(), revokes(&seen_b).len()), (1, 1));
+        assert!(revokes(&seen_b)[0].contains(&old_id), "{:?}", revokes(&seen_b));
+        let by = |sv: &String| out.iter().find(|r| &r.server == sv).unwrap().detail.clone();
+        assert_eq!(by(&a)["note"], json!(format!("Old enrolment grant {old_id} revoked")));
+        assert_eq!(by(&b)["note"], json!(format!("Old enrolment grant {old_id} revoked")));
+        assert!(grants::pending(&grant_journal(&app).unwrap(), &app.servers(), api::now()).is_empty());
+    }
+
+    /// The warning when a relay refuses the revoke, and Revoke again.
+    #[test]
+    fn a_refused_revoke_is_a_warning_and_revoke_again_finishes_it() {
+        let _one = api::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let ((a, codes_a, seen_a), (b, _, _)) = (fake_relay(), fake_relay());
+        let app = with_relays("revoke-warn", &[&a, &b]);
+        let old = grant_new(&app, "group:monitored", "", None).unwrap();
+        tauri::async_runtime::block_on(publish(&app, with_grant(&old), None)).unwrap();
+        let new = grant_new(&app, "group:monitored", "", Some(&old)).unwrap();
+        let old_id = grants::peek(&old).unwrap().id;
+        codes_a.lock().unwrap().1 = 500;
+        let out = tauri::async_runtime::block_on(publish(&app, with_grant(&new), None)).unwrap();
+        let warn = out["relays"][0]["detail"]["warning"].as_str().unwrap();
+        assert!(warn.starts_with(&format!("Old enrolment grant {old_id} not revoked: ")) && warn.ends_with("Use Revoke again under Policy, Health monitoring."), "{warn}");
+        assert_eq!(out["relays"][1]["detail"]["note"], json!(format!("Old enrolment grant {old_id} revoked")));
+        let p = grants::pending(&grant_journal(&app).unwrap(), &app.servers(), api::now());
+        assert_eq!(p[0]["relays"], json!([a]));
+        codes_a.lock().unwrap().1 = 200;
+        let again = tauri::async_runtime::block_on(revoke_pending(&app)).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!((again[0].server.as_str(), again[0].ok, again[0].detail["note"].as_str(), again[0].detail["id"].as_str()), (a.as_str(), true, Some(format!("Grant {old_id} revoked").as_str()), Some(old_id.as_str())));
+        assert_eq!(revokes(&seen_a).len(), 2);
+    }
+
+    /// Revoke after a Renew: the new grant and the old one (the one live on the relays), on every
+    /// relay at once; the results name each grant.
+    #[test]
+    fn revoke_after_renew_revokes_the_live_grant_too() {
+        let _one = api::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let ((a, _, seen_a), (b, codes_b, seen_b)) = (fake_relay(), fake_relay());
+        let app = with_relays("revoke-renew", &[&a, &b]);
+        let old = grant_new(&app, "group:monitored", "", None).unwrap();
+        tauri::async_runtime::block_on(publish(&app, with_grant(&old), None)).unwrap();
+        let new = grant_new(&app, "group:monitored", "", Some(&old)).unwrap();
+        codes_b.lock().unwrap().1 = 500;
+        let out = tauri::async_runtime::block_on(revoke_layer_now(&app, "group:monitored", &new)).unwrap();
+        let (old_id, new_id) = (grants::peek(&old).unwrap().id, grants::peek(&new).unwrap().id);
+        for id in [&old_id, &new_id] {
+            assert!(revokes(&seen_a).iter().any(|l| l.contains(id.as_str())) && revokes(&seen_b).iter().any(|l| l.contains(id.as_str())), "{id}");
+            let on_a = out.iter().find(|r| r.server == a && r.detail["id"] == json!(id)).unwrap();
+            assert_eq!(on_a.detail["note"], json!(format!("Grant {id} revoked")));
+            let on_b = out.iter().find(|r| r.server == b && r.detail["id"] == json!(id)).unwrap();
+            assert!(!on_b.ok && on_b.error.as_deref().unwrap().starts_with(&format!("Grant {id} not revoked: ")), "{on_b:?}");
+        }
+        assert_eq!(out.len(), 4);
+        // The published policy still carries the old grant: now revoked here, so it blocks publish.
+        assert!(publish_check(&app, &with_grant(&old)).unwrap_err().contains("was revoked"));
+    }
+
+    /// A policy that does not use the health features goes out byte for byte as before: the
+    /// signed body is the 0.6 serialisation with the new serial and time.
+    #[test]
+    fn a_policy_without_the_features_publishes_the_same_bytes() {
+        let _one = api::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (a, _, seen) = fake_relay();
+        let app = with_relays("same-bytes", &[&a]);
+        let old = r#"{"serial":7,"issued_at":1700000000,"profiles":{"technician":{"permission.clipboard":{"state":"off"}}},"groups":{"g":{"profile":"customer","overrides":{}}},"assignments":{"u1":"g"}}"#;
+        let out = tauri::async_runtime::block_on(publish(&app, serde_json::from_str(old).unwrap(), None)).unwrap();
+        let put = seen.lock().unwrap().iter().find(|l| l.starts_with("PUT /api/admin/policy ")).cloned().unwrap();
+        let doc: envelope::Signed = serde_json::from_str(put.trim_start_matches("PUT /api/admin/policy ")).unwrap();
+        use base64::Engine;
+        let body = base64::engine::general_purpose::STANDARD.decode(&doc.payload).unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["serial"], out["serial"]);
+        let want = old.replace("\"serial\":7,\"issued_at\":1700000000", &format!("\"serial\":{},\"issued_at\":{}", v["serial"], v["issued_at"]));
+        assert_eq!(String::from_utf8(body).unwrap(), want);
+        assert!(revokes(&seen).is_empty());
+    }
+
+    #[test]
+    fn a_custom_app_cannot_set_the_health_features() {
+        let key = tether_trust::generate_key();
+        for id in [grants::AGENT, grants::GRANT] {
+            let p = CustomProfile { id: "x".into(), name: "X".into(), accent: String::new(), welcome: String::new(), logo_png: String::new(), layer: Layer::from([(id.to_owned(), policy::Rule { state: policy::State::On, value: Some("install".into()) })]), issued_at: 0 };
+            let e = custom_body(&p, &key, "t", 1, "stable").unwrap_err();
+            assert!(e.starts_with(&format!("A custom app cannot set {id}: its signed profile has no serial and cannot be revoked.")), "{e}");
+        }
+    }
+
+    #[test]
+    fn saving_a_draft_with_the_old_grant_again_restores_it() {
+        let app = with_relays("restore", &[&"http://127.0.0.1:9".to_owned()]);
+        let old = grant_new(&app, "group:monitored", "", None).unwrap();
+        let _new = grant_new(&app, "group:monitored", "", Some(&old)).unwrap();
+        save_draft(&app, &with_grant(&old)).unwrap();
+        let j = grant_journal(&app).unwrap();
+        assert_eq!((j[0].state, j[1].state), (grants::GrantState::Active, grants::GrantState::Replaced));
     }
 
     #[test]
