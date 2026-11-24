@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AgentBody, type AgentResult } from "./AgentDialog";
+import { AgentBody, agentRunner, type AgentResult } from "./AgentDialog";
+import { invoke } from "../lib/ipc";
 import type { AgentAnswer } from "../lib/agent";
+
+vi.mock("../lib/ipc", () => ({ invoke: vi.fn() }));
+const ipc = vi.mocked(invoke);
 
 const ans = (state: string, p: Partial<AgentAnswer> = {}): AgentAnswer => ({ state, version: "", installed_by: "", detail: "", at: 0, ...p });
 const html = (r: AgentResult, p: Partial<Parameters<typeof AgentBody>[0]> = {}) =>
@@ -36,5 +40,36 @@ describe("session agent dialog", () => {
   });
   it("Remove asks first", () => {
     expect(buttons(html({ a: ans("installed"), did: "status" }, { ask: "remove" }))).toEqual(["Cancel", "Remove"]);
+  });
+});
+
+// The dialog's logic without a DOM: the runner is what AgentDialog drives its state with.
+describe("session agent dialog: requests", () => {
+  const collect = () => {
+    const st = { r: null as AgentResult, busy: null as string | null, err: "" };
+    return { st, on: { busy: (a: string | null) => void (st.busy = a), result: (r: AgentResult) => void (st.r = r), error: (e: string) => void (st.err = e) } };
+  };
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  it("a rejected request shows the error line and brings the buttons back", async () => {
+    ipc.mockRejectedValueOnce("the host did not answer");
+    const { st, on } = collect();
+    agentRunner("k", on).run("install");
+    expect(st.busy).toBe("install");
+    await tick();
+    expect(st.busy).toBeNull();
+    const s = html(st.r, { busy: st.busy as null, err: st.err });
+    expect(s).toContain("Could not ask the remote computer: the host did not answer");
+    expect(buttons(s)).toEqual(["Ask again", "Close"]);
+  });
+  it("an answer that arrives after the dialog was closed is dropped", async () => {
+    let done!: (a: AgentAnswer) => void;
+    ipc.mockReturnValueOnce(new Promise((r) => (done = r)));
+    const { st, on } = collect();
+    const run = agentRunner("k", on);
+    run.run("status");
+    run.stop();
+    done(ans("installed"));
+    await tick();
+    expect(st).toEqual({ r: null, busy: "status", err: "" });
   });
 });

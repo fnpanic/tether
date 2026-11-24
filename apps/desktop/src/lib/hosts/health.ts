@@ -161,6 +161,6 @@ export function linkedText(h: Pick<Host, "status">, rep: StatusHostReply | null,
   const at = l.at ? `, ${day(l.at)}` : "";
   if (st.conflict) return `Linked to ${clip(h.status?.tether_id ?? "", 32)} on its relay${at}`;
   if (l.by) return `Health linked by ${clip(l.by, 64)}, ${day(l.at)}`;
-  if (rep?.linked_proof === true || h.status?.linked_proof === true) return `Health linked by Tether on this computer${at}`;
+  if (rep?.linked_proof === true || h.status?.linked_proof === true) return `Health linked by Tether on that computer${at}`;
   return `Health linked by the enrolment token issued for this host${at}`;
 }

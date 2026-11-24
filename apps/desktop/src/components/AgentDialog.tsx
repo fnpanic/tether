@@ -5,42 +5,57 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "./ui";
 import { invoke } from "../lib/ipc";
 import { errorText } from "../lib/policy";
-import { clip } from "../lib/hosts/health";
+import { clean } from "../lib/hosts/sbom";
 import { agentConfirm, agentView, OFFER_LABEL, PROGRESS, type AgentAction, type AgentAnswer, type AgentOffer } from "../lib/agent";
 
 type Ask = Exclude<AgentOffer, "again">;
 export type AgentResult = { a: AgentAnswer; did: AgentAction } | null;
+
+/** One request at a time to the remote computer; after `stop()` (dialog closed) a late answer is dropped. */
+export function agentRunner(key: string, on: { busy: (a: AgentAction | null) => void; result: (r: AgentResult) => void; error: (e: string) => void }) {
+  let live = true;
+  return {
+    run(action: AgentAction) {
+      on.busy(action);
+      invoke<AgentAnswer>("session_agent", { key, action }).then(
+        (a) => live && (on.result(a ? { a, did: action } : null), on.busy(null)),
+        (e) => live && (on.error(errorText(e)), on.busy(null)),
+      );
+    },
+    stop() {
+      live = false;
+    },
+  };
+}
 
 export function AgentDialog({ sessionKey: key, onClose }: { sessionKey: string; onClose: () => void }) {
   const [r, setR] = useState<AgentResult>(null);
   const [busy, setBusy] = useState<AgentAction | null>("status");
   const [err, setErr] = useState("");
   const [ask, setAsk] = useState<Ask | null>(null);
-  const live = useRef(true);
+  const runner = useRef<ReturnType<typeof agentRunner>>(null);
   const run = (action: AgentAction) => {
     setAsk(null);
     setErr("");
-    setBusy(action);
-    invoke<AgentAnswer>("session_agent", { key, action }).then(
-      (a) => live.current && (setR(a ? { a, did: action } : null), setBusy(null)),
-      (e) => live.current && (setErr(errorText(e)), setBusy(null)),
-    );
+    runner.current?.run(action);
   };
   useEffect(() => {
-    live.current = true;
-    run("status");
-    return () => void (live.current = false);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    runner.current = agentRunner(key, { busy: setBusy, result: setR, error: setErr });
+    runner.current.run("status");
+    return () => runner.current?.stop();
+  }, [key]);
   return <AgentBody r={r} busy={busy} err={err} ask={ask} onOffer={(o) => (o === "again" ? run("status") : setAsk(o))} onConfirm={(a) => run(a)} onBack={() => setAsk(null)} onClose={onClose} />;
 }
 
 /** The dialog for one moment: asking (`busy`), an answer, or the confirmation of `ask`. */
 export function AgentBody({ r, busy, err, ask, onOffer, onConfirm, onBack, onClose }: { r: AgentResult; busy: AgentAction | null; err: string; ask: Ask | null; onOffer: (o: AgentOffer) => void; onConfirm: (a: "install" | "remove") => void; onBack: () => void; onClose: () => void }) {
   const box = useRef<HTMLDivElement>(null);
-  // The button that had focus may be gone (confirmed, answered): focus stays in the dialog.
+  // The button that had focus may be gone (confirmed, answered): focus stays in the dialog. While a request
+  // runs it goes to the status line, not to Close: a held Enter must not close the dialog. Only when the
+  // state changes, not on every render of the session view.
   useEffect(() => {
-    if (!box.current?.contains(document.activeElement)) box.current?.querySelector<HTMLElement>("[data-close]")?.focus();
-  });
+    if (!box.current?.contains(document.activeElement)) box.current?.querySelector<HTMLElement>(busy ? "[role=status]" : "[data-close]")?.focus();
+  }, [busy, ask, err, r]);
   const c = ask && r ? agentConfirm(ask, r.a) : null;
   const v = r && !busy ? agentView(r.a, r.did) : null;
   return (
@@ -65,11 +80,11 @@ export function AgentBody({ r, busy, err, ask, onOffer, onConfirm, onBack, onClo
         </>
       ) : (
         <>
-          <div role="status" aria-live="polite" className="mt-2 text-caption">
+          <div role="status" aria-live="polite" tabIndex={-1} className="mt-2 text-caption outline-none">
             {busy ? (
               <p className="text-white/70">{PROGRESS[busy]}</p>
             ) : err ? (
-              <p className="break-words text-warn">Could not ask the remote computer: {clip(err, 300)}</p>
+              <p className="break-words text-warn">Could not ask the remote computer: {clean(err, 300)}</p>
             ) : (
               v && (
                 <>

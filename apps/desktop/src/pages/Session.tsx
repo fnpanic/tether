@@ -241,8 +241,12 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
     invoke("session_keyboard", { key, pause: false }).catch(() => {});
   };
   useEffect(() => {
-    if (local && toolbar && !ask && !barRef.current?.contains(document.activeElement)) barRef.current?.querySelector("button")?.focus();
-  }, [local, toolbar, ask]);
+    if (local && toolbar && !ask && !agentOpen && !barRef.current?.contains(document.activeElement)) barRef.current?.querySelector("button")?.focus();
+  }, [local, toolbar, ask, agentOpen]);
+  // A reconnect must not bring the dialog back: it asked about the connection that ended.
+  useEffect(() => {
+    if (phase.kind !== "connected") setAgentOpen(false);
+  }, [phase.kind]);
   /** What the host said is missing (a Mac without Screen Recording / Accessibility). */
   const [hostMissing, setHostMissing] = useState<string[]>([]);
 

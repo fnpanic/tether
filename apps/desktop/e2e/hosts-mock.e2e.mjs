@@ -370,7 +370,7 @@ async function run(name) {
   // An agent Tether installed and linked on that computer (relay proof): said so, no member named.
   await setQuery("id:327660915");
   await rows().first().click();
-  check(tag("a proof-linked host says it was linked by Tether on that computer"), await until(() => p.getByText(/^Health linked by Tether on this computer, /).isVisible()));
+  check(tag("a proof-linked host says it was linked by Tether on that computer"), await until(() => p.getByText(/^Health linked by Tether on that computer, /).isVisible()));
   await setQuery(`id:${la?.tetherId}`);
   await rows().first().click();
   await p.getByTestId("health-section").getByRole("button", { name: "Unlink" }).click();

@@ -16,7 +16,7 @@ describe("session dialog: one sentence and its buttons per state", () => {
       [ans("failed", { detail: "download refused" }), "The last action on the remote computer did not succeed.", ["again", "install"]],
       [ans("running"), "Still running on the remote computer. Ask again in a moment to see the result.", ["again"]],
       [ans("busy"), "Tether on the remote computer is busy with the agent right now. Ask again in a moment.", ["again"]],
-      [ans("not-allowed"), "Not allowed by the remote computer's policy.", []],
+      [ans("not-allowed"), "Not allowed by the remote computer's policy. The person or administrator of that computer decides (machine policy).", []],
       [ans("needs-service"), "Needs Tether's service on the remote computer (Tether installed as a service).", []],
       [ans("not-supported"), "The remote computer does not support this: the health monitoring agent is for Windows computers with Tether installed.", []],
       [ans("too-old"), "Tether on the remote computer is too old (needs 0.7.0).", []],
@@ -56,11 +56,29 @@ describe("session dialog: one sentence and its buttons per state", () => {
   });
 });
 
+describe("session dialog: text from the other side", () => {
+  it("installed_by is looked up as an own key only: 'constructor' or '__proto__' show nothing", () => {
+    for (const k of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      expect(agentView(ans("installed", { installed_by: k })).text).toBe("Installed by Tether.");
+      expect(practiceLine(ans("installed", { installed_by: k }))).toContain("at your organisation's request. What it reports");
+    }
+  });
+  it("control, bidi-override and zero-width characters are removed from detail and version", () => {
+    const v = agentView(ans("failed", { detail: "a‮b​cd e", version: "1‮.2" }));
+    expect(v.detail).toBe("abcde");
+    expect(agentView(ans("installed", { version: "1​.‮2" })).text).toBe("Installed 1.2 by Tether.");
+  });
+  it("the refusal says who decides", () => {
+    expect(agentView(ans("not-allowed")).text).toBe("Not allowed by the remote computer's policy. The person or administrator of that computer decides (machine policy).");
+  });
+});
+
 describe("session dialog: confirmations", () => {
   it("install says it stays and how the practice removes it", () => {
     const c = agentConfirm("install", ans("not-installed"));
     expect([c.title, c.button, c.action, c.warn]).toEqual(["Install the health monitoring agent?", "Install", "install", undefined]);
     expect(c.text).toContain("It stays after this session ends");
+    expect(c.text).toContain("reports the computer's health and, if your organisation collects it, the list of installed programs to your organisation's servers");
     expect(c.text).toContain("can remove it under Settings › Apps (Tether Monitor)");
   });
   it("install again after the practice's removal names the date and warns first", () => {

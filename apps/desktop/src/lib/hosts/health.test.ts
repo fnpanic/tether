@@ -223,7 +223,7 @@ describe("verified links", () => {
     // No summary: nothing to offer.
     expect(linkState({ agentOnly: false, status: undefined }, null, true)).toEqual({ claim: null, linked: null, link: "none", blocked: null, unlink: false, remove: false, dismissed: false, allow: false, conflict: false });
   });
-  it("the link line: by Tether on this computer with a proof; an answer without the field reads as before", () => {
+  it("the link line: by Tether on that computer with a proof; an answer without the field reads as before", () => {
     const [linked] = buildHosts(emptyStore(), [], [], null, NOW, [sum({ uuid: "u2", tether_id: "222222222", linked_at: 1000 })]);
     const day = (t: number | null | undefined) => (t ? `day ${t}` : "");
     const line = (rep: StatusHostReply | null, h = linked) => linkedText(h, rep, linkState(h, rep, true), day);
@@ -232,9 +232,9 @@ describe("verified links", () => {
     expect(line(reply({ tether_id: "222222222", linked_at: 1000 }))).toBe("Health linked by the enrolment token issued for this host, day 1000");
     expect(line(reply({ tether_id: "222222222" }))).toBe("Health linked by the enrolment token issued for this host");
     // A proof link, in the per-host answer or in the summary.
-    expect(line(reply({ tether_id: "222222222", linked_at: 1000, linked_proof: true }))).toBe("Health linked by Tether on this computer, day 1000");
+    expect(line(reply({ tether_id: "222222222", linked_at: 1000, linked_proof: true }))).toBe("Health linked by Tether on that computer, day 1000");
     const [proofRow] = buildHosts(emptyStore(), [], [], null, NOW, [sum({ uuid: "u2", tether_id: "222222222", linked_proof: true })]);
-    expect(line(reply({ tether_id: "222222222" }), proofRow)).toBe("Health linked by Tether on this computer");
+    expect(line(reply({ tether_id: "222222222" }), proofRow)).toBe("Health linked by Tether on that computer");
     // Only true counts (the relay sends the field only when true; anything else is no proof).
     expect(line(reply({ tether_id: "222222222", linked_proof: "yes" as unknown as boolean }))).toBe("Health linked by the enrolment token issued for this host");
     // A member's confirmation names the member, whatever else the answer says.
