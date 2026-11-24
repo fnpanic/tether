@@ -14,6 +14,9 @@
 # baseline p99 + 2 ms, p99.9 <= 1.5 x baseline p99.9 + 5 ms, no request slower than 50 ms; no 5xx
 # (no 503 busy) on any route; 429 <= 0.1 % of status posts; peak RSS below 48 MiB (MemoryMax=64M);
 # RSS at the end within 10 % of the reference (taken after enrolment and the warm-up).
+# With STATUS_SBOM=on the relay stores software lists and every device also uploads a 60 KiB one
+# once (PUT /api/status/sbom), paced at STATUS_SBOM_RPS (default 2, the relay's own default) per
+# second for the whole run (or until every device has sent one); they must all be 204 (or 429).
 # STATUS_MAX_DEVICES is raised to DEVICES + 1000 for the run, so the new enrolments fit.
 #
 # Session signalling (hbbs) is not measured: it is a separate process that the status store does
@@ -21,6 +24,7 @@
 #
 #   tools/load/status-run.sh [out-file]     (Linux; env: DEVICES=20000 SECS=600 WARMUP=60
 #                                            BASELINE=60 ENROLL=100 API_BIN=… LOAD_BIN=…
+#                                            STATUS_SBOM=on [STATUS_SBOM_RPS=2]: also software lists;
 #                                            SELF_CHECK=1: also the generator's own pauses;
 #                                            STATUS_TRACE_LOCK=1: tether-api logs state-lock holds over 20 ms)
 set -euo pipefail
@@ -43,7 +47,7 @@ cleanup() { [ -n "$API_PID" ] && kill "$API_PID" 2>/dev/null; wait 2>/dev/null; 
 trap cleanup EXIT
 PUB="$("$LOAD_BIN" keygen "$W/admin.key")"
 "$LOAD_BIN" prep "$W/data" devices="$DEVICES" enroll="$ENROLL"
-ADMIN_PUB_KEY="$PUB" RELAY_HOST=relay.test STATUS_MAX_DEVICES=$((DEVICES + 1000)) STATUS_TRACE_LOCK="${STATUS_TRACE_LOCK:-}" \
+ADMIN_PUB_KEY="$PUB" RELAY_HOST=relay.test STATUS_MAX_DEVICES=$((DEVICES + 1000)) STATUS_TRACE_LOCK="${STATUS_TRACE_LOCK:-}" STATUS_SBOM="${STATUS_SBOM:-}" STATUS_SBOM_RPS="${STATUS_SBOM_RPS:-2}" \
   "$API_BIN" --data "$W/data" --listen 127.0.0.1:0 > "$W/api.out" 2> "$W/api.log" &
 API_PID=$!
 for _ in $(seq 300); do grep -q '^listening on' "$W/api.out" 2>/dev/null && break; sleep 0.1; done
@@ -52,7 +56,7 @@ ADDR="$(sed -n 's/^listening on //p' "$W/api.out")"
 echo "tether-api pid $API_PID on $ADDR; $DEVICES devices, warm-up $WARMUP s, baseline $BASELINE s, run $SECS s" | tee "$OUT"
 set +e
 "$LOAD_BIN" run addr="$ADDR" key="$W/admin.key" pid="$API_PID" devices="$DEVICES" enroll="$ENROLL" \
-  seconds="$SECS" warmup="$WARMUP" baseline="$BASELINE" ${SELF_CHECK:+--self-check} | tee -a "$OUT"
+  seconds="$SECS" warmup="$WARMUP" baseline="$BASELINE" sbom_rps="$([ "${STATUS_SBOM:-}" = on ] && echo "${STATUS_SBOM_RPS:-2}" || echo 0)" ${SELF_CHECK:+--self-check} | tee -a "$OUT"
 rc=${PIPESTATUS[0]}
 grep -v -e '^warning' -e '^status: ' -e '^lock held' "$W/api.log" | head -20 | sed 's/^/tether-api: /' | tee -a "$OUT"
 if [ -n "${STATUS_TRACE_LOCK:-}" ]; then

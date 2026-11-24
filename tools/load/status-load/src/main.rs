@@ -6,7 +6,7 @@
 //!                                                  in seen.json
 //!   status-load run addr=<host:port> key=<file> pid=<tether-api pid> devices=N enroll=E
 //!       seconds=600 warmup=60 baseline=60 probe_ms=50 workers=16 full_pct=5
-//!       new_per_s=2 new_secs=300 summary_s=30 metrics_s=15
+//!       new_per_s=2 new_secs=300 summary_s=30 metrics_s=15 sbom_rps=0
 //!
 //! `run` publishes a policy, enrols devices 0..E through `POST /api/status/enroll` with an
 //! admin-signed token and publishes a roster with one throwaway member. Then it probes
@@ -17,7 +17,10 @@
 //!     over it, `full_pct` % full reports (8 KiB body), the rest heartbeats of about 300 bytes;
 //!   - `new_per_s` new devices enrol through the API per second for the first `new_secs`;
 //!   - the member fetches `GET /api/team/status` every `summary_s` and `/metrics` is scraped
-//!     every `metrics_s`.
+//!     every `metrics_s`;
+//!   - with `sbom_rps` > 0 (the relay needs `STATUS_SBOM=on` and the same `STATUS_SBOM_RPS`): one
+//!     thread uploads a 60 KiB software list (`PUT /api/status/sbom`, device-signed) for device 0,
+//!     1, 2, … at `sbom_rps` per second, each device once, until the devices or the run are over.
 //! Device entries are realistic: 4 products and 3 faults (about 1 KB in the summary), every
 //! 20th device 8 products and 10 faults. It prints the numbers and PASS or FAIL (exit 0 or 1).
 //!
@@ -185,6 +188,27 @@ fn full(i: usize, seq: u64) -> String {
     )
 }
 
+/// A CycloneDX-shaped software list of `host` of about 60 KiB (the relay stores any JSON object).
+fn sbom_doc(host: &str) -> String {
+    let mut comps = String::from(r#"{"type":"operating-system","name":"Windows 11 Pro","version":"10.0.26300"}"#);
+    let mut k = 0;
+    while comps.len() < 60 * 1024 - 400 {
+        comps.push_str(&format!(r#",{{"type":"application","name":"Example Application {k}","version":"{}.{}.{}","publisher":"Example Software Vendor {}"}}"#, k % 7, k % 31, k % 997, k % 40));
+        k += 1;
+    }
+    format!(r#"{{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"metadata":{{"component":{{"type":"device","name":"{host}"}}}},"components":[{comps}]}}"#)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sbom_doc_is_a_json_object_of_about_60_kib() {
+        let d = super::sbom_doc("PC-LOAD-000001");
+        assert!((59 * 1024..=61 * 1024).contains(&d.len()), "{}", d.len());
+        assert!(serde_json::from_str::<serde_json::Value>(&d).unwrap().is_object());
+    }
+}
+
 /// (status, latency in ms) of one route.
 type Samples = Vec<(u16, f64)>;
 
@@ -294,6 +318,7 @@ fn run(a: &BTreeMap<String, String>) -> bool {
     let (workers, full_pct) = (num(a, "workers", 16) as usize, num(a, "full_pct", 5) as f64);
     let (new_per_s, new_secs) = (num(a, "new_per_s", 2), num(a, "new_secs", 300));
     let (summary_s, metrics_s) = (num(a, "summary_s", 30), num(a, "metrics_s", 15));
+    let sbom_rps = num(a, "sbom_rps", 0);
     let hex = std::fs::read_to_string(a.get("key").expect("key=")).unwrap();
     let seed: Vec<u8> = (0..32).map(|i| u8::from_str_radix(&hex.trim()[2 * i..2 * i + 2], 16).unwrap()).collect();
     let admin = SigningKey::from_bytes(&seed.try_into().unwrap());
@@ -420,12 +445,33 @@ fn run(a: &BTreeMap<String, String>) -> bool {
         let addr = addr.clone();
         std::thread::spawn(move || every(Duration::from_secs(metrics_s), until, |_| sample(req(&addr, "GET", "/metrics", &[], b""))))
     };
+    // One 60 KiB list per device, in device order, at the relay's global budget, until every device
+    // has sent one or the run is over.
+    let sbom_refused: Arc<Mutex<BTreeMap<String, usize>>> = Arc::new(Mutex::new(BTreeMap::new()));
+    let sboms = (sbom_rps > 0).then(|| {
+        let (addr, refused) = (addr.clone(), sbom_refused.clone());
+        let stop = start + Duration::from_micros((devices as u64 * 1_000_000 / sbom_rps).min(secs * 1_000_000));
+        std::thread::spawn(move || {
+            every(Duration::from_micros(1_000_000 / sbom_rps), stop, |n| {
+                let body = sbom_doc(&format!("PC-LOAD-{n:06}"));
+                let sig = reqauth::sign_device_request(&device_key(n), &uuid(n), RELAY, "PUT", "/api/status/sbom", body.as_bytes(), now());
+                let r = req(&addr, "PUT", "/api/status/sbom", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", &ip(150 + (n >> 16) as u8, n))], body.as_bytes());
+                if let Ok(r) = &r {
+                    if r.status != 204 {
+                        *refused.lock().unwrap().entry(format!("{} {}", r.status, r.body)).or_default() += 1;
+                    }
+                }
+                sample(r)
+            })
+        })
+    });
     let (hb_run, pol_run) = probes(&addr, secs, gap, pool, &next_uuid);
     dispatcher.join().unwrap();
     for t in pool_threads {
         t.join().unwrap();
     }
     let (new_enrols, summaries, scrapes) = (new_enrols.join().unwrap(), summaries.join().unwrap(), scrapes.join().unwrap());
+    let sboms: Samples = sboms.map(|t| t.join().unwrap()).unwrap_or_default();
     let series = sampler.join().unwrap();
     let rss_end = rss_kib(pid);
     let peak = peak.load(Ordering::Relaxed).max(rss_end as usize) as u64;
@@ -433,6 +479,7 @@ fn run(a: &BTreeMap<String, String>) -> bool {
     let (hb_b, pol_b, hb_r, pol_r) = (stats(&hb_base), stats(&pol_base), stats(&hb_run), stats(&pol_run));
     let posts = stats(&posts.lock().unwrap());
     let (new_s, sum_s, met_s) = (stats(&new_enrols), stats(&summaries), stats(&scrapes));
+    let sbom_s = stats(&sboms);
     println!();
     show("heartbeat baseline", &hb_b);
     show("heartbeat during run", &hb_r);
@@ -442,6 +489,14 @@ fn run(a: &BTreeMap<String, String>) -> bool {
     show("new enrolments", &new_s);
     show("team summary", &sum_s);
     show("metrics scrapes", &met_s);
+    if sbom_rps > 0 {
+        let ok = sbom_s.codes.get(&204).copied().unwrap_or(0);
+        println!("software list uploads: {} sent at {sbom_rps}/s, {ok} accepted (204), {} refused or failed", sbom_s.n, sbom_s.n - ok);
+        show("software list uploads", &sbom_s);
+        for (k, n) in sbom_refused.lock().unwrap().iter() {
+            println!("  refused software list upload x{n}: {}", k.chars().take(120).collect::<String>());
+        }
+    }
     for (k, n) in refusals.lock().unwrap().iter() {
         println!("  refused or failed status post x{n}: {}", k.chars().take(120).collect::<String>());
     }
@@ -450,7 +505,7 @@ fn run(a: &BTreeMap<String, String>) -> bool {
     println!("tether-api RSS each minute of the run (MiB): {}", series.join(" "));
 
     let r429 = posts.codes.get(&429).copied().unwrap_or(0);
-    let all = [&hb_b, &hb_r, &pol_b, &pol_r, &posts, &new_s, &sum_s, &met_s];
+    let all = [&hb_b, &hb_r, &pol_b, &pol_r, &posts, &new_s, &sum_s, &met_s, &sbom_s];
     let mut checks = Vec::new();
     for (name, b, r) in [("heartbeat", &hb_b, &hb_r), ("policy", &pol_b, &pol_r)] {
         checks.push((format!("{name} p99 {:.2} ms <= 1.2 x {:.2} + 2 ms", r.p99, b.p99), r.p99 <= 1.2 * b.p99 + 2.));
@@ -462,6 +517,7 @@ fn run(a: &BTreeMap<String, String>) -> bool {
         (format!("status 429: {r429} of {} posts <= 0.1 %", posts.n), r429 as f64 <= posts.n as f64 * 0.001),
         ("every status post accepted or 429".to_owned(), posts.codes.keys().all(|c| matches!(c, 200 | 429))),
         ("every probe, enrolment, summary and scrape answered 200".to_owned(), [&hb_b, &hb_r, &pol_b, &pol_r, &new_s, &sum_s, &met_s].iter().all(|s| s.codes.keys().all(|c| *c == 200))),
+        ("every software list upload accepted (204) or 429".to_owned(), sbom_s.codes.keys().all(|c| matches!(c, 204 | 429))),
         (format!("peak RSS {:.1} MiB < 48 MiB", mib(peak)), peak < 48 * 1024),
         (format!("RSS at the end within 10 % of the reference ({:.1} vs {:.1} MiB)", mib(rss_end), mib(rss_ref)), (rss_end as f64 - rss_ref as f64).abs() <= rss_ref as f64 * 0.1),
     ]);
