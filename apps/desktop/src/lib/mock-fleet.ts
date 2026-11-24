@@ -79,6 +79,7 @@ export function fleet() {
     status,
     second,
     report: (uuid: string) => healthReport(all(), meta, uuid, now),
+    sbom: (uuid: string) => sbomText(find(uuid).uuid, find(uuid).sbom?.at ?? now),
     link(uuid: string, id: string) {
       const s = find(uuid);
       if (s.claimed_id !== id) fail("Refused by the server: tether_id is not the one this device claims");
@@ -160,8 +161,45 @@ function summary(k: number, uuid: string, tether_id: string | null, host: string
 function healthFleet(org: { uuid: string; id: string }[], names: Map<string, string>, now: number): Summary[] {
   const out = org.filter((_, j) => j % 3 === 0).map((d, k) => summary(k, d.uuid, d.id, names.get(d.id) ?? d.id, now));
   // Agent-only machines: no Tether installed.
-  ["LAB-ANALYZER-01", "SCAN-STATION-02", "NAS-BACKUP-01"].forEach((host, i) => out.push(summary([3, 1, 2][i], `agent-only-${i + 1}`, null, host, now)));
+  ["LAB-ANALYZER-01", "SCAN-STATION-02", "NAS-BACKUP-01"].forEach((host, i) => out.push({ ...summary([3, 1, 2][i], `agent-only-${i + 1}`, null, host, now), sbom: { at: now - 3600 * (i + 1), sha: `0123456789abcde${i}` } }));
   return out;
+}
+
+// Software lists (team_status_sbom): made-up programs. agent-only-1 has a list, agent-only-2 is a list the relay
+// dropped since the summary (404), agent-only-3 holds JSON that is not a software list.
+const PROGRAMS: [string, string, string][] = [
+  ["Aster Notes", "4.2.1", "Aster Labs"], ["Birchwood Reader", "11.0.3", "Birchwood Software"], ["Cobalt Archive Tool", "7.15", "Cobalt Systems"], ["Dunmore Backup Agent", "3.8.0", "Dunmore Data"],
+  ["Elmstead Runtime", "17.0.9", "Elmstead Foundation"], ["Fenwick Spreadsheet", "2024.2", "Fenwick Office"], ["Garnet Browser", "126.0.2", "Garnet Project"], ["Hollin PDF Viewer", "9.1.4", "Hollin Documents"],
+  ["Ironwood Terminal", "1.4.0", "Ironwood Tools"], ["Juniper Mail", "102.9.1", "Juniper Project"], ["Kestrel Remote Helper", "2.0.12", "Kestrel Networks"], ["Larkfield Codec Pack", "5.3", "Larkfield Media"],
+  ["Meadow Text Editor", "8.6.2", "Meadow Software"], ["Northgate VPN Client", "6.1.0", "Northgate Security"], ["Oakham Image Editor", "3.9.7", "Oakham Graphics"], ["Pennant Chat", "1.88.0", "Pennant Communications"],
+  ["Quarry Database Browser", "5.2.4", "Quarry Data"], ["Ravenscar Antivirus", "21.4", "Ravenscar Security"], ["Stonebridge Print Driver", "2.7.1", "Stonebridge Devices"], ["Thistle Video Player", "3.0.5", "Thistle Media"],
+  ["Underhill Archive Manager", "1.12", "Underhill Tools"], ["Vale Calendar", "4.4.0", "Vale Software"], ["Wrenfield Scanner Service", "8.1.0", "Wrenfield Devices"], ["Yarrow Font Library", "2.2", "Yarrow Type"],
+  ["Zephyr Screenshot Tool", "6.0.3", "Zephyr Utilities"],
+];
+function sbomText(uuid: string, at: number): string {
+  if (uuid === "agent-only-2") return fail("none: No software list on the server.");
+  if (uuid === "agent-only-3") return JSON.stringify({ hello: "world", components: "none" });
+  const prop = (name: string, value: string) => ({ name, value });
+  return JSON.stringify({
+    bomFormat: "CycloneDX",
+    specVersion: "1.6",
+    serialNumber: "urn:uuid:7c1f6b5e-3f0a-4d8e-9a55-0c2d9a1b7e01",
+    version: 4,
+    metadata: {
+      timestamp: iso(at),
+      tools: { components: [{ type: "application", name: "tether-monitor", version: "0.1.2" }] },
+      component: {
+        type: "device",
+        name: "LAB-ANALYZER-01",
+        properties: [prop("tether:hw.manufacturer", "Example Devices"), prop("tether:hw.model", "Analyzer Station 7010"), prop("tether:hw.serial", "7XK2LAB0001"), prop("tether:hw.cpu", "Example Core i5-12500"), prop("tether:hw.memory_bytes", String(16 * 2 ** 30)), prop("tether:truncated", "12")],
+      },
+    },
+    components: [
+      { type: "operating-system", name: "Windows 11 Pro", version: "10.0.22631" },
+      ...PROGRAMS.map(([name, version, publisher]) => ({ type: "application", name, version, publisher })),
+      { type: "application", name: "Records Server", version: "26.3.2", publisher: "Example Health Software", properties: [prop("tether:product", "true"), prop("tether:role", "server")] },
+    ],
+  });
 }
 
 function healthReport(status: Summary[], meta: Map<string, Meta>, uuid: string, now: number): StatusHostReply {

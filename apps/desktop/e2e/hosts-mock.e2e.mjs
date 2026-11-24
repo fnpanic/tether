@@ -297,6 +297,35 @@ async function run(name) {
   await p.keyboard.press("Enter");
   await sleep(100);
   check(tag("Enter on an m: row opens nothing"), (await calls("open_session")).length === 0);
+  // Software list (SBOM): collapsed until opened, then the table, the filter, the device line and the export.
+  await setQuery("LAB-ANALYZER-01");
+  await rows().first().click();
+  const sw = p.getByTestId("software-section");
+  check(tag("Software is collapsed and says when the list is from"), (await until(() => sw.isVisible())) && /as of /.test(await sw.textContent()) && (await sw.getByRole("table").count()) === 0 && (await calls("team_status_sbom")).length === 0);
+  await sw.getByRole("button", { name: /^Software/ }).click();
+  check(tag("opening Software asks the relay and lists the programs"), (await until(() => sw.getByRole("table").isVisible())) && (await calls("team_status_sbom")).length === 1 && (await sw.getByRole("row").count()) === 27, `${await sw.getByRole("row").count()} rows`);
+  check(tag("Software header counts the programs"), /26 programs, as of /.test(await sw.getByRole("button", { name: /^Software/ }).textContent()));
+  check(tag("the product comes first, then by name"), /^Records Server/.test(await sw.getByRole("row").nth(1).textContent()) && /^Aster Notes/.test(await sw.getByRole("row").nth(2).textContent()));
+  check(tag("Software shows the device line and the truncated line"), (await sw.getByText("Example Devices Analyzer Station 7010, serial 7XK2LAB0001, 16 GB").isVisible()) && (await sw.getByText("12 more programs are not in the list").isVisible()));
+  const swFilter = sw.getByRole("textbox", { name: "Filter software by name or publisher" });
+  await swFilter.fill("oAk");
+  check(tag("the filter matches the name, case-insensitive"), (await sw.getByRole("row").count()) === 2 && (await sw.getByRole("cell", { name: "Oakham Image Editor" }).isVisible()));
+  await swFilter.fill("ravenscar security");
+  check(tag("the filter matches the publisher"), (await sw.getByRole("row").count()) === 2 && (await sw.getByRole("cell", { name: "Ravenscar Antivirus" }).isVisible()));
+  await swFilter.fill("");
+  await sw.getByRole("button", { name: "Export SBOM" }).click();
+  await until(async () => /\.cdx\.json$/.test((await p.evaluate(() => window.__lastExport?.name)) ?? ""));
+  const sx = await p.evaluate(() => window.__lastExport);
+  check(tag("Export SBOM saves the document as <host>-<date>.cdx.json, unchanged"), /^LAB-ANALYZER-01-\d{4}-\d{2}-\d{2}\.cdx\.json$/.test(sx?.name ?? "") && JSON.parse(sx.content).bomFormat === "CycloneDX" && sx.content.includes('"Aster Notes"'), sx?.name);
+  await shot("software");
+  await setQuery("SCAN-STATION-02");
+  await rows().first().click();
+  await p.getByTestId("software-section").getByRole("button", { name: /^Software/ }).click();
+  check(tag("a list the relay dropped meanwhile says so, no export"), (await until(() => p.getByText("No software list on the server.").isVisible())) && !(await p.getByRole("button", { name: "Export SBOM" }).isVisible()));
+  await setQuery("NAS-BACKUP-01");
+  await rows().first().click();
+  await p.getByTestId("software-section").getByRole("button", { name: /^Software/ }).click();
+  check(tag("a document that is not a software list says so and still offers the export"), (await until(() => p.getByText("The software list could not be read.").isVisible())) && (await p.getByRole("button", { name: "Export SBOM" }).isVisible()));
   // A report without body: an empty state, no error.
   await setQuery("NAS-BACKUP-01");
   await rows().first().click();

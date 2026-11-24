@@ -1,13 +1,15 @@
 // Health section of a host (spec 10.2/10.3): faults by group, setup items, passing checks folded,
 // then History, All checks and the raw report. Everything from the device is plain text, clipped.
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Copy, Link2, RotateCcw, Trash2, Unlink } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, Download, Link2, RotateCcw, Trash2, Unlink } from "lucide-react";
 import { Button, IconButton, Modal } from "../ui";
 import { invoke } from "../../lib/ipc";
 import { errorText } from "../../lib/policy";
 import { checksOf, clip, groupChecks, healthText, linkState, pick } from "../../lib/hosts/health";
+import { exportName, filterPrograms, parse } from "../../lib/hosts/sbom";
 import { label, type CheckState, type Host, type ReportCheck, type StatusHostReply, type StatusSummary } from "../../lib/hosts/model";
 import { actions, useHosts } from "../../lib/hosts/store";
+import { saveFile } from "./Dialogs";
 import { ago, HealthDot } from "./bits";
 
 type Lang = "de" | "en";
@@ -221,6 +223,138 @@ function LinkPart({ h, rep, nameOf, holderOf, ask, setAsk }: { h: Host; rep: Sta
   );
 }
 
+const SOFTWARE_ROWS = 200;
+type SbomLoad = { raw: string } | { note: string } | null;
+
+/** The host's software list (docs/health.md): asked for from the relay with the newest list when opened,
+ *  and again when the summary says it changed. Parsed here (tolerantly); Export saves the text as the relay sent it. */
+function SoftwarePart({ h }: { h: Host }) {
+  const s = h.status!;
+  const sb = s.sbom!;
+  const relay = s.sbomRelay ?? s.relay;
+  const [open, setOpen] = useState(false);
+  const [load, setLoad] = useState<SbomLoad>(null);
+  const [filter, setFilter] = useState("");
+  const [all, setAll] = useState(false);
+  const [saved, setSaved] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    setLoad(null);
+    invoke<string>("team_status_sbom", { relay, uuid: s.uuid }).then(
+      (raw) => live && setLoad({ raw }),
+      (e) => {
+        const m = errorText(e);
+        if (live) setLoad({ note: m.startsWith("none: ") ? "No software list on the server." : m.startsWith("too-large: ") ? "The software list is too large to show." : clip(m.replace(/^[a-z-]+: /, ""), 300) });
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [open, relay, s.uuid, sb.sha]);
+  const raw = load && "raw" in load ? load.raw : null;
+  const doc = useMemo(() => (raw === null ? null : parse(raw)), [raw]);
+  const rows = useMemo(() => (doc ? filterPrograms(doc.programs, filter) : []), [doc, filter]);
+  const shown = all ? rows : rows.slice(0, SOFTWARE_ROWS);
+  const d = doc?.device;
+  const gb = d?.memory ? Math.max(1, Math.round(d.memory / 2 ** 30)) : 0;
+  const device = d ? [[d.manufacturer, d.model].filter(Boolean).join(" "), d.serial && `serial ${d.serial}`, gb && `${gb} GB`].filter(Boolean).join(", ") : "";
+  const save = () => {
+    setSaved("");
+    saveFile(exportName(s.host, new Date().toISOString().slice(0, 10)), raw!, "application/vnd.cyclonedx+json").then(
+      (ok) => ok && setSaved("Exported."),
+      (e) => setSaved(clip(errorText(e), 200)),
+    );
+  };
+  return (
+    <section aria-label="Software" className="mt-3 border-t border-hairline pt-2" data-testid="software-section">
+      <div className="flex items-center gap-2">
+        <h3 className="min-w-0 flex-1">
+          <Fold label="Software" open={open} onToggle={() => setOpen((o) => !o)} extra={<span className="shrink-0 pl-2">{doc?.readable ? `${doc.programs.length} programs, as of ${day(sb.at)}` : `as of ${day(sb.at)}`}</span>} />
+        </h3>
+        {raw !== null && (
+          <Button size="sm" variant="secondary" className="shrink-0" onClick={save}>
+            <Download size={14} /> Export SBOM
+          </Button>
+        )}
+      </div>
+      {open && (
+        <div className="pb-2">
+          {load === null && <div className="text-footnote text-muted">Loading software list…</div>}
+          {load && "note" in load && <div className="text-footnote text-warn">{load.note}</div>}
+          {doc && !doc.readable && <div className="text-footnote text-warn">The software list could not be read. It can still be exported.</div>}
+          {saved && (
+            <div role="status" className="text-footnote text-muted">
+              {saved}
+            </div>
+          )}
+          {doc?.readable && (
+            <>
+              <input
+                value={filter}
+                onChange={(e) => setFilter(e.target.value.slice(0, 64))}
+                onKeyDown={(e) => e.stopPropagation()}
+                placeholder="Filter by name or publisher"
+                aria-label="Filter software by name or publisher"
+                spellCheck={false}
+                className="mt-1 h-8 w-full rounded-xl border border-hairline bg-parchment px-3 text-footnote text-ink outline-none placeholder:text-faint focus-visible:border-focus"
+              />
+              {rows.length === 0 && <div className="mt-1 text-footnote text-muted">{filter.trim() ? "No program matches." : "The list is empty."}</div>}
+              {rows.length > 0 && (
+                <div role="region" aria-label="Programs" tabIndex={0} className="mt-1 max-h-[320px] overflow-auto rounded-xl border border-hairline">
+                  <table className="w-full table-fixed text-left text-footnote">
+                    <caption className="sr-only">Installed programs</caption>
+                    <thead className="sticky top-0 bg-parchment text-muted">
+                      <tr>
+                        <th scope="col" className="w-[44%] px-2 py-1 font-semibold">
+                          Name
+                        </th>
+                        <th scope="col" className="w-[20%] px-2 py-1 font-semibold">
+                          Version
+                        </th>
+                        <th scope="col" className="w-[36%] px-2 py-1 font-semibold">
+                          Publisher
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {shown.map((p, i) => (
+                        <tr key={i} className="border-t border-hairline align-top">
+                          <td className="break-words px-2 py-1 text-ink">
+                            {p.name}
+                            {p.product && <span className="ml-1 rounded bg-parchment px-1 text-muted">product{p.role ? `: ${p.role}` : ""}</span>}
+                          </td>
+                          <td className="break-words px-2 py-1 text-ink-80">{p.version}</td>
+                          <td className="break-words px-2 py-1 text-ink-80">{p.publisher}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {rows.length > shown.length && (
+                <Button size="sm" variant="ghost" className="mt-1" onClick={() => setAll(true)}>
+                  Show all {rows.length}
+                </Button>
+              )}
+              {doc.truncated && (
+                <div className="mt-1 text-footnote text-muted">
+                  {doc.omitted} more {doc.omitted === 1 ? "program is" : "programs are"} not in the list
+                </div>
+              )}
+              {device && (
+                <div className="mt-1 break-words text-footnote text-ink-80">
+                  <span className="font-semibold text-muted">Device</span> {device}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function HealthSection({ h, reply, lang, nameOf, holderOf }: { h: Host; reply: StatusHostReply | string | null; lang: Lang; nameOf?: (id: string) => string | undefined; holderOf?: (id: string) => StatusSummary | "conflict" | undefined }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState("");
@@ -327,6 +461,8 @@ export function HealthSection({ h, reply, lang, nameOf, holderOf }: { h: Host; r
           ))}
         </div>
       )}
+
+      {s.sbom && <SoftwarePart key={s.uuid} h={h} />}
 
       {rep && (
         <div className="mt-3 border-t border-hairline pt-2">

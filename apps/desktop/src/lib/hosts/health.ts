@@ -4,16 +4,24 @@ import type { CheckState, HealthState, Host, ReportCheck, StatusHostReply, Statu
 type RelayAnswer = { relay: string; hosts?: Omit<StatusSummary, "relay">[]; error?: string };
 
 /** One summary per uuid over all relays; the newest `last_seen` wins, on a tie the smaller relay
- *  name (stable between refreshes). A relay that was not reached comes with its last hosts and an error. */
+ *  name (stable between refreshes). A relay that was not reached comes with its last hosts and an error.
+ *  The software list is decided on its own: the entry with the newest `sbom.at` names the relay to ask (`sbomRelay`). */
 export function mergeStatus(perRelay: RelayAnswer[]): StatusSummary[] {
   const by = new Map<string, StatusSummary>();
+  const sb = new Map<string, { at: number; sha: string; relay: string }>();
   for (const r of perRelay ?? []) {
     for (const s of r.hosts ?? []) {
       const old = by.get(s.uuid);
       if (!old || s.last_seen > old.last_seen || (s.last_seen === old.last_seen && r.relay < old.relay)) by.set(s.uuid, { ...s, relay: r.relay });
+      const b = s.sbom;
+      const o = sb.get(s.uuid);
+      if (b && typeof b.at === "number" && typeof b.sha === "string" && (!o || b.at > o.at || (b.at === o.at && r.relay < o.relay))) sb.set(s.uuid, { at: b.at, sha: b.sha, relay: r.relay });
     }
   }
-  return [...by.values()];
+  return [...by.values()].map(({ sbom: _x, ...s }) => {
+    const b = sb.get(s.uuid);
+    return b ? { ...s, sbom: { at: b.at, sha: b.sha }, sbomRelay: b.relay } : s;
+  });
 }
 
 const reason = (e: string) => (e.startsWith("unsupported: ") ? "this relay does not report health" : e.replace(/^[a-z-]+: /, ""));

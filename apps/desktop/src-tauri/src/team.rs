@@ -17,6 +17,8 @@ const AUDIT_MAX: usize = 2 * 1024 * 1024;
 const STATUS_MAX: usize = 16 << 20;
 /// One report (≤ 64 KiB) plus 90 days of history.
 const REPORT_MAX: usize = 1 << 20;
+/// A software list (SBOM): the relay keeps at most 512 KiB by default; more than 1 MiB is not shown.
+const SBOM_MAX: usize = 1 << 20;
 /// The relay refuses larger tag documents (docs/api.md, team endpoints).
 pub const TAGS_PUT_MAX: usize = 512 * 1024;
 
@@ -271,17 +273,43 @@ fn status_with(relays: &[String], cache: &Mutex<BTreeMap<String, (String, Arc<Va
     }
 }
 
-/// One host's last report and history from `relay` (one of this build's relays).
-pub fn status_host(relay: &str, uuid: &str) -> R<Value> {
+/// The webview names the relay and the host: signed requests go only to this build's own relays.
+fn own_relay_host(relay: &str, uuid: &str) -> R<()> {
     if !tether_trust::status::valid_uuid(uuid) {
         return Err("invalid host id".into());
     }
-    // The webview names the relay: signed requests go only to this build's own relays.
     if !crate::policy::relay_bases().iter().any(|(h, _)| h == relay) {
         return Err("unknown server".into());
     }
+    Ok(())
+}
+
+/// One host's last report and history from `relay` (one of this build's relays).
+pub fn status_host(relay: &str, uuid: &str) -> R<Value> {
+    own_relay_host(relay, uuid)?;
     let (c, _, b) = call_via(Some(&[relay.to_owned()]), "GET", &format!("/api/team/status/{uuid}"), None, &[], REPORT_MAX)?;
     json_ok(c, &b)
+}
+
+/// The software list a device sent, as the relay holds it (the text, unchanged: the webview reads it
+/// and exports it byte for byte). The relay stores any JSON object, so nothing here parses it.
+pub fn status_sbom(relay: &str, uuid: &str) -> R<String> {
+    own_relay_host(relay, uuid)?;
+    let (c, _, b) = call_via(Some(&[relay.to_owned()]), "GET", &format!("/api/team/status/{uuid}/sbom"), None, &[], SBOM_MAX).map_err(|e| if e.starts_with("the answer is larger than") { too_large() } else { e })?;
+    sbom_text(c, b)
+}
+
+fn too_large() -> String {
+    "too-large: The software list is too large to show.".into()
+}
+
+/// 404 is "no document" (none stored, or the feature is off on that relay), not "no team access".
+fn sbom_text(code: u16, raw: Vec<u8>) -> R<String> {
+    match code {
+        200 => String::from_utf8(raw).map_err(|_| "bad answer from the server: the software list is not text".into()),
+        404 => Err("none: No software list on the server.".into()),
+        _ => Err(status_error(code, &String::from_utf8_lossy(&raw))),
+    }
 }
 
 /// Changes one health device on every relay of this build: pins (and so links) are kept per relay,
@@ -481,6 +509,22 @@ mod tests {
             assert!(ask(Ok((500, None, vec![]))).is_err(), "nothing cached to show: {a:?}");
             assert_eq!(sent.lock().unwrap().last().cloned().flatten(), None, "no tag after a drop: {a:?}");
         }
+    }
+
+    #[test]
+    fn sbom_answers() {
+        // The text comes through unchanged, whatever it holds.
+        let doc = "{\"components\": [ ]}
+";
+        assert_eq!(sbom_text(200, doc.as_bytes().to_vec()).unwrap(), doc);
+        assert!(sbom_text(404, b"not found".to_vec()).unwrap_err().starts_with("none:"));
+        assert!(sbom_text(200, vec![0xff, 0xfe]).unwrap_err().starts_with("bad answer"));
+        assert!(sbom_text(403, vec![]).unwrap_err().contains("membership"));
+        assert!(sbom_text(429, vec![]).unwrap_err().contains("Too many"));
+        assert!(too_large().starts_with("too-large:"));
+        // Host and relay are checked before anything is sent.
+        assert_eq!(status_sbom("relay.example", "../x").unwrap_err(), "invalid host id");
+        assert_eq!(status_sbom("relay.example", "0123456789abcdef0123456789abcdef").unwrap_err(), "unknown server");
     }
 
     #[test]

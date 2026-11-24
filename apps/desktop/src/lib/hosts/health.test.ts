@@ -41,6 +41,18 @@ describe("health", () => {
       expect.objectContaining({ uuid: "u1", relay: "b", overall: "warn" }),
     ]);
   });
+  it("merges relays: the newest sbom.at names the relay to ask for the software list, whichever relay has the newest report", () => {
+    const at = (relay: string, last_seen: number, sbom?: { at: number; sha: string }) => ({ relay, hosts: [sum({ uuid: "u1", last_seen, ...(sbom ? { sbom } : {}) })] });
+    const m = (...r: ReturnType<typeof at>[]) => mergeStatus(r)[0];
+    expect(m(at("a", 10, { at: 5, sha: "aa" }), at("b", 20))).toMatchObject({ relay: "b", sbom: { at: 5, sha: "aa" }, sbomRelay: "a" });
+    expect(m(at("a", 10, { at: 5, sha: "aa" }), at("b", 20, { at: 9, sha: "bb" }))).toMatchObject({ relay: "b", sbom: { at: 9, sha: "bb" }, sbomRelay: "b" });
+    expect(m(at("a", 30, { at: 9, sha: "aa" }), at("b", 20, { at: 5, sha: "bb" }))).toMatchObject({ relay: "a", sbomRelay: "a" });
+    expect(m(at("b", 10, { at: 5, sha: "bb" }), at("a", 10, { at: 5, sha: "aa" }))).toMatchObject({ sbomRelay: "a" });
+    const none = m(at("a", 10), at("b", 20));
+    expect(["sbom", "sbomRelay"].map((k) => k in none)).toEqual([false, false]);
+    // A relay's malformed field is not a document.
+    expect(m({ relay: "a", hosts: [sum({ uuid: "u1", sbom: { at: "x", sha: 1 } as never })] })).not.toHaveProperty("sbom");
+  });
   it("health states", () => {
     expect(healthOf(undefined)).toBe("none");
     expect(healthOf(sum({ overall: "crit", stale: true }))).toBe("stale");

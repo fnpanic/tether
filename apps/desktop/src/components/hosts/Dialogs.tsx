@@ -171,7 +171,7 @@ export function Rules({ hosts, store, onClose }: { hosts: Host[]; store: Store; 
   );
 }
 
-async function saveFile(name: string, content: string, type: string): Promise<boolean> {
+export async function saveFile(name: string, content: string, type: string): Promise<boolean> {
   if (inTauri) return invoke<boolean>("hosts_export", { name, content });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([content], { type }));

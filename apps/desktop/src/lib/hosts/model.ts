@@ -131,6 +131,10 @@ export interface StatusSummary {
   stale: boolean;
   /** The relay this entry came from (the newest of all relays). */
   relay: string;
+  /** A software list (SBOM) is stored for this device: when (unix s) and the first 16 hex digits of its SHA-256. A relay without the feature sends none. */
+  sbom?: { at: number; sha: string };
+  /** The relay with the newest `sbom` of this device (not always `relay`); set by `mergeStatus`. */
+  sbomRelay?: string;
 }
 export interface Text2 {
   de?: string;

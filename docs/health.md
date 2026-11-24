@@ -583,13 +583,42 @@ version it says "Customer 4711" when the device has a customer reference.
 - **All checks** and **Raw report**, the report exactly as the relay holds it, with a copy button.
 
 The device's software list is stored on the relay too, when the operator enabled it
-([The software list](#the-software-list)). The technician app shows it from the version that
-includes it.
+([The software list](#the-software-list)); the app shows it under [Software](#software).
 
 Titles, hints and groups come from the report in German and English; the app uses the language of
 the system and falls back to the other one. Everything is shown as plain text, shortened to fit
 (titles 120, hints 600, values 80 characters). In a session window, a **Health** button in the
 toolbar opens the same information for the connected host.
+
+### Software
+
+When a host's agent has sent a software list and its relay has the feature on
+([The software list](#the-software-list)), the Health section has a **Software** part, folded
+until you open it. The header says how many programs the list holds and when it is from; the list
+is loaded from the relay when you open it, and again when the agent sends a new one. A host
+without a list has no Software part: the feature is off by default on the relay, and an agent
+sends a list only to a relay that has it on (and only when its owner has not switched it off).
+
+- The table has the columns Name, Version and Publisher. Products the agent detected are marked
+  and come first, then the programs by name. At most 200 rows are drawn at first; **Show all**
+  draws the rest.
+- The filter box finds text in the name or the publisher, in any case, as plain text (no
+  wildcards).
+- **Device** names the manufacturer, model, serial number (in full) and memory, when the agent
+  reported them. A line "12 more programs are not in the list" says that the agent left programs
+  out (it sends at most 2000).
+- **Export SBOM** saves the document exactly as the relay holds it, as
+  `<host>-<yyyy-mm-dd>.cdx.json` (CycloneDX 1.6; only letters, digits, `.`, `_` and `-` of the
+  host name are kept in the file name). If the app cannot read a document, it says so and still
+  offers the export.
+- The app shows at most 5000 programs and cuts names and publishers to 128 characters and versions
+  to 64. A document larger than 1 MiB is not shown ("too large to show") and cannot be exported
+  from the app. If the relay no longer has the list, the part says "No software list on the
+  server".
+
+There is no search across all hosts for a program in the app: the software lists are not part of
+the team summary the host list is built from, so a search such as "which hosts have Java 8" is not
+possible there. Everything in the table is plain text.
 
 ### Export
 

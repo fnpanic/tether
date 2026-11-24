@@ -753,6 +753,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         team_audit,
         team_status,
         team_status_host,
+        team_status_sbom,
         team_status_find,
         team_status_link,
         team_status_unlink,
@@ -862,6 +863,11 @@ async fn team_status() -> R<Value> {
 #[tauri::command]
 async fn team_status_host(relay: String, uuid: String) -> R<Value> {
     blocking(move || team::status_host(&relay, &uuid)).await?
+}
+
+#[tauri::command]
+async fn team_status_sbom(relay: String, uuid: String) -> R<String> {
+    blocking(move || team::status_sbom(&relay, &uuid)).await?
 }
 
 #[tauri::command]
