@@ -129,7 +129,8 @@ now written after the lock is released, before the answer.
 Software lists (`STATUS_SBOM=on`): *measured*, 2026-11-24, **a short run at 5 000 devices, not the
 20 000-device run above**: `DEVICES=5000 SECS=240 WARMUP=30 BASELINE=30 SELF_CHECK=1
 tools/load/status-run.sh`, the relay and the generator on one developer PC under WSL2 (the machine
-was not otherwise idle), once without and once with `STATUS_SBOM=on`. With it, one thread uploads
+was not otherwise idle; made before the review fixes to the order of the upload checks, not
+repeated after them), once without and once with `STATUS_SBOM=on`. With it, one thread uploads
 a 60 KiB document for each device in turn (`PUT /api/status/sbom`, device-signed) at
 `STATUS_SBOM_RPS`, the default 2 per second, for the whole run: 480 uploads, 28 MiB. Everything
 else is as in the run above (2 351 to 2 393 status posts, 480 enrolments, the summary every 30 s).

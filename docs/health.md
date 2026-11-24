@@ -151,7 +151,7 @@ A value that is not a number stops tether-api from starting, as for the other nu
 
 The answer to a post (`POST /api/status`) carries `"sbom": true` beside `releases` and `next`
 when the feature is on, so an agent uploads only to a relay that takes lists. The team summary
-gives each host that has a list `"sbom":{"at":<unix time>,"sha":"<16 hex>"}`, so a client can see
+gives each host that has a list `"sbom":{"at":<unix time of the file>,"sha":"<16 hex>"}`, so a client can see
 whether the list changed without fetching it.
 
 **What the relay checks.** Only that the body is a JSON object. A document that is valid JSON but
@@ -160,24 +160,30 @@ size limit. Whatever reads the stored document (your own scripts, the technician
 assume it is CycloneDX or that it is shallow. The file is written and synced to
 `status/<uuid>.sbom.json` before the `204`.
 
-**Limits, in the order the relay applies them to an upload:** the switch (`404`), the size from
-`Content-Length` (`413`), one accepted upload per device per hour (`429 upload too frequent`,
-`Retry-After` is the time left), the global budget (`429 busy`), the key lookup (`401` for an
-unknown device), the signature, then the body. A request that is refused for its signature does
-not use up the device's hour; it does use one of the second's `STATUS_SBOM_RPS`. The hour also
-holds after a `DELETE`, so deleting and uploading again does not get around it. A request that
-declares a body of up to 1 KiB and then sends fewer bytes may get no answer at all (the HTTP
-server drops it); nothing is stored. A longer one is `400 request body incomplete`.
+**Limits, in the order the relay applies them to an upload:** the switch (`404`), a
+`Content-Length` (`411 length required` without one) of at most `STATUS_SBOM_MAX_KB` (`413`), the
+header, the per-IP limit on failed requests (`429 too many failed requests`), the key lookup
+(`401 unknown device`), one accepted upload per device per hour (`429 upload too frequent`,
+`Retry-After` is the time left), the global budget (`429 busy`), then the body, then the signature
+and the JSON-object check. Everything before the body is cheap and happens before the global
+budget is touched, so a request for a device that is not enrolled here never uses it. A request
+that is refused for its signature gives its slot in the budget back and counts as a failed request
+for its IP; it does not use up the device's hour. The hour also holds after a `DELETE`, so
+deleting and uploading again does not get around it. A request that declares a body of up to
+1 KiB and then sends fewer bytes may get no answer at all (the HTTP server drops it); nothing is
+stored. A longer one is `400 request body incomplete`.
 
 **Lifetime.** The file goes with the device's pin: when the device removes itself, when an
 administrator or a team member removes it ([Removing a device](#removing-a-device)) and when the
 pin expires after 180 days without a report. A device that has not posted a report yet can upload
 before its first report; it is then shown without a report and removed 180 days after its
 enrolment if it never posts. Unlinking a host or dismissing its claim leaves the list in place.
-At each start tether-api matches the records and the files in the background (it matters after a
-hard stop, which loses up to 5 minutes of `seen.json`): a list without a record is read again and
-recorded (its time is the file's modification time), a record without a file is dropped, and a
-file whose device is no longer pinned is deleted.
+At each start and then once an hour tether-api matches the records and the files in the
+background (it matters after a hard stop, which loses up to 5 minutes of `seen.json`): a list
+without a record, or one that was replaced shortly before the stop (its size or modification
+time differs from the record), is read again and recorded; a record without a file is dropped;
+and a file whose device is no longer pinned is deleted. A record's time is the file's
+modification time.
 
 **Disk.** *Estimated*, not measured at scale: a list is 40 to 80 KiB per machine, about 1.2 GB at
 20 000 machines. The default total of 2 048 MiB leaves room for that; the files are replaced in

@@ -418,23 +418,35 @@ deeply nested, or not CycloneDX, is stored as it is. It is written and synced as
 to a post carries `"sbom":true`. A device may upload before its first report.
 
 Signed as a post (`Tether-Sig: device-v1`, over the host name, `PUT`, `/api/status/sbom`, the time,
-a nonce and the SHA-256 of the body). Order of work: off or locked (`503`), the switch (`404`), size
-from `Content-Length` (`413`), the header, one accepted upload per uuid per hour, the global budget
-(`STATUS_SBOM_RPS`, default 2 per second), the per-IP failure limit and the key lookup, the
-signature, and only then the check that the body is a JSON object. The hash, the signature and the
-write happen outside the state lock.
+a nonce and the SHA-256 of the body). Order of work, cheapest first:
+
+1. off or locked (`503`), then the switch (`404`);
+2. `Content-Length` must be there (`411`) and at most `STATUS_SBOM_MAX_KB` KiB (`413`), both before
+   the body is read;
+3. the header (`401`), the per-IP failure limit (`429 too many failed requests`) and the key lookup
+   (`401 unknown device`, counted as a failure for the IP);
+4. one accepted upload per uuid per hour (`429 upload too frequent`), then the global budget
+   (`STATUS_SBOM_RPS`, default 2 per second, all devices; `429 busy`);
+5. the body, read for exactly the declared bytes (`400 request body incomplete`);
+6. the signature (`401`; a refused request gives its budget slot back and counts as a failure for
+   the IP), then the check that the body is a JSON object (`400`);
+7. the hour again (a second upload from the same device in the meantime), the total cap (`507`), the
+   write; `204`.
+
+The hash, the signature and the write happen outside the state lock.
 
 | Status | Body | Meaning |
 |---|---|---|
 | `204` | | stored (replaces the device's earlier list) |
 | `400` | `not a JSON object` | the body is not one JSON object (an array, a string, text, trailing data, empty) |
 | `400` | `request body incomplete` | fewer bytes arrived than `Content-Length` declared. A body declared up to 1 KiB that is cut short may get no answer at all |
-| `401` | those of a post: `missing signature`, `unsupported signature version`, `malformed signature header`, `unknown device`, `signature does not match`, `request timestamp outside allowed clock skew`, `request signed for another relay`, `replayed request` | not enrolled here, or the signature or clock is wrong |
+| `401` | those of a post: `missing signature`, `unsupported signature version`, `malformed signature header`, `unknown device`, `signature does not match`, `request timestamp outside allowed clock skew`, `request signed for another relay`, `replayed request` | not enrolled here (before the body is read), or the signature or clock is wrong (after it) |
 | `404` | `not found` | `STATUS_SBOM` is not `on` |
+| `411` | `length required` | no `Content-Length` (a chunked body is refused) |
 | `413` | `body too large` | more than `STATUS_SBOM_MAX_KB` KiB |
-| `429` | `upload too frequent`, `Retry-After: <s>` | an accepted upload from this uuid less than an hour ago (the seconds left; 60 while an upload from this uuid is being written). A `DELETE` does not reset it |
-| `429` | `busy`, `Retry-After: 60` | more than `STATUS_SBOM_RPS` uploads in this second, all devices together. Requests that fail the signature count here too |
-| `429` | `too many failed requests`, `Retry-After: 60` | as for a post |
+| `429` | `upload too frequent`, `Retry-After: <s>` | an accepted upload from this uuid less than an hour ago (the seconds left; 60 while an upload from this uuid is being written, also when a second upload of the same device raced this one). A `DELETE` does not reset it |
+| `429` | `busy`, `Retry-After: 60` | more than `STATUS_SBOM_RPS` uploads in this second, all devices together. A request refused for its signature gives its slot back |
+| `429` | `too many failed requests`, `Retry-After: 60` | as for a post: more than 60 failed device signatures or unknown uuids per minute from this IP |
 | `503` | `status reporting is off`, `status store unavailable`, `busy` | back off |
 | `507` | `sbom store full (STATUS_SBOM_MAX_TOTAL_MB)` | the stored lists would exceed `STATUS_SBOM_MAX_TOTAL_MB`; a device that already has a list can still replace it with one that is not larger |
 | `507` | `insufficient storage` | the data disk is nearly full |
@@ -476,7 +488,7 @@ it sends no `customer` field); `last_seen` and `built` are the relay's unix time
 summary is rebuilt at most every 30 s from a snapshot and sent from `status/summary.json`, so
 `stale` is as of that build. `ETag` is `"<16 hex>"`, the first 16 hex digits of the SHA-256 over
 the `hosts` array, so an unchanged summary keeps its tag and answers `304` to `If-None-Match`.
-A host whose device has a software list (with `STATUS_SBOM=on`) also has `"sbom":{"at":<unix time of the upload>,"sha":"<16 hex>"}`, outside the 2 KiB entry; the list itself is
+A host whose device has a software list (with `STATUS_SBOM=on`) also has `"sbom":{"at":<unix time>,"sha":"<16 hex>"}` (`at` is the modification time of the stored file, which is when it was uploaded), outside the 2 KiB entry; the list itself is
 `GET /api/team/status/<uuid>/sbom`.
 
 ### `GET /api/team/status/<uuid>` (member-signed)
