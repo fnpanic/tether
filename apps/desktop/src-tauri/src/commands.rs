@@ -1344,7 +1344,11 @@ mod tests {
         posted: Vec<(serde_json::Value, bool)>,
     }
 
-    fn serve(action: Action, handler: core_agent::Handler, post: impl FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = hbb_common::ResultType<()>>>>, post_wait: Duration) -> (Served, bool) {
+    fn serve(action: Action, handler: core_agent::Handler, post: impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = hbb_common::ResultType<()>>>>, post_wait: Duration) -> (Served, bool) {
+        serve_within(action, handler, Duration::from_secs(5), post, post_wait)
+    }
+
+    fn serve_within(action: Action, handler: core_agent::Handler, wait: Duration, post: impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = hbb_common::ResultType<()>>>>, post_wait: Duration) -> (Served, bool) {
         use librustdesk::ui::agent::{message, misc};
         let gate = Rc::new(RefCell::new(InFlight::default()));
         let guard = gate.borrow_mut().start(action, Instant::now()).unwrap();
@@ -1353,7 +1357,7 @@ mod tests {
         rt().block_on(core_agent::serve(
             action,
             Some(handler),
-            Duration::from_secs(5),
+            wait,
             guard,
             move |m| {
                 let Some(message::Union::Misc(misc)) = m.union else { panic!("not misc") };
@@ -1429,31 +1433,82 @@ mod tests {
         assert!(core_agent::AUDIT_POST_WAIT <= Duration::from_secs(10));
     }
 
-    #[test]
-    fn core_serve_running_is_audited_but_not_shown_as_finished() {
+    /// `serve` with an app that takes 600 ms against a 50 ms wait; at 300 ms (answered `running`, the
+    /// app still at work) a probe notes (answers sent, posts made, a new request accepted) and,
+    /// with `close`, ends the session (the connection's channel is gone).
+    fn serve_long(close: bool) -> (Vec<TetherAgentAnswer>, Vec<(String, String)>, Vec<serde_json::Value>, (Vec<String>, usize, bool)) {
+        use librustdesk::ui::agent::{message, misc, Message};
+        fn answer_of(m: Message) -> TetherAgentAnswer {
+            let Some(message::Union::Misc(misc)) = m.union else { panic!("not misc") };
+            let Some(misc::Union::TetherAgentAnswer(a)) = misc.union else { panic!("not an answer") };
+            a
+        }
         fn slow(_: Action) -> TetherAgentAnswer {
-            std::thread::sleep(Duration::from_millis(400));
+            std::thread::sleep(Duration::from_millis(600));
             TetherAgentAnswer { state: "installed".into(), ..Default::default() }
         }
         let gate = RefCell::new(InFlight::default());
         let guard = gate.borrow_mut().start(Action::Install, Instant::now()).unwrap();
-        let (sent, cm, posted) = (RefCell::new(vec![]), RefCell::new(vec![]), RefCell::new(vec![]));
-        rt().block_on(core_agent::serve(
-            Action::Install,
-            Some(slow),
-            Duration::from_millis(50),
-            guard,
-            |m| sent.borrow_mut().push(m),
-            |a, o| cm.borrow_mut().push((a, o)),
-            |info| {
-                posted.borrow_mut().push(info);
-                async { Ok(()) }
-            },
-            Duration::from_secs(1),
-        ));
-        assert_eq!(posted.into_inner(), [serde_json::json!({"agent": "install", "result": "running"})]);
-        assert!(cm.into_inner().is_empty(), "not finished yet");
-        assert_eq!(sent.into_inner().len(), 1);
+        let (cm, posted) = (RefCell::new(vec![]), RefCell::new(vec![]));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let rx = RefCell::new(Some(rx));
+        let between = rt().block_on(async {
+            let served = core_agent::serve(
+                Action::Install,
+                Some(slow),
+                Duration::from_millis(50),
+                guard,
+                |m| drop(tx.send(m)),
+                |a, o| cm.borrow_mut().push((a.to_owned(), o)),
+                |info| {
+                    posted.borrow_mut().push(info);
+                    async { Ok(()) }
+                },
+                Duration::from_secs(1),
+            );
+            let probe = async {
+                hbb_common::tokio::time::sleep(Duration::from_millis(300)).await;
+                let sent = rx.borrow().as_ref().unwrap().try_iter().map(|m| answer_of(m).state).collect::<Vec<_>>();
+                let free = gate.borrow_mut().start(Action::Status, Instant::now()).is_some();
+                if close {
+                    rx.borrow_mut().take();
+                }
+                (sent, posted.borrow().len(), free)
+            };
+            hbb_common::tokio::join!(served, probe).1
+        });
+        let sent = rx.into_inner().map(|rx| rx.try_iter().collect::<Vec<_>>()).unwrap_or_default();
+        (sent.into_iter().map(answer_of).collect(), cm.into_inner(), posted.into_inner(), between)
+    }
+
+    #[test]
+    fn core_serve_follows_a_long_action_to_its_outcome() {
+        let (sent, cm, posted, between) = serve_long(false);
+        // At the wait: `running` answered and audited, the guard freed while the app still works.
+        assert_eq!(between, (vec!["running".to_owned()], 1, true), "(answers, posts, a new request accepted) in between");
+        assert!(sent.is_empty(), "nothing more is sent to the viewer");
+        // Then exactly one more record, with the outcome, and the connection window told once.
+        assert_eq!(posted, [serde_json::json!({"agent": "install", "result": "running"}), serde_json::json!({"agent": "install", "result": "installed"})]);
+        assert_eq!(cm, [("install".to_owned(), "installed".to_owned())]);
+    }
+
+    #[test]
+    fn core_serve_audits_the_outcome_after_the_session_ended() {
+        let (_, cm, posted, between) = serve_long(true);
+        assert_eq!(between.1, 1);
+        assert_eq!(posted.len(), 2, "{posted:?}");
+        assert_eq!(posted[1], serde_json::json!({"agent": "install", "result": "installed"}));
+        assert_eq!(cm.len(), 1);
+    }
+
+    #[test]
+    fn core_cm_event_only_for_a_known_action_and_outcome() {
+        use librustdesk::ui::cm::agent_event;
+        assert_eq!(agent_event(3, "install", "installed"), Some(serde_json::json!({"id": 3, "action": "install", "outcome": "installed"})));
+        assert!(agent_event(3, "remove", "removed-by-tether").is_some());
+        for (a, o) in [("status", "installed"), ("upgrade", "installed"), ("install", "running"), ("install", "busy"), ("remove", "Click here: https://x"), ("install", "")] {
+            assert_eq!(agent_event(3, a, o), None, "{a} {o}");
+        }
     }
 
     #[test]

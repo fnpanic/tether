@@ -7098,10 +7098,10 @@ index 50eb3e2..008ddf7 100644
      ] {
 diff --git a/src/tauri_ui/agent.rs b/src/tauri_ui/agent.rs
 new file mode 100644
-index 0000000..3c109c8
+index 0000000..274db9b
 --- /dev/null
 +++ b/src/tauri_ui/agent.rs
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,290 @@
 +//! Tether: the health monitoring agent through a session (`Misc` `TetherAgentRequest` and
 +//! `TetherAgentAnswer`, message.proto).
 +//!
@@ -7109,11 +7109,12 @@ index 0000000..3c109c8
 +//! only from a logged-in remote session with the control permission, one at a time per
 +//! connection, an install or remove at most once per [`CHANGE_PACE`], and handed to the app's
 +//! [`Handler`] (set by the desktop app; TetherQS sets none, so it answers `not-supported`), which is
-+//! waited for at most [`HOST_WAIT`] (then the answer is `running`; a later `status` shows the
-+//! outcome). An install or remove the app acted on is posted to the session audit log as an alarm
-+//! record naming only the action and the outcome (one attempt, at most [`AUDIT_POST_WAIT`]), and,
-+//! once finished, told to the host's connection window (`ipc::Data::TetherAgent`, emitted there as
-+//! the `cm` event `health_agent`). Before login the request never reaches this module: the core's
++//! waited for at most [`HOST_WAIT`] (then the answer is `running`, and the host goes on waiting for
++//! the outcome without holding the connection; a later `status` shows it). An install or remove the
++//! app acted on is posted to the session audit log as an alarm record naming only the action and
++//! the outcome (one attempt, at most [`AUDIT_POST_WAIT`]; after a `running` record a second one with
++//! the outcome follows), and, once finished, told to the host's connection window
++//! (`ipc::Data::TetherAgent`, emitted there as the `cm` event `health_agent`). Before login the request never reaches this module: the core's
 +//! unauthorised branch has no arm for it, so it gets no answer and nothing is run or posted.
 +//!
 +//! Viewer: [`Session::ask_agent`] sends the request; the answer arrives through
@@ -7167,6 +7168,8 @@ index 0000000..3c109c8
 +
 +/// Answer to an install or remove the app is still working on when the host stops waiting.
 +pub const RUNNING: &str = "still running on the remote computer; ask again for the result";
++
++const NO_HANDLER: &str = "Tether on this computer does not manage the health monitoring agent";
 +
 +/// Outcomes where nothing was done: no audit record, no line in the connection window.
 +const REFUSALS: [&str; 4] = ["not-supported", "needs-service", "not-allowed", "busy"];
@@ -7236,7 +7239,7 @@ index 0000000..3c109c8
 +/// answers `busy` to the next request until it is done, and `status` shows its outcome).
 +pub async fn host_answer(action: Action, handler: Option<Handler>, wait: Duration) -> TetherAgentAnswer {
 +    let Some(f) = handler else {
-+        return answer("not-supported", "Tether on this computer does not manage the health monitoring agent");
++        return answer("not-supported", NO_HANDLER);
 +    };
 +    match tokio::time::timeout(wait, tokio::task::spawn_blocking(move || f(action))).await {
 +        Ok(Ok(a)) => a,
@@ -7261,9 +7264,21 @@ index 0000000..3c109c8
 +    Some(json!({ "agent": acted(action, a)?, "result": a.state }))
 +}
 +
++/// One attempt of at most `post_wait`; a failure is only logged.
++async fn audit<F: Future<Output = ResultType<()>>>(post: &impl Fn(Value) -> F, info: Value, post_wait: Duration) {
++    match tokio::time::timeout(post_wait, post(info)).await {
++        Ok(Ok(())) => {}
++        Ok(Err(e)) => hbb_common::log::warn!("health agent audit post dropped: {e}"),
++        Err(_) => hbb_common::log::warn!("health agent audit post dropped: no answer within {post_wait:?}"),
++    }
++}
++
 +/// Host: runs one accepted request. The answer goes to `send`. If the app acted, the outcome goes
-+/// to `cm` (unless still `running`) and the audit info to `post`, which gets one attempt of at most
-+/// `post_wait` (a failure is only logged). `running` is held until all of this is over.
++/// to `cm` and the audit info to `post` (one attempt of at most `post_wait` each). `running` is held
++/// until this is over, unless the app takes longer than `wait`: then the viewer gets `running`, a
++/// `running` record is posted and `running` is freed (the viewer may ask `status`), and this goes
++/// on waiting for the app (bounded by the app's own limits), then posts a second record with the
++/// outcome and tells `cm`, also when the session has ended meanwhile.
 +#[allow(clippy::too_many_arguments)]
 +pub async fn serve<F: Future<Output = ResultType<()>>>(
 +    action: Action,
@@ -7272,21 +7287,39 @@ index 0000000..3c109c8
 +    running: InFlightGuard,
 +    send: impl FnOnce(Message),
 +    cm: impl FnOnce(&'static str, String),
-+    post: impl FnOnce(Value) -> F,
++    post: impl Fn(Value) -> F,
 +    post_wait: Duration,
 +) {
-+    let a = host_answer(action, handler, wait).await;
++    let Some(f) = handler else {
++        return send(answer_message(action, answer("not-supported", NO_HANDLER)));
++    };
++    let mut job = tokio::task::spawn_blocking(move || f(action));
++    let ended = |r: Result<TetherAgentAnswer, tokio::task::JoinError>| r.unwrap_or_else(|_| answer("failed", "the action stopped unexpectedly"));
++    let a = match tokio::time::timeout(wait, &mut job).await {
++        Ok(r) => ended(r),
++        Err(_) => {
++            let a = answer("running", RUNNING);
++            let info = audit_info(action, &a);
++            send(answer_message(action, a));
++            let Some(info) = info else { return }; // status: nothing to follow up
++            audit(&post, info, post_wait).await;
++            drop(running);
++            let a = ended(job.await);
++            if let (Some(name), Some(info)) = (acted(action, &a), audit_info(action, &a)) {
++                hbb_common::log::info!("health agent: {action:?} ended after the session's wait: {}", a.state);
++                cm(name, a.state.clone());
++                audit(&post, info, post_wait).await;
++            }
++            return;
++        }
++    };
 +    let info = audit_info(action, &a);
 +    if let Some(name) = acted(action, &a).filter(|_| a.state != "running") {
 +        cm(name, a.state.clone());
 +    }
 +    send(answer_message(action, a));
 +    if let Some(info) = info {
-+        match tokio::time::timeout(post_wait, post(info)).await {
-+            Ok(Ok(())) => {}
-+            Ok(Err(e)) => hbb_common::log::warn!("health agent audit post dropped: {e}"),
-+            Err(_) => hbb_common::log::warn!("health agent audit post dropped: no answer within {post_wait:?}"),
-+        }
++        audit(&post, info, post_wait).await;
 +    }
 +    drop(running);
 +}
@@ -7361,10 +7394,10 @@ index 0000000..3c109c8
 +}
 diff --git a/src/tauri_ui/cm.rs b/src/tauri_ui/cm.rs
 new file mode 100644
-index 0000000..058512b
+index 0000000..9ed77d5
 --- /dev/null
 +++ b/src/tauri_ui/cm.rs
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,105 @@
 +//! Host-side connection manager: incoming connection requests, permissions, chat.
 +
 +use serde_json::{json, Value};
@@ -7442,7 +7475,18 @@ index 0000000..058512b
 +/// with `outcome` (the agent state, e.g. `installed`, `removed-by-tether`, `failed`), for the line
 +/// in the connection window (design 7.3).
 +pub(crate) fn agent_done(id: i32, action: String, outcome: String) {
-+    emit("health_agent", json!({ "id": id, "action": action, "outcome": outcome }));
++    if let Some(payload) = agent_event(id, &action, &outcome) {
++        emit("health_agent", payload);
++    }
++}
++
++/// Tether: the agent states an install or remove can end in (desktop agent.rs).
++const AGENT_OUTCOMES: [&str; 6] = ["installed", "installed-by-hand", "not-installed", "removed-locally", "removed-by-tether", "failed"];
++
++/// Tether: the `health_agent` payload, or None for anything but a known action and outcome (the
++/// ipc message can come from any process of the logged-in user).
++pub fn agent_event(id: i32, action: &str, outcome: &str) -> Option<Value> {
++    (matches!(action, "install" | "remove") && AGENT_OUTCOMES.contains(&outcome)).then(|| json!({ "id": id, "action": action, "outcome": outcome }))
 +}
 +
 +/// A viewer asked to record connection `conn_id`; it may only once the user allows it.

@@ -133,7 +133,21 @@ pub(crate) struct State {
     pub checked_at: u64,
     /// Since when the installed agent is below the index's `minimumVersion` (0: not below).
     pub below_since: u64,
+    /// Saved before the agent's `install` runs, cleared with its outcome: set after a restart means
+    /// Tether stopped while it ran ([`Manager::adopt`]).
+    pub pending_install: Option<Pending>,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Pending {
+    pub at: u64,
+    /// `policy` or `session`.
+    pub by: String,
+}
+
+/// A pending install older than this (the install's own limit and a margin) did not finish.
+const PENDING_MAX: u64 = INSTALL_TIMEOUT.as_secs() + 60;
 
 // ----------------------------------------------------------------------------- the machine
 
@@ -255,6 +269,23 @@ fn running() -> std::sync::MutexGuard<'static, Option<&'static str>> {
 
 struct Running;
 
+/// The slot's name while a policy check runs no agent process.
+const TICK: &str = "checking the policy for the agent";
+
+/// `status` while an action runs: `busy` naming it, except while only a policy check holds the
+/// slot (then the saved state answers).
+fn busy_now(slot: Option<&'static str>) -> Option<AgentAnswer> {
+    slot.filter(|w| *w != TICK).map(busy)
+}
+
+/// The policy check runs the agent now (`status` answers `busy` naming it).
+fn child(what: &'static str) {
+    let mut r = running();
+    if *r == Some(TICK) {
+        *r = Some(what);
+    }
+}
+
 impl Running {
     /// `Err(name)`: that action runs.
     fn start(what: &'static str) -> Result<Self, &'static str> {
@@ -279,24 +310,13 @@ fn busy(what: &str) -> AgentAnswer {
     AgentAnswer::only("busy", &format!("Tether is {what}; ask for the status later"))
 }
 
-/// Runs `work` as the one action `what`; answers within `wait` (what the session waits for): with
-/// its answer, or, when it takes longer, `running` (the core's state for that) while it goes on (a
-/// later `status` shows the outcome). Meanwhile every other action answers `busy` naming this one.
-fn in_background(what: &'static str, wait: Duration, work: impl FnOnce() -> AgentAnswer + Send + 'static) -> AgentAnswer {
-    let guard = match Running::start(what) {
-        Ok(g) => g,
-        Err(other) => return busy(other),
-    };
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let a = work();
-        drop(guard);
-        let _ = tx.send(a);
-    });
-    match rx.recv_timeout(wait) {
-        Ok(a) => a,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => AgentAnswer::only("running", &format!("{what} takes longer than this session waits; Tether goes on, ask for the status later")),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => AgentAnswer::only("failed", "the action stopped unexpectedly"),
+/// Runs `work` as the one action `what`, on this thread to its end (the core answers `running` to
+/// the session when it takes longer, and still gets this outcome for the audit). Meanwhile every
+/// other action answers `busy` naming this one.
+fn exclusive(what: &'static str, work: impl FnOnce() -> AgentAnswer) -> AgentAnswer {
+    match Running::start(what) {
+        Ok(_slot) => work(),
+        Err(other) => busy(other),
     }
 }
 
@@ -391,6 +411,21 @@ impl Manager<'_> {
         *st = State { state: "removed-locally".into(), at, hold: "removed-locally".into(), detail: "removed on this computer".into(), version: st.version.clone(), by: st.by.clone(), grant_id: st.grant_id.clone(), ..Default::default() };
     }
 
+    /// An install under way when Tether stopped: the agent's service there means it finished (the
+    /// agent is Tether's, installed by whoever asked); none after [`PENDING_MAX`] means it did not.
+    fn adopt(st: &mut State, svc: bool, now: u64) {
+        let Some(p) = st.pending_install.take() else { return };
+        if svc {
+            Self::succeeded(st, "installed", &p.by, "installed while Tether stopped".into(), now);
+            st.ours = true;
+            st.hold.clear();
+        } else if now >= p.at + PENDING_MAX {
+            Self::fail(st, "the install was interrupted (Tether stopped while it ran)".into(), now);
+        } else {
+            st.pending_install = Some(p); // the install may still be running
+        }
+    }
+
     /// One policy check (only modes other than `manual` get here).
     pub fn tick(&self, now: u64) -> Result<(), String> {
         if !active(&self.p.mode) {
@@ -402,10 +437,10 @@ impl Manager<'_> {
         self.sys.secure_dir(&self.p.dir)?;
         self.sweep()?;
         let svc = self.sys.service_exists()?;
-        let old = self.load();
-        let mut st = old.clone().unwrap_or_default();
+        let mut st = self.load().unwrap_or_default();
+        Self::adopt(&mut st, svc, now);
         self.notice_removal(&mut st, svc, now);
-        if now >= st.next_try {
+        if now >= st.next_try && st.pending_install.is_none() {
             match self.p.mode.as_str() {
                 "remove" if svc => match self.remove() {
                     Ok(l) => {
@@ -425,7 +460,8 @@ impl Manager<'_> {
                 _ => {}
             }
         }
-        self.save(&old, &st)
+        // Against the file as it is now (an install saves its pending mark in between).
+        self.save(&self.load(), &st)
     }
 
     /// Re-enrolment (mode `install`) and the minimum version, for the agent Tether installed.
@@ -476,6 +512,7 @@ impl Manager<'_> {
             return;
         }
         let by = st.by.clone();
+        child("upgrading the agent");
         match self.staged(&c, |exe| self.sys.run(exe, &["upgrade"], None, UPGRADE_TIMEOUT)) {
             Ok(r) if r.code == 0 => {
                 Self::succeeded(st, "installed", &by, line_of(&r), now);
@@ -584,10 +621,15 @@ impl Manager<'_> {
         self.check_channel()?;
         let (token, grant_id) = self.grant(now)?;
         let Some(c) = self.candidate(now, rollout)? else { return Ok(()) };
+        child("installing the agent");
         let r = self.staged(&c, |exe| {
             let line = self.from_tether_line(exe, &token)?;
+            st.pending_install = Some(Pending { at: now, by: by.into() });
+            self.save(&None, st)?;
             self.sys.run(exe, &["install", "--from-tether", "-"], Some(&line), INSTALL_TIMEOUT)
-        })?;
+        });
+        st.pending_install = None;
+        let r = r?;
         if r.code != 0 {
             return Err(line_of(&r));
         }
@@ -607,6 +649,7 @@ impl Manager<'_> {
         self.check_channel()?;
         let (token, _) = self.grant(now)?;
         let exe = self.sys.installed_exe();
+        child("enrolling the agent");
         let line = self.from_tether_line(&exe, &token)?;
         let r = self.sys.run(&exe, &["enrol", "--from-tether", "-"], Some(&line), INSTALL_TIMEOUT)?;
         match r.code {
@@ -617,6 +660,7 @@ impl Manager<'_> {
 
     /// The installed agent's `uninstall --by-tether` (plain `uninstall` for agents before it).
     fn remove(&self) -> Result<String, String> {
+        child("removing the agent");
         let (sup, _) = self.sys.versions();
         let args: &[&str] = match sup.as_deref() {
             Some(v) if below_minimum(v, FIRST_TETHER_AWARE) => &["uninstall"],
@@ -649,7 +693,8 @@ impl Manager<'_> {
             Ok(s) => s,
             Err(e) => return AgentAnswer::only("failed", &e),
         };
-        let st = self.load().unwrap_or_default();
+        let mut st = self.load().unwrap_or_default();
+        Self::adopt(&mut st, svc, now); // read only: the next tick or request saves it
         let answer = |state: &str| AgentAnswer { state: state.into(), version: st.version.clone(), installed_by: st.by.clone(), detail: st.detail.clone(), at: st.at };
         if svc {
             let (sup, worker) = self.sys.versions();
@@ -691,12 +736,13 @@ impl Manager<'_> {
             self.sys.secure_dir(&self.p.dir)?;
             self.sweep()?;
             let svc = self.sys.service_exists()?;
-            let old = self.load();
-            let mut st = old.clone().unwrap_or_default();
+            let mut st = self.load().unwrap_or_default();
+            Self::adopt(&mut st, svc, now);
             self.notice_removal(&mut st, svc, now);
             let done = match action {
                 Action::Install if self.p.mode == "remove" => Err("not allowed: this computer's policy removes the agent".to_owned()),
                 Action::Install if svc => Err("the agent is already installed".to_owned()),
+                Action::Install if st.pending_install.is_some() => Err("an install Tether started before it stopped may still be running; ask again in a few minutes".to_owned()),
                 Action::Install => self.install(&mut st, "session", now, false).map(|()| st.detail.clone()),
                 Action::Remove if !svc => Err("the agent is not installed".to_owned()),
                 Action::Remove => self.remove().map(|l| {
@@ -716,7 +762,7 @@ impl Manager<'_> {
                     st.at = now;
                 }
             }
-            self.save(&old, &st)?;
+            self.save(&self.load(), &st)?;
             done
         })();
         match r {
@@ -734,11 +780,6 @@ impl Manager<'_> {
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
-
-/// How long a request answers within: the session's own wait (the core's `HOST_WAIT`) less a
-/// margin, so the technician hears "still working" from here and not a timeout from the core.
-#[cfg(windows)]
-const CALLER_WAIT: Duration = librustdesk::ui::agent::HOST_WAIT.saturating_sub(Duration::from_secs(15));
 
 #[cfg(windows)]
 fn inputs(eff: &tether_trust::policy::Effective) -> Inputs {
@@ -765,7 +806,7 @@ pub fn tick(eff: &tether_trust::policy::Effective, now: u64) {
     if !win::Real.service_process() {
         return;
     }
-    let Ok(_running) = Running::start("checking the policy for the agent") else { return };
+    let Ok(_running) = Running::start(TICK) else { return };
     match (Manager { sys: &win::Real, p: inputs(eff) }).tick(now) {
         Err(e) if e == NEEDS_SERVICE => log::debug!("health agent: {e}"),
         Err(e) => log::info!("health agent: {e}"),
@@ -773,8 +814,8 @@ pub fn tick(eff: &tether_trust::policy::Effective, now: u64) {
     }
 }
 
-/// A technician's request in a session: answered within [`CALLER_WAIT`]; an install that takes
-/// longer goes on (see [`in_background`]).
+/// A technician's request in a session, run to its end with its real outcome (the core answers the
+/// session `running` meanwhile when it takes longer, see [`exclusive`]).
 #[cfg(windows)]
 pub fn request(action: Action) -> AgentAnswer {
     let what = match action {
@@ -782,19 +823,20 @@ pub fn request(action: Action) -> AgentAnswer {
         Action::Install => "installing the agent",
         Action::Remove => "removing the agent",
     };
-    let p = inputs(&crate::policy::effective());
+    let m = Manager { sys: &win::Real, p: inputs(&crate::policy::effective()) };
     if !win::Real.service_process() {
-        return (Manager { sys: &win::Real, p }).request(action, now());
+        return m.request(action, now());
     }
-    in_background(what, CALLER_WAIT, move || (Manager { sys: &win::Real, p }).request(action, now()))
+    exclusive(what, || m.request(action, now()))
 }
 
-/// What the host answers to `status`: `busy` while an action runs.
+/// What the host answers to `status`: `busy` while an action runs ([`busy_now`]).
 #[cfg(windows)]
 pub fn status() -> AgentAnswer {
-    if let Some(what) = *running() {
+    let slot = *running();
+    if let Some(b) = busy_now(slot) {
         if win::Real.service_process() {
-            return busy(what);
+            return b;
         }
     }
     (Manager { sys: &win::Real, p: inputs(&crate::policy::effective()) }).status(now())
@@ -1322,6 +1364,11 @@ mod tests {
             }
             self.runs.borrow_mut().push((name, args.iter().map(|a| a.to_string()).collect(), stdin.map(str::to_owned)));
             let (code, line) = self.codes.borrow().get(args[0]).cloned().unwrap_or((0, "ok".into()));
+            // Tether stops while the child runs; -99: the child finishes, -98: it does not.
+            if code == -99 || code == -98 {
+                self.svc.set(code == -99);
+                panic!("Tether stopped");
+            }
             let out = match args[0] {
                 "identity" if code == 0 => self.identity.borrow().clone().unwrap_or_else(|| format!("{{\"uuid\":\"{UUID}\",\"pubkey\":\"{}\"}}\n", agent_pubkey())),
                 _ => format!("{line}\n"),
@@ -1849,28 +1896,108 @@ mod tests {
         assert_eq!(tidy(&"ä".repeat(400)).chars().count(), 300);
     }
 
+    /// The tests that hold the process-wide running slot, one at a time.
+    static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn wait_free() {
+        let t = std::time::Instant::now();
+        while running().is_some() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
-    fn a_long_action_goes_on_and_the_next_one_hears_busy() {
-        let a = in_background("installing the agent", Duration::from_millis(50), || {
-            std::thread::sleep(Duration::from_millis(400));
-            AgentAnswer::only("installed", "done")
+    fn a_long_action_runs_to_its_end_and_the_next_one_hears_busy() {
+        let _one = SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        wait_free();
+        // The real outcome, however long it takes (the core answers the session `running` meanwhile).
+        let long = std::thread::spawn(|| {
+            exclusive("installing the agent", || {
+                std::thread::sleep(Duration::from_millis(400));
+                AgentAnswer::only("installed", "done")
+            })
         });
-        assert_eq!(a.state, "running");
-        assert!(a.detail.contains("installing the agent takes longer"), "{}", a.detail);
-        let b = in_background("removing the agent", Duration::from_secs(5), || AgentAnswer::only("removed-by-tether", ""));
+        let t = std::time::Instant::now();
+        while running().is_none() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let b = exclusive("removing the agent", || AgentAnswer::only("removed-by-tether", ""));
         assert_eq!((b.state.as_str(), b.detail.as_str()), ("busy", "Tether is installing the agent; ask for the status later"));
-        let t = std::time::Instant::now();
-        while running().is_some() && t.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert_eq!(in_background("removing the agent", Duration::from_secs(5), || AgentAnswer::only("removed-by-tether", "")).state, "removed-by-tether");
+        assert_eq!(busy_now(*running()).map(|a| a.detail), Some("Tether is installing the agent; ask for the status later".into()), "status meanwhile");
+        assert_eq!(long.join().unwrap(), AgentAnswer::only("installed", "done"));
+        assert_eq!(exclusive("removing the agent", || AgentAnswer::only("removed-by-tether", "")).state, "removed-by-tether");
         // a panic inside does not leave it busy
-        assert_eq!(in_background("installing the agent", Duration::from_secs(5), || panic!("boom")).state, "failed");
-        let t = std::time::Instant::now();
-        while running().is_some() && t.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        assert!(std::panic::catch_unwind(|| exclusive("installing the agent", || panic!("boom"))).is_err());
+        assert!(running().is_none());
         assert!(Running::start("checking").is_ok());
+    }
+
+    #[test]
+    fn status_during_a_policy_check_answers_from_the_saved_state_until_it_runs_the_agent() {
+        let _one = SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        wait_free();
+        let slot = Running::start(TICK).unwrap();
+        assert_eq!(busy_now(*running()), None, "only checking: the saved state answers");
+        child("installing the agent");
+        assert_eq!(busy_now(*running()).map(|a| a.state), Some("busy".into()));
+        assert_eq!(*running(), Some("installing the agent"));
+        drop(slot);
+        // a session's action is never renamed by the policy's
+        let s = Running::start("removing the agent").unwrap();
+        child("upgrading the agent");
+        assert_eq!(*running(), Some("removing the agent"));
+        drop(s);
+        assert_eq!(busy_now(None), None);
+    }
+
+    #[test]
+    fn an_install_tether_stopped_in_is_adopted_once_the_service_is_there() {
+        let w = world("pending", "install");
+        w.fake.codes.borrow_mut().insert("install", (-99, String::new()));
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| w.m().request(Action::Install, NOW)));
+        assert!(stopped.is_err());
+        let st = w.state().unwrap();
+        assert_eq!(st.pending_install, Some(Pending { at: NOW, by: "session".into() }), "saved before the run");
+        assert!(!st.ours);
+        assert_eq!(w.m().status(NOW + 30).installed_by, "session", "status reads it the same way");
+        w.fake.codes.borrow_mut().clear();
+        w.tick(NOW + 60).unwrap();
+        let st = w.state().unwrap();
+        assert_eq!((st.state.as_str(), st.by.as_str(), st.ours, st.pending_install.is_none()), ("installed", "session", true, true));
+        // Tether's agent now: it is enrolled with the policy's grant (not left as one installed by hand)
+        assert!(w.runs().iter().any(|r| r[0] == "enrol"), "{:?}", w.runs());
+        assert_eq!(st.grant_id, w.grant_id);
+        assert_eq!(w.m().status(NOW + 70).installed_by, "session");
+        // by policy, adopted through a session request too
+        let w = world("pending-policy", "install");
+        w.fake.codes.borrow_mut().insert("install", (-99, String::new()));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| w.tick(NOW))).is_err());
+        assert_eq!(w.state().unwrap().pending_install.map(|p| p.by), Some("policy".into()));
+        w.fake.codes.borrow_mut().clear();
+        assert_eq!(w.m().request(Action::Remove, NOW + 10).state, "removed-by-tether");
+        assert_eq!(w.state().unwrap().pending_install, None);
+    }
+
+    #[test]
+    fn an_install_that_never_finished_is_recorded_as_interrupted() {
+        let w = world("interrupted", "install");
+        w.fake.codes.borrow_mut().insert("install", (-98, String::new()));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| w.tick(NOW))).is_err());
+        w.fake.codes.borrow_mut().clear();
+        let n = w.runs().len();
+        // it may still be running: no second install, by policy or in a session
+        w.tick(NOW + 10).unwrap();
+        assert_eq!(w.runs().len(), n);
+        assert!(w.m().request(Action::Install, NOW + 20).detail.contains("may still be running"));
+        assert_eq!(w.runs().len(), n);
+        assert!(w.state().unwrap().pending_install.is_some());
+        // past the install's own limit: failed, interrupted, the field cleared
+        w.tick(NOW + PENDING_MAX).unwrap();
+        let st = w.state().unwrap();
+        assert_eq!((st.state.as_str(), st.pending_install.is_none()), ("failed", true));
+        assert!(st.detail.contains("interrupted"), "{}", st.detail);
+        assert_eq!(w.runs().len(), n, "backs off before the next try");
+        assert_eq!(w.m().status(NOW + PENDING_MAX).state, "failed");
     }
 
     #[cfg(windows)]
