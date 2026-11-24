@@ -259,6 +259,44 @@ runs nothing on a device and opens no port on it.
   so the agent's files can never be offered to an installed Tether client. The agent verifies the
   index, the size, the SHA-256 and the minisign signature of each artifact before installing.
 
+### The software list
+
+With `STATUS_SBOM=on` a device can also upload a list of its installed software
+([docs/health.md](docs/health.md#the-software-list), [docs/api.md](docs/api.md#put-apistatussbom-device-signed)).
+It is off by default; while off, its three routes answer `404`. `STATUS=off` wins over it.
+
+- **Who can read it.** The relay operator, who can read `status/`, and every member of the team
+  roster (no `write` or `audit` flag needed), as for reports. It is not end-to-end encrypted. It
+  names the installed programs with their versions and publishers and the machine's hardware
+  identity, which is more than a report holds ([PRIVACY.md](PRIVACY.md)). A device key and a
+  member key do not pass on each other's routes, as for reports.
+- **What an enrolled device can do.** Store one document of its own choosing: a JSON object of at
+  most `STATUS_SBOM_MAX_KB` (512 KiB), one accepted upload per hour, in place of its earlier one.
+  The relay checks only that it is a JSON object and stores it byte for byte, so junk, a document
+  that is not CycloneDX, and one nested very deeply are all stored. Whatever reads a list (the
+  technician app, scripts, the bridge) must treat it as untrusted text and survive that. Nothing
+  in a list is run or changes a policy or an access decision. A device can be made to look like it
+  has software it has not, as with a report.
+- **What a hostile enrolled device can not do.** Store more than that one document, or touch
+  another device's list: the key is pinned per uuid, and a signature for another uuid, an unsigned
+  request or a replayed one is refused with `401`.
+- **Limits, in the order of work.** The switch, the size from `Content-Length` (`413`, before the
+  body is read), one accepted upload per uuid per hour, a global budget `STATUS_SBOM_RPS`
+  (default 2 per second, all devices), the per-IP failed-signature limit and the key lookup, the
+  signature, then the body, which is read for exactly the declared bytes. The hash, the signature
+  check and the write happen outside the state lock. A request that fails the signature does not
+  use up the device's hour, but it does use the global budget before its signature is known:
+  whoever can reach the relay (a header naming any valid uuid is enough) can use up the budget
+  with unsigned requests, so that real uploads get `429 busy` and are delayed until they retry.
+  Nothing else on the relay is affected, and no file is written for such a request.
+- **Disk.** `STATUS_SBOM_MAX_TOTAL_MB` (2 048 MiB) limits the sum of all stored lists. A holder of
+  an enrolment token can enrol devices (up to `STATUS_MAX_DEVICES`) and fill that sum with junk
+  lists of 512 KiB; uploads that would exceed it then get `507`, while devices that already have a
+  list can still replace it with one that is not larger. Revoking the token and removing its
+  devices (`monitor-publish devices --token <id>`, `remove`) gives the room back.
+- **Lifetime.** The file is removed with the pin: the device's own removal, an administrator's or
+  a member's, and the 180 days without a report. Unlinking and dismissing a claim keep it.
+
 ## Least privilege and attack surface
 
 Settings below are **forced** for every Tether process (UI, server, service and connection manager)
@@ -550,7 +588,8 @@ Report vulnerabilities privately to the maintainers. Do not open a public issue.
 - A device's Tether ID in the health view rests on a token issued for that ID or on a
   technician's confirmation, both the word of a trusted person, not a cryptographic proof by
   Tether on that machine ([Device status](#device-status-health-reports)). Reports are readable
-  by the relay operator and every team member, not end-to-end encrypted.
+  by the relay operator and every team member, not end-to-end encrypted. The same holds for the
+  software list ([The software list](#the-software-list)), which also holds the hardware identity.
 - A custom app's settings apply above the policy profile, except for features the profile locks:
   it can add restrictions and defaults, and its branding (title, accent, welcome text) applies,
   but it cannot unlock what the policy locks.

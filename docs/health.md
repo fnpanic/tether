@@ -104,8 +104,9 @@ Everything is in `/var/lib/tether-api/status/` (directory `0700`, files `0600`):
 | `keys.jsonl` | The pins, one line per change: `set` (enrolment, link, unlink, allowing a new claim, a claim taken from an accepted report: uuid, device public key, the token's label and id, time of enrolment, the verified Tether ID, the claimed one, who linked it and when, `no_claim`, the customer reference), `used` (a token issued for one Tether ID was used, with its expiry), `dismissed` and `forgotten` (the key of a device whose link was dismissed released its own pin; kept 180 days, at most 10 000: when full, the oldest goes with a `forgotten` line, also when the file is read at start) and `unpin` (removal); `pin` lines from before are still read. Appended and synced for each change, compacted in the background. | Every device must enrol again, with a valid token ([Locked state](#the-locked-state)). **Back this one up.** |
 | `revoked.json` | Revoked tokens: `{"<token id>": <its expiry>}`, at most 10 000; an entry is dropped once the token would have expired anyway. Written by the status writer, synced before a revocation is answered. | Revoked tokens that have not expired work again. **Back this one up.** |
 | `<uuid>.json` | The last full report, byte for byte as the agent sent it. | Shown as "No full report yet" until the device posts a full one. |
+| `<uuid>.sbom.json` | Only with `STATUS_SBOM=on` ([The software list](#the-software-list)): the device's software list, byte for byte as it was uploaded. | The list of that device, until the device uploads one again. |
 | `<uuid>.history.jsonl` | One line per change of a check (`id`, `from`, `to`, `time`, and `at`, the relay's receive time). Kept 90 days and at most 2000 lines. | The history of that device. |
-| `seen.json` | Last post of each device: time, `seq`, the `next` it was told and the summary entry (at most 2 KiB). Written at most every 5 minutes when something changed, and at a normal stop; a hard kill loses up to 5 minutes of last-seen times. | The hosts leave the summary until each posts a full report again (a heartbeat is answered `409 send a full report`). |
+| `seen.json` | Last post of each device: time, `seq`, the `next` it was told, the summary entry (at most 2 KiB) and, when the device has a software list, its time, size and the first 16 hex digits of its SHA-256. Written at most every 5 minutes when something changed, and at a normal stop; a hard kill loses up to 5 minutes of last-seen times. | The hosts leave the summary until each posts a full report again (a heartbeat is answered `409 send a full report`). |
 | `summary.json` | The cached team summary, rebuilt at most every 30 s. | Rebuilt on the next request. |
 
 A heartbeat writes no file, with one exception: the first post that names a Tether ID for a device
@@ -121,6 +122,75 @@ removed with its files, as in the device list.
 
 Back up `keys.jsonl` and `revoked.json` with the rest of `/var/lib/tether-api` ([deployment.md](deployment.md)).
 Reports and history are worth keeping only if you want the history across a restore.
+
+### The software list
+
+A device can also upload a list of the software installed on it, as one JSON document (the
+monitoring agent that supports it sends CycloneDX 1.6). The relay stores it and hands it to team
+members; it reads no field of it. **Off by default.** `STATUS_SBOM=on` in `api.env` enables it
+(any other value leaves it off). While it is off, the three routes below answer `404` and the
+answer to a post has no `sbom` field. `STATUS=off` wins over it: with `STATUS=off` they answer
+`503 status reporting is off`. Files already stored stay when the feature is switched off, and
+come back when it is switched on again.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `STATUS_SBOM` | off | `on` enables the software list. |
+| `STATUS_SBOM_MAX_KB` | `512` | The largest document, in KiB. A larger `Content-Length` is `413`, answered before the body is read. |
+| `STATUS_SBOM_RPS` | `2` | Uploads the relay takes up per second, all devices together (at least 1). More in the same second is `429 busy` with `Retry-After: 60`. |
+| `STATUS_SBOM_MAX_TOTAL_MB` | `2048` | The sum of all stored lists, in MiB. An upload that would exceed it is `507`; a device that already has a list can still replace it with one that is not larger. |
+
+A value that is not a number stops tether-api from starting, as for the other numeric settings.
+
+**Routes** (every status code: [api.md](api.md#put-apistatussbom-device-signed)):
+
+- `PUT /api/status/sbom`, signed by the device like a post, stores the document: `204`.
+- `DELETE /api/status/sbom`, signed by the device, removes it: `204`, also when there is none.
+- `GET /api/team/status/<uuid>/sbom`, signed by a team member, returns the document byte for byte
+  with `Content-Type: application/vnd.cyclonedx+json` and an `ETag`; `404` when the device has none.
+
+The answer to a post (`POST /api/status`) carries `"sbom": true` beside `releases` and `next`
+when the feature is on, so an agent uploads only to a relay that takes lists. The team summary
+gives each host that has a list `"sbom":{"at":<unix time>,"sha":"<16 hex>"}`, so a client can see
+whether the list changed without fetching it.
+
+**What the relay checks.** Only that the body is a JSON object. A document that is valid JSON but
+deeply nested, or not CycloneDX at all, is stored as it is; there is no depth limit apart from the
+size limit. Whatever reads the stored document (your own scripts, the technician app) must not
+assume it is CycloneDX or that it is shallow. The file is written and synced to
+`status/<uuid>.sbom.json` before the `204`.
+
+**Limits, in the order the relay applies them to an upload:** the switch (`404`), the size from
+`Content-Length` (`413`), one accepted upload per device per hour (`429 upload too frequent`,
+`Retry-After` is the time left), the global budget (`429 busy`), the key lookup (`401` for an
+unknown device), the signature, then the body. A request that is refused for its signature does
+not use up the device's hour; it does use one of the second's `STATUS_SBOM_RPS`. The hour also
+holds after a `DELETE`, so deleting and uploading again does not get around it. A request that
+declares a body of up to 1 KiB and then sends fewer bytes may get no answer at all (the HTTP
+server drops it); nothing is stored. A longer one is `400 request body incomplete`.
+
+**Lifetime.** The file goes with the device's pin: when the device removes itself, when an
+administrator or a team member removes it ([Removing a device](#removing-a-device)) and when the
+pin expires after 180 days without a report. A device that has not posted a report yet can upload
+before its first report; it is then shown without a report and removed 180 days after its
+enrolment if it never posts. Unlinking a host or dismissing its claim leaves the list in place.
+At each start tether-api matches the records and the files in the background (it matters after a
+hard stop, which loses up to 5 minutes of `seen.json`): a list without a record is read again and
+recorded (its time is the file's modification time), a record without a file is dropped, and a
+file whose device is no longer pinned is deleted.
+
+**Disk.** *Estimated*, not measured at scale: a list is 40 to 80 KiB per machine, about 1.2 GB at
+20 000 machines. The default total of 2 048 MiB leaves room for that; the files are replaced in
+place, not added to, so the total does not grow with the number of uploads. A load test with
+uploads: [scaling.md](scaling.md). Back up `status/` with the rest of `/var/lib/tether-api`
+([Storage and backup](#storage-and-backup)); a lost list returns when the device uploads it again.
+
+**Who can read it.** Every member of the team roster (no `write` or `audit` flag needed) and the
+relay operator, who can read `status/`. It is not encrypted end to end. A list names the installed
+programs, their versions and publishers and the machine's hardware identity
+([PRIVACY.md](../PRIVACY.md)). A device that is enrolled can store one document of its own choosing
+there, at most `STATUS_SBOM_MAX_KB`, once an hour, and nothing in it is ever run
+([SECURITY.md](../SECURITY.md#the-software-list)).
 
 ### Load behaviour
 
@@ -147,8 +217,8 @@ cost little and to give way:
 - **Staleness is computed on read.** The relay keeps no timers: a device is stale when
   `now > last_seen + 3 × next`, using the `next` it last told that device.
 - **Load test.** `tools/load/status-run.sh` posts for simulated devices at the paced rate while it
-  measures heartbeat and policy latency and the relay's memory. The numbers are in
-  [scaling.md](scaling.md).
+  measures heartbeat and policy latency and the relay's memory; with `STATUS_SBOM=on` the devices
+  also upload 60 KiB software lists. The numbers are in [scaling.md](scaling.md).
 
 ### The locked state
 
@@ -181,6 +251,7 @@ On tether-api's `/metrics` ([monitoring.md](monitoring.md)):
 | Metric | Meaning |
 |---|---|
 | `tether_api_status_hosts{state="ok\|warn\|crit\|stale"}` | Hosts with a full report by state. `stale` takes precedence over the reported state; `unknown` counts as `ok`. Counted at each scrape. |
+| `tether_api_status_sbom_files`, `tether_api_status_sbom_bytes` | Software lists stored and their total size in bytes (the figure `STATUS_SBOM_MAX_TOTAL_MB` limits). Counted from the records, also while the feature is off. |
 | `tether_api_status_write_errors` | Failed writes of the status store since start (counter): `seen.json`, `summary.json`, `revoked.json`, history trimming, the `keys.jsonl` compaction, syncs and expiry, and a claim line whose sync failed. |
 | `tether_api_release_index_expires_timestamp{channel,index="monitor"}` | When the channel's `monitor.json` expires (unix seconds); the series without `index` are Tether's `releases.json`. |
 | `tether_api_requests_total{endpoint="status"}` | Posts, enrolments and removals by HTTP code (`/api/status`, `/api/status/*`). |
@@ -310,7 +381,7 @@ or `409 tether_id is enrolled with another key`) or a reused ID:
   health monitoring…** in the host's Health section
   ([Removing a device from the host list](#removing-a-device-from-the-host-list)).
 
-Both delete the pin with its link or claim, the report and the history. The line `status: pin of
+Both delete the pin with its link or claim, the report, the history and the software list. The line `status: pin of
 <uuid> removed by …` goes to the journal. If the agent on that computer still holds a valid
 enrolment token, it enrols again by itself and comes back as an agent that is not linked to any
 host (with a claim if it names a Tether ID). Uninstall the agent there, or revoke the token. A
@@ -322,6 +393,15 @@ line each to tether-api's journal on stderr (`status: <uuid> linked to <id> by t
 <name>`, `… dismissed by team member <name>`, `… removed by team member <name>`), and the pin
 keeps `linked_by` and `linked_at` of the current link. There is no separate audit log of these
 actions: keep the journal (systemd's) as long as you need that record.
+
+### Software lists
+
+A relay stores software lists only when its operator set `STATUS_SBOM=on`
+([The software list](#the-software-list)); a device uploads one only to a relay whose answer to
+its posts says `"sbom": true`. To remove the list of one device without removing the device, that
+device sends `DELETE /api/status/sbom` (an agent does so when its owner switches the list off);
+removing the device removes the list with it. A list is read through the member routes: any
+member of the roster can fetch any device's list, whatever its customer.
 
 ### Customer reference
 
@@ -496,6 +576,10 @@ version it says "Customer 4711" when the device has a customer reference.
 - **History (90 days)** lists the state changes, newest first, filterable by check.
 - **All checks** and **Raw report**, the report exactly as the relay holds it, with a copy button.
 
+The device's software list is stored on the relay too, when the operator enabled it
+([The software list](#the-software-list)). The technician app shows it from the version that
+includes it.
+
 Titles, hints and groups come from the report in German and English; the app uses the language of
 the system and falls back to the other one. Everything is shown as plain text, shortened to fit
 (titles 120, hints 600, values 80 characters). In a session window, a **Health** button in the
@@ -599,6 +683,9 @@ Enrolment, the signature, the answers and the status codes: [api.md](api.md#devi
   ([Customer reference](#customer-reference)). A device's Tether ID is shown only when a token was issued for it or a team member
   confirmed it. Both are the word of a trusted person, not a proof by Tether on that machine:
   [SECURITY.md](../SECURITY.md#device-status-health-reports).
+- **The software list** (only when the relay has `STATUS_SBOM=on`) is readable by the same people
+  and is as little end-to-end encrypted. A device can store one JSON document of its own choosing
+  there, never run by anything ([SECURITY.md](../SECURITY.md#the-software-list)).
 - **Who linked a host** (the member's roster name and the time) is stored with the pin on the
   relay and shown to the team.
 - **The relay never runs anything from a report:** `body` is stored and returned as text, and the

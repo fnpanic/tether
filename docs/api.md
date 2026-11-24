@@ -370,7 +370,7 @@ the device's history.
 
 | Status | Body | Meaning |
 |---|---|---|
-| `200` | `{"releases":<u64>,"next":<u64>}` | accepted |
+| `200` | `{"releases":<u64>,"next":<u64>}`, plus `"sbom":true` when the relay takes software lists | accepted |
 | `400` | the reason: `report is not UTF-8`, a JSON error, a field rule (`next must be 60-3600`, `at most 50 faults`, `a full report has products, changes and body, a heartbeat none of them`, …), `uuid does not match the signature` | refused; the agent has a bug |
 | `401` | `missing signature`, `unsupported signature version`, `malformed signature header`, `unknown device`, `signature does not match`, `request timestamp outside allowed clock skew`, `request signed for another relay`, `replayed request`, `this relay does not know its own host name …` | not enrolled here, or the signature or clock is wrong |
 | `409` | `seq must increase` | `seq` is not above the last accepted one |
@@ -408,6 +408,54 @@ Releases the device's pin and deletes its stored report, history and last-seen e
 relay. `204`; the `401`, `429` and `503` answers are those of a post. An agent sends it to every
 relay on uninstall.
 
+### `PUT /api/status/sbom` (device-signed)
+
+The device's software list: any JSON object, at most `STATUS_SBOM_MAX_KB` KiB (default 512). The
+agent sends CycloneDX 1.6; the relay reads no field of it, and a document that is valid JSON but
+deeply nested, or not CycloneDX, is stored as it is. It is written and synced as
+`status/<uuid>.sbom.json` before the `204`. The route exists only with `STATUS_SBOM=on`
+(operator: [health.md](health.md#the-software-list)); an agent uploads only to a relay whose answer
+to a post carries `"sbom":true`. A device may upload before its first report.
+
+Signed as a post (`Tether-Sig: device-v1`, over the host name, `PUT`, `/api/status/sbom`, the time,
+a nonce and the SHA-256 of the body). Order of work: off or locked (`503`), the switch (`404`), size
+from `Content-Length` (`413`), the header, one accepted upload per uuid per hour, the global budget
+(`STATUS_SBOM_RPS`, default 2 per second), the per-IP failure limit and the key lookup, the
+signature, and only then the check that the body is a JSON object. The hash, the signature and the
+write happen outside the state lock.
+
+| Status | Body | Meaning |
+|---|---|---|
+| `204` | | stored (replaces the device's earlier list) |
+| `400` | `not a JSON object` | the body is not one JSON object (an array, a string, text, trailing data, empty) |
+| `400` | `request body incomplete` | fewer bytes arrived than `Content-Length` declared. A body declared up to 1 KiB that is cut short may get no answer at all |
+| `401` | those of a post: `missing signature`, `unsupported signature version`, `malformed signature header`, `unknown device`, `signature does not match`, `request timestamp outside allowed clock skew`, `request signed for another relay`, `replayed request` | not enrolled here, or the signature or clock is wrong |
+| `404` | `not found` | `STATUS_SBOM` is not `on` |
+| `413` | `body too large` | more than `STATUS_SBOM_MAX_KB` KiB |
+| `429` | `upload too frequent`, `Retry-After: <s>` | an accepted upload from this uuid less than an hour ago (the seconds left; 60 while an upload from this uuid is being written). A `DELETE` does not reset it |
+| `429` | `busy`, `Retry-After: 60` | more than `STATUS_SBOM_RPS` uploads in this second, all devices together. Requests that fail the signature count here too |
+| `429` | `too many failed requests`, `Retry-After: 60` | as for a post |
+| `503` | `status reporting is off`, `status store unavailable`, `busy` | back off |
+| `507` | `sbom store full (STATUS_SBOM_MAX_TOTAL_MB)` | the stored lists would exceed `STATUS_SBOM_MAX_TOTAL_MB`; a device that already has a list can still replace it with one that is not larger |
+| `507` | `insufficient storage` | the data disk is nearly full |
+
+A `429` or `503` is retried with the agent's backoff, `413` not until the list changes.
+
+### `DELETE /api/status/sbom` (device-signed, no body)
+
+Deletes the device's list. `204`, also when it has none. The `401`, `429` (`too many failed
+requests`) and `503` answers are those of a post; `404` while `STATUS_SBOM` is not `on`. The hour of
+`PUT` stays in force after it.
+
+### `GET /api/team/status/<uuid>/sbom` (member-signed)
+
+Any member of the roster. The stored document byte for byte, `200` with `Content-Type:
+application/vnd.cyclonedx+json` and `ETag: "<16 hex>"`, the first 16 hex digits of its SHA-256
+(the `sha` of the summary entry). `If-None-Match` with that tag answers `304`. `404` when the device
+has no list, for an invalid uuid, one that is not enrolled, and while `STATUS_SBOM` is not `on`.
+`401` for a request that is not member-signed (a device key does not pass), `503` as for every
+status route. Treat the content as untrusted: it is whatever the device sent.
+
 ### `GET /api/team/status` (member-signed)
 
 Any member of the roster. The summary of every host that has a full report, sorted by uuid:
@@ -428,6 +476,8 @@ it sends no `customer` field); `last_seen` and `built` are the relay's unix time
 summary is rebuilt at most every 30 s from a snapshot and sent from `status/summary.json`, so
 `stale` is as of that build. `ETag` is `"<16 hex>"`, the first 16 hex digits of the SHA-256 over
 the `hosts` array, so an unchanged summary keeps its tag and answers `304` to `If-None-Match`.
+A host whose device has a software list (with `STATUS_SBOM=on`) also has `"sbom":{"at":<unix time of the upload>,"sha":"<16 hex>"}`, outside the 2 KiB entry; the list itself is
+`GET /api/team/status/<uuid>/sbom`.
 
 ### `GET /api/team/status/<uuid>` (member-signed)
 
@@ -448,7 +498,7 @@ relay's time when the change was stored. `404` for an invalid uuid or one that i
 
 `/var/lib/tether-api/status/` (`0700`, files `0600`): `keys.jsonl` (the pins), `revoked.json`
 (revoked token ids with their expiry; unreadable, it locks the status routes like `keys.jsonl`), `<uuid>.json` (the
-last full report), `<uuid>.history.jsonl` (changes, appended; at most 2000 lines and 90 days, cut
+last full report), `<uuid>.sbom.json` (the software list, with `STATUS_SBOM=on`; removed with the pin), `<uuid>.history.jsonl` (changes, appended; at most 2000 lines and 90 days, cut
 in the background), `seen.json` (last post of each device, flushed at most every 5 minutes), and
 `summary.json`. A pin without a post for 180 days (never posted: since enrolment) is removed with
 its files. `keys.jsonl` or `revoked.json` that cannot be read locks the status routes (503) until it is repaired or
@@ -460,8 +510,13 @@ moved away and tether-api is restarted; the rest of the relay is not affected. D
 | `STATUS` | on | `off`: every route above answers `503 status reporting is off`, `Retry-After: 3600`; posts are refused before the body is read |
 | `STATUS_TARGET_RPS` | `10` | posts per second the devices are paced to (at least 1); sets `next` |
 | `STATUS_MAX_DEVICES` | `20000` | pins at most; more is `507`, existing pins keep working |
+| `STATUS_SBOM` | off | `on`: the software-list routes exist and the answer to a post says `"sbom":true`; otherwise they answer `404`. `STATUS=off` wins |
+| `STATUS_SBOM_MAX_KB` | `512` | largest software list in KiB; more is `413` |
+| `STATUS_SBOM_RPS` | `2` | software-list uploads taken per second, all devices (at least 1); more is `429 busy` |
+| `STATUS_SBOM_MAX_TOTAL_MB` | `2048` | sum of all stored lists in MiB; an upload that would exceed it is `507` |
 
-Metrics: `tether_api_status_hosts{state}`, `tether_api_status_write_errors`, and the request
+Metrics: `tether_api_status_hosts{state}`, `tether_api_status_write_errors`,
+`tether_api_status_sbom_files`, `tether_api_status_sbom_bytes`, and the request
 counters of the endpoints `status` and `team` ([monitoring.md](monitoring.md#tether-api-12700121120metrics)).
 
 ## Download layout and update manifests

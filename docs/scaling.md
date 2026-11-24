@@ -126,6 +126,39 @@ the end and at the peak. The run before (2026-11-23) failed the 50 ms limit (117
 member- or admin-signed request then wrote and fsynced `nonces.json` under the state lock; it is
 now written after the lock is released, before the answer.
 
+Software lists (`STATUS_SBOM=on`): *measured*, 2026-11-24, **a short run at 5 000 devices, not the
+20 000-device run above**: `DEVICES=5000 SECS=240 WARMUP=30 BASELINE=30 SELF_CHECK=1
+tools/load/status-run.sh`, the relay and the generator on one developer PC under WSL2 (the machine
+was not otherwise idle), once without and once with `STATUS_SBOM=on`. With it, one thread uploads
+a 60 KiB document for each device in turn (`PUT /api/status/sbom`, device-signed) at
+`STATUS_SBOM_RPS`, the default 2 per second, for the whole run: 480 uploads, 28 MiB. Everything
+else is as in the run above (2 351 to 2 393 status posts, 480 enrolments, the summary every 30 s).
+p50 / p99 / p99.9 / max in ms, baseline then during the run:
+
+| | without uploads | with uploads |
+|---|---|---|
+| `POST /api/heartbeat`, baseline | 0.48 / 2.03 / 4.95 / 4.95 | 0.48 / 4.99 / 29.77 / 29.77 |
+| `POST /api/heartbeat`, during | 0.50 / 2.55 / 15.77 / 30.96 | 0.51 / 3.32 / 15.02 / 24.94 |
+| `GET /api/policy`, baseline | 0.48 / 1.16 / 6.00 / 6.00 | 0.47 / 10.57 / 18.26 / 18.26 |
+| `GET /api/policy`, during | 0.50 / 2.39 / 16.67 / 28.27 | 0.31 / 5.45 / 24.31 / 33.19 |
+| `PUT /api/status/sbom` | | 3.67 / 45.87 / 95.07 / 95.07 |
+
+478 of the 480 uploads were `204`; two were `429 busy` (the generator spaces them 500 ms apart and
+the relay counts per wall-clock second, so a second can get three). No `5xx` and no connection
+error in either run. The probes stayed under 50 ms; other requests did not: the slowest status post,
+enrolment and summary took 361.6, 486.4 and 116.0 ms without uploads and 39.6, 96.7 and 72.1 ms
+with them (a short run on a PC that was doing other things: single slow requests, not a trend). tether-api RSS: 12.0 MiB after the
+warm-up without uploads and 14.8 MiB at the end and at the peak; 12.1 MiB and 15.2 MiB with them.
+In both runs the generator's own criteria show FAIL on a short run: the RSS at the end is more
+than 10 % above the reference taken after a 30 s warm-up (it keeps growing for the first minutes
+of a run; the 20 000-device run above is 10 minutes with a 60 s warm-up) and, without uploads,
+the p99.9 of the probes is above 1.5 x the baseline's (a baseline of 600 samples has a noisy
+p99.9: with uploads the baseline itself had 29.8 ms). So the two runs show that the uploads at the
+default budget cost no more than the noise of this machine and about 0.4 MiB more memory at the
+end; they do not show a pass of the 20 000-device criteria, and the run at 20 000 devices with
+uploads was **not done**. The differences between the two columns are within the spread of one
+run to the next here: do not read them as an effect of the uploads, in either direction.
+
 Disk writes of the status store at 20 000 devices: `seen.json` (about 22 MB, *estimated* from the
 entry sizes) is rewritten at most every 5 minutes, about 6 GB a day; a hard kill loses at most 5
 minutes of last-seen times (a stop by systemd flushes it). Summary entries are capped at 2 KiB.

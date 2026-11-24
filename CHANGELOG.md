@@ -82,6 +82,33 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   ([docs/health.md](docs/health.md#customer-reference),
   [SECURITY.md](SECURITY.md#device-status-health-reports)). Separate organisations need separate
   deployments: [docs/several-organisations.md](docs/several-organisations.md).
+- **Software list on the relay (tether-api; off by default).** With `STATUS_SBOM=on` a device can
+  upload the list of its installed software as one JSON document (`PUT /api/status/sbom`,
+  device-signed; `DELETE` removes it) and team members read it
+  (`GET /api/team/status/<uuid>/sbom`: the stored bytes, `Content-Type:
+  application/vnd.cyclonedx+json`, `ETag`). The relay checks only that the document is a JSON
+  object (so valid JSON that is deeply nested or not CycloneDX is stored as it is), writes it
+  to `status/<uuid>.sbom.json` before the `204`, and applies, in this order: the switch (`404`),
+  the size from `Content-Length` (`STATUS_SBOM_MAX_KB`, default 512, `413`), one accepted upload
+  per device per hour, a global budget (`STATUS_SBOM_RPS`, default 2 per second, `429` with
+  `Retry-After`), the signature and the body; the total is capped by `STATUS_SBOM_MAX_TOTAL_MB`
+  (default 2048, `507`). The file goes with the pin (removal, 180 days without a report). A device
+  may upload before its first report. The answer to a post carries `"sbom": true` when the
+  feature is on, the team summary a host's `sbom: {at, sha}`, and `/metrics` has
+  `tether_api_status_sbom_files` and `tether_api_status_sbom_bytes`. The technician app does not
+  show the list yet. `tools/load/status-run.sh` can now upload lists for every simulated device
+  (`STATUS_SBOM=on`). Operation: [docs/health.md](docs/health.md#the-software-list); wire:
+  [docs/api.md](docs/api.md#put-apistatussbom-device-signed); what it holds and who can read it:
+  [PRIVACY.md](PRIVACY.md), [SECURITY.md](SECURITY.md#the-software-list).
+  Checked: the relay's integration tests (`server/api/tests/status.rs`, on Linux under WSL) and a
+  short load run of 5 000 devices for 240 s, once without and once with uploads at the default
+  budget, on a developer PC under WSL ([docs/scaling.md](docs/scaling.md#tether-api)): 478 of 480
+  uploads accepted, two `429 busy`, no `5xx`, memory about 15 MiB. Not checked: the run at
+  20 000 devices with uploads, a relay on a real server, a real agent's uploads (the agent is not
+  built yet), and the 40 to 80 KiB per machine and 1.2 GB at 20 000 machines, which stay an
+  estimate. The short runs failed two of the generator's own criteria (RSS at the end against a
+  30 s warm-up, p99.9 of the probes against a noisy baseline), with and without uploads; they
+  are not a pass.
 - Checked and not checked: to be filled in at release.
 
 ### Instances: two organisations' Tether on one PC (not in a numbered version yet)
