@@ -1831,6 +1831,108 @@ extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
 }
 
+const HBBS_PEER_DEFAULT: &str = "127.0.0.1:21122";
+/// The whole lookup of an ID's key at hbbs, all URLs together.
+const HBBS_TIMEOUT: Duration = Duration::from_secs(2);
+/// hbbs's answer is about 130 bytes; anything longer is not one.
+const HBBS_ANSWER_MAX: usize = 256;
+
+/// `HBBS_PEER_URL`: comma-separated `http://<host>:<port>[/]`, or `off`; `host:port` of each.
+/// Plain HTTP only: hbbs's health port has no TLS, and the relay carries no TLS client (it runs
+/// in 64 MB; hbbs is on the same host or its private network, `PEER_LOOKUP_FROM`).
+fn hbbs_peer_urls(v: &str) -> Result<Vec<String>, String> {
+    match v.trim() {
+        "" => return Ok(vec![HBBS_PEER_DEFAULT.into()]),
+        "off" => return Ok(Vec::new()),
+        _ => {}
+    }
+    v.split(',')
+        .map(|u| {
+            let u = u.trim();
+            let a = u.strip_prefix("http://").ok_or_else(|| format!("{u}: not an http:// URL"))?;
+            let a = a.strip_suffix('/').unwrap_or(a);
+            let port = a.rsplit_once(':').map(|(h, p)| (h, p.parse::<u16>()));
+            match port {
+                Some((h, Ok(_))) if !h.is_empty() && a.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b)) => Ok(a.to_owned()),
+                _ => Err(format!("{u}: expected http://<host>:<port>")),
+            }
+        })
+        .collect()
+}
+
+/// The key hbbs holds for `id` (already checked against hbbs's ID rule), asking `hosts` in
+/// order, all within [`HBBS_TIMEOUT`]: `Ok(Some(key))` from the first that has it, `Ok(None)`
+/// when one answered 404 and none had it, `Err` when none gave a usable answer.
+pub(crate) fn hbbs_peer_pk(hosts: &[String], id: &str) -> Result<Option<String>, ()> {
+    let deadline = Instant::now() + HBBS_TIMEOUT;
+    let (hosts, id) = (hosts.to_vec(), id.to_owned());
+    let (tx, rx) = std::sync::mpsc::channel();
+    // On its own thread: a host name lookup has no timeout of its own.
+    std::thread::spawn(move || {
+        let mut r = Err(());
+        for h in &hosts {
+            match peer_pk_from(h, &id, deadline) {
+                Ok(Some(k)) => {
+                    r = Ok(Some(k));
+                    break;
+                }
+                Ok(None) => r = Ok(None),
+                Err(()) => {}
+            }
+        }
+        let _ = tx.send(r);
+    });
+    rx.recv_timeout(HBBS_TIMEOUT).unwrap_or(Err(()))
+}
+
+/// One `GET /peer-pk/<id>`: every step within `deadline`, at most [`HBBS_ANSWER_MAX`] bytes read,
+/// a redirect is no answer.
+fn peer_pk_from(host: &str, id: &str, deadline: Instant) -> Result<Option<String>, ()> {
+    use std::net::ToSocketAddrs;
+    let left = || deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or(());
+    let addr = host.to_socket_addrs().map_err(drop)?.next().ok_or(())?;
+    let mut s = TcpStream::connect_timeout(&addr, left()?).map_err(drop)?;
+    s.set_write_timeout(Some(left()?)).map_err(drop)?;
+    s.write_all(format!("GET /peer-pk/{id} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes()).map_err(drop)?;
+    let mut buf = [0u8; HBBS_ANSWER_MAX + 1];
+    let mut n = 0;
+    while n < buf.len() {
+        s.set_read_timeout(Some(left()?)).map_err(drop)?;
+        match s.read(&mut buf[n..]).map_err(drop)? {
+            0 => return peer_pk_answer(&buf[..n]),
+            k => n += k,
+        }
+    }
+    Err(())
+}
+
+/// hbbs's answer, strictly: `404`, or `200` with a `Content-Length` and the body
+/// `<standard base64 of a 32-byte key>\n`. Anything else is no answer.
+fn peer_pk_answer(raw: &[u8]) -> Result<Option<String>, ()> {
+    let raw = std::str::from_utf8(raw).map_err(drop)?;
+    let (head, body) = raw.split_once("\r\n\r\n").ok_or(())?;
+    let mut lines = head.split("\r\n");
+    let mut status = lines.next().ok_or(())?.split(' ');
+    if !matches!(status.next(), Some("HTTP/1.1" | "HTTP/1.0")) {
+        return Err(());
+    }
+    match status.next() {
+        Some("404") => return Ok(None),
+        Some("200") => {}
+        _ => return Err(()),
+    }
+    let len = lines.find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("content-length")).map(|(_, v)| v.trim()));
+    if len != Some(body.len().to_string().as_str()) {
+        return Err(());
+    }
+    let key = body.strip_suffix('\n').ok_or(())?;
+    if key.bytes().any(|b| b.is_ascii_whitespace()) {
+        return Err(());
+    }
+    tether_trust::key_from_b64(key).map_err(drop)?;
+    Ok(Some(key.to_owned()))
+}
+
 fn main() {
     let mut data = PathBuf::from("/var/lib/tether-api");
     let mut listen = "127.0.0.1:21120".to_owned();
@@ -1881,6 +1983,10 @@ fn main() {
         sbom_max: env_num("STATUS_SBOM_MAX_KB", 512).saturating_mul(1 << 10),
         sbom_rps: env_num("STATUS_SBOM_RPS", 2).max(1),
         sbom_total: env_num("STATUS_SBOM_MAX_TOTAL_MB", 2048).saturating_mul(1 << 20),
+        hbbs: hbbs_peer_urls(&std::env::var("HBBS_PEER_URL").unwrap_or_default()).unwrap_or_else(|e| {
+            eprintln!("HBBS_PEER_URL: {e}");
+            std::process::exit(1);
+        }),
     });
     let mut app = App::open(data.clone(), keys, audit_days, audit_max).unwrap_or_else(|e| {
         eprintln!("data dir: {e}");

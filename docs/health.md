@@ -45,7 +45,9 @@ report format below are open and checked by the relay, which does not interpret 
    checks the token and the signature, pins the key to the uuid and answers how long to wait
    before the next post. The Tether
    ID the agent names is only a **claim**: it becomes the device's Tether ID when the token was
-   issued for that ID, or when a team member confirms it ([Linking an agent to its
+   issued for that ID, when a grant comes with a Tether proof from Tether on that machine
+   (checked against hbbs, [api.md](api.md#post-apistatusenroll-token-and-device-signature)), or
+   when a team member confirms it ([Linking an agent to its
    host](#linking-an-agent-to-its-host)).
 3. The agent posts a **full report** (everything) and, between changes, **heartbeats** (the state
    in a few fields). Each post is signed with the device key. The relay sets the pace.
@@ -75,6 +77,7 @@ are environment variables of tether-api, normally in `/etc/tether/api.env`, read
 | `STATUS` | on | `STATUS=off` switches the whole feature off (below). Any other value leaves it on. |
 | `STATUS_TARGET_RPS` | `10` | Posts per second the relay paces its enrolled devices to (at least 1). |
 | `STATUS_MAX_DEVICES` | `20000` | Enrolled devices at most. A new device beyond it gets `507 too many devices (STATUS_MAX_DEVICES)`. Devices already enrolled are not affected. |
+| `HBBS_PEER_URL` | `http://127.0.0.1:21122` | hbbs health ports (comma separated, tried in order, 2 s for all) asked for the key of a Tether ID when a device enrols with a grant and a Tether proof ([api.md](api.md#post-apistatusenroll-token-and-device-signature)). Only `http://<host>:<port>`; anything else stops tether-api at start. hbbs answers only loopback and its `PEER_LOOKUP_FROM`. `off`: such enrolments get `503 tether proof needs HBBS_PEER_URL`; when no hbbs answers, `503 tether proof unavailable` (the device tries again later; it is never linked without the proof). |
 | `STATUS_TRACE_LOCK` | off | `1`: log every hold of tether-api's state lock over 20 ms with the route that held it (`lock held <ms> ms: …`). A diagnosis setting for load tests; leave it off. |
 
 A value that is not a number stops tether-api from starting, as for the other numeric settings.
@@ -93,7 +96,7 @@ come back when the setting is removed. Pins that have not seen a post for 180 da
 dropped while it is off.
 
 Enrolment is refused when the same Tether ID or uuid is pinned to another key, and limited to 30
-new pins or refused tokens per minute per IP (an IPv6 client counts as its /64).
+new pins or refused tokens (wrong Tether proofs included) per minute per IP (an IPv6 client counts as its /64).
 
 ### Storage and backup
 

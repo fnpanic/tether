@@ -74,7 +74,9 @@ Probes: `/readyz` (readiness, every 2 s) and `/healthz` (liveness) on the health
 hbbs answers `/peer-pk/<id>` (the key it holds for an ID, read by tether-api for a Tether proof
 enrolment) only to loopback and to `PEER_LOOKUP_FROM` (comma-separated CIDRs, unset in the chart):
 tether-api runs in its own pod here, so set `PEER_LOOKUP_FROM` to the api pods' range for that
-enrolment, and keep it narrow, since anyone inside it can look up any ID's key.
+enrolment, and keep it narrow, since anyone inside it can look up any ID's key. tether-api asks
+`HBBS_PEER_URL` (default `http://127.0.0.1:21122`, not set in the chart): point it at the hbbs
+pods' health port, several comma separated ([api.md](api.md#storage-limits-and-settings)).
 
 The WebSocket ports (hbbs 21118, hbbr 21119) listen on 127.0.0.1 by default (`WS_BIND`), because
 hbbs and hbbr take the client IP from `X-Forwarded-For`/`X-Real-IP`. The proxy runs in its own pod

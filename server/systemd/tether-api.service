@@ -18,7 +18,8 @@ EnvironmentFile=-/etc/tether/server.env
 # Device status: STATUS=off (every status route answers 503, Retry-After: 3600),
 # STATUS_TARGET_RPS (posts per second the devices are paced to, default 10),
 # STATUS_MAX_DEVICES (enrolled devices at most, default 20000; more needs a larger MemoryMax,
-# docs/scaling.md).
+# docs/scaling.md), HBBS_PEER_URL (hbbs health ports asked for a Tether ID's key when a device
+# enrols with a Tether proof; default http://127.0.0.1:21122, comma-separated, or off).
 EnvironmentFile=/etc/tether/api.env
 ExecStart=/usr/local/bin/tether-api --data /var/lib/tether-api --listen 127.0.0.1:21120
 Restart=always

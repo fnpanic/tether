@@ -89,7 +89,7 @@ const SBOM_INTERVAL: u64 = 3600;
 /// `STATUS_MAX_DEVICES` (default 20 000, the size load-tested within `MemoryMax=64M`); the
 /// software list: `STATUS_SBOM=on` (off by default), `STATUS_SBOM_MAX_KB` (default 512),
 /// `STATUS_SBOM_RPS` (accepted for checking per second, all devices; default 2, at least 1),
-/// `STATUS_SBOM_MAX_TOTAL_MB` (default 2048).
+/// `STATUS_SBOM_MAX_TOTAL_MB` (default 2048); `HBBS_PEER_URL` (default `http://127.0.0.1:21122`).
 pub struct Conf {
     pub off: bool,
     pub rps: u64,
@@ -100,9 +100,17 @@ pub struct Conf {
     pub sbom_rps: u64,
     /// Bytes.
     pub sbom_total: u64,
+    /// `HBBS_PEER_URL`: `host:port` of the hbbs asked, in order, for an ID's key (enrolment with
+    /// a Tether proof); empty with `off`.
+    pub hbbs: Vec<String>,
 }
 
 static CONF: OnceLock<Conf> = OnceLock::new();
+
+/// hbbs's ID rule for `/peer-pk/<id>`: 6 to 16 of `A-Z a-z 0-9 _ -`.
+fn peer_id_ok(id: &str) -> bool {
+    (6..=16).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
 
 /// Set once by `main` from the environment.
 pub fn set_conf(c: Conf) {
@@ -110,7 +118,7 @@ pub fn set_conf(c: Conf) {
 }
 
 pub fn conf() -> &'static Conf {
-    CONF.get_or_init(|| Conf { off: false, rps: 10, max_devices: 20_000, sbom: false, sbom_max: 512 << 10, sbom_rps: 2, sbom_total: 2048 << 20 })
+    CONF.get_or_init(|| Conf { off: false, rps: 10, max_devices: 20_000, sbom: false, sbom_max: 512 << 10, sbom_rps: 2, sbom_total: 2048 << 20, hbbs: vec![crate::HBBS_PEER_DEFAULT.into()] })
 }
 
 /// `min(3600, max(300, ceil(enrolled / rps)))`: the relay's budget spread over its devices.
@@ -162,6 +170,11 @@ struct Pin {
     /// The customer reference an enrolment token set (`valid_customer`); a device cannot name it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     customer: Option<String>,
+    /// The link was made by a grant with a Tether proof (`linked_token` is the grant). Not in
+    /// `keys.jsonl`: a relay of 0.6 refuses an unknown field there and locks its store, so on
+    /// disk (and after a restart) the link reads as a token's; the journal names the proof.
+    #[serde(skip)]
+    linked_proof: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -225,7 +238,7 @@ enum KeyLine {
 
 impl KeyLine {
     fn set(uuid: &str, p: &Pin) -> Self {
-        let p = p.clone();
+        let p = p.clone(); // `linked_proof` stays out of the file (see `Pin`)
         KeyLine::Set { uuid: uuid.to_owned(), key: p.key, tether_id: p.tether_id, label: p.label, enrolled: p.enrolled, token: p.token, claimed_id: p.claimed_id, linked_by: p.linked_by, linked_at: p.linked_at, linked_token: p.linked_token, no_claim: p.no_claim, customer: p.customer }
     }
 }
@@ -264,7 +277,7 @@ fn replay_keys(b: &[u8]) -> Result<(BTreeMap<String, Pin>, Used, Dismissed, usiz
                 keys.remove(&uuid);
             }
             KeyLine::Set { uuid, key, tether_id, label, enrolled, token, claimed_id, linked_by, linked_at, linked_token, no_claim, customer } => {
-                keys.insert(uuid, Pin { key, tether_id, label, enrolled, token, claimed_id, linked_by, linked_at, linked_token, no_claim, customer });
+                keys.insert(uuid, Pin { key, tether_id, label, enrolled, token, claimed_id, linked_by, linked_at, linked_token, no_claim, customer, linked_proof: false });
             }
             KeyLine::Used { token, uuid, exp } => {
                 used.insert(token, (uuid, exp));
@@ -1089,13 +1102,16 @@ fn build_summary(app: &Mutex<App>, tmp: &Path, t: u64) -> io::Result<String> {
         s.entry()?;
         let p = a.status.keys.get(&**u);
         let sbom = s.sbom.as_ref().filter(|_| conf().sbom).map(|r| (r.at, r.sha.clone()));
-        Some((u.clone(), p.and_then(|p| p.tether_id.clone()), p.and_then(|p| p.claimed_id.clone()), p.and_then(|p| p.linked_at), p.is_some_and(|p| p.no_claim), p.and_then(|p| p.customer.clone()), s.last_seen, s.next, s.entry.clone()?, sbom))
+        Some((u.clone(), p.and_then(|p| p.tether_id.clone()), p.and_then(|p| p.claimed_id.clone()), p.and_then(|p| p.linked_at), p.is_some_and(|p| p.no_claim), p.is_some_and(|p| p.linked_proof), p.and_then(|p| p.customer.clone()), s.last_seen, s.next, s.entry.clone()?, sbom))
     };
     chunks(app, dev_map, copy, |buf| {
         // The head is built by the relay from fixed-size fields (`sbom`: a number and 16 hex
         // digits) and is outside the entry's 2 KiB cap, which bounds only the device-supplied part.
-        for (u, tid, claimed, linked_at, no_claim, customer, last_seen, next, entry, sbom) in buf.drain(..) {
+        for (u, tid, claimed, linked_at, no_claim, linked_proof, customer, last_seen, next, entry, sbom) in buf.drain(..) {
             let mut head = serde_json::json!({"uuid": &*u, "tether_id": tid, "claimed_id": claimed, "linked_at": linked_at, "no_claim": no_claim, "customer": customer, "last_seen": last_seen, "next": next, "stale": stale_at(last_seen, next, t)});
+            if linked_proof {
+                head["linked_proof"] = true.into();
+            }
             if let Some((at, sha)) = sbom {
                 head["sbom"] = serde_json::json!({"at": at, "sha": sha});
             }
@@ -1184,21 +1200,15 @@ impl App {
         if counted && self.status.enroll_hits.get(&ip).is_some_and(|h| t < h.0 + 60 && h.1 >= ENROLL_PER_MIN) {
             return Err(text(429, "too many requests").with_header(hdr("Retry-After", "60")));
         }
-        let refused = |s: &mut Status, r: Resp| {
-            if counted {
-                rate_ok(&mut s.enroll_hits, ip.clone(), t, u32::MAX);
-            }
-            r
-        };
         // Every enrolment proves possession of the key it pins (verified after the token). Without a
         // header it is refused before the token is checked, counted as a refused token is.
         if header(rq, reqauth::HEADER).is_none() {
-            return Err(refused(&mut self.status, text(401, "enrolment needs the device's signature")));
+            return Err(self.enroll_refused(&req.uuid, &key, &ip, t, text(401, "enrolment needs the device's signature")));
         }
         let tok = match st::verify_token(&req.token, &self.keys, t) {
             Ok(tok) if !self.status.revoked.contains_key(&tok.id) => tok,
-            Ok(_) => return Err(refused(&mut self.status, text(401, "token revoked"))),
-            Err(e) => return Err(refused(&mut self.status, text(401, &format!("enrollment token: {e}")))),
+            Ok(_) => return Err(self.enroll_refused(&req.uuid, &key, &ip, t, text(401, "token revoked"))),
+            Err(e) => return Err(self.enroll_refused(&req.uuid, &key, &ip, t, text(401, &format!("enrollment token: {e}")))),
         };
         if old.as_ref().is_some_and(|p| p.key != key) {
             return Err(text(409, "uuid is enrolled with another key"));
@@ -1209,8 +1219,66 @@ impl App {
             return Err(text(401, "signature names another uuid"));
         }
         self.device_verify_key(rq, &sig, Some(&key), "POST", url, body)?;
-        // A token issued for a Tether ID: that ID, for one device. Any other token: what the
-        // device names is only a claim, until a team member links it.
+        if !tok.tether_proof {
+            return self.enroll_pin(req, tok, key, ip, t, false);
+        }
+        // A grant (a token with `tether_proof`): the ID is the one whose key, as hbbs holds it,
+        // signed the proof. hbbs is asked after the lock is released (up to 2 s).
+        let (Some(id), Some(proof)) = (req.tether_id.clone(), req.tether_proof.clone()) else {
+            return Err(text(400, "tether proof required"));
+        };
+        // Only an ID of hbbs's own rule goes into the lookup's path.
+        if !peer_id_ok(&id) {
+            return Err(text(400, "bad tether_id"));
+        }
+        if conf().hbbs.is_empty() {
+            return Err(text(503, "tether proof needs HBBS_PEER_URL"));
+        }
+        self.defer(move |app| {
+            let pk = crate::hbbs_peer_pk(&conf().hbbs, &id);
+            let (r, later) = {
+                let mut a = lock(app);
+                let t = now();
+                let r = match pk.map(|pk| pk.map(|pk| st::verify_agent_link(&pk, &proof, &id, &req.uuid, &req.pubkey))) {
+                    Err(()) => Err(text(503, "tether proof unavailable")),
+                    Ok(None) => Err(text(409, "tether id unknown to this relay")),
+                    Ok(Some(Err(_))) => Err(a.enroll_refused(&req.uuid, &key, &ip, t, text(401, "tether proof does not match"))),
+                    Ok(Some(Ok(()))) => a.enroll_pin(req, tok, key, ip, t, true),
+                };
+                (r, a.later.take())
+            };
+            match (r, later) {
+                (Ok(_), Some(f)) => f(app),
+                (r, _) => r,
+            }
+        })
+    }
+
+    /// A refused enrolment counts for its IP, unless it is the pinned key again.
+    fn enroll_refused(&mut self, uuid: &str, key: &str, ip: &str, t: u64, r: Resp) -> Resp {
+        if self.status.keys.get(uuid).is_none_or(|p| p.key != key) {
+            rate_ok(&mut self.status.enroll_hits, ip.to_owned(), t, u32::MAX);
+        }
+        r
+    }
+
+    /// The pin an accepted enrolment makes or keeps. With a Tether proof (`proof`: `req.tether_id`
+    /// is verified) this runs after hbbs was asked, without the lock in between, so what was
+    /// checked before is checked again: the token revoked or the uuid pinned to another key since
+    /// (the ID taken and the device cap are checked here anyway).
+    fn enroll_pin(&mut self, req: st::EnrollRequest, tok: st::TokenPayload, key: String, ip: String, t: u64, proof: bool) -> Result<Resp, Resp> {
+        let old = self.status.keys.get(&req.uuid).cloned();
+        if proof {
+            if self.status.revoked.contains_key(&tok.id) {
+                return Err(self.enroll_refused(&req.uuid, &key, &ip, t, text(401, "token revoked")));
+            }
+            if old.as_ref().is_some_and(|p| p.key != key) {
+                return Err(text(409, "uuid is enrolled with another key"));
+            }
+        }
+        // A token issued for a Tether ID: that ID, for one device. A grant with a proof: the ID
+        // proven, not single-use. Any other token: what the device names is only a claim, until a
+        // team member links it.
         let first_use = tok.tether_id.is_some() && !self.status.used.contains_key(&tok.id);
         let dismissed = self.status.key_dismissed(&key);
         let (tether_id, claim) = match &tok.tether_id {
@@ -1227,6 +1295,7 @@ impl App {
             // A device whose link a member dismissed claims nothing until a member allows it, also
             // with its key under another uuid.
             None if old.as_ref().is_some_and(|o| o.no_claim) || dismissed => (None, None),
+            None if proof => (req.tether_id.clone(), None),
             None => (None, req.tether_id.clone()),
         };
         if let (Some(o), Some(i)) = (&old, tether_id.as_ref().or(claim.as_ref())) {
@@ -1244,7 +1313,7 @@ impl App {
         let mut pin = match old.clone() {
             // The same key again: idempotent; a pin without a Tether ID gets the bound one, or the claim.
             Some(mut p) if p.tether_id.is_none() && tether_id.is_some() => {
-                (p.tether_id, p.claimed_id, p.linked_by, p.linked_at, p.linked_token, p.no_claim) = (tether_id.clone(), None, None, Some(t), Some(tok.id.clone()), false);
+                (p.tether_id, p.claimed_id, p.linked_by, p.linked_at, p.linked_token, p.no_claim, p.linked_proof) = (tether_id.clone(), None, None, Some(t), Some(tok.id.clone()), false, proof);
                 p
             }
             Some(mut p) => {
@@ -1276,6 +1345,7 @@ impl App {
                 linked_by: None,
                 no_claim: false,
                 customer: None,
+                linked_proof: proof && tether_id.is_some(),
             },
         };
         // A token without a customer changes nothing; one with it sets it, also on a pin that has one.
@@ -1297,6 +1367,9 @@ impl App {
                 lines.insert(0, KeyLine::Used { token: tok.id.clone(), uuid: req.uuid.clone(), exp: tok.exp });
             }
             let log = self.status.keys_append(&lines).map_err(crate::internal)?;
+            if let Some(i) = pin.tether_id.as_ref().filter(|_| proof && old.as_ref().is_none_or(|o| o.tether_id.is_none())) {
+                eprintln!("status: {} linked to {i} by Tether proof (token {})", req.uuid, tok.id);
+            }
             if let (Some(o), Some(c)) = (&old, &pin.customer) {
                 if o.customer != pin.customer {
                     eprintln!("status: customer of {} set to {c} by token {}", req.uuid, tok.id);
@@ -1750,7 +1823,7 @@ impl App {
             return Err(text(409, "tether_id is pinned to another device"));
         }
         let t = now();
-        let next = Pin { tether_id: Some(id.clone()), claimed_id: None, linked_by: Some(member.to_owned()), linked_at: Some(t), linked_token: None, no_claim: false, ..pin };
+        let next = Pin { tether_id: Some(id.clone()), claimed_id: None, linked_by: Some(member.to_owned()), linked_at: Some(t), linked_token: None, no_claim: false, linked_proof: false, ..pin };
         let log = self.pin_update(uuid, next, false)?;
         eprintln!("status: {uuid} linked to {id} by team member {member}");
         synced_then(self, log, empty(204))
@@ -1769,7 +1842,7 @@ impl App {
             (None, Some(c)) => format!("claim of {c}"),
             (None, None) => "claims".to_owned(),
         };
-        let next = Pin { tether_id: None, claimed_id: None, linked_by: None, linked_at: None, linked_token: None, no_claim: true, ..pin };
+        let next = Pin { tether_id: None, claimed_id: None, linked_by: None, linked_at: None, linked_token: None, no_claim: true, linked_proof: false, ..pin };
         let log = self.pin_update(uuid, next, false)?;
         eprintln!("status: {what} of {uuid} dismissed by team member {member}");
         synced_then(self, log, empty(204))
@@ -1963,7 +2036,7 @@ impl App {
         let pin = self.status.keys.get(uuid).ok_or_else(not_found)?;
         let t = now();
         let s = self.status.dev.get(uuid).filter(|s| s.last_seen > 0); // 0: only a software list so far
-        let head = serde_json::json!({
+        let mut head = serde_json::json!({
             "uuid": uuid,
             "tether_id": pin.tether_id,
             "claimed_id": pin.claimed_id,
@@ -1976,8 +2049,11 @@ impl App {
             "last_seen": s.map(|s| s.last_seen),
             "next": s.map(|s| s.next),
             "stale": s.is_some_and(|s| stale(s, t)),
-        })
-        .to_string();
+        });
+        if pin.linked_proof {
+            head["linked_proof"] = true.into();
+        }
+        let head = head.to_string();
         let (report, history) = (file(&self.data, uuid, "json"), file(&self.data, uuid, "history.jsonl"));
         self.defer(move |_| {
             #[derive(Deserialize)]

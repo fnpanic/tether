@@ -2,11 +2,12 @@
 //! the team summary and per-host report, removal of a pin. Same harness as tests/team.rs.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use tether_trust::{generate_key, key_to_b64, reqauth, status, SigningKey};
@@ -2183,4 +2184,323 @@ fn sbom_settings_must_be_numbers() {
     assert!(std::fs::read_to_string(&err).unwrap().contains("STATUS_SBOM_MAX_KB: not a number"));
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&err);
+}
+
+// ---- Enrolment with a Tether proof: a grant (a token with `tether_proof`), the ID's key from hbbs.
+
+const TID: &str = "123456789";
+
+/// A stub hbbs health port: the bytes `answer` gives for the request's path are sent back as they
+/// are. Its URL and the number of requests it got.
+fn stub_hbbs(answer: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static) -> (String, Arc<AtomicU32>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let (answer, hits) = (Arc::new(answer), Arc::new(AtomicU32::new(0)));
+    let h = hits.clone();
+    std::thread::spawn(move || {
+        for mut c in l.incoming().flatten() {
+            let (answer, h) = (answer.clone(), h.clone());
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 1024];
+                let n = c.read(&mut buf).unwrap_or(0);
+                h.fetch_add(1, Ordering::SeqCst);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let _ = c.write_all(&answer(req.split_whitespace().nth(1).unwrap_or("")));
+            });
+        }
+    });
+    (url, hits)
+}
+
+fn http(status: &str, body: &str) -> Vec<u8> {
+    format!("HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
+}
+
+/// As hbbs answers: `tether`'s key for `id`, 404 for any other ID.
+fn hbbs_knowing(id: &str, tether: &SigningKey) -> (String, Arc<AtomicU32>) {
+    let (path, key) = (format!("/peer-pk/{id}"), key_to_b64(&tether.verifying_key()));
+    stub_hbbs(move |p| if p == path { http("200 OK", &format!("{key}\n")) } else { http("404 Not Found", "not found\n") })
+}
+
+/// A URL nobody listens on.
+fn hbbs_down() -> String {
+    format!("http://{}", TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap())
+}
+
+fn proof_server(admin: &SigningKey, hbbs: &str) -> Srv {
+    spawn_env(new_dir(), &key_to_b64(&admin.verifying_key()), &[("HBBS_PEER_URL", hbbs)])
+}
+
+fn grant(admin: &SigningKey, customer: Option<&str>) -> (String, String) {
+    status::make_token("grant", now() + 3600, None, customer, true, admin).unwrap()
+}
+
+/// What Tether on the machine signs with its identity key `tether`.
+fn proof(tether: &SigningKey, id: &str, uuid: &str, dev: &SigningKey) -> String {
+    status::sign_agent_link(&tether.to_bytes(), id, uuid, &key_to_b64(&dev.verifying_key()))
+}
+
+fn enroll_proof(s: &Srv, dev: &SigningKey, uuid: &str, id: Option<&str>, token: &str, proof: Option<&str>) -> Reply {
+    let mut b = json!({"uuid": uuid, "pubkey": key_to_b64(&dev.verifying_key()), "token": token});
+    if let Some(t) = id {
+        b["tether_id"] = t.into();
+    }
+    if let Some(p) = proof {
+        b["tether_proof"] = p.into();
+    }
+    signed(s, dev, uuid, "POST", "/api/status/enroll", b.to_string().as_bytes())
+}
+
+#[test]
+fn a_grant_with_a_proof_links_the_id_hbbs_holds() {
+    let (admin, tether) = (generate_key(), generate_key());
+    let (url, hits) = hbbs_knowing(TID, &tether);
+    let s = proof_server(&admin, &url);
+    let (g, gid) = grant(&admin, Some("cust-1"));
+    let a = generate_key();
+    let p = proof(&tether, TID, "dev-0001", &a);
+    let r = enroll_proof(&s, &a, "dev-0001", Some(TID), &g, Some(&p));
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.json(), json!({"releases": 0, "next": 300}));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let r = enroll_proof(&s, &a, "dev-0001", Some(TID), &g, Some(&p));
+    assert_eq!((r.status, r.json()), (200, json!({"releases": 0, "next": 300})), "idempotent");
+    let (w, _) = writer_and_reader(&s, &admin);
+    let h = team_get(&s, &w, "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["claimed_id"], &h["linked_by"], &h["linked_token"], &h["linked_proof"], &h["customer"]), (&json!(TID), &Value::Null, &Value::Null, &json!(gid), &json!(true), &json!("cust-1")), "{h}");
+    assert!(h["linked_at"].as_u64().unwrap() >= now() - 5);
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok")).status, 200);
+    let host = team_get(&s, &w, "/api/team/status").json()["hosts"][0].clone();
+    assert_eq!((&host["tether_id"], &host["linked_proof"]), (&json!(TID), &json!(true)), "{host}");
+    // The journal names the link once, never the grant or the proof.
+    let log = std::fs::read_to_string(&s.err).unwrap();
+    assert_eq!(log.matches(&format!("status: dev-0001 linked to {TID} by Tether proof (token {gid})")).count(), 1, "{log}");
+    assert!(!log.contains(&g) && !log.contains(&p), "{log}");
+    // Not single-use, but the ID is held: another uuid with a valid proof for it is refused.
+    let b = generate_key();
+    let r = enroll_proof(&s, &b, "dev-0002", Some(TID), &g, Some(&proof(&tether, TID, "dev-0002", &b)));
+    assert_eq!((r.status, r.text()), (409, "tether_id is enrolled with another key".into()));
+    // keys.jsonl carries no `linked_proof` (a relay of 0.6 locks its store on an unknown field):
+    // the link is stored as a token's, and after a restart it reads as one.
+    let keys = std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap();
+    assert!(!keys.contains("linked_proof") && keys.contains(&format!("\"linked_token\":\"{gid}\"")), "{keys}");
+    let s = restart(s, &admin);
+    let h = team_get(&s, &w, "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["linked_token"], &h["linked_proof"]), (&json!(TID), &json!(gid), &Value::Null), "{h}");
+}
+
+#[test]
+fn a_keys_line_with_an_unknown_field_locks_the_store() {
+    // What a relay of 0.6 (this parser) does with a `set` line carrying `linked_proof`.
+    let admin = generate_key();
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    let line = json!({"op": "set", "uuid": "dev-0001", "key": key_to_b64(&generate_key().verifying_key()), "tether_id": TID, "label": "t", "enrolled": now(), "linked_at": now(), "linked_token": "abcdefghABCDEFGH", "linked_proof": true});
+    std::fs::write(dir.join("status/keys.jsonl"), format!("{line}\n")).unwrap();
+    let s = start_in(dir, &admin);
+    let tok = status::make_token("t", now() + 3600, None, None, false, &admin).unwrap().0;
+    let r = enroll(&s, &generate_key(), "dev-0002", None, &tok);
+    assert_eq!((r.status, r.text()), (503, "status store unavailable".into()));
+}
+
+#[test]
+fn proof_enrolment_refusals() {
+    let (admin, tether) = (generate_key(), generate_key());
+    let (url, hits) = hbbs_knowing(TID, &tether);
+    let s = proof_server(&admin, &url);
+    let (g, gid) = grant(&admin, None);
+    let a = generate_key();
+    let p = proof(&tether, TID, "dev-0001", &a);
+    for (id, pr) in [(Some(TID), None), (None, Some(p.as_str())), (None, None)] {
+        let r = enroll_proof(&s, &a, "dev-0001", id, &g, pr);
+        assert_eq!((r.status, r.text()), (400, "tether proof required".into()), "{id:?} {pr:?}");
+    }
+    // Only an ID of hbbs's rule goes into the lookup's path.
+    for bad in ["12345", "12345678901234567", "../pubkey", "1234567%2F", "12345678/", "123456789?x=1", "1234567.9", "../..\\x/y"] {
+        let r = enroll_proof(&s, &a, "dev-0001", Some(bad), &g, Some(&proof(&tether, bad, "dev-0001", &a)));
+        assert_eq!((r.status, r.text()), (400, "bad tether_id".into()), "{bad}");
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    // A proof for another uuid, by another key, for another device key, or not a signature.
+    let other = generate_key();
+    for wrong in [proof(&tether, TID, "dev-0002", &a), proof(&other, TID, "dev-0001", &a), proof(&tether, TID, "dev-0001", &other), "AAAA".into(), "not base64".into()] {
+        let r = enroll_proof(&s, &a, "dev-0001", Some(TID), &g, Some(&wrong));
+        assert_eq!((r.status, r.text()), (401, "tether proof does not match".into()), "{wrong}");
+    }
+    // An ID hbbs does not know.
+    let r = enroll_proof(&s, &a, "dev-0001", Some("987654321"), &g, Some(&proof(&tether, "987654321", "dev-0001", &a)));
+    assert_eq!((r.status, r.text()), (409, "tether id unknown to this relay".into()));
+    // A revoked grant is refused before hbbs is asked.
+    let before = hits.load(Ordering::SeqCst);
+    assert_eq!(revoke(&s, &admin, &gid, now() + 3600).status, 204);
+    let r = enroll_proof(&s, &a, "dev-0001", Some(TID), &g, Some(&p));
+    assert_eq!((r.status, r.text()), (401, "token revoked".into()));
+    assert_eq!(hits.load(Ordering::SeqCst), before);
+    assert_eq!(s.admin(&admin, "GET", "/api/admin/status/devices", b"").json()["devices"], json!([]), "nothing pinned");
+}
+
+#[test]
+fn wrong_proofs_count_against_the_ip() {
+    let (admin, tether) = (generate_key(), generate_key());
+    let s = proof_server(&admin, &hbbs_knowing(TID, &tether).0);
+    let (g, _) = grant(&admin, None);
+    let a = generate_key();
+    let ip = "203.0.113.30";
+    let from_ip = |uuid: &str, p: &str| {
+        let b = json!({"uuid": uuid, "pubkey": key_to_b64(&a.verifying_key()), "token": g, "tether_id": TID, "tether_proof": p}).to_string();
+        let sig = reqauth::sign_device_request(&a, uuid, RELAY, "POST", "/api/status/enroll", b.as_bytes(), now());
+        s.req("POST", "/api/status/enroll", &[("X-Forwarded-For", ip), (reqauth::HEADER, &sig)], b.as_bytes())
+    };
+    for i in 0..30 {
+        let r = from_ip("dev-0001", &proof(&tether, TID, "dev-0002", &a));
+        assert_eq!((r.status, r.text()), (401, "tether proof does not match".into()), "attempt {i}");
+    }
+    let r = from_ip("dev-0001", &proof(&tether, TID, "dev-0001", &a));
+    assert_eq!((r.status, r.text()), (429, "too many requests".into()));
+    assert_eq!(enroll_proof(&s, &a, "dev-0001", Some(TID), &g, Some(&proof(&tether, TID, "dev-0001", &a))).status, 200, "other IPs unaffected");
+}
+
+#[test]
+fn proof_enrolment_without_a_usable_hbbs() {
+    let (admin, tether) = (generate_key(), generate_key());
+    let (g, _) = grant(&admin, None);
+    let a = generate_key();
+    let p = proof(&tether, TID, "dev-0001", &a);
+    let try_with = |hbbs: &str| {
+        let s = proof_server(&admin, hbbs);
+        let r = enroll_proof(&s, &a, "dev-0001", Some(TID), &g, Some(&p));
+        (r.status, r.text())
+    };
+    assert_eq!(try_with("off"), (503, "tether proof needs HBBS_PEER_URL".into()));
+    let down = hbbs_down();
+    assert_eq!(try_with(&down), (503, "tether proof unavailable".into()));
+    let key = key_to_b64(&tether.verifying_key());
+    let junk: Vec<Vec<u8>> = vec![
+        http("200 OK", ""),
+        http("200 OK", "\n"),
+        http("200 OK", &key), // no line end
+        http("200 OK", &format!("{key}\n\n")),
+        http("200 OK", &format!(" {key}\n")),
+        http("200 OK", &format!("{key}\n{}", "x".repeat(200))), // over 256 bytes
+        http("200 OK", "not base64!\n"),
+        http("200 OK", &format!("{}AA==\n", "A".repeat(40))), // 31 bytes
+        http("200 OK", &format!("{}\n", "A".repeat(44))),      // 33 bytes
+        format!("HTTP/1.1 302 Found\r\nLocation: {}/peer-pk/{TID}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", hbbs_knowing(TID, &tether).0).into_bytes(),
+        http("500 Internal Server Error", &format!("{key}\n")),
+        format!("HTTP/1.1 200 OK\r\n\r\n{key}\n").into_bytes(), // no length
+        b"garbage".to_vec(),
+        Vec::new(),
+    ];
+    for j in junk {
+        let shown = String::from_utf8_lossy(&j).into_owned();
+        let (url, _) = stub_hbbs(move |_| j.clone());
+        assert_eq!(try_with(&url), (503, "tether proof unavailable".into()), "{shown}");
+    }
+    // Several hbbs, tried in order: a down one, then one that answers.
+    let (url, _) = hbbs_knowing(TID, &tether);
+    assert_eq!(try_with(&format!("{down}, {url}/")).0, 200);
+    // One that does not know the ID, then one that does.
+    let (unknown, _) = hbbs_knowing("555555555", &tether);
+    assert_eq!(try_with(&format!("{unknown},{url}")).0, 200);
+}
+
+#[test]
+fn hbbs_peer_url_must_be_plain_http_urls() {
+    for bad in ["https://127.0.0.1:21122", "127.0.0.1:21122", "http://", "http://h:1/path", "http://u@h:1", "http://h:1,off", "http://h:1?x"] {
+        let dir = new_dir();
+        let err = dir.with_extension("err");
+        let st = Command::new(env!("CARGO_BIN_EXE_tether-api"))
+            .args(["--data", dir.to_str().unwrap(), "--listen", "127.0.0.1:0"])
+            .env("HBBS_PEER_URL", bad)
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&err).unwrap())
+            .status()
+            .unwrap();
+        assert!(!st.success(), "{bad}");
+        assert!(std::fs::read_to_string(&err).unwrap().contains("HBBS_PEER_URL:"), "{bad}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&err);
+    }
+}
+
+#[test]
+fn a_proof_respects_an_unlink_and_other_tokens_ignore_it() {
+    let (admin, tether) = (generate_key(), generate_key());
+    let (url, hits) = hbbs_knowing(TID, &tether);
+    let s = proof_server(&admin, &url);
+    let tok = status::make_token("t", now() + 3600, None, None, false, &admin).unwrap().0;
+    let a = generate_key();
+    let p = proof(&tether, TID, "dev-0001", &a);
+    // An ordinary token: the proof is ignored, the ID only a claim, hbbs not asked.
+    assert_eq!(enroll_proof(&s, &a, "dev-0001", Some(TID), &tok, Some(&p)).status, 200);
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    let (w, _) = writer_and_reader(&s, &admin);
+    let h = team_get(&s, &w, "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["claimed_id"], &h["linked_proof"]), (&Value::Null, &json!(TID), &Value::Null), "{h}");
+    // A member's Unlink holds against a grant with a valid proof.
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0001/link", b"").status, 204);
+    let (g, _) = grant(&admin, None);
+    assert_eq!(enroll_proof(&s, &a, "dev-0001", Some(TID), &g, Some(&p)).status, 200);
+    let h = team_get(&s, &w, "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["claimed_id"], &h["no_claim"], &h["linked_proof"]), (&Value::Null, &Value::Null, &json!(true), &Value::Null), "{h}");
+    let log = std::fs::read_to_string(&s.err).unwrap();
+    assert!(!log.contains("by Tether proof"), "{log}");
+}
+
+#[test]
+fn the_hbbs_lookup_holds_no_lock_and_is_checked_again_after() {
+    let (admin, tether) = (generate_key(), generate_key());
+    let (key, path) = (key_to_b64(&tether.verifying_key()), format!("/peer-pk/{TID}"));
+    let known = ["/peer-pk/abcdef_-12".to_owned(), path];
+    let (url, _) = stub_hbbs(move |p| {
+        std::thread::sleep(Duration::from_millis(1500));
+        if known.iter().any(|k| k == p) { http("200 OK", &format!("{key}\n")) } else { http("404 Not Found", "not found\n") }
+    });
+    let dir = new_dir();
+    let b = generate_key();
+    prep_device(&dir, "dev-0009", &b, now() - 61, 5);
+    let s = spawn_env(dir, &key_to_b64(&admin.verifying_key()), &[("HBBS_PEER_URL", &url)]);
+    let a = generate_key();
+    let (g, gid) = grant(&admin, None);
+    std::thread::scope(|sc| {
+        let e = sc.spawn(|| enroll_proof(&s, &a, "dev-0001", Some(TID), &g, Some(&proof(&tether, TID, "dev-0001", &a))));
+        std::thread::sleep(Duration::from_millis(300));
+        let t0 = Instant::now();
+        assert_eq!(post(&s, &b, "dev-0009", &heartbeat("dev-0009", 6)).status, 200);
+        assert!(t0.elapsed() < Duration::from_millis(200), "heartbeat took {:?}", t0.elapsed());
+        // Revoked while hbbs was asked.
+        assert_eq!(revoke(&s, &admin, &gid, now() + 3600).status, 204);
+        let r = e.join().unwrap();
+        assert_eq!((r.status, r.text()), (401, "token revoked".into()));
+    });
+    // The ID taken by another device (a token issued for it) while hbbs was asked.
+    let (g, _) = grant(&admin, None);
+    std::thread::scope(|sc| {
+        let e = sc.spawn(|| enroll_proof(&s, &a, "dev-0001", Some(TID), &g, Some(&proof(&tether, TID, "dev-0001", &a))));
+        std::thread::sleep(Duration::from_millis(300));
+        let bound = status::make_token("t", now() + 3600, Some(TID), None, false, &admin).unwrap().0;
+        assert_eq!(enroll(&s, &generate_key(), "dev-0002", Some(TID), &bound).status, 200);
+        let r = e.join().unwrap();
+        assert_eq!((r.status, r.text()), (409, "tether_id is enrolled with another key".into()));
+    });
+    // The pin changed while hbbs was asked: the uuid enrolled first with another key.
+    std::thread::scope(|sc| {
+        let e = sc.spawn(|| enroll_proof(&s, &a, "dev-0003", Some("abcdef_-12"), &g, Some(&proof(&tether, "abcdef_-12", "dev-0003", &a))));
+        std::thread::sleep(Duration::from_millis(300));
+        let tok = status::make_token("t", now() + 3600, None, None, false, &admin).unwrap().0;
+        assert_eq!(enroll(&s, &generate_key(), "dev-0003", None, &tok).status, 200);
+        let r = e.join().unwrap();
+        assert_eq!((r.status, r.text()), (409, "uuid is enrolled with another key".into()));
+    });
+    drop(s);
+    // hbbs answering after the 2 s: unavailable, in about 2 s.
+    let (slow, _) = stub_hbbs(|_| {
+        std::thread::sleep(Duration::from_secs(5));
+        Vec::new()
+    });
+    let s = proof_server(&admin, &slow);
+    let t0 = Instant::now();
+    let r = enroll_proof(&s, &a, "dev-0001", Some(TID), &g, Some(&proof(&tether, TID, "dev-0001", &a)));
+    assert_eq!((r.status, r.text()), (503, "tether proof unavailable".into()));
+    assert!(t0.elapsed() < Duration::from_millis(2800), "{:?}", t0.elapsed());
 }
