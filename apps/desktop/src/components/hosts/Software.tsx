@@ -63,8 +63,8 @@ export function SoftwarePart({ h }: { h: Host }) {
   };
   return (
     <section aria-label="Software" className="mt-3 border-t border-hairline pt-2" data-testid="software-section">
-      <div className="flex items-center gap-2">
-        <h3 className="min-w-0 flex-1">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <h3 className="min-w-0 basis-full">
           <Fold label="Software" open={open} onToggle={() => setOpen((o) => !o)} extra={<span className="shrink-0 pl-2">{doc?.readable ? `${n} ${n === 1 ? "program" : "programs"}, as of ${day(sb.at)}` : `as of ${day(sb.at)}`}</span>} />
         </h3>
         {raw !== null && (
