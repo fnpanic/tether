@@ -10,6 +10,8 @@ env:
   TETHER_PUB_KEY: ${{ secrets.TETHER_PUB_KEY }}
   TETHER_ADMIN_PUB_KEY: ${{ secrets.TETHER_ADMIN_PUB_KEY }}
   TETHER_UPDATER_PUB_KEY: ${{ secrets.TETHER_UPDATER_PUB_KEY }}
+  # Optional repository variable: build Tether-<i>, installable beside the default app (build.rs).
+  TETHER_INSTANCE: ${{ vars.TETHER_INSTANCE }}
   # Only whether the signing secrets exist (for `if:`); the secrets themselves go to the signing steps alone.
   HAVE_SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
   HAVE_WINDOWS_P12: ${{ secrets.WINDOWS_SIGNING_P12 != '' }}
@@ -33,6 +35,9 @@ jobs:
         with: { targets: "${{ matrix.target }}" }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm, cache-dependency-path: apps/desktop/package-lock.json }
+      - name: Installer hooks name no app literally (instance builds)
+        shell: bash
+        run: bash scripts/check-hooks.sh
       - name: Fetch pinned sources and apply patches
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -64,7 +69,14 @@ jobs:
       - name: Bundle
         working-directory: apps/desktop
         shell: bash
-        run: npx tauri build --target ${{ matrix.target }} --bundles nsis
+        run: |
+          config=$(bash ../../scripts/instance-config.sh "$TETHER_INSTANCE")
+          npx tauri build --target ${{ matrix.target }} --bundles nsis ${config:+--config "$config"}
+          # The release index takes only Tether_<v>_x64-setup.exe, for an instance build too.
+          if [ -n "$TETHER_INSTANCE" ]; then
+            cd src-tauri/target/${{ matrix.target }}/release/bundle/nsis
+            for f in "Tether-${TETHER_INSTANCE}_"*_x64-setup.exe; do mv "$f" "Tether_${f#"Tether-${TETHER_INSTANCE}_"}"; done
+          fi
       # Free self-signed Authenticode (scripts/make-windows-cert.ps1), mirroring the macOS cert.
       # Gives a stable publisher identity and full trust on fleets that deploy the .cer (GPO/Intune);
       # inert without the secret. Superseded by the SignPath step below once that is approved.
@@ -176,6 +188,8 @@ jobs:
           name: tether-macos-universal
           path: dist/macos/*
       - name: Smoke test (window shown, no admin prompt)
+        # It checks Tether.app; an instance build ships Tether-<i>.app.
+        if: env.TETHER_INSTANCE == ''
         shell: bash
         run: bash scripts/smoke-macos.sh dist/macos
       - uses: actions/upload-artifact@v4

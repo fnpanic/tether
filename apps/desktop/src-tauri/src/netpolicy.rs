@@ -46,7 +46,7 @@ pub fn apply() {
 }
 
 /// Windows firewall rule the installer creates for the direct listener (hooks.nsh).
-const FIREWALL_RULE: &str = "Tether";
+const FIREWALL_RULE: &str = crate::APP_NAME;
 
 /// Policy `network.direct`: `auto` races direct paths (LAN) beside the relay, `off` keeps every
 /// session on the relay. The host side listens only where that raises no firewall prompt.
@@ -327,6 +327,14 @@ mod winhttp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn firewall_rule_is_the_app_name() {
+        assert_eq!(FIREWALL_RULE, crate::APP_NAME);
+        if env!("TETHER_INSTANCE").is_empty() {
+            assert_eq!(FIREWALL_RULE, "Tether");
+        }
+    }
 
     #[test]
     fn stun_on_own_servers_only() {

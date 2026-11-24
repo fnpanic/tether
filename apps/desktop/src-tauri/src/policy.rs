@@ -377,17 +377,29 @@ fn apply_core(eff: &Effective, applied: &mut Vec<String>) {
 }
 
 /// GPO/MDM layer: a `Layer` JSON in `HKLM\SOFTWARE\Policies\Tether` `PolicyJson` (REG_SZ) or
-/// `/Library/Managed Preferences/net.tether.app.plist` key `PolicyJson`.
+/// `/Library/Managed Preferences/net.tether.app.plist` key `PolicyJson`. An instance build
+/// (`TETHER_INSTANCE`) reads `…\Policies\Tether-<i>` and `net.tether.app.<i>`.
 fn machine_layer() -> Option<Layer> {
     let raw = machine_json()?;
     serde_json::from_str(&raw).map_err(|e| log::error!("machine policy ignored: {e}")).ok()
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+const MACHINE_POLICY_KEY: &str = concat!("SOFTWARE\\Policies\\", env!("TETHER_APP_NAME"));
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn managed_preferences_domain() -> String {
+    match env!("TETHER_INSTANCE") {
+        "" => "net.tether.app".to_owned(),
+        i => format!("net.tether.app.{i}"),
+    }
 }
 
 #[cfg(windows)]
 fn machine_json() -> Option<String> {
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
     let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
-    let (key, name) = (wide("SOFTWARE\\Policies\\Tether"), wide("PolicyJson"));
+    let (key, name) = (wide(MACHINE_POLICY_KEY), wide("PolicyJson"));
     unsafe {
         let mut size = 0u32;
         let get = |buf: *mut std::ffi::c_void, size: &mut u32| {
@@ -410,7 +422,7 @@ fn machine_json() -> Option<String> {
     // shortcut: reads via `defaults`, no plist crate; fine for one string key. Upgrade (plist crate
     // or CFPreferences) when a second managed key or a non-string value is read.
     let out = std::process::Command::new("/usr/bin/defaults")
-        .args(["read", "/Library/Managed Preferences/net.tether.app", "PolicyJson"])
+        .args(["read", format!("/Library/Managed Preferences/{}", managed_preferences_domain()).as_str(), "PolicyJson"])
         .output()
         .ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
@@ -678,6 +690,18 @@ pub fn start(ui: bool) {
 mod tests {
     use super::*;
     use tether_trust::policy::{Group, Rule, State as S};
+
+    #[test]
+    fn machine_policy_names_follow_the_app_name() {
+        assert_eq!(MACHINE_POLICY_KEY, format!("SOFTWARE\\Policies\\{}", crate::APP_NAME));
+        match env!("TETHER_INSTANCE") {
+            "" => {
+                assert_eq!(MACHINE_POLICY_KEY, "SOFTWARE\\Policies\\Tether");
+                assert_eq!(managed_preferences_domain(), "net.tether.app");
+            }
+            i => assert_eq!(managed_preferences_domain(), format!("net.tether.app.{i}")),
+        }
+    }
 
     fn bundle_locking_everything() -> Bundle {
         let layer: Layer = FEATURES

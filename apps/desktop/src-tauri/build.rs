@@ -1,3 +1,6 @@
+#[path = "src/instance.rs"]
+mod instance;
+
 fn main() {
     // A release build without a pinned server and keys would fall back to upstream defaults, accept
     // no policy and install no updates: refuse to produce one.
@@ -12,6 +15,20 @@ fn main() {
             }
         }
     }
+    // A second build for another organisation, installed beside the default one: its own product
+    // name and so its own service, config folder, firewall rule and policy key (scripts/instance-config.sh).
+    println!("cargo:rerun-if-env-changed=TETHER_INSTANCE");
+    let inst = match std::env::var("TETHER_INSTANCE") {
+        Ok(v) => v,
+        Err(std::env::VarError::NotPresent) => String::new(),
+        Err(e) => panic!("TETHER_INSTANCE: {e}"),
+    };
+    if !instance::valid_instance(&inst) {
+        panic!("TETHER_INSTANCE must be empty or 1 to 16 characters a-z, 0-9 (got {inst:?})");
+    }
+    let name = if inst.is_empty() { "Tether".to_owned() } else { format!("Tether-{inst}") };
+    println!("cargo:rustc-env=TETHER_APP_NAME={name}");
+    println!("cargo:rustc-env=TETHER_INSTANCE={inst}");
     link_clang_rt();
     tauri_build::build()
 }
