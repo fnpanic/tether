@@ -9,6 +9,7 @@ import { inTauri, invoke } from "./lib/ipc";
 import { useMode } from "./lib/mode";
 import { useToast } from "./components/ui";
 import { errorText } from "./lib/policy";
+import { AgentConsentDialog } from "./components/AgentHere";
 
 // Advanced mode is its own chunk: the simple home view never downloads or parses it.
 const Hosts = React.lazy(() => import("./pages/Hosts").then((m) => ({ default: m.Hosts })));
@@ -43,6 +44,8 @@ function Main() {
   return (
     <>
       {mode === "advanced" ? lazyHosts : <Home />}
+      {/* The health agent's pre-dialog, in either view (agent_elevated.rs). */}
+      <AgentConsentDialog onNotice={toast.show} />
       {toast.node}
     </>
   );

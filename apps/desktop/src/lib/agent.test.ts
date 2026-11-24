@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentConfirm, agentDate, agentMenu, agentView, practiceLine, type AgentAnswer } from "./agent";
+import { agentConfirm, agentDate, agentMenu, agentView, practiceLine, PROGRESS, type AgentAnswer } from "./agent";
 
 const T = 1_795_000_000;
 const ans = (state: string, p: Partial<AgentAnswer> = {}): AgentAnswer => ({ state, version: "", installed_by: "", detail: "", at: 0, ...p });
@@ -111,5 +111,23 @@ describe("Settings: the practice's line", () => {
     expect(practiceLine(ans("installed", { installed_by: "session" }))).toContain("installed by Tether at your organisation's request (technician in a session).");
     for (const s of ["not-installed", "installed-by-hand", "removed-locally", "removed-by-tether", "failed", "needs-service", "not-supported", "not-allowed"]) expect(practiceLine(ans(s))).toBeNull();
     expect(practiceLine(null)).toBeNull();
+  });
+});
+
+describe("a remote computer without Tether's service (or TetherQS): the elevation prompt", () => {
+  it("an agent linked to another ID says so in the status", () => {
+    const v = agentView(ans("installed", { version: "0.2.0", installed_by: "session", detail: "linked to another ID (555666777)" }));
+    expect(v.text).toContain("linked to another ID (555666777)");
+    expect(v.offers).toEqual(["remove"]);
+    // only that sentence and a plain ID: anything else in detail is not added
+    expect(agentView(ans("installed", { detail: "linked to another ID (<b>x</b>)" })).text).not.toContain("linked to another");
+    expect(agentView(ans("installed", { detail: "call 0900 now" })).text).not.toContain("0900");
+  });
+  it("the install progress says the person there is asked first", () => {
+    expect(PROGRESS.install).toContain("the person at the remote computer");
+  });
+  it("a declined dialog or prompt reads as not installed, with the reason", () => {
+    const v = agentView(ans("not-installed", { detail: "The person at the computer declined." }), "install");
+    expect([v.text, v.detail, v.problem]).toEqual(["The health monitoring agent is not installed on the remote computer.", "The person at the computer declined.", false]);
   });
 });

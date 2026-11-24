@@ -192,6 +192,13 @@ export const mock = {
         const st = want ?? "not-installed";
         return { state: st, version: st.startsWith("installed") ? "0.2.0" : "", installed_by: st === "installed" ? "policy" : "", detail: st === "failed" ? "download refused: the file does not match the signed index" : "", at: st === "not-installed" ? 0 : t - 3 * 86400 } as T;
       }
+      // `?agentcard=1`: the home view's Install card (policy install, Tether without its service);
+      // Install… ends as if the person declined the prompt.
+      case "health_agent_offer":
+        return (new URLSearchParams(location.search).get("agentcard") === "1") as T;
+      case "health_agent_install":
+        await new Promise((r) => setTimeout(r, 800));
+        return { state: "not-installed", version: "", installed_by: "", detail: "Administrator approval was not given (declined, or no administrator's name and password).", at: 0 } as T;
       case "session_keyboard":
         return { dir: "pc-mac", shortcuts: true, system_keys: true, alt_tab_remote: false, hook: true } as T;
       case "fs_home_dir":

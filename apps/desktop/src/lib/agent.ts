@@ -22,7 +22,7 @@ export const OFFER_LABEL: Record<AgentOffer, string> = { again: "Ask again", ins
 
 export const PROGRESS: Record<AgentAction, string> = {
   status: "Asking the remote computer…",
-  install: "Installing on the remote computer… This can take up to three minutes.",
+  install: "Installing on the remote computer… This can take up to three minutes. Without Tether's service there, the person at the remote computer is asked first.",
   remove: "Removing on the remote computer…",
 };
 
@@ -60,7 +60,10 @@ export function agentView(a: AgentAnswer, did: AgentAction = "status"): AgentVie
     case "installed": {
       if (did === "install") return view(`Installed${v ? ` ${v}` : ""}, linked to this host; first report within five minutes.`, ["remove"], true);
       const who = by(a.installed_by);
-      return view(`Installed${v ? ` ${v}` : ""} by Tether${date ? ` on ${date}` : ""}${who ? ` (${who})` : ""}.`, ["remove"], did !== "status");
+      // The agent's link names another Tether ID than this host's (spec 11.4): only a plain ID is shown.
+      const other = /^linked to another ID \(([0-9A-Za-z_-]{1,40})\)$/.exec(detail)?.[1];
+      const link = other ? ` It is linked to another ID (${other}), so its health shows on that host's row.` : "";
+      return view(`Installed${v ? ` ${v}` : ""} by Tether${date ? ` on ${date}` : ""}${who ? ` (${who})` : ""}.${link}`, ["remove"], did !== "status");
     }
     case "installed-by-hand":
       return view(`Installed by hand${v ? ` ${v}` : ""} (managed outside Tether).`, ["remove"], did !== "status");

@@ -4,6 +4,7 @@ import { api, formatId, invoke, type Peer, type Status } from "../lib/ipc";
 import { Button, IconButton, Logo, PlatformIcon, StatusDot, TitleBar, useToast } from "../components/ui";
 import { Settings } from "./Settings";
 import { UpdateCard } from "../components/UpdateCard";
+import { AgentCard } from "../components/AgentHere";
 import { errorText, usePolicy } from "../lib/policy";
 import { useMode } from "../lib/mode";
 import { Recordings, recordingsHidden, useRecordings } from "./Recordings";
@@ -261,6 +262,7 @@ export function Home() {
       <main className="flex min-h-0 flex-1 flex-col overflow-y-auto px-8 pb-6 pt-4">
         <div className="mx-auto flex min-h-0 w-full max-w-[980px] flex-1 flex-col short:min-h-fit">
           <MacPermissions />
+          <AgentCard />
           <div className="grid shrink-0 grid-cols-[1.1fr_1fr] gap-6">
             <ThisDevice s={s} onToast={toast.show} onRefresh={refresh} />
             <ConnectBox peers={peers} onConnect={connect} />
