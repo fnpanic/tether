@@ -1735,9 +1735,12 @@ fn sbom_server(n: usize, env: &[(&str, &str)], prep: impl FnOnce(&Path)) -> (Srv
     (spawn_env(dir, &key_to_b64(&admin.verifying_key()), &e), admin, keys)
 }
 
-/// A stored document with its record in `seen.json` (accepted at `at`), before the relay starts.
+/// A stored document with its record in `seen.json` (accepted at `at`, also the file's mtime, as
+/// the relay leaves them), before the relay starts.
 fn prep_sbom(dir: &Path, uuid: &str, doc: &[u8], at: u64) {
-    std::fs::write(dir.join(format!("status/{uuid}.sbom.json")), doc).unwrap();
+    let p = dir.join(format!("status/{uuid}.sbom.json"));
+    std::fs::write(&p, doc).unwrap();
+    std::fs::File::options().write(true).open(&p).unwrap().set_modified(UNIX_EPOCH + std::time::Duration::from_secs(at)).unwrap();
     update_json(&dir.join("status/seen.json"), |m| {
         m.get_mut(uuid).unwrap()["sbom"] = json!({"at": at, "size": doc.len(), "sha": sha16(doc)});
     });
@@ -1998,26 +2001,76 @@ fn sbom_delete_and_lifetime() {
 
 #[test]
 fn sbom_record_is_rebuilt_after_a_hard_kill() {
-    let doc = sbom_doc(5000, 'j');
-    // dev-0002 has a record but its file is gone: the record is dropped.
-    let (s, admin, k) = sbom_server(2, &[], |d| {
+    let (doc, old, new) = (sbom_doc(5000, 'j'), sbom_doc(3000, 'k'), sbom_doc(4000, 'l'));
+    // dev-0002 has a record but its file is gone: the record is dropped. dev-0003 has a list
+    // from two hours ago and replaces it before the kill.
+    let (s, admin, k) = sbom_server(3, &[], |d| {
         prep_sbom(d, "dev-0002", b"{}", now() - 7200);
         std::fs::remove_file(d.join("status/dev-0002.sbom.json")).unwrap();
+        prep_sbom(d, "dev-0003", &old, now() - 7200);
     });
     assert_eq!(sbom_put(&s, &k[0], "dev-0001", &doc).status, 204);
-    // seen.json is written at most every 5 minutes: after SIGKILL the record is not in it.
+    assert_eq!(sbom_put(&s, &k[2], "dev-0003", &new).status, 204);
+    // seen.json is written at most every 5 minutes: after SIGKILL it holds the records from before.
     let s = restart_env(s, &admin, &[("STATUS_SBOM", "on")], true);
     let seen: Value = serde_json::from_slice(&std::fs::read(s.dir.join("status/seen.json")).unwrap()).unwrap();
     assert!(seen["dev-0001"].get("sbom").is_none());
+    assert_eq!(seen["dev-0003"]["sbom"]["sha"], sha16(&old), "the stale record");
     let m = member(&s, &admin);
-    wait_for("the record rebuilt from the file", || sbom_get(&s, &m, "dev-0001", None).status == 200);
+    let new_tag = Some(format!("\"{}\"", sha16(&new)));
+    wait_for("the records rebuilt from the files", || sbom_get(&s, &m, "dev-0001", None).status == 200 && sbom_get(&s, &m, "dev-0003", None).header("ETag") == new_tag);
     assert_eq!(sbom_get(&s, &m, "dev-0001", None).header("ETag"), Some(format!("\"{}\"", sha16(&doc))));
+    let r = sbom_get(&s, &m, "dev-0003", Some(&format!("\"{}\"", sha16(&old))));
+    assert_eq!((r.status, r.body), (200, new.clone()), "the old tag no longer matches");
     let h = team_get(&s, &m, "/api/team/status").json()["hosts"].clone();
-    assert_eq!(h[0]["sbom"]["sha"], sha16(&doc));
+    assert_eq!((&h[0]["sbom"]["sha"], &h[2]["sbom"]["sha"]), (&json!(sha16(&doc)), &json!(sha16(&new))));
     assert!(h[1].get("sbom").is_none());
     assert_eq!(sbom_get(&s, &m, "dev-0002", None).status, 404);
-    assert_eq!(metric(&s, "tether_api_status_sbom_files"), Some(1.));
-    assert_eq!(metric(&s, "tether_api_status_sbom_bytes"), Some(5000.));
+    assert_eq!(metric(&s, "tether_api_status_sbom_files"), Some(2.));
+    assert_eq!(metric(&s, "tether_api_status_sbom_bytes"), Some(9000.));
+}
+
+#[test]
+fn sbom_budget_is_not_held_by_requests_without_the_key() {
+    // Room for exactly the three honest uploads below, should they fall into one second.
+    let (s, _admin, k) = sbom_server(3, &[("STATUS_SBOM_RPS", "3")], |_| {});
+    let doc = sbom_doc(200, 'm');
+    let stranger = generate_key();
+    let from = |key: &SigningKey, uuid: &str, ip: &str| {
+        let sig = reqauth::sign_device_request(key, uuid, RELAY, "PUT", PUT_SBOM, &doc, now());
+        s.req("PUT", PUT_SBOM, &[(reqauth::HEADER, &sig), ("X-Forwarded-For", ip)], &doc)
+    };
+    // An unknown uuid, from many addresses: refused before the budget.
+    for i in 0..200 {
+        let r = from(&stranger, "dev-0099", &format!("198.18.{}.{}", i / 250, i % 250));
+        assert_eq!((r.status, r.text()), (401, "unknown device".into()), "{i}");
+    }
+    assert_eq!(from(&k[0], "dev-0001", "192.0.2.1").status, 204, "the budget is free");
+    // A pinned uuid with a bad signature, from one address: each attempt gives its slot back,
+    // and after 60 failures the address is cut off before the budget.
+    for i in 0..200 {
+        let r = from(&stranger, "dev-0002", "203.0.113.9");
+        let want = if i < 60 { (401, "signature does not match") } else { (429, "too many failed requests") };
+        assert_eq!((r.status, r.text().as_str()), want, "forged upload {i}");
+    }
+    assert_eq!(from(&k[2], "dev-0003", "192.0.2.3").status, 204, "another device still uploads");
+    assert_eq!(from(&k[1], "dev-0002", "192.0.2.2").status, 204, "the victim's hour is untouched");
+}
+
+#[test]
+fn sbom_put_needs_a_content_length() {
+    let (s, _admin, k) = sbom_server(1, &[], |_| {});
+    let sig = reqauth::sign_device_request(&k[0], "dev-0001", RELAY, "PUT", PUT_SBOM, b"{}", now());
+    let mut c = TcpStream::connect(&s.addr).unwrap();
+    c.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    let head = format!("PUT {PUT_SBOM} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n{}: {sig}\r\n\r\n2\r\n{{}}\r\n0\r\n\r\n", reqauth::HEADER);
+    c.write_all(head.as_bytes()).unwrap();
+    let mut raw = Vec::new();
+    let _ = c.read_to_end(&mut raw);
+    let raw = String::from_utf8_lossy(&raw);
+    assert!(raw.starts_with("HTTP/1.1 411"), "{raw}");
+    assert!(sbom_file(&s, "dev-0001").is_none());
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", b"{}").status, 204, "nothing used up");
 }
 
 #[test]

@@ -227,12 +227,15 @@ enum Body {
     /// unless the handler renamed it into place. `nonce`: of the admin signature already
     /// verified over the file (release uploads), still to be checked for replay.
     File { path: PathBuf, len: u64, nonce: Option<String> },
+    /// A software list (`PUT /api/status/sbom`) and the second whose global budget slot it took;
+    /// the handler takes the buffer out (no copy under the state lock).
+    Sbom(Vec<u8>, u64),
 }
 
 impl Body {
     fn bytes(&self, limit: u64) -> Result<&[u8], Resp> {
         match self {
-            Body::Mem(b) if b.len() as u64 <= limit => Ok(b),
+            Body::Mem(b) | Body::Sbom(b, _) if b.len() as u64 <= limit => Ok(b),
             _ => Err(too_large()),
         }
     }
@@ -240,7 +243,7 @@ impl Body {
     fn file(&self) -> Result<(&Path, u64), Resp> {
         match self {
             Body::File { path, len, .. } => Ok((path, *len)),
-            Body::Mem(_) => Err(internal("upload not streamed to a file")),
+            Body::Mem(_) | Body::Sbom(..) => Err(internal("upload not streamed to a file")),
         }
     }
 }
@@ -571,19 +574,19 @@ fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<
         // Status: off and size answered before the body is read.
         ("POST" | "DELETE", "/api/status") | ("POST", "/api/status/enroll") | ("PUT" | "DELETE", "/api/status/sbom") if status::conf().off => return Err(status::off()),
         ("PUT" | "DELETE", "/api/status/sbom") if !status::conf().sbom => return Err(not_found()),
-        // The software list: size from Content-Length, the device's hour and the global budget,
-        // then the body; only the declared bytes are read, and all of them.
+        // The software list: size from Content-Length (required), the cheap checks and the global
+        // budget, then the body; only the declared bytes are read, and all of them.
         ("PUT", "/api/status/sbom") => {
-            let limit = status::conf().sbom_max;
-            if rq.body_length().is_some_and(|n| n as u64 > limit) {
+            let Some(n) = rq.body_length() else { return Err(text(411, "length required")) };
+            if n as u64 > status::conf().sbom_max {
                 return Err(too_large());
             }
-            lock(app).sbom_precheck(rq)?;
-            let b = read_body(rq, limit)?;
-            if rq.body_length().is_some_and(|n| n != b.len()) {
+            let slot = lock(app).sbom_precheck(rq)?;
+            let b = read_body(rq, n as u64)?;
+            if b.len() != n {
                 return Err(text(400, "request body incomplete"));
             }
-            return Ok(Body::Mem(b));
+            return Ok(Body::Sbom(b, slot));
         }
         ("POST", "/api/status") => return read_body(rq, status::LIMIT_STATUS).map(Body::Mem),
         ("POST", "/api/status/enroll") => return read_body(rq, tether_trust::status::ENROLL_MAX as u64).map(Body::Mem),
@@ -678,12 +681,12 @@ fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
             None => not_found(),
         })
     } else {
-        read_request_body(app, &mut rq, data).map(|body| {
+        read_request_body(app, &mut rq, data).map(|mut body| {
             let (r, later, nonce) = {
                 let mut a = lock(app);
                 let held = Instant::now();
                 let used = a.nonces_used;
-                let r = a.route(&mut rq, &body);
+                let r = a.route(&mut rq, &mut body);
                 let out = (r, a.later.take(), a.nonces_used != used);
                 traced(|| format!("{} {}", rq.method(), rq.url().split('?').next().unwrap_or("")), held.elapsed());
                 out
@@ -1019,7 +1022,7 @@ impl App {
         Ok(empty(500))
     }
 
-    fn route(&mut self, rq: &mut Request, body: &Body) -> Result<Resp, Resp> {
+    fn route(&mut self, rq: &mut Request, body: &mut Body) -> Result<Resp, Resp> {
         let url = rq.url().to_owned();
         let path = url.split('?').next().unwrap_or("");
         let method = rq.method().as_str().to_owned();

@@ -322,7 +322,7 @@ struct Seen {
 
 /// A stored software list: when it was accepted, its size and the first 16 hex digits of its
 /// SHA-256 (the `ETag` and the summary's `sbom.sha`).
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 struct Sbom {
     at: u64,
     size: u64,
@@ -582,6 +582,8 @@ pub struct Status {
     sbom_writing: HashSet<String>,
     /// The global budget: (second, lists let through to the signature check in it).
     sbom_budget: (u64, u64),
+    /// When the last `Job::SbomScan` was queued from `status_maintain`.
+    sbom_scanned: u64,
 }
 
 impl Status {
@@ -796,9 +798,27 @@ impl Status {
         }
         if let Some(s) = self.dev.remove(uuid) {
             if let Some(r) = s.sbom {
-                (self.sbom_files, self.sbom_bytes) = (self.sbom_files - 1, self.sbom_bytes - r.size);
+                self.sbom_count(&r, false);
             }
             self.seen_dirty = true;
+        }
+    }
+
+    /// The running totals, with a record added or taken away.
+    fn sbom_count(&mut self, r: &Sbom, add: bool) {
+        if add {
+            (self.sbom_files, self.sbom_bytes) = (self.sbom_files + 1, self.sbom_bytes + r.size);
+        } else {
+            (self.sbom_files, self.sbom_bytes) = (self.sbom_files.saturating_sub(1), self.sbom_bytes.saturating_sub(r.size));
+        }
+    }
+
+    /// Gives back a global budget slot taken in second `slot` (a refused signature), if that
+    /// second's count is still running.
+    fn sbom_slot_back(&mut self, slot: u64) {
+        let (sec, n) = &mut self.sbom_budget;
+        if *sec == slot {
+            *n = n.saturating_sub(1);
         }
     }
 
@@ -808,14 +828,15 @@ impl Status {
             return;
         }
         let s = self.dev.entry(uuid.into()).or_default();
-        if let Some(old) = s.sbom.take() {
-            (self.sbom_files, self.sbom_bytes) = (self.sbom_files - 1, self.sbom_bytes - old.size);
-        }
-        if let Some(r) = rec {
-            (self.sbom_files, self.sbom_bytes) = (self.sbom_files + 1, self.sbom_bytes + r.size);
-            s.sbom = Some(r);
-        } else if s.last_seen == 0 && s.entry.is_none() {
+        let old = std::mem::replace(&mut s.sbom, rec.clone());
+        if rec.is_none() && s.last_seen == 0 && s.entry.is_none() {
             self.dev.remove(uuid); // it existed only for the list
+        }
+        if let Some(o) = &old {
+            self.sbom_count(o, false);
+        }
+        if let Some(r) = &rec {
+            self.sbom_count(r, true);
         }
         self.seen_dirty = true;
     }
@@ -828,7 +849,7 @@ impl Status {
     /// larger than the device's current list always does.
     fn sbom_fits(&self, uuid: &str, len: u64) -> bool {
         let old = self.sbom_size(uuid).unwrap_or(0);
-        len <= old || self.sbom_bytes - old + len <= conf().sbom_total
+        len <= old || self.sbom_bytes.saturating_sub(old) + len <= conf().sbom_total
     }
 
     /// 429 while `uuid`'s last accepted list is younger than an hour or one is being written.
@@ -851,7 +872,7 @@ fn sbom_full() -> Resp {
 /// lock the nonce, failure count, the hour, the cap and the claim of the write; the file written
 /// and synced; under the lock again the rename and the record.
 #[allow(clippy::too_many_arguments)]
-fn sbom_store(app: &Mutex<App>, uuid: String, sig: String, key: String, ip: String, url: String, raw: Vec<u8>, t: u64) -> Result<Resp, Resp> {
+fn sbom_store(app: &Mutex<App>, uuid: String, sig: String, key: String, ip: String, url: String, raw: Vec<u8>, t: u64, slot: u64) -> Result<Resp, Resp> {
     let digest = reqauth::body_digest(&raw);
     let mut nonce = String::new();
     let verified = tether_trust::key_from_b64(&key).and_then(|k| {
@@ -868,6 +889,8 @@ fn sbom_store(app: &Mutex<App>, uuid: String, sig: String, key: String, ip: Stri
         let s = &mut a.status;
         let fresh = |s: &mut Status| if s.nonces.insert(nonce, t).is_some() { Err("replayed request".to_owned()) } else { Ok(()) };
         if let Err(e) = verified.and_then(|()| fresh(s)) {
+            // A forged list costs its sender one of its failures per minute, not the budget.
+            s.sbom_slot_back(slot);
             rate_ok(&mut s.fail_hits, ip, t, u32::MAX);
             return Err(text(401, &e));
         }
@@ -882,10 +905,12 @@ fn sbom_store(app: &Mutex<App>, uuid: String, sig: String, key: String, ip: Stri
         a.status.sbom_writing.insert(uuid.clone());
         crate::tmp_path(&a.data)
     };
-    let wrote = write_synced(&tmp, &raw);
+    // The record's time is the file's mtime (kept by the rename), so the start-up scan can tell a
+    // file that a lost record does not describe.
+    let wrote = write_synced(&tmp, &raw).and_then(|()| fs::metadata(&tmp)).map(|m| mtime(&m));
     let mut a = lock(app);
     a.status.sbom_writing.remove(&uuid);
-    let r = wrote.map_err(crate::internal).and_then(|()| {
+    let r = wrote.map_err(crate::internal).and_then(|at| {
         // Removed, or another list took the room, while this one was written.
         if !a.status.keys.contains_key(&uuid) {
             return Err(text(401, "unknown device"));
@@ -893,13 +918,15 @@ fn sbom_store(app: &Mutex<App>, uuid: String, sig: String, key: String, ip: Stri
         if !a.status.sbom_fits(&uuid, len) {
             return Err(sbom_full());
         }
-        fs::rename(&tmp, file(&a.data, &uuid, "sbom.json")).map_err(crate::internal)
+        fs::rename(&tmp, file(&a.data, &uuid, "sbom.json")).map(|()| at).map_err(crate::internal)
     });
-    if let Err(e) = r {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
-    }
-    let at = now();
+    let at = match r {
+        Ok(at) => at,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
     a.status.sbom_record(&uuid, Some(Sbom { at, size: len, sha: digest[..16].to_owned() }));
     a.status.sbom_last.insert(uuid, at);
     Ok(empty(204))
@@ -1056,7 +1083,8 @@ fn build_summary(app: &Mutex<App>, tmp: &Path, t: u64) -> io::Result<String> {
         Some((u.clone(), p.and_then(|p| p.tether_id.clone()), p.and_then(|p| p.claimed_id.clone()), p.and_then(|p| p.linked_at), p.is_some_and(|p| p.no_claim), p.and_then(|p| p.customer.clone()), s.last_seen, s.next, s.entry.clone()?, sbom))
     };
     chunks(app, dev_map, copy, |buf| {
-        // The head is outside the entry's byte cap (fixed fields only).
+        // The head is built by the relay from fixed-size fields (`sbom`: a number and 16 hex
+        // digits) and is outside the entry's 2 KiB cap, which bounds only the device-supplied part.
         for (u, tid, claimed, linked_at, no_claim, customer, last_seen, next, entry, sbom) in buf.drain(..) {
             let mut head = serde_json::json!({"uuid": &*u, "tether_id": tid, "claimed_id": claimed, "linked_at": linked_at, "no_claim": no_claim, "customer": customer, "last_seen": last_seen, "next": next, "stale": stale_at(last_seen, next, t)});
             if let Some((at, sha)) = sbom {
@@ -1527,11 +1555,18 @@ impl App {
     }
 
     /// `PUT /api/status/sbom` before its body is read (its size is checked before this): the
-    /// device's hour, then the global budget. Nothing here is counted for the device.
-    pub(crate) fn sbom_precheck(&mut self, rq: &Request) -> Result<(), Resp> {
+    /// per-IP failure limit, the pin (an unknown uuid counts as a failure), the device's hour,
+    /// then the global budget. Returns the second whose budget slot it took: a refused signature
+    /// gives it back. Nothing here is counted for the device.
+    pub(crate) fn sbom_precheck(&mut self, rq: &Request) -> Result<u64, Resp> {
         self.sbom_open()?;
         let (uuid, _) = Self::device_header(rq)?;
-        let t = now();
+        let (ip, t) = (crate::rate_ip(rq), now());
+        self.fail_limit(&ip, t)?;
+        if !self.status.keys.contains_key(&uuid) {
+            rate_ok(&mut self.status.fail_hits, ip, t, u32::MAX);
+            return Err(text(401, "unknown device"));
+        }
         self.status.sbom_hour(&uuid, t)?;
         let (sec, n) = &mut self.status.sbom_budget;
         if *sec != t {
@@ -1541,23 +1576,26 @@ impl App {
             return Err(text(429, "busy").with_header(hdr("Retry-After", "60")));
         }
         *n += 1;
-        Ok(())
+        Ok(t)
     }
 
-    /// `PUT /api/status/sbom`: the failure limit and the key lookup here, the rest after the lock
-    /// is released ([`sbom_store`]).
-    pub(crate) fn status_sbom_put(&mut self, rq: &Request, body: &Body, url: &str) -> Result<Resp, Resp> {
+    /// `PUT /api/status/sbom`: the failure limit and the key lookup here (the body is moved out,
+    /// not copied), the rest after the lock is released ([`sbom_store`]).
+    pub(crate) fn status_sbom_put(&mut self, rq: &Request, body: &mut Body, url: &str) -> Result<Resp, Resp> {
         self.sbom_open()?;
-        let raw = body.bytes(conf().sbom_max)?;
+        let Body::Sbom(raw, slot) = body else { return Err(crate::internal("software list not read")) };
+        let (raw, slot) = (std::mem::take(raw), *slot);
         let (uuid, sig) = Self::device_header(rq)?;
         let (ip, t) = (crate::rate_ip(rq), now());
         self.fail_limit(&ip, t)?;
         let Some(key) = self.status.keys.get(&uuid).map(|p| p.key.clone()) else {
+            // Removed since the precheck.
+            self.status.sbom_slot_back(slot);
             rate_ok(&mut self.status.fail_hits, ip, t, u32::MAX);
             return Err(text(401, "unknown device"));
         };
-        let (raw, url) = (raw.to_vec(), url.to_owned());
-        self.defer(move |app| sbom_store(app, uuid, sig, key, ip, url, raw, t))
+        let url = url.to_owned();
+        self.defer(move |app| sbom_store(app, uuid, sig, key, ip, url, raw, t, slot))
     }
 
     /// `DELETE /api/status/sbom`: 204 also when there is none.
@@ -1959,6 +1997,12 @@ impl App {
         self.status.enroll_hits.retain(|_, (start, _)| t < *start + 60);
         self.status.refused_hits.retain(|_, (start, _)| t < *start + 60);
         self.status.sbom_last.retain(|_, at| t < *at + SBOM_INTERVAL);
+        // Hourly, in the status writer: records and files matched up, orphans removed. The first
+        // run is queued by `start_writer`.
+        if t >= self.status.sbom_scanned + SBOM_INTERVAL {
+            self.status.sbom_scanned = t;
+            self.status.send(Job::SbomScan);
+        }
         self.status.send(Job::Tick);
     }
 
@@ -2059,10 +2103,17 @@ pub(crate) fn start_writer(app: &Arc<Mutex<App>>) {
     });
 }
 
-/// At start, in the background: `seen.json` is written every 5 minutes, so after a hard stop a
-/// stored software list may lack its record (rebuilt here from the file: size, mtime, hash) or a
-/// record its file (dropped). A file whose uuid has no pin is removed. One pass over the folder,
-/// the records copied out in chunks, then one short lock hold per mismatch.
+/// A file's modification time in unix seconds (0 if unknown).
+fn mtime(m: &fs::Metadata) -> u64 {
+    m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
+}
+
+/// At start and then hourly, in the background: `seen.json` is written every 5 minutes, so after
+/// a hard stop a stored software list may lack its record, or have one from before it was
+/// replaced (its size or mtime differs from the record's `size` and `at`): both are rebuilt from
+/// the file (size, mtime, hash). A record without a file is dropped; a file whose uuid has no
+/// pin is removed. One pass over the folder, the records copied out in chunks, one stat per file,
+/// then a read and one short lock hold per mismatch.
 fn sbom_scan(app: &Mutex<App>) {
     let data = {
         let a = lock(app);
@@ -2073,43 +2124,50 @@ fn sbom_scan(app: &Mutex<App>) {
     };
     let Ok(dir) = fs::read_dir(data.join("status")) else { return };
     let files: HashSet<String> = dir.flatten().filter_map(|e| e.file_name().into_string().ok()?.strip_suffix(".sbom.json").filter(|u| st::valid_uuid(u)).map(str::to_owned)).collect();
-    let mut have: HashSet<Arc<str>> = HashSet::new();
-    let _ = chunks(app, dev_map, |_, u, s| s.sbom.as_ref().map(|_| u.clone()), |buf| {
+    let mut have: HashMap<Arc<str>, Sbom> = HashMap::new();
+    let _ = chunks(app, dev_map, |_, u, s| s.sbom.clone().map(|r| (u.clone(), r)), |buf| {
         have.extend(buf.drain(..));
         Ok(())
     });
-    for u in have.iter().filter(|u| !files.contains(&***u)) {
+    for u in have.keys().filter(|u| !files.contains(&***u)) {
         let mut a = lock(app);
         if !a.status.sbom_writing.contains(&**u) && !file(&data, u, "sbom.json").exists() {
             a.status.sbom_record(u, None);
         }
     }
-    for u in files.iter().filter(|u| !have.contains(u.as_str())) {
+    for u in &files {
         if crate::STOP.load(Ordering::SeqCst) {
             return;
         }
         let path = file(&data, u, "sbom.json");
-        {
-            let a = lock(app);
-            if !a.status.keys.contains_key(u) {
-                let _ = fs::remove_file(&path);
-                continue;
-            }
-            if a.status.sbom_writing.contains(u) || a.status.sbom_size(u).is_some() {
-                continue;
+        let known = have.get(u.as_str());
+        match known {
+            // As an accepted upload left it.
+            Some(r) if fs::metadata(&path).is_ok_and(|m| m.len() == r.size && mtime(&m) == r.at) => continue,
+            Some(_) => {}
+            None => {
+                let a = lock(app);
+                if !a.status.keys.contains_key(u) {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
             }
         }
         let read = fs::File::open(&path).and_then(|mut f| {
-            let at = f.metadata()?.modified()?.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let at = mtime(&f.metadata()?);
             let mut b = Vec::new();
             f.read_to_end(&mut b)?;
             Ok((at, b))
         });
         let Ok((at, b)) = read else { continue };
         let rec = Sbom { at, size: b.len() as u64, sha: reqauth::body_digest(&b)[..16].to_owned() };
+        if known.is_some_and(|k| k.sha == rec.sha && k.size == rec.size) {
+            continue; // the same content (only its mtime changed): the record stands
+        }
         let mut a = lock(app);
-        // Still pinned, still without a record, not deleted or replaced meanwhile.
-        if a.status.keys.contains_key(u) && !a.status.sbom_writing.contains(u) && a.status.sbom_size(u).is_none() && path.exists() {
+        // Still pinned, the record as it was looked at, no upload running, the file still there.
+        let cur = a.status.dev.get(u.as_str()).and_then(|s| s.sbom.as_ref());
+        if a.status.keys.contains_key(u) && cur == known && !a.status.sbom_writing.contains(u) && path.exists() {
             a.status.sbom_record(u, Some(rec));
         }
     }
