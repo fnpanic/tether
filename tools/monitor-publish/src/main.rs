@@ -4,10 +4,10 @@
 //! below, so the format is the same by construction); the passphrase only from `MANAGE_PASSPHRASE`.
 //!
 //! ```text
-//! monitor-publish token --label <text> --days <1-30> [--tether-id <id>]
+//! monitor-publish token --label <text> --days <1-30> [--tether-id <id>] [--customer <ref>]
 //! monitor-publish tokens
 //! monitor-publish revoke --id <token id> [--exp <unix>] | --token-file <path> | --token - --relay <https://host>[,…]
-//! monitor-publish devices [--token <token id>] --relay <https://host>[,…]
+//! monitor-publish devices [--token <token id>] [--customer <ref>] --relay <https://host>[,…]
 //! monitor-publish remove --uuid <uuid> --relay <https://host>[,…]
 //! monitor-publish index --channel <c> --app monitor|monitor-packs --version <v> --file <artifact>
 //!     [--rollout standard|fast|now] [--min-version <v>] --relay <https://host>[,<https://host>…]
@@ -21,7 +21,7 @@
 //!
 //! Key file: `MANAGE_KEYS`, else `$TETHER_MANAGE_DIR/keys.json`, else Tether Manage's data folder
 //! (`%APPDATA%\Tether-Manage\keys.json` on Windows). Issued tokens are journaled (id, label,
-//! expiry, bound Tether ID; never the token) in `monitor-tokens.json` next to the key file.
+//! expiry, bound Tether ID, customer; never the token) in `monitor-tokens.json` next to the key file.
 //! `index` needs `<artifact>.sig` (the updater
 //! signature, as the build writes it) and checks it against the updater key in the same key file.
 //! A version below the published one is refused; the same version only with the same bytes, which
@@ -44,10 +44,10 @@ type R<T> = Result<T, String>;
 const TRUSTED_ADMIN_KEYS: Option<&str> = option_env!("TETHER_ADMIN_PUB_KEY");
 
 const USAGE: &str = "usage:
-  monitor-publish token --label <text> --days <1-30> [--tether-id <id>]
+  monitor-publish token --label <text> --days <1-30> [--tether-id <id>] [--customer <ref>]
   monitor-publish tokens
   monitor-publish revoke (--id <token id> [--exp <unix>] | --token-file <path> | --token -) --relay <https://host>[,<https://host>...]
-  monitor-publish devices [--token <token id>] --relay <https://host>[,<https://host>...]
+  monitor-publish devices [--token <token id>] [--customer <ref>] --relay <https://host>[,<https://host>...]
   monitor-publish remove --uuid <uuid> --relay <https://host>[,<https://host>...]
   monitor-publish index --channel <c> --app monitor|monitor-packs --version <v> --file <artifact>
       [--rollout standard|fast|now] [--min-version <v>] --relay <https://host>[,<https://host>...]
@@ -85,18 +85,21 @@ fn run(args: &[String]) -> R<()> {
     let need = |f: &std::collections::BTreeMap<String, String>, n: &str| f.get(n).cloned().ok_or_else(|| format!("--{n} is required\n{USAGE}"));
     match cmd.as_str() {
         "token" => {
-            let f = flags(rest, &["label", "days", "tether-id"])?;
+            let f = flags(rest, &["label", "days", "tether-id", "customer"])?;
             let days = need(&f, "days")?.parse().map_err(|_| "--days must be a number")?;
             let label = need(&f, "label")?;
             let bound = f.get("tether-id").map(String::as_str);
             if bound.is_some_and(|t| !valid_bound_id(t)) {
                 return Err("--tether-id must be a Tether ID (1-32 printable characters, no spaces, not starting with m:)".into());
             }
+            let customer = f.get("customer").map(String::as_str);
+            if customer.is_some_and(|c| !tether_trust::status::valid_customer(c)) {
+                return Err("--customer must be 1 to 32 characters of A-Z a-z 0-9 . _ -".into());
+            }
             let keys = open_keys(&key_file(), passphrase())?;
-            let (tok, e) = issue(&keys.admin, &journal_file(), &label, days, bound, now())?;
+            let (tok, e) = issue(&keys.admin, &journal_file(), &label, days, bound, customer, now())?;
             println!("{tok}");
-            let only = e.tether_id.as_deref().map_or(String::new(), |t| format!(", for Tether ID {t} only (one device)"));
-            eprintln!("enrolment token {} {label:?}, valid until {}{only}", e.id, utc(e.exp));
+            eprintln!("{}", token_summary(&label, &e));
             Ok(())
         }
         "tokens" => {
@@ -152,8 +155,12 @@ fn run(args: &[String]) -> R<()> {
             fail_count(failed.len(), relays.len())
         }
         "devices" => {
-            let f = flags(rest, &["token", "relay"])?;
+            let f = flags(rest, &["token", "customer", "relay"])?;
             let filter = f.get("token").cloned();
+            let customer = f.get("customer").map(String::as_str);
+            if customer.is_some_and(|c| !tether_trust::status::valid_customer(c)) {
+                return Err("--customer must be 1 to 32 characters of A-Z a-z 0-9 . _ -".into());
+            }
             if filter.as_deref().is_some_and(|t| !tether_trust::status::valid_token_id(t)) {
                 return Err("bad --token id".into());
             }
@@ -163,7 +170,10 @@ fn run(args: &[String]) -> R<()> {
             let mut failed = 0;
             for r in &relays {
                 match list_devices(&c, &keys.admin, r, filter.as_deref()) {
-                    Ok(list) => print!("{r}: {} devices\n{}", list.len(), devices_table(&list)),
+                    Ok(list) => {
+                        let list = by_customer(list, customer);
+                        print!("{r}: {} devices\n{}", list.len(), devices_table(&list))
+                    }
                     Err(e) => {
                         failed += 1;
                         println!("{r}: FAILED: {e}");
@@ -268,14 +278,14 @@ fn valid_bound_id(t: &str) -> bool {
     tether_trust::status::valid_tether_id(t) && !t.starts_with("m:")
 }
 
-/// An enrolment token valid for `days` (1-30) from `now`, optionally for one Tether ID.
-fn token(admin: &SigningKey, label: &str, days: u64, tether_id: Option<&str>, now: u64) -> R<(String, Issued)> {
+/// An enrolment token valid for `days` (1-30) from `now`, optionally for one Tether ID and/or tagging its devices with a customer.
+fn token(admin: &SigningKey, label: &str, days: u64, tether_id: Option<&str>, customer: Option<&str>, now: u64) -> R<(String, Issued)> {
     if !(1..=30).contains(&days) {
         return Err("--days must be 1 to 30".into());
     }
     let exp = now + days * 86_400;
-    let (tok, id) = tether_trust::status::make_token(label, exp, tether_id, None, admin)?;
-    Ok((tok, Issued { id, label: label.into(), exp, tether_id: tether_id.map(Into::into), issued: now, revoked: None, partly_revoked: None }))
+    let (tok, id) = tether_trust::status::make_token(label, exp, tether_id, customer, admin)?;
+    Ok((tok, Issued { id, label: label.into(), exp, tether_id: tether_id.map(Into::into), customer: customer.map(Into::into), issued: now, revoked: None, partly_revoked: None }))
 }
 
 /// A token as the journal keeps it: never the token itself (it would enrol devices).
@@ -286,6 +296,8 @@ struct Issued {
     exp: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tether_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    customer: Option<String>,
     issued: u64,
     /// When this tool revoked it on every relay it was asked to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -381,8 +393,8 @@ fn journal_update(p: &Path, f: impl FnOnce(&mut Vec<Issued>)) -> R<()> {
 }
 
 /// A token, journaled before it is handed out: there is no token the journal does not know.
-fn issue(admin: &SigningKey, journal: &Path, label: &str, days: u64, tether_id: Option<&str>, now: u64) -> R<(String, Issued)> {
-    let (tok, e) = token(admin, label, days, tether_id, now)?;
+fn issue(admin: &SigningKey, journal: &Path, label: &str, days: u64, tether_id: Option<&str>, customer: Option<&str>, now: u64) -> R<(String, Issued)> {
+    let (tok, e) = token(admin, label, days, tether_id, customer, now)?;
     journal_update(journal, |l| l.push(e.clone()))?;
     Ok((tok, e))
 }
@@ -399,9 +411,16 @@ fn revoke_exp(journal: &[Issued], id: &str, flag: Option<u64>) -> R<u64> {
     }
 }
 
+/// The line `token` prints to stderr.
+fn token_summary(label: &str, e: &Issued) -> String {
+    let only = e.tether_id.as_deref().map_or(String::new(), |t| format!(", for Tether ID {t} only (one device)"));
+    let customer = e.customer.as_deref().map_or(String::new(), |c| format!(", customer {c}"));
+    format!("enrolment token {} {label:?}, valid until {}{only}{customer}", e.id, utc(e.exp))
+}
+
 fn tokens_table(list: &[Issued], now: u64) -> String {
-    let row = |id: &str, state: &str, tid: &str, exp: &str, label: &str| format!("{id:<32}  {state:<14}  {tid:<16}  {exp:<20}  {label}\n");
-    let mut out = row("ID", "STATE", "TETHER ID", "EXPIRES", "LABEL");
+    let row = |id: &str, state: &str, tid: &str, customer: &str, exp: &str, label: &str| format!("{id:<32}  {state:<14}  {tid:<16}  {customer:<32}  {exp:<20}  {label}\n");
+    let mut out = row("ID", "STATE", "TETHER ID", "CUSTOMER", "EXPIRES", "LABEL");
     for e in list {
         let state = if e.revoked.is_some() {
             "revoked"
@@ -412,7 +431,7 @@ fn tokens_table(list: &[Issued], now: u64) -> String {
         } else {
             "valid"
         };
-        out += &row(&e.id, state, e.tether_id.as_deref().unwrap_or("-"), &utc(e.exp), &e.label);
+        out += &row(&e.id, state, e.tether_id.as_deref().unwrap_or("-"), e.customer.as_deref().unwrap_or("-"), &utc(e.exp), &e.label);
     }
     out
 }
@@ -483,6 +502,14 @@ struct Device {
     host: Option<String>,
     enrolled: u64,
     last_seen: Option<u64>,
+    /// Absent from a relay that predates the customer reference.
+    #[serde(default)]
+    customer: Option<String>,
+}
+
+/// Only the devices of `customer` (all when none): the relay lists every pin, so this is done here.
+fn by_customer(list: Vec<Device>, customer: Option<&str>) -> Vec<Device> {
+    list.into_iter().filter(|d| customer.is_none_or(|c| d.customer.as_deref() == Some(c))).collect()
 }
 
 /// Every pin of `relay` (with `token`: those enrolled with that token), page by page.
@@ -522,11 +549,11 @@ fn cell(s: Option<&str>, n: usize) -> String {
 }
 
 fn devices_table(list: &[Device]) -> String {
-    let row = |u: &str, t: &str, c: &str, h: &str, e: &str, s: &str| format!("  {u:<36}  {t:<16}  {c:<16}  {h:<24}  {e:<20}  {s}\n");
-    let mut out = row("UUID", "TETHER ID", "CLAIMED ID", "HOST", "ENROLLED", "LAST SEEN");
+    let row = |u: &str, t: &str, c: &str, h: &str, cu: &str, e: &str, s: &str| format!("  {u:<36}  {t:<16}  {c:<16}  {h:<24}  {cu:<32}  {e:<20}  {s}\n");
+    let mut out = row("UUID", "TETHER ID", "CLAIMED ID", "HOST", "CUSTOMER", "ENROLLED", "LAST SEEN");
     for d in list {
         let seen = d.last_seen.map_or("never".to_owned(), utc);
-        out += &row(&d.uuid, &cell(d.tether_id.as_deref(), 16), &cell(d.claimed_id.as_deref(), 16), &cell(d.host.as_deref(), 24), &utc(d.enrolled), &seen);
+        out += &row(&d.uuid, &cell(d.tether_id.as_deref(), 16), &cell(d.claimed_id.as_deref(), 16), &cell(d.host.as_deref(), 24), &cell(d.customer.as_deref(), 32), &utc(d.enrolled), &seen);
     }
     out
 }
@@ -836,14 +863,65 @@ mod tests {
     #[test]
     fn token_days_are_bounded_and_the_token_verifies() {
         let k = keys::Keys::generate().unwrap();
-        assert!(token(&k.admin, "x", 0, None, 1000).is_err());
-        assert!(token(&k.admin, "x", 31, None, 1000).is_err());
-        let (t, e) = token(&k.admin, "office", 7, None, 1000).unwrap();
+        assert!(token(&k.admin, "x", 0, None, None, 1000).is_err());
+        assert!(token(&k.admin, "x", 31, None, None, 1000).is_err());
+        let (t, e) = token(&k.admin, "office", 7, None, None, 1000).unwrap();
         let p = tether_trust::status::verify_token(&t, &[k.admin.verifying_key()], 1000).unwrap();
         assert_eq!((p.exp, p.label.as_str(), p.id.as_str(), p.tether_id), (1000 + 7 * 86_400, "office", e.id.as_str(), None));
-        let (t, e) = token(&k.admin, "front desk", 1, Some("123456789"), 1000).unwrap();
+        let (t, e) = token(&k.admin, "front desk", 1, Some("123456789"), None, 1000).unwrap();
         let p = tether_trust::status::verify_token(&t, &[k.admin.verifying_key()], 1000).unwrap();
         assert_eq!((p.tether_id.as_deref(), e.tether_id.as_deref()), (Some("123456789"), Some("123456789")));
+    }
+
+    #[test]
+    fn token_with_customer() {
+        let d = tmp("customer");
+        let k = keys::Keys::generate().unwrap();
+        let j = d.join("monitor-tokens.json");
+        let (t, e) = issue(&k.admin, &j, "office", 7, None, Some("4711"), 1000).unwrap();
+        let p = tether_trust::status::verify_token(&t, &[k.admin.verifying_key()], 1000).unwrap();
+        assert_eq!((p.customer.as_deref(), e.customer.as_deref()), (Some("4711"), Some("4711")));
+        assert_eq!(journal_read(&j).unwrap(), vec![e.clone()]);
+        assert!(token_summary("office", &e).contains("customer 4711"));
+        assert!(!token_summary("office", &token(&k.admin, "x", 1, None, None, 1000).unwrap().1).contains("customer"));
+        assert!(tokens_table(&[e], 1000).lines().nth(1).unwrap().contains("4711"));
+    }
+
+    #[test]
+    fn old_journal_loads() {
+        let d = tmp("oldjournal");
+        let j = d.join("monitor-tokens.json");
+        std::fs::write(&j, r#"[{"id":"abcdefghijklmnop","label":"old","exp":99,"issued":1}]"#).unwrap();
+        let list = journal_read(&j).unwrap();
+        assert_eq!(list[0].customer, None);
+        let table = tokens_table(&list, 1);
+        assert!(table.lines().next().unwrap().contains("CUSTOMER"));
+        assert!(table.lines().nth(1).unwrap().contains("  -  "), "{table}");
+    }
+
+    fn devs() -> Vec<Device> {
+        let d = |uuid: &str, customer: Option<&str>| Device { uuid: uuid.into(), tether_id: None, claimed_id: None, host: None, enrolled: 0, last_seen: None, customer: customer.map(Into::into) };
+        vec![d("11111111-1111-1111-1111-111111111111", Some("4711")), d("22222222-2222-2222-2222-222222222222", None), d("33333333-3333-3333-3333-333333333333", Some("Example-1"))]
+    }
+
+    #[test]
+    fn devices_table_has_customer() {
+        let t = devices_table(&devs());
+        let lines: Vec<&str> = t.lines().collect();
+        assert!(lines[0].contains("CUSTOMER"), "{t}");
+        assert!(lines[1].contains("4711") && lines[3].contains("Example-1"), "{t}");
+        assert!(lines[2].contains("  -  "), "{t}");
+        // A relay that does not list the field (older) still parses.
+        let page: Vec<Device> = serde_json::from_str(r#"[{"uuid":"u","tether_id":null,"claimed_id":null,"host":null,"enrolled":1,"last_seen":null}]"#).unwrap();
+        assert_eq!(page[0].customer, None);
+    }
+
+    #[test]
+    fn devices_filter_by_customer() {
+        let only = |c| by_customer(devs(), c).into_iter().map(|d| d.uuid[..1].to_owned()).collect::<Vec<_>>();
+        assert_eq!(only(None), ["1", "2", "3"]);
+        assert_eq!(only(Some("4711")), ["1"]);
+        assert_eq!(only(Some("4712")), Vec::<String>::new());
     }
 
     #[test]
@@ -851,8 +929,8 @@ mod tests {
         let d = tmp("journal");
         let k = keys::Keys::generate().unwrap();
         let j = d.join("monitor-tokens.json");
-        let (t1, e1) = issue(&k.admin, &j, "office", 7, None, 1000).unwrap();
-        let (t2, e2) = issue(&k.admin, &j, "front desk", 1, Some("123456789"), 2000).unwrap();
+        let (t1, e1) = issue(&k.admin, &j, "office", 7, None, None, 1000).unwrap();
+        let (t2, e2) = issue(&k.admin, &j, "front desk", 1, Some("123456789"), None, 2000).unwrap();
         let raw = std::fs::read_to_string(&j).unwrap();
         assert!(!raw.contains(&t1) && !raw.contains(&t2), "no token in the journal");
         assert_eq!(journal_read(&j).unwrap(), vec![e1.clone(), e2.clone()]);
@@ -866,14 +944,14 @@ mod tests {
         assert!(tokens_table(&journal_read(&j).unwrap(), 2000).lines().nth(2).unwrap().contains("valid"));
         // A damaged journal is reported and left alone; no token is handed out then.
         std::fs::write(&j, "nonsense").unwrap();
-        assert!(issue(&k.admin, &j, "x", 1, None, 1000).is_err());
+        assert!(issue(&k.admin, &j, "x", 1, None, None, 1000).is_err());
         assert_eq!(std::fs::read_to_string(&j).unwrap(), "nonsense");
     }
 
     #[test]
     fn revoke_takes_the_expiry_from_the_journal() {
         let k = keys::Keys::generate().unwrap();
-        let (_, e) = token(&k.admin, "office", 7, None, 1000).unwrap();
+        let (_, e) = token(&k.admin, "office", 7, None, None, 1000).unwrap();
         let journal = vec![e.clone()];
         assert_eq!(revoke_exp(&journal, &e.id, None).unwrap(), 1000 + 7 * 86_400);
         assert!(revoke_exp(&journal, &e.id, Some(5)).unwrap_err().contains("earlier than the token's expiry"), "a revocation never ends before the token");
@@ -885,7 +963,7 @@ mod tests {
     #[test]
     fn the_token_itself_names_what_to_revoke() {
         let k = keys::Keys::generate().unwrap();
-        let (t, e) = token(&k.admin, "office", 7, None, 1000).unwrap();
+        let (t, e) = token(&k.admin, "office", 7, None, None, 1000).unwrap();
         assert_eq!(token_target(&format!("{t}
 "), &[k.admin.verifying_key()], 1000).unwrap(), (e.id.clone(), e.exp));
         assert!(token_target(&t, &[k.admin.verifying_key()], e.exp).unwrap_err().contains("expired"));
@@ -938,6 +1016,7 @@ mod tests {
             ("index --channel stable --app monitor --version 0.1.0 --file x --min-version a/b --relay https://r", "--min-version"),
             ("index --channel stable --app monitor --version 0.1.0 --file x --relay http://relay.example.org", "not a relay address"),
             ("token --label x --days 1 --tether-id m:dev-0001", "--tether-id"),
+            ("token --label x --days 1 --customer a/b", "--customer"),
             ("revoke --id short --relay https://r", "bad token id"),
             ("revoke --id abcdefghijklmnop --exp soon --relay https://r", "--exp"),
             ("revoke --id abcdefghijklmnop --exp 1", "--relay is required"),
