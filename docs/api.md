@@ -321,8 +321,10 @@ customer.
 
 With a grant the body also needs `"tether_proof":"<std base64>"` and a `tether_id` of hbbs's ID
 rule (6–16 of `A-Z a-z 0-9 _ -`). After the token and the device signature are checked, hbbs is
-asked for the ID's key without holding the relay's state lock (2 s for all of `HBBS_PEER_URL`), and
-the token, the pin and the ID are checked again after it. A valid proof gives the pin that
+asked for the ID's key without holding the relay's state lock (2 s for all of `HBBS_PEER_URL`,
+each URL getting an equal share of the time left, and every address of its host in turn; the first
+answer with a key wins; at most 4 lookups run at once, more are answered `503 tether proof
+unavailable` at once), and the token, the pin and the ID are checked again after it. A valid proof gives the pin that
 `tether_id` with `linked_token` (the grant's id) and `linked_proof`, unless the pin has `no_claim` or
 the key is dismissed (a member's Unlink holds); another uuid holding the ID is `409 tether_id is
 enrolled with another key`. Journal: `status: <uuid> linked to <id> by Tether proof (token <id>)`.
@@ -333,8 +335,8 @@ With any other token `tether_proof` is ignored.
 | `400` | `bad uuid`, `bad pubkey`, `bad tether_id`, or the JSON error | malformed |
 | `400` | `tether proof required` | a grant without `tether_id` or `tether_proof` |
 | `401` | `tether proof does not match` | the proof is not signed by the key hbbs holds for the ID, over this request; counts against the IP as a refused token does |
-| `409` | `tether id unknown to this relay` | hbbs answered `404` for the ID |
-| `503` | `tether proof unavailable` | no hbbs of `HBBS_PEER_URL` gave a usable answer within 2 s; try again later |
+| `409` | `tether id unknown to this relay` | hbbs answered `404` for the ID; counts against the IP as a refused token does. hbbs also answers `404` to a relay outside its `PEER_LOOKUP_FROM`, so that misconfiguration shows as this error |
+| `503` | `tether proof unavailable` | no hbbs of `HBBS_PEER_URL` gave a usable answer within 2 s, or 4 lookups are already running; try again later |
 | `503` | `tether proof needs HBBS_PEER_URL` | `HBBS_PEER_URL=off` |
 | `401` | `enrollment token: <reason>` (`signed by an untrusted key`, `expired`, `not an enrollment token`, `bad label`, `bad id`, `bad tether_id`, `bad customer`) | token refused |
 | `401` | `token revoked` | the token was revoked |
@@ -538,9 +540,10 @@ A host whose device has a software list (with `STATUS_SBOM=on`) also has `"sbom"
 never posted. `linked_by` and `linked_at` say who confirmed the Tether ID and when the link was
 made; for a link by a token issued for that ID `linked_by` is `null` and `linked_token` is that
 token's id. All three are `null` without a Tether ID. `linked_proof` is `true` (only then
-present) when a grant with a Tether proof made the link; it is not stored in `keys.jsonl` (a relay
-of 0.6 locks its store on an unknown field there), so after a restart such a link shows as a
-token's. `no_claim` is `true` after a member
+present) when a grant with a Tether proof made the link, also after a restart. `keys.jsonl` has no
+field for it (a relay of 0.6 locks its store on an unknown field there): it stores `linked_token` as
+`proof:<grant id>`, which this relay reads back as the grant id with `linked_proof`; a relay of 0.6
+shows that text as `linked_token`. `no_claim` is `true` after a member
 dismissed the link. `customer` is the customer reference, `null` when none. `history` is the state changes of the last 90 days, oldest first; `at` is the
 relay's time when the change was stored. `404` for an invalid uuid or one that is not enrolled.
 
@@ -560,7 +563,7 @@ moved away and tether-api is restarted; the rest of the relay is not affected. D
 | `STATUS` | on | `off`: every route above answers `503 status reporting is off`, `Retry-After: 3600`; posts are refused before the body is read |
 | `STATUS_TARGET_RPS` | `10` | posts per second the devices are paced to (at least 1); sets `next` |
 | `STATUS_MAX_DEVICES` | `20000` | pins at most; more is `507`, existing pins keep working |
-| `HBBS_PEER_URL` | `http://127.0.0.1:21122` | hbbs health ports asked for an ID's key (enrolment with a grant), comma separated, tried in order; only `http://<host>:<port>` (hbbs's health port has no TLS; another form stops tether-api at start). `off`: grants answer `503 tether proof needs HBBS_PEER_URL`. hbbs answers only loopback and `PEER_LOOKUP_FROM` |
+| `HBBS_PEER_URL` | `http://127.0.0.1:21122` | hbbs health ports asked for an ID's key (enrolment with a grant), comma separated, tried in order; only `http://<host>:<port>`, an IPv6 address in brackets (`http://[::1]:21122`), no path, query or user name (hbbs's health port is plain HTTP; another form stops tether-api at start). Plain HTTP: point it only to loopback or a trusted private network, since whoever is on that path decides which ID a device is linked to; with several URLs the first answer with a key wins. `off`: grants answer `503 tether proof needs HBBS_PEER_URL`. hbbs answers only loopback and `PEER_LOOKUP_FROM` |
 | `STATUS_SBOM` | off | `on`: the software-list routes exist and the answer to a post says `"sbom":true`; otherwise `PUT /api/status/sbom` and `GET /api/team/status/<uuid>/sbom` answer `404`, while a device's `DELETE /api/status/sbom` still deletes (`204`). `STATUS=off` wins |
 | `STATUS_SBOM_MAX_KB` | `512` | largest software list in KiB; more is `413` |
 | `STATUS_SBOM_RPS` | `2` | software-list uploads taken per second, all devices (at least 1); more is `429 busy` |

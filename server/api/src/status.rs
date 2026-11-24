@@ -170,9 +170,9 @@ struct Pin {
     /// The customer reference an enrolment token set (`valid_customer`); a device cannot name it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     customer: Option<String>,
-    /// The link was made by a grant with a Tether proof (`linked_token` is the grant). Not in
-    /// `keys.jsonl`: a relay of 0.6 refuses an unknown field there and locks its store, so on
-    /// disk (and after a restart) the link reads as a token's; the journal names the proof.
+    /// The link was made by a grant with a Tether proof (`linked_token` is the grant). Not a field
+    /// of `keys.jsonl` (a relay of 0.6 refuses an unknown field there and locks its store): it is
+    /// stored as `linked_token` `proof:<grant id>`, which an old relay takes as free text.
     #[serde(skip)]
     linked_proof: bool,
 }
@@ -238,8 +238,22 @@ enum KeyLine {
 
 impl KeyLine {
     fn set(uuid: &str, p: &Pin) -> Self {
-        let p = p.clone(); // `linked_proof` stays out of the file (see `Pin`)
-        KeyLine::Set { uuid: uuid.to_owned(), key: p.key, tether_id: p.tether_id, label: p.label, enrolled: p.enrolled, token: p.token, claimed_id: p.claimed_id, linked_by: p.linked_by, linked_at: p.linked_at, linked_token: p.linked_token, no_claim: p.no_claim, customer: p.customer }
+        let p = p.clone();
+        let linked_token = if p.linked_proof { p.linked_token.map(|g| format!("{PROOF_PREFIX}{g}")) } else { p.linked_token };
+        KeyLine::Set { uuid: uuid.to_owned(), key: p.key, tether_id: p.tether_id, label: p.label, enrolled: p.enrolled, token: p.token, claimed_id: p.claimed_id, linked_by: p.linked_by, linked_at: p.linked_at, linked_token, no_claim: p.no_claim, customer: p.customer }
+    }
+}
+
+/// `linked_token` of a proof link in `keys.jsonl` (see `Pin::linked_proof`); token ids are
+/// alphanumeric, so it cannot be one.
+const PROOF_PREFIX: &str = "proof:";
+
+/// A stored `linked_token`: the grant id and `linked_proof` for `proof:<token id>`. Anything else,
+/// also a hand-edited `proof:` without a token id after it, stays the text it is (as before).
+fn stored_link(t: Option<String>) -> (Option<String>, bool) {
+    match t.as_deref().and_then(|t| t.strip_prefix(PROOF_PREFIX)) {
+        Some(g) if st::valid_token_id(g) => (Some(g.to_owned()), true),
+        _ => (t, false),
     }
 }
 
@@ -277,7 +291,8 @@ fn replay_keys(b: &[u8]) -> Result<(BTreeMap<String, Pin>, Used, Dismissed, usiz
                 keys.remove(&uuid);
             }
             KeyLine::Set { uuid, key, tether_id, label, enrolled, token, claimed_id, linked_by, linked_at, linked_token, no_claim, customer } => {
-                keys.insert(uuid, Pin { key, tether_id, label, enrolled, token, claimed_id, linked_by, linked_at, linked_token, no_claim, customer, linked_proof: false });
+                let (linked_token, linked_proof) = stored_link(linked_token);
+                keys.insert(uuid, Pin { key, tether_id, label, enrolled, token, claimed_id, linked_by, linked_at, linked_token, no_claim, customer, linked_proof });
             }
             KeyLine::Used { token, uuid, exp } => {
                 used.insert(token, (uuid, exp));
@@ -1241,7 +1256,8 @@ impl App {
                 let t = now();
                 let r = match pk.map(|pk| pk.map(|pk| st::verify_agent_link(&pk, &proof, &id, &req.uuid, &req.pubkey))) {
                     Err(()) => Err(text(503, "tether proof unavailable")),
-                    Ok(None) => Err(text(409, "tether id unknown to this relay")),
+                    // Counted: lookups of random IDs must not load hbbs for free.
+                    Ok(None) => Err(a.enroll_refused(&req.uuid, &key, &ip, t, text(409, "tether id unknown to this relay"))),
                     Ok(Some(Err(_))) => Err(a.enroll_refused(&req.uuid, &key, &ip, t, text(401, "tether proof does not match"))),
                     Ok(Some(Ok(()))) => a.enroll_pin(req, tok, key, ip, t, true),
                 };

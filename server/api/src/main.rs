@@ -285,12 +285,12 @@ impl<R: Read> Read for Deadline<R> {
     }
 }
 
-/// One of the MAX_UPLOADS upload slots of a pool, released on drop.
+/// One of the `max` slots of a pool (uploads, hbbs lookups), released on drop.
 struct UploadSlot(&'static AtomicUsize);
 
 impl UploadSlot {
-    fn take(pool: &'static AtomicUsize) -> Option<Self> {
-        if pool.fetch_add(1, Ordering::SeqCst) < MAX_UPLOADS {
+    fn take(pool: &'static AtomicUsize, max: usize) -> Option<Self> {
+        if pool.fetch_add(1, Ordering::SeqCst) < max {
             return Some(UploadSlot(pool));
         }
         pool.fetch_sub(1, Ordering::SeqCst);
@@ -596,7 +596,7 @@ fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<
         ("POST", "/api/status/enroll") => return read_body(rq, tether_trust::status::ENROLL_MAX as u64).map(Body::Mem),
         _ => return read_body(rq, LIMIT_PAGE).map(Body::Mem),
     };
-    let _slot = UploadSlot::take(pool).ok_or_else(|| text(503, "too many uploads at once, retry later").with_header(hdr("Retry-After", "30")))?;
+    let _slot = UploadSlot::take(pool, MAX_UPLOADS).ok_or_else(|| text(503, "too many uploads at once, retry later").with_header(hdr("Retry-After", "30")))?;
     // The timestamp was current when the upload began (precheck); a slow upload may outlast the skew.
     let t = now();
     let mut body = body_to_file(rq, data, limit, mode)?;
@@ -1836,6 +1836,10 @@ const HBBS_PEER_DEFAULT: &str = "127.0.0.1:21122";
 const HBBS_TIMEOUT: Duration = Duration::from_secs(2);
 /// hbbs's answer is about 130 bytes; anything longer is not one.
 const HBBS_ANSWER_MAX: usize = 256;
+/// hbbs lookups running at once (their threads, until each really ends); more are refused at
+/// once, so a hung hbbs or a dropped address cannot hold the relay's workers.
+const HBBS_LOOKUPS_MAX: usize = 4;
+static HBBS_LOOKUPS: AtomicUsize = AtomicUsize::new(0);
 
 /// `HBBS_PEER_URL`: comma-separated `http://<host>:<port>[/]`, or `off`; `host:port` of each.
 /// Plain HTTP only: hbbs's health port has no TLS, and the relay carries no TLS client (it runs
@@ -1849,11 +1853,21 @@ fn hbbs_peer_urls(v: &str) -> Result<Vec<String>, String> {
     v.split(',')
         .map(|u| {
             let u = u.trim();
+            if u.get(..8).is_some_and(|p| p.eq_ignore_ascii_case("https://")) {
+                return Err(format!("{u}: https is not supported: hbbs's health port is plain HTTP"));
+            }
             let a = u.strip_prefix("http://").ok_or_else(|| format!("{u}: not an http:// URL"))?;
             let a = a.strip_suffix('/').unwrap_or(a);
-            let port = a.rsplit_once(':').map(|(h, p)| (h, p.parse::<u16>()));
-            match port {
-                Some((h, Ok(_))) if !h.is_empty() && a.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b)) => Ok(a.to_owned()),
+            if a.contains(['/', '?', '#', '@']) {
+                return Err(format!("{u}: no path, query or user name: expected http://<host>:<port>"));
+            }
+            let Some((h, Ok(_))) = a.rsplit_once(':').map(|(h, p)| (h, p.parse::<u16>())) else {
+                return Err(format!("{u}: expected http://<host>:<port>"));
+            };
+            match h.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+                Some(v6) if v6.parse::<std::net::Ipv6Addr>().is_ok() => Ok(a.to_owned()),
+                None if h.contains(':') => Err(format!("{u}: an IPv6 address must be in brackets, as http://[::1]:21122")),
+                None if !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b)) => Ok(a.to_owned()),
                 _ => Err(format!("{u}: expected http://<host>:<port>")),
             }
         })
@@ -1862,16 +1876,22 @@ fn hbbs_peer_urls(v: &str) -> Result<Vec<String>, String> {
 
 /// The key hbbs holds for `id` (already checked against hbbs's ID rule), asking `hosts` in
 /// order, all within [`HBBS_TIMEOUT`]: `Ok(Some(key))` from the first that has it, `Ok(None)`
-/// when one answered 404 and none had it, `Err` when none gave a usable answer.
+/// when one answered 404 and none had it, `Err` when none gave a usable answer, or at once when
+/// [`HBBS_LOOKUPS_MAX`] lookups are running.
 pub(crate) fn hbbs_peer_pk(hosts: &[String], id: &str) -> Result<Option<String>, ()> {
+    let slot = UploadSlot::take(&HBBS_LOOKUPS, HBBS_LOOKUPS_MAX).ok_or(())?;
     let deadline = Instant::now() + HBBS_TIMEOUT;
     let (hosts, id) = (hosts.to_vec(), id.to_owned());
     let (tx, rx) = std::sync::mpsc::channel();
-    // On its own thread: a host name lookup has no timeout of its own.
+    // On its own thread: a host name lookup has no timeout of its own. The thread holds the slot
+    // until it ends, so threads stuck there are bounded too.
     std::thread::spawn(move || {
         let mut r = Err(());
-        for h in &hosts {
-            match peer_pk_from(h, &id, deadline) {
+        for (i, h) in hosts.iter().enumerate() {
+            // Each URL gets an equal share of the time left, so a hung or dropping one leaves the
+            // next its turn.
+            let left = deadline.saturating_duration_since(Instant::now());
+            match peer_pk_from(h, &id, Instant::now() + left / (hosts.len() - i) as u32) {
                 Ok(Some(k)) => {
                     r = Ok(Some(k));
                     break;
@@ -1880,6 +1900,7 @@ pub(crate) fn hbbs_peer_pk(hosts: &[String], id: &str) -> Result<Option<String>,
                 Err(()) => {}
             }
         }
+        drop(slot);
         let _ = tx.send(r);
     });
     rx.recv_timeout(HBBS_TIMEOUT).unwrap_or(Err(()))
@@ -1890,8 +1911,9 @@ pub(crate) fn hbbs_peer_pk(hosts: &[String], id: &str) -> Result<Option<String>,
 fn peer_pk_from(host: &str, id: &str, deadline: Instant) -> Result<Option<String>, ()> {
     use std::net::ToSocketAddrs;
     let left = || deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or(());
-    let addr = host.to_socket_addrs().map_err(drop)?.next().ok_or(())?;
-    let mut s = TcpStream::connect_timeout(&addr, left()?).map_err(drop)?;
+    let addrs: Vec<_> = host.to_socket_addrs().map_err(drop)?.collect();
+    // Every address of the host in turn, each with an equal share of the time left.
+    let mut s = (0..addrs.len()).find_map(|i| TcpStream::connect_timeout(&addrs[i], left().ok()? / (addrs.len() - i) as u32).ok()).ok_or(())?;
     s.set_write_timeout(Some(left()?)).map_err(drop)?;
     s.write_all(format!("GET /peer-pk/{id} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes()).map_err(drop)?;
     let mut buf = [0u8; HBBS_ANSWER_MAX + 1];
