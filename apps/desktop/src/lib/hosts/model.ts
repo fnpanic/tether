@@ -116,6 +116,8 @@ export interface StatusSummary {
   claimed_id?: string | null;
   /** When the verified link was made. */
   linked_at?: number | null;
+  /** The relay linked it from Tether's proof on that computer (sent only when true; an older relay sends none). */
+  linked_proof?: boolean;
   /** A member dismissed its link: it claims nothing until a member allows a new claim. */
   no_claim?: boolean;
   host: string;
@@ -170,6 +172,8 @@ export interface StatusHostReply {
   /** The member who confirmed the link and when; null for a link from a token issued for that ID. */
   linked_by?: string | null;
   linked_at?: number | null;
+  /** The link was made from Tether's proof on that computer (sent only when true). */
+  linked_proof?: boolean;
   /** A member dismissed its link: it claims nothing until a member allows a new claim. */
   no_claim?: boolean;
   last_seen: number | null;

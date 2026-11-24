@@ -179,6 +179,19 @@ export const mock = {
           { ts: t - 86400 * 3, action: "login", id: a.device, peer_id: "402118736", peer_name: "ben", conn_type: "file_transfer", ip: "203.0.113.20" },
         ] as T;
       }
+      case "session_agent":
+      case "health_agent_status": {
+        // `?agent=<state>`: what the (remote, or for Settings this) computer answers to `status`;
+        // install and remove succeed after a moment. Without it Settings shows no agent line.
+        const want = new URLSearchParams(location.search).get("agent");
+        if (cmd === "health_agent_status" && !want) throw "unknown command";
+        const t = Math.floor(Date.now() / 1000);
+        await new Promise((r) => setTimeout(r, a.action === "status" || !a.action ? 300 : 1200));
+        if (a.action === "install") return { state: "installed", version: "0.2.0", installed_by: "session", detail: "installed 0.2.0, service running, linked to Tether ID 731204986 by proof", at: t } as T;
+        if (a.action === "remove") return { state: "removed-by-tether", version: "", installed_by: "session", detail: "removed", at: t } as T;
+        const st = want ?? "not-installed";
+        return { state: st, version: st.startsWith("installed") ? "0.2.0" : "", installed_by: st === "installed" ? "policy" : "", detail: st === "failed" ? "download refused: the file does not match the signed index" : "", at: st === "not-installed" ? 0 : t - 3 * 86400 } as T;
+      }
       case "session_keyboard":
         return { dir: "pc-mac", shortcuts: true, system_keys: true, alt_tab_remote: false, hook: true } as T;
       case "fs_home_dir":

@@ -151,3 +151,16 @@ export function linkState(h: Pick<Host, "agentOnly" | "status" | "conflict">, re
   const link = !claim ? ("none" as const) : blocked ? ("blocked" as const) : write ? ("on" as const) : ("disabled" as const);
   return { claim, linked, link, blocked, unlink: !!linked && write, remove: !!s && write, dismissed, allow: dismissed && write, conflict: !!h.conflict };
 }
+
+/** The line under a linked host: who made the link. A member's confirmation names the member; a
+ *  link the relay made from Tether's proof on that computer (`linked_proof`, only ever `true`; an
+ *  older relay sends no field) says so; else it came from an enrolment token issued for that ID. */
+export function linkedText(h: Pick<Host, "status">, rep: StatusHostReply | null, st: Pick<ReturnType<typeof linkState>, "linked" | "conflict">, day: (t: number | null | undefined) => string): string {
+  const l = st.linked;
+  if (!l) return "";
+  const at = l.at ? `, ${day(l.at)}` : "";
+  if (st.conflict) return `Linked to ${clip(h.status?.tether_id ?? "", 32)} on its relay${at}`;
+  if (l.by) return `Health linked by ${clip(l.by, 64)}, ${day(l.at)}`;
+  if (rep?.linked_proof === true || h.status?.linked_proof === true) return `Health linked by Tether on this computer${at}`;
+  return `Health linked by the enrolment token issued for this host${at}`;
+}

@@ -37,6 +37,8 @@ import { buildHosts, emptyStore, label, type Host, type StatusSummary } from "..
 import { uiLang } from "../lib/hosts/health";
 import { HealthDot, HEALTH_LABEL } from "../components/hosts/bits";
 import { HealthSection, useStatusHost } from "../components/hosts/Health";
+import { AgentDialog } from "../components/AgentDialog";
+import { AGENT_MENU, agentMenu } from "../lib/agent";
 import { ADMIN_ON, elevationError, hostNote, NOTE_TEXT, UAC_SETTLE_MS, uacOutcome, type HostNote } from "../lib/elevation";
 
 interface Display {
@@ -219,6 +221,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
   /** Every toolbar action either works or says why not. */
   const act = (p: Promise<unknown>) => p.catch((e) => toast.show(errorText(e)));
   const [ask, setAsk] = useState<"lock" | "restart" | null>(null);
+  const [agentOpen, setAgentOpen] = useState(false);
   // Local keyboard (docs/keyboard.md): after Ctrl+Alt+Home the keys work this window's toolbar,
   // menus and dialogs instead of going to the remote computer, until Escape or a click into the picture.
   const [local, setLocal] = useState(false);
@@ -570,6 +573,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
         e.preventDefault();
         const menu = barRef.current?.querySelector<HTMLElement>('[aria-expanded="true"]');
         if (ask) setAsk(null);
+        else if (agentOpen) setAgentOpen(false);
         else if (menu) (menu.click(), menu.focus());
         else leaveLocal(e.code);
         return;
@@ -612,7 +616,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       document.removeEventListener("focusin", fin);
       document.removeEventListener("focusout", fout);
     };
-  }, [phase.kind, key, toRemote, chat.open, useGl, viewOnly, local, ask]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [phase.kind, key, toRemote, chat.open, useGl, viewOnly, local, ask, agentOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keyboard settings; asked again once the peer's platform is known (PC/Mac mapping).
   useEffect(() => {
@@ -889,7 +893,9 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
             adminOn={adminOn}
             onCad={() => act(invoke("session_ctrl_alt_del", { key }))}
             onElevate={() => act(invoke("session_elevate", { key }))}
-            onAsk={setAsk}
+            onAsk={(a) => (setAgentOpen(false), setAsk(a))}
+            agent={agentMenu(viewOnly, controlOff)}
+            onAgent={() => (setAsk(null), setAgentOpen(true))}
           />
           <Sep />
           <TB label={fullscreen ? "Exit full screen" : "Full screen"} onClick={toggleFullscreen}>
@@ -924,6 +930,8 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
           }}
         />
       )}
+
+      {agentOpen && connected && <AgentDialog sessionKey={key} onClose={() => setAgentOpen(false)} />}
 
       {showStats && connected && (
         <div className="animate-fade pointer-events-none absolute bottom-3 left-3 z-10 rounded-xl border border-white/10 bg-black/70 px-3.5 py-2.5 font-mono text-footnote leading-[1.7] text-white/85 backdrop-blur">
@@ -1049,7 +1057,7 @@ function KeyboardMenu({ kbd, mac, onChange, onForceQuit }: { kbd: KbdSettings; m
 }
 
 /** Ctrl+Alt+Del, lock and restart: disruptive, so grouped, explained and (lock, restart) confirmed. */
-function ActionsMenu({ windows, service, adminOn, onCad, onElevate, onAsk }: { windows: boolean; service: boolean; adminOn: boolean | null; onCad: () => void; onElevate: () => void; onAsk: (a: "lock" | "restart") => void }) {
+function ActionsMenu({ windows, service, adminOn, onCad, onElevate, onAsk, agent, onAgent }: { windows: boolean; service: boolean; adminOn: boolean | null; onCad: () => void; onElevate: () => void; onAsk: (a: "lock" | "restart") => void; agent: { disabled: boolean; hint: string }; onAgent: () => void }) {
   const [open, setOpen] = useState(false);
   const item = (label: string, hint: string, run: () => void, disabled = false) => (
     <button
@@ -1091,6 +1099,7 @@ function ActionsMenu({ windows, service, adminOn, onCad, onElevate, onAsk }: { w
             )}
           {item("Lock screen…", service ? "Locks the remote computer" : "You will not be able to sign back in", () => onAsk("lock"))}
           {item("Restart…", "Ends the session", () => onAsk("restart"))}
+          {item(AGENT_MENU, agent.hint, onAgent, agent.disabled)}
         </div>
       )}
     </div>

@@ -5,7 +5,7 @@ import { Copy, Link2, RotateCcw, Trash2, Unlink } from "lucide-react";
 import { Button, IconButton, Modal } from "../ui";
 import { invoke } from "../../lib/ipc";
 import { errorText } from "../../lib/policy";
-import { checksOf, clip, groupChecks, healthText, linkState, pick } from "../../lib/hosts/health";
+import { checksOf, clip, groupChecks, healthText, linkedText, linkState, pick } from "../../lib/hosts/health";
 import { label, type CheckState, type Host, type ReportCheck, type StatusHostReply, type StatusSummary } from "../../lib/hosts/model";
 import { actions, useHosts } from "../../lib/hosts/store";
 import { SoftwarePart } from "./Software";
@@ -114,7 +114,7 @@ function LinkPart({ h, rep, nameOf, holderOf, ask, setAsk }: { h: Host; rep: Sta
     },
     remove: {
       title: `Remove ${clip(label(h), 64)} from health monitoring?`,
-      text: "Its enrolment, link and stored reports are deleted on every server. If the agent on that computer still holds a valid enrolment token it enrols again by itself, and comes back as an agent that is not linked to any host. Uninstall the agent there, or ask an admin to revoke the token.",
+      text: "Its enrolment, link and stored reports are deleted on every server. If the agent on that computer still holds a valid enrolment token it enrols again by itself, and comes back as an agent that is not linked to any host. Uninstall the agent there, or ask an admin to revoke the token. Tether on that computer enrols it again while its policy says install; to remove the agent, use the session menu or change the policy.",
       button: "Remove",
       go: () => run("team_status_remove", { uuid: s.uuid }),
     },
@@ -168,13 +168,7 @@ function LinkPart({ h, rep, nameOf, holderOf, ask, setAsk }: { h: Host; rep: Sta
       )}
       {st.linked && rep && (
         <div className="mt-2 flex items-center justify-between gap-2 text-footnote text-muted">
-          <span className="min-w-0 break-words">
-            {st.conflict
-              ? `Linked to ${clip(h.status?.tether_id ?? "", 32)} on its relay${st.linked.at ? `, ${day(st.linked.at)}` : ""}`
-              : st.linked.by
-                ? `Health linked by ${clip(st.linked.by, 64)}, ${day(st.linked.at)}`
-                : `Health linked by the enrolment token issued for this host${st.linked.at ? `, ${day(st.linked.at)}` : ""}`}
-          </span>
+          <span className="min-w-0 break-words">{linkedText(h, rep, st, day)}</span>
           {st.unlink && (
             <Button size="sm" variant="ghost" className="shrink-0" onClick={() => setAsk("unlink")}>
               <Unlink size={14} /> Unlink

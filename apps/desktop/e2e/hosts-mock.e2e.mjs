@@ -367,6 +367,10 @@ async function run(name) {
   check(tag("the linked host shows who linked it"), await until(() => p.getByText("Health linked by Anna (Helpdesk)").isVisible()));
   await setQuery("id:m:");
   check(tag("the linked agent no longer has its own row"), (await shown()) === 6);
+  // An agent Tether installed and linked on that computer (relay proof): said so, no member named.
+  await setQuery("id:327660915");
+  await rows().first().click();
+  check(tag("a proof-linked host says it was linked by Tether on that computer"), await until(() => p.getByText(/^Health linked by Tether on this computer, /).isVisible()));
   await setQuery(`id:${la?.tetherId}`);
   await rows().first().click();
   await p.getByTestId("health-section").getByRole("button", { name: "Unlink" }).click();
@@ -383,7 +387,7 @@ async function run(name) {
   await rows().first().click();
   await p.getByRole("button", { name: "Remove from health monitoring…" }).click();
   const rmdlg = p.getByRole("dialog");
-  check(tag("Remove names the host and asks to uninstall the agent"), (await rmdlg.getByText("Remove FRONT-DESK-AGENT from health monitoring?").isVisible()) && (await rmdlg.getByText(/enrols again by itself.*Uninstall the agent there, or ask an admin to revoke the token/).isVisible()));
+  check(tag("Remove names the host and asks to uninstall the agent"), (await rmdlg.getByText("Remove FRONT-DESK-AGENT from health monitoring?").isVisible()) && (await rmdlg.getByText(/enrols again by itself.*Uninstall the agent there, or ask an admin to revoke the token/).isVisible()) && (await rmdlg.getByText(/Tether on that computer enrols it again while its policy says install; to remove the agent, use the session menu or change the policy\./).isVisible()));
   await clearCalls();
   await rmdlg.getByRole("button", { name: "Remove", exact: true }).click();
   check(tag("Remove calls team_status_remove"), await until(async () => (await calls("team_status_remove"))[0]?.uuid === "agent-only-4"));

@@ -66,9 +66,12 @@ export function fleet() {
   if (status[2]?.tether_id) status.push({ ...summary(1, "agent-only-5", null, "IMPOSTER-PC", now), claimed_id: status[2].tether_id });
   // A second relay where another device is linked to the second host's ID: a link conflict.
   const second: Summary[] = status[1]?.tether_id ? [summary(5, "agent-dup-1", status[1].tether_id, "SHADOW-PC", now)] : [];
+  // The mock's own recent peer "Reception": its agent was installed and linked by Tether there (proof link).
+  status.push({ ...summary(2, "agent-proof-1", "327660915", "RECEPTION", now), linked_proof: true });
   const all = () => [...status, ...second];
   const meta = new Map<string, Meta>(all().map((s, k) => [s.uuid, { enrolled: now - 40 * 86400 + k * 600, linked_by: null, linked_at: s.tether_id ? now - 40 * 86400 + k * 600 : null, no_claim: false }]));
   if (status[0]?.tether_id) Object.assign(meta.get(status[0].uuid)!, { linked_by: "Anna (Helpdesk)", linked_at: now - 5 * 86400 });
+  Object.assign(meta.get("agent-proof-1")!, { linked_proof: true });
   for (const s of all()) s.linked_at = meta.get(s.uuid)!.linked_at;
   const find = (uuid: string) => all().find((x) => x.uuid === uuid) ?? fail("unknown device");
   return {
@@ -84,12 +87,12 @@ export function fleet() {
       const s = find(uuid);
       if (s.claimed_id !== id) fail("Refused by the server: tether_id is not the one this device claims");
       Object.assign(s, { tether_id: id, claimed_id: null, linked_at: Math.floor(Date.now() / 1000) });
-      Object.assign(meta.get(uuid)!, { linked_by: "Anna (Helpdesk)", linked_at: s.linked_at, no_claim: false });
+      Object.assign(meta.get(uuid)!, { linked_by: "Anna (Helpdesk)", linked_at: s.linked_at, no_claim: false, linked_proof: undefined });
     },
     unlink(uuid: string) {
       // The link and the claim go; the agent claims nothing until a member allows it.
-      Object.assign(find(uuid), { tether_id: null, claimed_id: null, linked_at: null, no_claim: true });
-      Object.assign(meta.get(uuid)!, { linked_by: null, linked_at: null, no_claim: true });
+      Object.assign(find(uuid), { tether_id: null, claimed_id: null, linked_at: null, no_claim: true, linked_proof: undefined });
+      Object.assign(meta.get(uuid)!, { linked_by: null, linked_at: null, no_claim: true, linked_proof: undefined });
     },
     allowClaim(uuid: string) {
       find(uuid).no_claim = false;
@@ -102,7 +105,7 @@ export function fleet() {
   };
 }
 
-type Meta = { enrolled: number; linked_by: string | null; linked_at: number | null; no_claim: boolean };
+type Meta = { enrolled: number; linked_by: string | null; linked_at: number | null; no_claim: boolean; linked_proof?: boolean };
 const fail = (e: string): never => {
   throw e;
 };

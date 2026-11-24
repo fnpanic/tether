@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cmAdd, cmEmpty, cmNote, cmRemove, cmShow, requestText, type CmClient, type CmState } from "./cm";
+import { agentLine, cmAdd, cmEmpty, cmNote, cmRemove, cmShow, requestText, type CmClient, type CmState } from "./cm";
 
 const c = (id: number, extra: Partial<CmClient> = {}): CmClient => ({ id, peer_id: `${id}00000000`, name: `user${id}`, authorized: false, is_file_transfer: false, ...extra });
 
@@ -40,5 +40,22 @@ describe("connection manager: request text", () => {
     expect(requestText(c(1, { is_view_camera: true }), "1")).toContain("camera");
     expect(requestText(c(1, { is_terminal: true }), "1")).toContain("terminal");
     expect(requestText(c(1, { port_forward: "10.0.0.5:3389" }), "1")).toContain("reach 10.0.0.5:3389 through this computer");
+  });
+});
+
+describe("connection manager: the technician's agent action", () => {
+  it("installed or removed: one plain line", () => {
+    expect(agentLine({ id: 1, action: "install", outcome: "installed" })).toBe("The technician installed the health monitoring agent.");
+    expect(agentLine({ id: 1, action: "remove", outcome: "removed-by-tether" })).toBe("The technician removed the health monitoring agent.");
+  });
+  it("another outcome: a neutral line that does not repeat it", () => {
+    for (const outcome of ["failed", "not-installed", "installed-by-hand", "<b>x</b>", "", 5, null]) {
+      expect(agentLine({ id: 1, action: "install", outcome })).toBe("The technician asked to install the health monitoring agent.");
+      expect(agentLine({ id: 1, action: "remove", outcome })).toBe("The technician asked to remove the health monitoring agent.");
+    }
+    expect(agentLine({ id: 1, action: "remove", outcome: "installed" })).toBe("The technician asked to remove the health monitoring agent.");
+  });
+  it("an action outside install and remove, or no payload: nothing", () => {
+    for (const p of [{ id: 1, action: "status", outcome: "installed" }, { id: 1, action: "run", outcome: "installed" }, { id: 1, action: ["install"], outcome: "installed" }, null, "install", undefined]) expect(agentLine(p)).toBeNull();
   });
 });
