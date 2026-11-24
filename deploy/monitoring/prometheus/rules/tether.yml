@@ -185,7 +185,8 @@ groups:
           summary: "The release index of channel {{ $labels.channel }} differs between relays"
           description: "Not every relay has the newest signed release index for 10 minutes: a publish did not reach every relay. Tether Manage › Releases › Publish to missing relays."
       - alert: ReleaseIndexExpiringSoon
-        expr: min by (channel) (tether_api_release_index_expires_timestamp) - time() < 7 * 86400
+        # Tether's releases.json only: monitor.json (index="monitor") is refreshed with monitor-publish (docs/health.md).
+        expr: min by (channel) (tether_api_release_index_expires_timestamp{index=""}) - time() < 7 * 86400
         for: 1h
         labels: { severity: warning }
         annotations:

@@ -91,7 +91,10 @@ impl App {
     /// `/api/team/<rest>`: size check, member signature, rate limit, then the handler.
     pub(crate) fn team_route(&mut self, rq: &Request, body: &Body, method: &str, url: &str, rest: &str) -> Result<Resp, Resp> {
         let limit = match (method, rest) {
-            ("GET", "me" | "devices" | "tags" | "audit") => LIMIT_SMALL,
+            ("GET", "me" | "devices" | "tags" | "audit" | "status") => LIMIT_SMALL,
+            ("GET", r) if r.starts_with("status/") => LIMIT_SMALL,
+            ("POST", r) if r.starts_with("status/") && (r.ends_with("/link") || r.ends_with("/allow-claim")) => LIMIT_SMALL,
+            ("DELETE", r) if r.starts_with("status/") => LIMIT_SMALL,
             ("PUT", "tags") => LIMIT_TAGS,
             _ => return Err(crate::not_found()),
         };
@@ -111,6 +114,21 @@ impl App {
                 self.json_file(|w| serde::Serializer::collect_seq(&mut serde_json::Serializer::new(w), out))
             }
             ("GET", "tags") => Ok(json(&self.team.tags)),
+            ("GET", "status") => self.team_status_summary(rq),
+            ("GET", r) if r.starts_with("status/") => self.team_status_host(&r["status/".len()..]),
+            // Health links and removal change what the team sees for a host: `write` only.
+            ("POST" | "DELETE", r) if r.starts_with("status/") => {
+                if !m.write {
+                    return Err(text(403, "this member may not change health monitoring"));
+                }
+                let r = &r["status/".len()..];
+                match (method, r.strip_suffix("/link")) {
+                    ("POST", Some(uuid)) => self.team_status_link(uuid, body, &m.name),
+                    ("DELETE", Some(uuid)) => self.team_status_unlink(uuid, &m.name),
+                    ("POST", None) => self.team_status_allow_claim(r.strip_suffix("/allow-claim").unwrap_or_default(), &m.name),
+                    _ => self.admin_status_delete(r, &format!("team member {}", m.name), false),
+                }
+            }
             ("PUT", "tags") => {
                 if !m.write {
                     return Err(text(403, "this member may not edit the shared tags"));
@@ -174,7 +192,7 @@ impl App {
         })();
         match r {
             Ok(i) => {
-                self.save_nonces();
+                self.nonce_used();
                 Ok(i)
             }
             Err(e) => {

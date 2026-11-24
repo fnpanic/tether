@@ -3,10 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Copy, Eye, FolderSync, History, Pin, PinOff, Trash2 } from "lucide-react";
 import { Button, IconButton, PlatformIcon } from "../ui";
 import { formatId, invoke } from "../../lib/ipc";
-import { label, osFamily, type Host, type Store } from "../../lib/hosts/model";
+import { label, osFamily, type Host, type StatusSummary, type Store } from "../../lib/hosts/model";
 import { actions, useHosts, useReadOnly } from "../../lib/hosts/store";
 import { errorText } from "../../lib/policy";
+import { uiLang } from "../../lib/hosts/health";
 import { ago, OnlineDot, TagChip, TagInput } from "./bits";
+import { HealthSection, useStatusHost } from "./Health";
 
 interface AuditRow {
   ts: number;
@@ -27,6 +29,8 @@ export function Detail({
   onConnect,
   onToast,
   onRemove,
+  nameOf,
+  holderOf,
 }: {
   h: Host;
   meta: Store["tags"];
@@ -35,14 +39,19 @@ export function Detail({
   onConnect: (id: string, kind: "default" | "file-transfer" | "view-only") => void;
   onToast: (m: string) => void;
   onRemove: (ids: string[]) => void;
+  /** A host row's name by its ID (the host an agent claims to be). */
+  nameOf?: (id: string) => string | undefined;
+  /** The health summary already joined to a host row (a claim to it cannot be linked). */
+  holderOf?: (id: string) => StatusSummary | "conflict" | undefined;
 }) {
-  const entry = useHosts((s) => s.store.hosts[h.id]);
+  const entry = useHosts((s) => (Object.hasOwn(s.store.hosts, h.id) ? s.store.hosts[h.id] : undefined));
   const me = useHosts((s) => s.team.me);
   const teamOn = useHosts((s) => !!s.store.team?.enabled);
   const [name, setName] = useState(h.name);
   const [notes, setNotes] = useState(h.notes);
   const [audit, setAudit] = useState<AuditRow[] | string | null>(null);
   const ro = useReadOnly();
+  const report = useStatusHost(h);
   // Mounted per host (key = id). What was typed and is not saved yet: saved on blur, and on unmount,
   // because clicking another row removes this panel before the field loses the focus.
   const edit = useRef<{ name?: string; notes?: string }>({});
@@ -85,24 +94,43 @@ export function Detail({
             </IconButton>
           </div>
         </div>
-        <IconButton label={h.pinned ? "Unpin" : "Pin"} active={h.pinned} onClick={() => actions.setPinned([h.id], !h.pinned)}>
-          {h.pinned ? <PinOff size={16} /> : <Pin size={16} />}
-        </IconButton>
+        {!h.agentOnly && (
+          <IconButton label={h.pinned ? "Unpin" : "Pin"} active={h.pinned} onClick={() => actions.setPinned([h.id], !h.pinned)}>
+            {h.pinned ? <PinOff size={16} /> : <Pin size={16} />}
+          </IconButton>
+        )}
       </div>
 
-      <div className="mt-4 flex gap-2" title={why}>
-        <Button variant="primary" size="md" className="flex-1" disabled={!canConnect} onClick={() => onConnect(h.id, "default")}>
-          Connect <ArrowRight size={15} />
-        </Button>
-        <Button variant="secondary" size="md" className="!px-3" disabled={!canConnect} onClick={() => onConnect(h.id, "file-transfer")} aria-label="Transfer files" title="Transfer files (Shift+Enter)">
-          <FolderSync size={16} />
-        </Button>
-        <Button variant="secondary" size="md" className="!px-3" disabled={!canConnect} onClick={() => onConnect(h.id, "view-only")} aria-label="View only" title="View only (Alt+Enter)">
-          <Eye size={16} />
-        </Button>
-      </div>
-      <div className="mt-2 text-footnote text-muted">Enter connects · Shift+Enter files · Alt+Enter view only</div>
+      {h.agentOnly ? (
+        <div className="mt-4 rounded-xl bg-parchment px-3 py-2 text-footnote text-muted">
+          {h.conflict
+            ? `In conflict with another agent for host ${nameOf?.(h.status?.tether_id ?? "") || h.status?.tether_id || ""}.`
+            : h.status?.claimed_id
+              ? "This agent is not linked to a host yet. Its health is reported by the monitor agent."
+              : h.status?.no_claim || (typeof report === "object" && report?.no_claim)
+                ? "Link dismissed. This agent is not linked to a host."
+                : "No remote access: Tether is not installed on this machine. Its health is reported by the monitor agent."}
+        </div>
+      ) : (
+        <>
+          <div className="mt-4 flex gap-2" title={why}>
+            <Button variant="primary" size="md" className="flex-1" disabled={!canConnect} onClick={() => onConnect(h.id, "default")}>
+              Connect <ArrowRight size={15} />
+            </Button>
+            <Button variant="secondary" size="md" className="!px-3" disabled={!canConnect} onClick={() => onConnect(h.id, "file-transfer")} aria-label="Transfer files" title="Transfer files (Shift+Enter)">
+              <FolderSync size={16} />
+            </Button>
+            <Button variant="secondary" size="md" className="!px-3" disabled={!canConnect} onClick={() => onConnect(h.id, "view-only")} aria-label="View only" title="View only (Alt+Enter)">
+              <Eye size={16} />
+            </Button>
+          </div>
+          <div className="mt-2 text-footnote text-muted">Enter connects · Shift+Enter files · Alt+Enter view only</div>
+        </>
+      )}
 
+      {/* An agent-only row is not a host of the list: no name, tags, notes or pin (never stored or shared). */}
+      {!h.agentOnly && (
+        <>
       <label className="mt-6 flex items-center justify-between text-footnote font-semibold text-muted" htmlFor="host-name">
         Name {ro && <span className="font-normal">Managed by your team</span>}
       </label>
@@ -136,7 +164,18 @@ export function Detail({
           <TagInput inputId="detail-tag" known={known} onAdd={(t) => actions.addTags([h.id], [t])} placeholder="Add tag (site:berlin)" />
         </div>
       )}
+        </>
+      )}
 
+      {h.conflict && !h.status && (
+        <div data-testid="health-conflict-host" role="alert" className="mt-5 rounded-xl bg-parchment px-3 py-2 text-footnote text-danger">
+          Health link conflict: two devices are linked to this host on different relays, so no health is shown here. Open the rows of the two agents (search <span className="font-mono">id:m:</span>) and unlink or remove the one that is not this computer.
+        </div>
+      )}
+      {h.status && <HealthSection h={h} reply={report} lang={uiLang()} nameOf={nameOf} holderOf={holderOf} />}
+
+      {!h.agentOnly && (
+        <>
       <label className="mt-5 flex items-center justify-between text-footnote font-semibold text-muted" htmlFor="host-notes">
         Notes <span className="font-normal">Only on this PC</span>
       </label>
@@ -153,6 +192,8 @@ export function Detail({
         }}
         className="mt-1 resize-none rounded-xl border border-hairline bg-parchment px-3 py-2 text-caption outline-none placeholder:text-faint focus-visible:border-focus"
       />
+        </>
+      )}
 
       <dl className="mt-5 grid grid-cols-[88px_1fr] gap-x-3 gap-y-1.5 text-footnote">
         {(
@@ -189,7 +230,7 @@ export function Detail({
           </li>
         ))}
       </ul>
-      {teamOn && me?.audit && (
+      {teamOn && me?.audit && !h.agentOnly && (
         <div className="mt-3">
           {audit === null ? (
             <Button size="sm" variant="pearl" onClick={loadAudit}>
@@ -213,11 +254,13 @@ export function Detail({
         </div>
       )}
 
-      <div className="mt-auto pt-6">
-        <Button size="sm" variant="danger" onClick={() => onRemove([h.id])}>
-          <Trash2 size={14} /> Remove host
-        </Button>
-      </div>
+      {!h.agentOnly && (
+        <div className="mt-auto pt-6">
+          <Button size="sm" variant="danger" onClick={() => onRemove([h.id])}>
+            <Trash2 size={14} /> Remove host
+          </Button>
+        </div>
+      )}
     </aside>
   );
 }

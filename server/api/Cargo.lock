@@ -361,6 +361,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "tether-trust",
  "tiny_http",
 ]

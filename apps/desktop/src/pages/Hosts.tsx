@@ -8,6 +8,7 @@ import {
   Download,
   Eye,
   FolderSync,
+  HeartPulse,
   HelpCircle,
   LayoutList,
   Monitor,
@@ -34,6 +35,8 @@ import { RecordingSaved } from "../components/RecordingSaved";
 import { UpdateCard } from "../components/UpdateCard";
 import { errorText, isOn, usePolicy } from "../lib/policy";
 import { buildHosts, label, type Host } from "../lib/hosts/model";
+import { linkHolder } from "../lib/hosts/health";
+import { healthAlerts, type Sent } from "../lib/hosts/notify";
 import { applyRules } from "../lib/hosts/rules";
 import { parse, search } from "../lib/hosts/query";
 import { actions, flush, useHosts, useReadOnly } from "../lib/hosts/store";
@@ -120,11 +123,26 @@ export function Hosts() {
 
   const hosts = useMemo(() => {
     const now = Date.now() / 1000;
-    const list = buildHosts(st.store, st.peers, st.store.team?.enabled ? st.org : [], st.online, now);
+    const team = st.store.team?.enabled;
+    const list = buildHosts(st.store, st.peers, team ? st.org : [], st.online, now, team ? st.status : []);
     applyRules(list, st.store.rules, now);
     return list;
-  }, [st.store, st.peers, st.org, st.online]);
+  }, [st.store, st.peers, st.org, st.online, st.status]);
   const byId = useMemo(() => new Map(hosts.map((h) => [h.id, h])), [hosts]);
+  const hasHealth = useMemo(() => hosts.some((h) => h.status || h.conflict), [hosts]);
+
+  // Health notifications (spec 10.5) after each status refresh; the first one only records states.
+  // Personal switch (store.team.healthNotify, default on). Sent through the backend (Windows toasts).
+  const sent = useRef<Sent | null>(null);
+  const hostsRef = useRef(hosts);
+  hostsRef.current = hosts;
+  useEffect(() => {
+    if (!st.status.length) return; // no data (yet, or a failed refresh): nothing changed state
+    const r = healthAlerts(sent.current, hostsRef.current, Date.now() / 1000);
+    sent.current = r.next;
+    if (useHosts.getState().store.team?.healthNotify === false) return;
+    for (const a of r.alerts) void invoke("health_notify", { title: a.title, body: a.body }).catch(() => {});
+  }, [st.status]);
   const tree = useMemo(() => tagTree(hosts), [hosts]);
   const known = useMemo(() => [...tree.count.keys()].sort(), [tree]);
   const parsed = useMemo(() => parse(q), [q]);
@@ -146,6 +164,7 @@ export function Hosts() {
       recent: hosts.filter((h) => h.recent).length,
       org: hosts.filter((h) => h.org).length,
       untagged: hosts.filter((h) => !h.tags.length && !h.auto.length).length,
+      attention: hosts.filter((h) => h.health === "crit" || h.health === "stale" || h.health === "conflict").length,
     }),
     [hosts],
   );
@@ -154,11 +173,18 @@ export function Hosts() {
   // The cursor stays on a shown row.
   const cur = cursor && rows.some((h) => h.id === cursor) ? cursor : (rows[0]?.id ?? null);
   const curHost = cur ? byId.get(cur) : undefined;
+  const nameOf = useCallback((id: string) => {
+    const x = byId.get(id);
+    return x && !x.agentOnly && label(x) !== id ? label(x) : undefined;
+  }, [byId]);
+  const holderOf = useCallback((id: string) => linkHolder(byId.get(id)), [byId]);
   const sel = useMemo(() => [...selected].filter((id) => byId.has(id)), [selected, byId]);
-  const targets = sel.length ? sel : cur ? [cur] : [];
+  // Tags, pin and Remove: agent-only rows (`m:<uuid>`) are not hosts of the list.
+  const targets = (sel.length ? sel : cur ? [cur] : []).filter((id) => !id.startsWith("m:"));
 
   const connect = useCallback(
     (id: string, kind: Kind) => {
+      if (id.startsWith("m:")) return toast.show("No remote access: Tether is not installed on this machine.", 3000);
       if (!canConnect) return toast.show("Your organisation does not allow connecting to other devices.", 3000);
       invoke<string>("open_session", { peer: id, conn: kind === "file-transfer" ? "file-transfer" : "default", viewOnly: kind === "view-only" }).then(
         () => actions.logSession(id, kind),
@@ -345,6 +371,8 @@ export function Hosts() {
     ["Recent", "is:recent", counts.recent, <Clock size={15} />],
     ...(st.org.length ? ([["Organisation", "is:org", counts.org, <Users size={15} />]] as [string, string, number, React.ReactNode][]) : []),
     ["Untagged", "-has:tags", counts.untagged, <Tag size={15} />],
+    // Built in, not a saved search: saved searches sync to the whole team (spec 10.1).
+    ...(hasHealth ? ([["Needs attention", "health:crit | health:stale | health:conflict", counts.attention, <HeartPulse size={15} />]] as [string, string, number, React.ReactNode][]) : []),
   ];
 
   const navItem = (key: string, text: React.ReactNode, n: number | undefined, active: boolean, onClick: (e: React.MouseEvent) => void, icon?: React.ReactNode, extra?: React.ReactNode) => (
@@ -578,7 +606,7 @@ export function Hosts() {
               </div>
             </div>
           ) : (
-            <HostTable rows={rows} cursor={cur} selected={selected} meta={st.store.tags} sort={sort} onSort={setSort} onRow={onRow} onToggle={onToggle} onToggleAll={() => setSelected(rows.every((h) => selected.has(h.id)) ? new Set() : new Set(rows.map((h) => h.id)))} onOpen={onOpen} />
+            <HostTable rows={rows} cursor={cur} selected={selected} meta={st.store.tags} sort={sort} onSort={setSort} onRow={onRow} onToggle={onToggle} onToggleAll={() => setSelected(rows.every((h) => selected.has(h.id)) ? new Set() : new Set(rows.map((h) => h.id)))} onOpen={onOpen} health={hasHealth} />
           )}
 
           <footer className="flex h-8 shrink-0 items-center gap-3 whitespace-nowrap border-t border-hairline px-4 text-footnote text-muted" data-testid="status-bar">
@@ -588,6 +616,7 @@ export function Hosts() {
             {st.onlineState === "ok" && <span>{counts.online.toLocaleString()} online</span>}
             {onlineNote && <span>{onlineNote}</span>}
             {st.store.team?.enabled && st.team.error && <span className="text-warn">Team: {st.team.error}</span>}
+            {st.store.team?.enabled && st.statusError && <span className={st.statusError === "this relay does not report health" ? "" : "text-warn"}>Health: {st.statusError}</span>}
             <span className="flex-1" />
             <span className="hidden tabular-nums text-faint xl:inline" data-testid="search-ms">
               search {perf.last.toFixed(1)} ms
@@ -601,14 +630,14 @@ export function Hosts() {
           </footer>
         </main>
 
-        {curHost && <Detail key={curHost.id} h={curHost} meta={st.store.tags} known={known} canConnect={canConnect} onConnect={connect} onToast={toast.show} onRemove={() => setDlg("remove")} />}
+        {curHost && <Detail key={curHost.id} h={curHost} meta={st.store.tags} known={known} canConnect={canConnect} onConnect={connect} onToast={toast.show} onRemove={() => setDlg("remove")} nameOf={nameOf} holderOf={holderOf} />}
       </div>
 
       {palette && <Palette hosts={hosts} commands={commands} onClose={() => setPalette(false)} onHost={connect} />}
       {dlg === "tags" && <BulkTags hosts={targets.map((id) => byId.get(id)!).filter(Boolean)} meta={st.store.tags} known={known} onClose={() => setDlg(null)} />}
       {dlg === "rules" && <Rules hosts={hosts} store={st.store} onClose={() => setDlg(null)} />}
       {dlg === "colors" && <TagColors tags={known} meta={st.store.tags} onClose={() => setDlg(null)} />}
-      {dlg === "export" && <Export store={st.store} selection={sel} onClose={() => setDlg(null)} onToast={toast.show} />}
+      {dlg === "export" && <Export store={st.store} selection={sel} shown={rows} hosts={byId} health={hasHealth} onClose={() => setDlg(null)} onToast={toast.show} />}
       {dlg === "import" && <Import store={st.store} onClose={() => setDlg(null)} onToast={toast.show} />}
       {dlg === "team" && <Team onClose={() => setDlg(null)} onToast={toast.show} />}
       {dlg === "add" && <AddHost known={known} onClose={() => setDlg(null)} onAdded={(id) => (setQ(""), setCursor(id))} />}

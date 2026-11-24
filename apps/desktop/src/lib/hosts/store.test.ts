@@ -76,3 +76,39 @@ describe("team member without write permission", () => {
     await flush();
   });
 });
+
+describe("prototype names", () => {
+  it("an edit never writes a store entry for __proto__ or constructor", () => {
+    useHosts.setState({ store: { v: 1, hosts: {}, tags: {}, rules: [], searches: [] } });
+    actions.addTags(["__proto__", "constructor", "111111111"], ["x"]);
+    const after = useHosts.getState().store.hosts;
+    expect(Object.getPrototypeOf(after)).toBe(Object.prototype);
+    expect(Object.keys(after)).toEqual(["111111111"]);
+  });
+});
+
+describe("agent-only rows (m:<uuid>)", () => {
+  it("are never written to the store or the shared document, and are dropped on load", async () => {
+    useHosts.setState({ store: { v: 1, hosts: {}, tags: {}, rules: [], searches: [] } });
+    actions.addTags(["m:dev-0001", "111111111"], ["x"]);
+    actions.setName("m:dev-0001", "agent");
+    actions.setNotes("m:dev-0001", "n");
+    actions.setPinned(["m:dev-0001"], true);
+    expect(Object.keys(useHosts.getState().store.hosts)).toEqual(["111111111"]);
+    const { readShared } = await import("./sync");
+    const { shared } = await import("./model");
+    expect(Object.keys(readStore('{"v":1,"hosts":{"m:dev-0001":{"name":"a"},"1":{"name":"n"}}}').store.hosts)).toEqual(["1"]);
+    expect(Object.keys(readShared({ hosts: { "m:dev-0001": { name: "a" }, "1": { name: "n" } } })!.hosts)).toEqual(["1"]);
+    expect(Object.keys(shared({ v: 1, hosts: { "m:dev-0001": { name: "a" }, "1": { name: "n" } }, tags: {}, rules: [], searches: [] }).hosts)).toEqual(["1"]);
+  });
+});
+
+describe("stored host IDs from before the health view", () => {
+  it("stay editable, also outside the Tether ID characters (a direct IPv6 peer)", () => {
+    const id = "[2001:db8::1]:21118";
+    useHosts.setState({ store: { v: 1, hosts: { [id]: { name: "lab" } }, tags: {}, rules: [], searches: [] } });
+    actions.addTags([id], ["site:lab"]);
+    actions.setName(id, "lab printer");
+    expect(useHosts.getState().store.hosts[id]).toEqual({ name: "lab printer", tags: ["site:lab"] });
+  });
+});

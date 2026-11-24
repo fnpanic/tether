@@ -1,0 +1,1443 @@
+//! Device status end to end: enrollment with an admin token, device-signed reports and heartbeats,
+//! the team summary and per-host report, removal of a pin. Same harness as tests/team.rs.
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::{json, Value};
+use tether_trust::{generate_key, key_to_b64, reqauth, status, SigningKey};
+
+static SEQ: AtomicU32 = AtomicU32::new(0);
+const RELAY: &str = "https://relay.test";
+
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+}
+
+struct Srv {
+    child: Child,
+    addr: String,
+    dir: PathBuf,
+}
+
+impl Drop for Srv {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+struct Reply {
+    status: u16,
+    body: Vec<u8>,
+    head: String,
+}
+
+impl Reply {
+    fn json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap()
+    }
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+    fn header(&self, name: &str) -> Option<String> {
+        self.head.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+        })
+    }
+}
+
+fn new_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("tether-api-status-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn start_in(dir: PathBuf, admin: &SigningKey) -> Srv {
+    spawn(dir, &key_to_b64(&admin.verifying_key()))
+}
+
+/// The relay with `ADMIN_PUB_KEY=<admin_env>` (empty: no admin keys).
+fn spawn(dir: PathBuf, admin_env: &str) -> Srv {
+    spawn_env(dir, admin_env, &[])
+}
+
+fn spawn_env(dir: PathBuf, admin_env: &str, env: &[(&str, &str)]) -> Srv {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tether-api"))
+        .args(["--data", dir.to_str().unwrap(), "--listen", "127.0.0.1:0"])
+        .env("ADMIN_PUB_KEY", admin_env)
+        .env("RELAY_HOST", "relay.test")
+        .envs(env.iter().copied())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let addr = line.trim().strip_prefix("listening on ").expect("listen line").to_owned();
+    Srv { child, addr, dir }
+}
+
+fn server() -> (Srv, SigningKey) {
+    let admin = generate_key();
+    (start_in(new_dir(), &admin), admin)
+}
+
+impl Srv {
+    fn req(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Reply {
+        let mut s = TcpStream::connect(&self.addr).unwrap();
+        let mut head = format!("{method} {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
+        for (k, v) in headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str("\r\n");
+        s.write_all(head.as_bytes()).unwrap();
+        let _ = s.write_all(body);
+        let mut raw = Vec::new();
+        let _ = s.read_to_end(&mut raw);
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("response head");
+        let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+        let status = head.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+        Reply { status, body: raw[split + 4..].to_vec(), head }
+    }
+
+    /// Admin (or member) v1 signature.
+    fn admin(&self, key: &SigningKey, method: &str, path: &str, body: &[u8]) -> Reply {
+        let sig = reqauth::sign_request(key, method, path, body, now());
+        self.req(method, path, &[(reqauth::HEADER, &sig)], body)
+    }
+}
+
+/// A device request signed with `dev` for `uuid`.
+fn signed(s: &Srv, dev: &SigningKey, uuid: &str, method: &str, path: &str, body: &[u8]) -> Reply {
+    let sig = reqauth::sign_device_request(dev, uuid, RELAY, method, path, body, now());
+    s.req(method, path, &[(reqauth::HEADER, &sig)], body)
+}
+
+fn enroll(s: &Srv, dev: &SigningKey, uuid: &str, tether_id: Option<&str>, token: &str) -> Reply {
+    let mut b = json!({"uuid": uuid, "pubkey": key_to_b64(&dev.verifying_key()), "token": token});
+    if let Some(t) = tether_id {
+        b["tether_id"] = t.into();
+    }
+    s.req("POST", "/api/status/enroll", &[], b.to_string().as_bytes())
+}
+
+fn post(s: &Srv, dev: &SigningKey, uuid: &str, body: &str) -> Reply {
+    signed(s, dev, uuid, "POST", "/api/status", body.as_bytes())
+}
+
+/// A full report; `body` keys deliberately out of alphabetical order (stored byte-exact).
+fn full(uuid: &str, seq: u64, overall: &str) -> String {
+    format!(
+        r#"{{"v":1,"uuid":"{uuid}","tether_id":"123456789","host":"PC-1","seq":{seq},"time":"2026-11-23T08:15:00Z","next":300,"agent":"0.1.0","packs":{{"system":9}},"overall":"{overall}","counts":{{"ok":31,"warn":0,"crit":1,"unknown":0,"setup":0}},"faults":[{{"id":"app/db-service","state":"crit","since":"2026-11-23T07:55:00Z"}}],"products":[{{"name":"Example App","version":"1.2","role":"server"}}],"changes":[{{"id":"app/db-service","from":"ok","to":"crit","time":"2026-11-23T07:55:00Z"}}],"body":{{"zeta":1,"alpha":{{"y":2,"b":3}},  "checks":[]}}}}"#
+    )
+}
+
+fn heartbeat(uuid: &str, seq: u64) -> String {
+    format!(
+        r#"{{"v":1,"uuid":"{uuid}","host":"PC-1","seq":{seq},"time":"2026-11-23T08:20:00Z","next":300,"agent":"0.1.0","packs":{{}},"overall":"crit","counts":{{"ok":31,"warn":0,"crit":1,"unknown":0,"setup":0}},"faults":[]}}"#
+    )
+}
+
+fn update_json(p: &Path, f: impl FnOnce(&mut serde_json::Map<String, Value>)) {
+    let mut m: serde_json::Map<String, Value> = std::fs::read(p).ok().map(|b| serde_json::from_slice(&b).unwrap()).unwrap_or_default();
+    f(&mut m);
+    std::fs::write(p, serde_json::to_vec(&m).unwrap()).unwrap();
+}
+
+/// Pins `uuid` to `key` and stores a full report seen at `last_seen`, before the relay starts.
+fn prep_device(dir: &Path, uuid: &str, key: &SigningKey, last_seen: u64, seq: u64) {
+    let st = dir.join("status");
+    std::fs::create_dir_all(&st).unwrap();
+    update_json(&st.join("keys.json"), |m| {
+        m.insert(uuid.into(), json!({"key": key_to_b64(&key.verifying_key()), "tether_id": null, "label": "t", "enrolled": last_seen}));
+    });
+    let entry = json!({"host": "PC-1", "agent": "0.1.0", "overall": "crit", "counts": {"ok":31,"warn":0,"crit":1,"unknown":0,"setup":0}, "products": [], "faults": []});
+    update_json(&st.join("seen.json"), |m| {
+        m.insert(uuid.into(), json!({"last_seen": last_seen, "seq": seq, "next": 300, "entry": entry.to_string()}));
+    });
+    std::fs::write(st.join(format!("{uuid}.json")), full(uuid, seq, "crit")).unwrap();
+}
+
+/// A roster member (published with the admin key).
+fn member(s: &Srv, admin: &SigningKey) -> SigningKey {
+    let m = generate_key();
+    let roster = json!({"members": [{"name": "M", "key": key_to_b64(&m.verifying_key()), "write": false, "audit": false}]});
+    assert_eq!(s.admin(admin, "PUT", "/api/admin/team", roster.to_string().as_bytes()).status, 204);
+    m
+}
+
+fn team_get(s: &Srv, m: &SigningKey, path: &str) -> Reply {
+    s.admin(m, "GET", path, b"")
+}
+
+#[test]
+fn enroll_pins_uuid_and_tether_id() {
+    let (s, admin) = server();
+    // A token issued for 123456789 pins that ID; any other token only lets a device claim one.
+    let bound = |id: &str| status::make_token("t", now() + 3600, Some(id), &admin).unwrap().0;
+    let tok = bound("123456789");
+    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let (a, b) = (generate_key(), generate_key());
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
+    let r = enroll(&s, &a, "dev-0001", Some("123456789"), &tok);
+    assert_eq!(r.status, 200, "idempotent");
+    assert_eq!(r.json(), json!({"releases": 0, "next": 300}));
+    let r = enroll(&s, &b, "dev-0001", None, &any);
+    assert_eq!((r.status, r.text()), (409, "uuid is enrolled with another key".into()));
+    let r = enroll(&s, &b, "dev-0002", Some("123456789"), &bound("123456789"));
+    assert_eq!((r.status, r.text()), (409, "tether_id is enrolled with another key".into()));
+    assert_eq!(enroll(&s, &b, "dev-0003", None, &status::make_token("t", now() - 1, None, &admin).unwrap().0).status, 401);
+    let r = enroll(&s, &b, "dev-0003", None, &status::make_token("t", now() + 60, None, &generate_key()).unwrap().0);
+    assert_eq!((r.status, r.text()), (401, "enrollment token: signed by an untrusted key".into()));
+    // A report cannot move the pin; the summary shows the pinned ID.
+    let r = post(&s, &a, "dev-0001", &full("dev-0001", 1, "crit").replace("123456789", "999999999"));
+    assert_eq!((r.status, r.text()), (409, "tether_id is pinned to another value".into()));
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 2, "crit")).status, 200);
+    let m = member(&s, &admin);
+    let sum = team_get(&s, &m, "/api/team/status").json();
+    assert_eq!(sum["hosts"][0]["tether_id"], "123456789");
+    // Self-release, then a new key may enrol (a token issued for one ID stays used); the admin
+    // route removes any pin.
+    assert_eq!(signed(&s, &a, "dev-0001", "DELETE", "/api/status", b"").status, 204);
+    assert!(!s.dir.join("status/dev-0001.json").exists());
+    assert_eq!(enroll(&s, &b, "dev-0001", Some("123456789"), &tok).text(), "token already used");
+    assert_eq!(enroll(&s, &b, "dev-0001", Some("123456789"), &bound("123456789")).status, 200);
+    assert_eq!(s.admin(&admin, "DELETE", "/api/admin/status/dev-0001", b"").status, 204);
+    assert_eq!(s.admin(&admin, "DELETE", "/api/admin/status/dev-0001", b"").status, 404);
+    // Gone at once from the per-host route; the cached summary drops it within 30 s.
+    assert_eq!(team_get(&s, &m, "/api/team/status/dev-0001").status, 404);
+}
+
+#[test]
+fn malformed_uuids_and_odd_tether_ids_never_reach_a_path() {
+    let (s, admin) = server();
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    for bad in ["../../etc", "dev_0001", "short", "dev-0001/../x"] {
+        let r = enroll(&s, &a, bad, None, &tok);
+        assert_eq!((r.status, r.text()), (400, "bad uuid".into()), "{bad}");
+        let r = post(&s, &a, bad, &heartbeat("dev-0001", 1));
+        assert_eq!((r.status, r.text()), (401, "malformed signature header".into()), "{bad}");
+        assert_eq!(s.admin(&admin, "DELETE", &format!("/api/admin/status/{bad}"), b"").status, 404);
+    }
+    // A tether_id with path characters is only a map key and a stored value.
+    let odd = "../..\\x/y";
+    let tok = status::make_token("t", now() + 3600, Some(odd), &admin).unwrap().0;
+    assert_eq!(enroll(&s, &a, "dev-0001", Some(odd), &tok).status, 200);
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok").replace("123456789", odd.replace('\\', "\\\\").as_str())).status, 200);
+    let mut names: Vec<String> = std::fs::read_dir(s.dir.join("status")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    names.sort();
+    assert_eq!(names, ["dev-0001.history.jsonl", "dev-0001.json", "keys.jsonl"]);
+    let m = member(&s, &admin);
+    assert_eq!(team_get(&s, &m, "/api/team/status").json()["hosts"][0]["tether_id"], odd);
+    let r = enroll(&s, &generate_key(), "dev-0002", Some(odd), &status::make_token("t", now() + 3600, Some(odd), &admin).unwrap().0);
+    assert_eq!((r.status, r.text()), (409, "tether_id is enrolled with another key".into()));
+}
+
+#[test]
+fn reports_heartbeats_seq_and_history() {
+    let (s, admin) = server();
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
+    let r = post(&s, &a, "dev-0001", &heartbeat("dev-0001", 1));
+    assert_eq!((r.status, r.text()), (409, "send a full report".into()));
+    let rep = full("dev-0001", 5, "crit");
+    let r = post(&s, &a, "dev-0001", &rep);
+    assert_eq!((r.status, r.json()), (200, json!({"releases": 0, "next": 300})));
+    assert_eq!(std::fs::read(s.dir.join("status/dev-0001.json")).unwrap(), rep.as_bytes(), "stored byte-exact");
+    // Next posts within 60 s are refused by the accepted-post limit: test the rest on a prepped device.
+    let r = post(&s, &a, "dev-0001", &heartbeat("dev-0001", 6));
+    assert_eq!((r.status, r.text()), (429, "report too frequent".into()));
+    drop(s);
+
+    let dir = new_dir();
+    let b = generate_key();
+    prep_device(&dir, "dev-0002", &b, now() - 61, 5);
+    let before = std::fs::read(dir.join("status/dev-0002.json")).unwrap();
+    let s = start_in(dir, &admin);
+    let r = post(&s, &b, "dev-0002", &heartbeat("dev-0002", 5));
+    assert_eq!((r.status, r.text()), (409, "seq must increase".into()));
+    assert_eq!(post(&s, &b, "dev-0002", &heartbeat("dev-0002", 6)).status, 200);
+    assert_eq!(std::fs::read(s.dir.join("status/dev-0002.json")).unwrap(), before, "heartbeat leaves the report");
+
+    let m = member(&s, &admin);
+    let r = team_get(&s, &m, "/api/team/status/dev-0002");
+    assert_eq!(r.status, 200);
+    // The report comes back as the bytes sent (body keys not reordered).
+    let raw = r.text();
+    assert!(raw.contains(r#""report":{"v":1,"uuid":"dev-0002""#) && raw.contains(r#""body":{"zeta":1,"alpha":{"y":2,"b":3}"#), "{raw}");
+    let v = r.json();
+    assert_eq!(v["uuid"], "dev-0002");
+    assert_eq!(v["history"], json!([]));
+    assert_eq!(v["stale"], false);
+    assert_eq!(team_get(&s, &m, "/api/team/status/dev-9999").status, 404);
+    assert_eq!(team_get(&s, &m, "/api/team/status/..%2f..").status, 404);
+
+    // Refusals on another prepped device: none counts as accepted.
+    drop(s);
+    let dir = new_dir();
+    prep_device(&dir, "dev-0003", &b, now() - 61, 5);
+    let s = start_in(dir, &admin);
+    let r = post(&s, &b, "dev-0003", &full("dev-0004", 6, "ok"));
+    assert_eq!(r.status, 400, "uuid in body differs from the header: {}", r.text());
+    assert_eq!(post(&s, &b, "dev-0003", &full("dev-0003", 6, "ok").replace("\"v\":1", "\"v\":1,\"x\":1")).status, 400);
+    let r = post(&s, &b, "dev-0003", &heartbeat("dev-0003", 6).replace("\"faults\"", "\"body\":{},\"faults\""));
+    assert_eq!(r.status, 400, "part of a full report");
+    assert_eq!(post(&s, &b, "dev-0003", &"x".repeat((64 << 10) + 1)).status, 413);
+    let r = post(&s, &b, "dev-0003", &full("dev-0003", 6, "ok").replace(r#"{"zeta":1,"alpha":{"y":2,"b":3},  "checks":[]}"#, "[1]"));
+    assert_eq!(r.status, 400, "body not an object");
+    // Pinned without a Tether ID: the report carries none either.
+    let rep = full("dev-0003", 6, "warn").replace(r#""tether_id":"123456789","#, "");
+    assert_eq!(post(&s, &b, "dev-0003", &rep).status, 200);
+    let v = team_get(&s, &member(&s, &admin), "/api/team/status/dev-0003").json();
+    let h = v["history"].as_array().unwrap();
+    assert_eq!(h.len(), 1);
+    assert_eq!((h[0]["id"].clone(), h[0]["from"].clone(), h[0]["to"].clone()), (json!("app/db-service"), json!("ok"), json!("crit")));
+    assert!(h[0]["at"].as_u64().unwrap() >= now() - 10);
+    assert_eq!(v["report"], serde_json::from_str::<Value>(&rep).unwrap());
+    assert_eq!(v["last_seen"].as_u64().unwrap() / 10, now() / 10);
+}
+
+#[test]
+fn device_and_member_signatures_stay_apart() {
+    let (s, admin) = server();
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
+    let m = member(&s, &admin);
+    let body = full("dev-0001", 1, "ok");
+    let sig = reqauth::sign_request_for(&m, RELAY, "POST", "/api/status", body.as_bytes(), now());
+    let r = s.req("POST", "/api/status", &[(reqauth::HEADER, &sig)], body.as_bytes());
+    assert_eq!((r.status, r.text()), (401, "unsupported signature version".into()));
+    let r = s.req("POST", "/api/status", &[], body.as_bytes());
+    assert_eq!((r.status, r.text()), (401, "missing signature".into()));
+    // The device key opens neither member nor admin routes.
+    for p in ["/api/team/status", "/api/admin/status"] {
+        let sig = reqauth::sign_device_request(&a, "dev-0001", RELAY, "GET", p, b"", now());
+        assert_eq!(s.req("GET", p, &[(reqauth::HEADER, &sig)], b"").status, 401, "{p}");
+    }
+    // Another key with the device's uuid; unknown uuid; an accepted post sent again (the
+    // per-uuid limit answers before the signature is looked at).
+    let r = post(&s, &generate_key(), "dev-0001", &body);
+    assert_eq!((r.status, r.text()), (401, "signature does not match".into()));
+    let r = post(&s, &a, "dev-0009", &body);
+    assert_eq!((r.status, r.text()), (401, "unknown device".into()));
+    let sig = reqauth::sign_device_request(&a, "dev-0001", RELAY, "POST", "/api/status", body.as_bytes(), now());
+    assert_eq!(s.req("POST", "/api/status", &[(reqauth::HEADER, &sig)], body.as_bytes()).status, 200);
+    let r = s.req("POST", "/api/status", &[(reqauth::HEADER, &sig)], body.as_bytes());
+    assert_eq!(r.status, 429, "accepted-post limit first: {}", r.text());
+}
+
+#[test]
+fn stale_is_computed_on_read() {
+    let admin = generate_key();
+    let dir = new_dir();
+    let (a, b) = (generate_key(), generate_key());
+    prep_device(&dir, "dev-0001", &a, now() - 901, 5);
+    prep_device(&dir, "dev-0002", &b, now() - 899, 5);
+    let s = start_in(dir, &admin);
+    let m = member(&s, &admin);
+    let r = team_get(&s, &m, "/api/team/status");
+    assert_eq!(r.status, 200);
+    let etag = r.header("ETag").unwrap();
+    assert_eq!(etag.len(), 18, "{etag}");
+    let v = r.json();
+    let hosts = v["hosts"].as_array().unwrap();
+    assert_eq!(hosts.len(), 2);
+    assert_eq!((hosts[0]["uuid"].clone(), hosts[0]["stale"].clone()), (json!("dev-0001"), json!(true)));
+    assert_eq!((hosts[1]["uuid"].clone(), hosts[1]["stale"].clone()), (json!("dev-0002"), json!(false)));
+    assert_eq!((hosts[0]["overall"].clone(), hosts[0]["next"].clone(), hosts[0]["host"].clone()), (json!("crit"), json!(300), json!("PC-1")));
+    let sig = reqauth::sign_request(&m, "GET", "/api/team/status", b"", now());
+    let r = s.req("GET", "/api/team/status", &[(reqauth::HEADER, &sig), ("If-None-Match", &etag)], b"");
+    assert_eq!(r.status, 304);
+}
+
+#[test]
+fn unreadable_keys_lock_the_status_store_only() {
+    let admin = generate_key();
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    let corrupt = b"{\"dev-0001\": {\"key\": tru".to_vec();
+    std::fs::write(dir.join("status/keys.json"), &corrupt).unwrap();
+    let s = start_in(dir, &admin);
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    let locked = |r: Reply| {
+        assert_eq!((r.status, r.text()), (503, "status store unavailable".into()));
+        assert_eq!(r.header("Retry-After").as_deref(), Some("3600"));
+    };
+    locked(enroll(&s, &a, "dev-0001", None, &tok));
+    locked(post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok")));
+    locked(signed(&s, &a, "dev-0001", "DELETE", "/api/status", b""));
+    locked(s.admin(&admin, "DELETE", "/api/admin/status/dev-0001", b""));
+    let m = member(&s, &admin);
+    locked(team_get(&s, &m, "/api/team/status"));
+    locked(team_get(&s, &m, "/api/team/status/dev-0001"));
+    assert_eq!(std::fs::read(s.dir.join("status/keys.json")).unwrap(), corrupt, "untouched");
+    let names: Vec<_> = std::fs::read_dir(s.dir.join("status")).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, ["keys.json"]);
+    // The rest of the relay works.
+    assert_eq!(s.req("GET", "/api/policy", &[], b"").text(), "no policy published");
+    let hb = r#"{"uuid":"dev-0001","id":"111222333","profile":"technician","version":"0.5.21","os":"windows 10.0.26300","serial":3}"#;
+    assert_eq!(s.req("POST", "/api/heartbeat", &[], hb.as_bytes()).status, 200);
+}
+
+#[test]
+fn enrollment_limits_and_tether_id_rules() {
+    // No admin keys: no enrollment.
+    let s = spawn(new_dir(), "");
+    let r = enroll(&s, &generate_key(), "dev-0001", None, "x");
+    assert_eq!((r.status, r.text()), (503, "status enrollment needs ADMIN_PUB_KEY".into()));
+    drop(s);
+
+    let (s, admin) = server();
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    // Idempotent re-enrollment adds a claim once (not a Tether ID); another one is refused.
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
+    let m = member(&s, &admin);
+    let h = team_get(&s, &m, "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["claimed_id"]), (&Value::Null, &json!("123456789")));
+    let r = enroll(&s, &a, "dev-0001", Some("555"), &tok);
+    assert_eq!((r.status, r.text()), (409, "tether_id is pinned to another value".into()));
+
+    // 30 refused tokens from one IP, then new enrollments from it wait; the same key again is free.
+    let ip = [("X-Forwarded-For", "203.0.113.20")];
+    let from_ip = |dev: &SigningKey, uuid: &str, token: &str| {
+        let b = json!({"uuid": uuid, "pubkey": key_to_b64(&dev.verifying_key()), "token": token});
+        s.req("POST", "/api/status/enroll", &ip, b.to_string().as_bytes())
+    };
+    let expired = status::make_token("t", now() - 1, None, &admin).unwrap().0;
+    for i in 0..30 {
+        assert_eq!(from_ip(&a, &format!("dev-1{i:03}"), &expired).status, 401, "attempt {i}");
+    }
+    let r = from_ip(&a, "dev-2000", &tok);
+    assert_eq!((r.status, r.text(), r.header("Retry-After")), (429, "too many requests".into(), Some("60".into())));
+    assert_eq!(from_ip(&a, "dev-0001", &tok).status, 200, "same uuid, same key");
+    assert_eq!(enroll(&s, &a, "dev-2000", None, &tok).status, 200, "other IPs unaffected");
+}
+
+#[test]
+fn refused_and_failed_posts_are_limited() {
+    let admin = generate_key();
+    let dir = new_dir();
+    let a = generate_key();
+    prep_device(&dir, "dev-0001", &a, now() - 61, 5);
+    let s = start_in(dir, &admin);
+    // Not UTF-8 inside a body string.
+    let mut bad = full("dev-0001", 6, "ok").replace(r#""tether_id":"123456789","#, "").replace(r#""zeta":1"#, r#""zeta":"?""#).into_bytes();
+    let q = bad.iter().position(|&b| b == b'?').unwrap();
+    bad[q] = 0xFF;
+    let r = signed(&s, &a, "dev-0001", "POST", "/api/status", &bad);
+    assert_eq!((r.status, r.text()), (400, "report is not UTF-8".into()));
+    // Correctly signed but refused posts: 10 per uuid and minute.
+    for i in 0..9 {
+        assert_eq!(post(&s, &a, "dev-0001", &heartbeat("dev-0001", 5)).status, 409, "attempt {i}");
+    }
+    let r = post(&s, &a, "dev-0001", &heartbeat("dev-0001", 7));
+    assert_eq!((r.status, r.text(), r.header("Retry-After")), (429, "too many refused reports".into(), Some("60".into())));
+
+    // Failed signatures: 60 per IP and minute.
+    let ip = [("X-Forwarded-For", "203.0.113.9")];
+    let stranger = generate_key();
+    let forged = || {
+        let body = heartbeat("dev-0009", 1);
+        let sig = reqauth::sign_device_request(&stranger, "dev-0009", RELAY, "POST", "/api/status", body.as_bytes(), now());
+        s.req("POST", "/api/status", &[(reqauth::HEADER, &sig), ip[0]], body.as_bytes())
+    };
+    for _ in 0..60 {
+        assert_eq!(forged().text(), "unknown device");
+    }
+    let r = forged();
+    assert_eq!((r.status, r.text()), (429, "too many failed requests".into()));
+}
+
+#[test]
+fn device_delete_is_not_replayable() {
+    let (s, admin) = server();
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
+    let sig = reqauth::sign_device_request(&a, "dev-0001", RELAY, "DELETE", "/api/status", b"", now());
+    assert_eq!(s.req("DELETE", "/api/status", &[(reqauth::HEADER, &sig)], b"").status, 204);
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
+    let r = s.req("DELETE", "/api/status", &[(reqauth::HEADER, &sig)], b"");
+    assert_eq!((r.status, r.text()), (401, "replayed request".into()));
+}
+
+/// The pins `keys.jsonl` holds, replayed.
+fn live_pins(dir: &Path) -> Vec<String> {
+    let mut pins = std::collections::BTreeSet::new();
+    for l in std::fs::read_to_string(dir.join("status/keys.jsonl")).unwrap().lines() {
+        let v: Value = serde_json::from_str(l).unwrap();
+        let u = v["uuid"].as_str().unwrap().to_owned();
+        match v["op"].as_str() {
+            Some("pin" | "set") => pins.insert(u),
+            Some("unpin") => pins.remove(&u),
+            _ => false, // `used`
+        };
+    }
+    pins.into_iter().collect()
+}
+
+/// Background work: polls for up to 10 s.
+fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[test]
+fn keys_log_survives_a_torn_line_and_locks_on_a_bad_one() {
+    let admin = generate_key();
+    let a = generate_key();
+    let pin = |u: &str| json!({"op": "pin", "uuid": u, "key": key_to_b64(&a.verifying_key()), "tether_id": null, "label": "t", "enrolled": now()}).to_string();
+    // A torn last line (a crash during an append) is dropped and cut off; the rest loads.
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    let good = format!("{}\n{}\n{}\n", pin("dev-0001"), json!({"op": "unpin", "uuid": "dev-0001"}), pin("dev-0003"));
+    std::fs::write(dir.join("status/keys.jsonl"), format!("{good}{}", &pin("dev-0002")[..20])).unwrap();
+    let s = start_in(dir, &admin);
+    assert_eq!(std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap(), good);
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    assert_eq!(enroll(&s, &a, "dev-0003", None, &tok).status, 200, "pinned: the same key again");
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
+    assert_eq!(live_pins(&s.dir), ["dev-0001", "dev-0003"]);
+    drop(s);
+
+    // Any other unreadable line: locked, nothing written.
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    let bad = format!("{}\nnot json\n{}\n", pin("dev-0001"), pin("dev-0003"));
+    std::fs::write(dir.join("status/keys.jsonl"), &bad).unwrap();
+    let s = start_in(dir, &admin);
+    let r = enroll(&s, &a, "dev-0004", None, &tok);
+    assert_eq!((r.status, r.text()), (503, "status store unavailable".into()));
+    assert_eq!(std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap(), bad);
+    let names: Vec<_> = std::fs::read_dir(s.dir.join("status")).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, ["keys.jsonl"]);
+}
+
+#[test]
+fn summary_rebuilds_after_30_s_and_keeps_an_unchanged_etag() {
+    let admin = generate_key();
+    let dir = new_dir();
+    let (a, b) = (generate_key(), generate_key());
+    prep_device(&dir, "dev-0001", &a, now() - 61, 5);
+    prep_device(&dir, "dev-0002", &b, now() - 61, 5);
+    let s = start_in(dir, &admin);
+    let m = member(&s, &admin);
+    let get = || {
+        let r = team_get(&s, &m, "/api/team/status");
+        assert_eq!(r.status, 200);
+        (r.header("ETag").unwrap(), r.json())
+    };
+    let (e1, v1) = get();
+    let rep = full("dev-0002", 6, "warn").replace(r#""tether_id":"123456789","#, "");
+    assert_eq!(post(&s, &b, "dev-0002", &rep).status, 200);
+    assert_eq!(get().0, e1, "cached");
+    std::thread::sleep(std::time::Duration::from_secs(31));
+    let (e2, v2) = get();
+    assert_ne!(e2, e1);
+    assert_eq!(v2["hosts"][1]["overall"], "warn");
+    assert!(v2["built"].as_u64() > v1["built"].as_u64());
+    // Rebuilt again with nothing changed: the same ETag.
+    std::thread::sleep(std::time::Duration::from_secs(31));
+    let (e3, v3) = get();
+    assert!(v3["built"].as_u64() > v2["built"].as_u64(), "rebuilt");
+    assert_eq!(e3, e2);
+}
+
+#[test]
+fn removals_do_not_rebuild_the_summary_and_the_keys_log_is_compacted() {
+    let (s, admin) = server();
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok").replace(r#""tether_id":"123456789","#, "")).status, 200);
+    let m = member(&s, &admin);
+    let r = team_get(&s, &m, "/api/team/status");
+    let (e1, built) = (r.header("ETag"), r.json()["built"].clone());
+    for i in 0..40 {
+        let u = format!("dev-1{i:03}");
+        let b = json!({"uuid": u, "pubkey": key_to_b64(&generate_key().verifying_key()), "token": tok});
+        let ip = format!("203.0.113.{i}"); // 30 new pins per IP and minute
+        assert_eq!(s.req("POST", "/api/status/enroll", &[("X-Forwarded-For", &ip)], b.to_string().as_bytes()).status, 200);
+        assert_eq!(s.admin(&admin, "DELETE", &format!("/api/admin/status/{u}"), b"").status, 204);
+    }
+    let r = team_get(&s, &m, "/api/team/status");
+    assert_eq!((r.header("ETag"), r.json()["built"].clone()), (e1, built), "no rebuild");
+    // 81 lines for one live pin: compacted in the background.
+    let lines = || std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap().lines().count();
+    wait_for("keys.jsonl compaction", || lines() < 40);
+    assert_eq!(live_pins(&s.dir), ["dev-0001"]);
+    assert_eq!(enroll(&s, &a, "dev-0002", None, &tok).status, 200);
+    assert_eq!(live_pins(&s.dir), ["dev-0001", "dev-0002"]);
+}
+
+#[test]
+fn a_long_history_is_trimmed_after_the_append() {
+    let admin = generate_key();
+    let dir = new_dir();
+    let a = generate_key();
+    prep_device(&dir, "dev-0001", &a, now() - 61, 5);
+    let t = now();
+    let line = |i: u64, at: u64| format!(r#"{{"id":"check/{i:040}","from":"ok","to":"warn","time":"2026-11-23T08:00:00Z","at":{at}}}"#) + "\n";
+    // 500 lines older than 90 days, 2500 recent: about 380 KB.
+    let old: String = (0..3000).map(|i| line(i, if i < 500 { t - 91 * 86_400 } else { t - 3000 + i })).collect();
+    std::fs::write(dir.join("status/dev-0001.history.jsonl"), &old).unwrap();
+    let s = start_in(dir, &admin);
+    let rep = full("dev-0001", 6, "crit").replace(r#""tether_id":"123456789","#, "");
+    assert_eq!(post(&s, &a, "dev-0001", &rep).status, 200);
+    let path = s.dir.join("status/dev-0001.history.jsonl");
+    wait_for("history trim", || std::fs::read_to_string(&path).unwrap().lines().count() == 2000);
+    let kept = std::fs::read_to_string(&path).unwrap();
+    // The newest 2000: 1999 of the recent lines, then the change just posted.
+    assert_eq!(kept.lines().next().unwrap().to_owned() + "\n", line(1001, t - 3000 + 1001));
+    assert!(kept.lines().last().unwrap().contains(r#""id":"app/db-service""#), "{}", kept.lines().last().unwrap());
+}
+
+#[test]
+fn summary_entries_keep_8_products_and_10_faults() {
+    let admin = generate_key();
+    let dir = new_dir();
+    let a = generate_key();
+    prep_device(&dir, "dev-0001", &a, now() - 61, 5);
+    let s = start_in(dir, &admin);
+    let products: Vec<Value> = (0..9).map(|i| json!({"name": format!("App {i}"), "version": "1.0"})).collect();
+    let faults: Vec<Value> = (0..12).map(|i| json!({"id": format!("app/check-{i}"), "state": "warn"})).collect();
+    let mut rep: Value = serde_json::from_str(&full("dev-0001", 6, "warn").replace(r#""tether_id":"123456789","#, "")).unwrap();
+    (rep["products"], rep["faults"]) = (json!(products), json!(faults));
+    assert_eq!(post(&s, &a, "dev-0001", &rep.to_string()).status, 200);
+    let m = member(&s, &admin);
+    let h = team_get(&s, &m, "/api/team/status").json()["hosts"][0].clone();
+    assert_eq!((h["products"].as_array().unwrap().len(), h["more_products"].clone()), (8, json!(1)));
+    assert_eq!((h["faults"].as_array().unwrap().len(), h["more_faults"].clone()), (10, json!(2)));
+    assert_eq!(h["faults"][0]["id"], "app/check-0", "the first ones, as sent");
+    let r = team_get(&s, &m, "/api/team/status/dev-0001").json();
+    assert_eq!(r["report"]["products"].as_array().unwrap().len(), 9, "the report keeps them all");
+}
+
+/// Name, bytes and mtime of every file in `status/`.
+fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>, SystemTime)> {
+    let mut v: Vec<_> = std::fs::read_dir(dir.join("status"))
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            (e.file_name().into_string().unwrap(), std::fs::read(e.path()).unwrap(), e.metadata().unwrap().modified().unwrap())
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn heartbeat_writes_no_file() {
+    let admin = generate_key();
+    let dir = new_dir();
+    let a = generate_key();
+    prep_device(&dir, "dev-0001", &a, now() - 61, 5);
+    let mut s = start_in(dir, &admin);
+    let before = snapshot(&s.dir);
+    assert_eq!(post(&s, &a, "dev-0001", &heartbeat("dev-0001", 6)).status, 200);
+    assert_eq!(snapshot(&s.dir), before, "a heartbeat touches no file");
+    let st = Command::new("kill").args(["-TERM", &s.child.id().to_string()]).status().unwrap();
+    assert!(st.success());
+    let _ = s.child.wait();
+    let seen: Value = serde_json::from_slice(&std::fs::read(s.dir.join("status/seen.json")).unwrap()).unwrap();
+    assert_eq!(seen["dev-0001"]["seq"], 6, "flushed at shutdown");
+}
+
+#[test]
+fn forged_posts_do_not_rate_limit_a_device() {
+    let admin = generate_key();
+    let dir = new_dir();
+    let a = generate_key();
+    prep_device(&dir, "dev-0001", &a, now() - 120, 5);
+    let s = start_in(dir, &admin);
+    let from = |key: &SigningKey, uuid: &str, ip: &str, body: &[u8]| {
+        let sig = reqauth::sign_device_request(key, uuid, RELAY, "POST", "/api/status", body, now());
+        s.req("POST", "/api/status", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", ip)], body)
+    };
+    let stranger = generate_key();
+    for i in 0..70 {
+        let r = from(&stranger, "dev-0001", "203.0.113.9", heartbeat("dev-0001", 7).as_bytes());
+        let want = if i < 60 { (401, "signature does not match") } else { (429, "too many failed requests") };
+        assert_eq!((r.status, r.text().as_str()), want, "forged post {i}");
+    }
+    let r = from(&a, "dev-0001", "198.51.100.4", heartbeat("dev-0001", 6).as_bytes());
+    assert_eq!((r.status, r.text()), (200, r#"{"releases":0,"next":300}"#.into()), "the device's own limit is untouched");
+    let r = from(&a, "dev-0001", "198.51.100.4", heartbeat("dev-0001", 7).as_bytes());
+    assert_eq!((r.status, r.text(), r.header("Retry-After")), (429, "report too frequent".into(), Some("60".into())));
+    // Size before anything else, then the key lookup before any parsing.
+    let r = from(&stranger, "dev-0009", "198.51.100.5", &vec![b'x'; 65537]);
+    assert_eq!((r.status, r.text()), (413, "body too large".into()));
+    let r = from(&stranger, "dev-0009", "198.51.100.5", b"not json");
+    assert_eq!((r.status, r.text()), (401, "unknown device".into()));
+}
+
+#[test]
+fn status_off_and_device_cap() {
+    let admin = generate_key();
+    let admin_env = key_to_b64(&admin.verifying_key());
+    let s = spawn_env(new_dir(), &admin_env, &[("STATUS", "off")]);
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    let m = member(&s, &admin);
+    for r in [
+        enroll(&s, &a, "dev-0001", None, &tok),
+        post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok")),
+        signed(&s, &a, "dev-0001", "DELETE", "/api/status", b""),
+        team_get(&s, &m, "/api/team/status"),
+    ] {
+        assert_eq!((r.status, r.text(), r.header("Retry-After")), (503, "status reporting is off".into(), Some("3600".into())));
+    }
+    assert!(!s.dir.join("status/keys.json").exists());
+    drop(s);
+
+    let s = spawn_env(new_dir(), &admin_env, &[("STATUS_MAX_DEVICES", "2")]);
+    assert_eq!(enroll(&s, &generate_key(), "dev-0001", None, &tok).status, 200);
+    assert_eq!(enroll(&s, &generate_key(), "dev-0002", None, &tok).status, 200);
+    let r = enroll(&s, &generate_key(), "dev-0003", None, &tok);
+    assert_eq!((r.status, r.text()), (507, "too many devices (STATUS_MAX_DEVICES)".into()));
+    drop(s);
+
+    // `next` from the enrolled count and STATUS_TARGET_RPS (read from an idempotent enrollment).
+    for (pins, next) in [(3, 300), (4000, 3600)] {
+        let dir = new_dir();
+        prep_device(&dir, "dev-0001", &a, now() - 61, 5);
+        update_json(&dir.join("status/keys.json"), |m| {
+            for i in 1..pins {
+                m.insert(format!("dev-{i:06}"), json!({"key": key_to_b64(&a.verifying_key()), "tether_id": null, "label": "t", "enrolled": now()}));
+            }
+        });
+        let s = spawn_env(dir, &admin_env, &[("STATUS_TARGET_RPS", "1")]);
+        let r = enroll(&s, &a, "dev-0001", None, &tok);
+        assert_eq!((r.status, r.json()["next"].clone()), (200, json!(next)), "{pins} pins");
+    }
+}
+
+fn metric(s: &Srv, series: &str) -> Option<f64> {
+    let page = s.req("GET", "/metrics", &[], b"").text();
+    page.lines().find_map(|l| l.strip_prefix(series)?.strip_prefix(' ')?.parse().ok())
+}
+
+#[test]
+fn summary_is_cached_with_etag_and_metrics() {
+    let admin = generate_key();
+    let dir = new_dir();
+    let (a, b) = (generate_key(), generate_key());
+    prep_device(&dir, "dev-0001", &a, now() - 61, 5);
+    prep_device(&dir, "dev-0002", &b, now() - 61, 5);
+    update_json(&dir.join("status/seen.json"), |m| {
+        let e = m["dev-0002"]["entry"].as_str().unwrap().replace(r#""overall":"crit""#, r#""overall":"ok""#);
+        m.get_mut("dev-0002").unwrap()["entry"] = e.into();
+    });
+    let s = start_in(dir, &admin);
+    let m = member(&s, &admin);
+    let r = team_get(&s, &m, "/api/team/status");
+    assert_eq!(r.status, 200);
+    let e1 = r.header("ETag").unwrap();
+    assert_eq!(r.json()["hosts"][1]["overall"], "ok");
+    let sig = reqauth::sign_request(&m, "GET", "/api/team/status", b"", now());
+    assert_eq!(s.req("GET", "/api/team/status", &[(reqauth::HEADER, &sig), ("If-None-Match", &e1)], b"").status, 304);
+    assert_eq!(metric(&s, r#"tether_api_status_hosts{state="crit"}"#), Some(1.));
+    assert_eq!(metric(&s, r#"tether_api_status_hosts{state="ok"}"#), Some(1.));
+    assert_eq!(metric(&s, r#"tether_api_status_hosts{state="stale"}"#), Some(0.));
+
+    let rep = full("dev-0002", 6, "warn").replace(r#""tether_id":"123456789","#, "");
+    assert_eq!(post(&s, &b, "dev-0002", &rep).status, 200);
+    let r = team_get(&s, &m, "/api/team/status");
+    assert_eq!((r.status, r.header("ETag")), (200, Some(e1)), "cached for 30 s");
+    assert_eq!(r.json()["hosts"][1]["overall"], "ok");
+    // The gauges are counted at scrape time.
+    assert_eq!(metric(&s, r#"tether_api_status_hosts{state="warn"}"#), Some(1.));
+    assert_eq!(metric(&s, r#"tether_api_status_hosts{state="ok"}"#), Some(0.));
+    assert_eq!(metric(&s, r#"tether_api_requests_total{endpoint="status",code="200"}"#), Some(1.));
+}
+
+#[test]
+fn pins_expire_after_180_days() {
+    let admin = generate_key();
+    let dir = new_dir();
+    let (a, b) = (generate_key(), generate_key());
+    prep_device(&dir, "dev-0001", &a, now() - 181 * 86_400, 5);
+    prep_device(&dir, "dev-0002", &b, now() - 179 * 86_400, 5);
+    std::fs::write(dir.join("status/dev-0001.history.jsonl"), "{}\n").unwrap();
+    let s = start_in(dir, &admin);
+    let mut names: Vec<String> = std::fs::read_dir(s.dir.join("status")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    names.sort();
+    // keys.json (the earlier format) migrated to keys.jsonl, then the expired pin unpinned there.
+    assert_eq!(names, ["dev-0002.json", "keys.json.migrated", "keys.jsonl", "seen.json"]);
+    assert_eq!(live_pins(&s.dir), ["dev-0002"]);
+    let r = post(&s, &a, "dev-0001", &heartbeat("dev-0001", 6));
+    assert_eq!((r.status, r.text()), (401, "unknown device".into()));
+}
+
+/// A signed `monitor.json` (or, with other `key`/`file`, any index) naming one release.
+fn monitor_doc(admin: &SigningKey, channel: &str, serial: u64, key: &str, file: &str, version: &str) -> Vec<u8> {
+    let entry = json!({
+        "version": version, "file": file, "size": 3, "sha256": "a".repeat(64), "signature": "U0lH",
+        "urls": [format!("https://{{relay}}/download/{channel}/{key}/{file}")],
+        "rollout": {"start": 0, "steps": [[0, 100]]}
+    });
+    let payload = json!({"type": "tether-releases/1", "channel": channel, "serial": serial, "issued": 1, "expires": 2_000_000_000u64, "releases": {key: entry}});
+    serde_json::to_vec(&tether_trust::envelope::sign(&serde_json::to_vec(&payload).unwrap(), admin)).unwrap()
+}
+
+/// The `releases` hint a status post answers (a new device each time: one post per minute).
+fn status_releases(s: &Srv, admin: &SigningKey, uuid: &str) -> u64 {
+    let dev = generate_key();
+    let tok = status::make_token("t", now() + 3600, None, admin).unwrap().0;
+    assert_eq!(enroll(s, &dev, uuid, None, &tok).status, 200);
+    let r = post(s, &dev, uuid, &full(uuid, 1, "ok").replace(r#""tether_id":"123456789","#, ""));
+    assert_eq!(r.status, 200, "{}", r.text());
+    r.json()["releases"].as_u64().unwrap()
+}
+
+/// The second release index: own app names, served like releases.json, does not move Tether's
+/// release generation, its serials are the status answers' `releases` hint, guarded and pruned.
+#[test]
+fn monitor_index_upload_serve_and_prune() {
+    let (s, k) = server();
+    let mon = ("monitor/windows-x86_64", "tether-monitor-0.1.0.exe", "0.1.0");
+    let tech = ("technician/windows-x86_64", "Tether_0.5.24_x64-setup.exe", "0.5.24");
+    let put = |p: &str, b: &[u8]| s.admin(&k, "PUT", &format!("/api/admin/release/{p}"), b);
+
+    let r = put("stable/releases.json", &monitor_doc(&k, "stable", 1, mon.0, mon.1, mon.2));
+    assert_eq!(r.status, 400);
+    assert!(r.text().contains("bad release key"), "{}", r.text());
+    assert_eq!(put("stable/monitor.json", &monitor_doc(&k, "stable", 1, tech.0, tech.1, tech.2)).status, 400);
+    let doc3 = monitor_doc(&k, "stable", 3, mon.0, mon.1, mon.2);
+    assert_eq!(put("stable/monitor.json", &doc3).status, 204);
+    assert_eq!(put("stable/monitor.json", &doc3).status, 204, "the same document again");
+    assert_eq!(put("stable/monitor.json", &monitor_doc(&k, "stable", 2, mon.0, mon.1, mon.2)).status, 409);
+
+    let r = s.req("GET", "/download/stable/monitor.json", &[], b"");
+    assert_eq!((r.status, r.header("ETag"), r.header("Cache-Control")), (200, Some("\"3\"".into()), Some("no-cache".into())));
+    assert_eq!(r.body, doc3);
+    assert_eq!(s.req("GET", "/download/stable/monitor.json", &[("If-None-Match", "\"3\"")], b"").status, 304);
+    assert_eq!(s.req("GET", "/download/test/monitor.json", &[], b"").status, 404);
+
+    let hb = r#"{"uuid":"hb-000001","id":"123456789","profile":"technician","version":"0.3.0","os":"windows 10.0.26300","serial":12}"#;
+    let r = s.req("POST", "/api/heartbeat", &[], hb.as_bytes());
+    assert_eq!((r.status, r.json()), (200, json!({"releases": 0})), "Tether's G did not move");
+    assert_eq!(status_releases(&s, &k, "dev-0001"), 3);
+    assert_eq!(put("test/monitor.json", &monitor_doc(&k, "test", 5, mon.0, mon.1, mon.2)).status, 204);
+    assert_eq!(status_releases(&s, &k, "dev-0002"), 8);
+
+    // Prune: the monitor folder is protected by monitor.json.
+    let dir = s.dir.join("download/stable/monitor/windows-x86_64");
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    for v in ["0.0.7", "0.0.8", "0.0.9", "0.1.0"] {
+        for f in [format!("tether-monitor-{v}.exe"), format!("tether-monitor-{v}.exe.sig")] {
+            std::fs::write(dir.join(&f), b"x").unwrap();
+            std::fs::File::options().write(true).open(dir.join(&f)).unwrap().set_modified(old).unwrap();
+        }
+    }
+    let plan = s.admin(&k, "POST", "/api/admin/releases/prune", br#"{"dry_run":true,"keep":2}"#).json();
+    let g = plan["groups"].as_array().unwrap().iter().find(|g| g["dir"] == "monitor/windows-x86_64").unwrap_or_else(|| panic!("{plan}"));
+    assert_eq!(g["published"], "0.1.0");
+    let vs = |l: &Value| l.as_array().unwrap().iter().map(|v| (v["version"].as_str().unwrap().to_owned(), v["why"].clone())).collect::<Vec<_>>();
+    assert_eq!(vs(&g["keep"]), [("0.1.0".into(), json!(["index"])), ("0.0.9".into(), json!(["previous"])), ("0.0.8".into(), json!(["previous"]))]);
+    assert_eq!(vs(&g["drop"]).into_iter().map(|v| v.0).collect::<Vec<_>>(), ["0.0.7"]);
+    let r = s.admin(&k, "DELETE", "/api/admin/release/stable/monitor/windows-x86_64/tether-monitor-0.1.0.exe", b"");
+    assert_eq!(r.status, 409);
+    assert!(r.text().contains("published release: "), "{}", r.text());
+
+    let p = "/api/admin/release/stable/monitor.json";
+    assert_eq!(s.admin(&k, "DELETE", p, b"").status, 409);
+    assert_eq!(s.admin(&k, "DELETE", &format!("{p}?force=1"), b"").status, 204);
+    assert_eq!(s.req("GET", "/download/stable/monitor.json", &[], b"").status, 404);
+    assert_eq!(status_releases(&s, &k, "dev-0003"), 5);
+}
+
+// ---- Revocable tokens, verified Tether IDs, removal by the team.
+
+/// Two roster members: `W` with `write`, `R` without.
+fn writer_and_reader(s: &Srv, admin: &SigningKey) -> (SigningKey, SigningKey) {
+    let (w, r) = (generate_key(), generate_key());
+    let roster = json!({"members": [
+        {"name": "W", "key": key_to_b64(&w.verifying_key()), "write": true, "audit": false},
+        {"name": "R", "key": key_to_b64(&r.verifying_key()), "write": false, "audit": false}]});
+    assert_eq!(s.admin(admin, "PUT", "/api/admin/team", roster.to_string().as_bytes()).status, 204);
+    (w, r)
+}
+
+fn revoke(s: &Srv, admin: &SigningKey, id: &str, exp: u64) -> Reply {
+    s.admin(admin, "POST", "/api/admin/status/revoke", json!({"id": id, "exp": exp}).to_string().as_bytes())
+}
+
+/// Stops `s` (SIGTERM, as systemd does) and starts the relay again on its folder.
+fn restart(mut s: Srv, admin: &SigningKey) -> Srv {
+    assert!(Command::new("kill").args(["-TERM", &s.child.id().to_string()]).status().unwrap().success());
+    let _ = s.child.wait();
+    let dir = s.dir.clone();
+    std::mem::forget(s); // its Drop would remove the folder
+    start_in(dir, admin)
+}
+
+#[test]
+fn revoked_tokens_are_refused_across_a_restart() {
+    let (s, admin) = server();
+    let (tok, id) = status::make_token("t", now() + 3600, None, &admin).unwrap();
+    let (other, _) = status::make_token("t", now() + 3600, None, &admin).unwrap();
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
+    assert_eq!(revoke(&s, &admin, &id, now() + 3600).status, 204);
+    assert_eq!(revoke(&s, &admin, &id, now() + 3600).status, 204, "idempotent");
+    let r = enroll(&s, &generate_key(), "dev-0002", None, &tok);
+    assert_eq!((r.status, r.text()), (401, "token revoked".into()));
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 401, "also for a device it enrolled");
+    assert_eq!(enroll(&s, &generate_key(), "dev-0003", None, &other).status, 200, "an unrevoked token is accepted");
+    assert_eq!(s.admin(&admin, "GET", "/api/admin/status/devices", b"").json()["devices"][0]["uuid"], "dev-0001", "revoking does not unpin");
+    let listed = s.admin(&admin, "GET", "/api/admin/status/revoked", b"").json();
+    assert!(listed[&id].as_u64().unwrap() > now(), "{listed}");
+    assert_eq!(revoke(&s, &admin, "short", now() + 60).status, 400);
+    let r = revoke(&s, &admin, "abcdefghABCDEFGH", now() - 1);
+    assert_eq!((r.status, r.text()), (400, "exp has passed".into()), "never a silent no-op");
+    // On disk before the answer; still refused after a restart.
+    let file: Value = serde_json::from_slice(&std::fs::read(s.dir.join("status/revoked.json")).unwrap()).unwrap();
+    assert!(file[&id].is_u64() && file.get("abcdefghABCDEFGH").is_none(), "{file}");
+    let s = restart(s, &admin);
+    let r = enroll(&s, &generate_key(), "dev-0004", None, &tok);
+    assert_eq!((r.status, r.text()), (401, "token revoked".into()));
+}
+
+#[test]
+fn expired_revocations_are_dropped_and_a_bad_file_locks() {
+    let admin = generate_key();
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    let live = "liveliveLIVELIVE";
+    let exp = now() + 600;
+    std::fs::write(dir.join("status/revoked.json"), json!({"oldoldOLDOLDoldo": now() - 10, live: exp}).to_string()).unwrap();
+    let s = start_in(dir, &admin);
+    assert_eq!(s.admin(&admin, "GET", "/api/admin/status/revoked", b"").json(), json!({live: exp}));
+    // The next write (a revocation) leaves the expired one out of the file too.
+    assert_eq!(revoke(&s, &admin, "nextnextNEXTNEXT", now() + 60).status, 204);
+    let file: Value = serde_json::from_slice(&std::fs::read(s.dir.join("status/revoked.json")).unwrap()).unwrap();
+    assert_eq!(file.as_object().unwrap().keys().collect::<Vec<_>>(), [live, "nextnextNEXTNEXT"], "{file}");
+    drop(s);
+
+    // Unreadable: locked (fail closed), nothing written.
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    std::fs::write(dir.join("status/revoked.json"), "{not json").unwrap();
+    let s = start_in(dir, &admin);
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let r = enroll(&s, &generate_key(), "dev-0001", None, &tok);
+    assert_eq!((r.status, r.text()), (503, "status store unavailable".into()));
+    assert_eq!(revoke(&s, &admin, "nextnextNEXTNEXT", now() + 60).status, 503);
+    assert_eq!(std::fs::read_to_string(s.dir.join("status/revoked.json")).unwrap(), "{not json");
+}
+
+#[test]
+fn a_bound_token_pins_its_id_for_one_device() {
+    let (s, admin) = server();
+    let (tok, id) = status::make_token("front desk", now() + 3600, Some("123456789"), &admin).unwrap();
+    let (a, b) = (generate_key(), generate_key());
+    let (w, _) = writer_and_reader(&s, &admin);
+    let r = enroll(&s, &a, "dev-0001", Some("555"), &tok);
+    assert_eq!((r.status, r.text()), (409, "token is issued for another id".into()));
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
+    let h = team_get(&s, &w, "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["claimed_id"], &h["linked_by"]), (&json!("123456789"), &Value::Null, &Value::Null));
+    assert!(h["linked_at"].as_u64().unwrap() >= now() - 5 && h["enrolled"].is_u64(), "{h}");
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200, "the same device again");
+    for t in [None, Some("123456789")] {
+        let r = enroll(&s, &b, "dev-0002", t, &tok);
+        assert_eq!((r.status, r.text()), (409, "token already used".into()));
+    }
+    let list = s.admin(&admin, "GET", &format!("/api/admin/status/devices?token={id}"), b"").json();
+    assert_eq!((list["devices"].as_array().unwrap().len(), &list["devices"][0]["tether_id"]), (1, &json!("123456789")));
+    // Used is kept across a restart (a `used` line in keys.jsonl).
+    let s = restart(s, &admin);
+    assert_eq!(enroll(&s, &b, "dev-0002", None, &tok).text(), "token already used");
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
+}
+
+#[test]
+fn an_unbound_token_only_claims_an_id() {
+    let (s, admin) = server();
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let (a, b) = (generate_key(), generate_key());
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
+    assert_eq!(enroll(&s, &b, "dev-0002", Some("123456789"), &tok).status, 200, "a claim pins nothing");
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "crit")).status, 200, "a report may name its claim");
+    let m = member(&s, &admin);
+    let host = team_get(&s, &m, "/api/team/status").json()["hosts"][0].clone();
+    assert_eq!((&host["tether_id"], &host["claimed_id"]), (&Value::Null, &json!("123456789")), "{host}");
+    let r = post(&s, &b, "dev-0002", &full("dev-0002", 1, "crit").replace("123456789", "555"));
+    assert_eq!((r.status, r.text()), (409, "tether_id is pinned to another value".into()));
+}
+
+#[test]
+fn members_with_write_link_and_unlink() {
+    let (s, admin) = server();
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let (a, b) = (generate_key(), generate_key());
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
+    assert_eq!(enroll(&s, &b, "dev-0002", Some("123456789"), &tok).status, 200);
+    let (w, r) = writer_and_reader(&s, &admin);
+    let link = |m: &SigningKey, uuid: &str, id: &str| s.admin(m, "POST", &format!("/api/team/status/{uuid}/link"), json!({"tether_id": id}).to_string().as_bytes());
+    assert_eq!(link(&r, "dev-0001", "123456789").status, 403);
+    let x = link(&w, "dev-0001", "999999999");
+    assert_eq!((x.status, x.text()), (409, "tether_id is not the one this device claims".into()));
+    assert_eq!(link(&w, "dev-9999", "123456789").status, 404);
+    assert_eq!(link(&w, "dev-0001", "m:dev-0001").status, 400);
+    assert_eq!(link(&w, "dev-0001", "123456789").status, 204);
+    assert_eq!(link(&w, "dev-0001", "123456789").status, 204, "the same link again");
+    let h = team_get(&s, &r, "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["claimed_id"], &h["linked_by"]), (&json!("123456789"), &Value::Null, &json!("W")));
+    assert!(h["linked_at"].as_u64().unwrap() >= now() - 5);
+    // The summary shows it at once (rebuilt for the link).
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "crit")).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status").json()["hosts"][0]["tether_id"], "123456789");
+    let x = link(&w, "dev-0002", "123456789");
+    assert_eq!((x.status, x.text()), (409, "tether_id is pinned to another device".into()));
+    // Unlink removes the link and the claim; then the other device may be linked.
+    assert_eq!(s.admin(&r, "DELETE", "/api/team/status/dev-0001/link", b"").status, 403);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0001/link", b"").status, 204);
+    let h = team_get(&s, &r, "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["claimed_id"], &h["linked_by"], &h["no_claim"]), (&Value::Null, &Value::Null, &Value::Null, &json!(true)));
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0001/link", b"").status, 204, "again: no change");
+    assert_eq!(link(&w, "dev-0001", "123456789").status, 409, "no claim left to confirm");
+    assert_eq!(link(&w, "dev-0002", "123456789").status, 204);
+    // The link of dev-0002 survives a restart.
+    let s = restart(s, &admin);
+    let h = team_get(&s, &r, "/api/team/status/dev-0002").json();
+    assert_eq!((&h["tether_id"], &h["linked_by"]), (&json!("123456789"), &json!("W")));
+}
+
+#[test]
+fn a_device_cannot_change_its_link() {
+    let (s, admin) = server();
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
+    let (w, _) = writer_and_reader(&s, &admin);
+    assert_eq!(s.admin(&w, "POST", "/api/team/status/dev-0001/link", br#"{"tether_id":"123456789"}"#).status, 204);
+    let r = post(&s, &a, "dev-0001", &full("dev-0001", 1, "crit").replace("123456789", "555"));
+    assert_eq!((r.status, r.text()), (409, "tether_id is pinned to another value".into()));
+    let r = enroll(&s, &a, "dev-0001", Some("555"), &tok);
+    assert_eq!((r.status, r.text()), (409, "tether_id is pinned to another value".into()));
+    // Its own key does not sign team routes.
+    for (m, p) in [("POST", "/api/team/status/dev-0001/link"), ("DELETE", "/api/team/status/dev-0001/link"), ("DELETE", "/api/team/status/dev-0001")] {
+        let body: &[u8] = if m == "POST" { br#"{"tether_id":"555"}"# } else { b"" };
+        assert_eq!(signed(&s, &a, "dev-0001", m, p, body).status, 401, "{m} {p}");
+    }
+    assert_eq!(team_get(&s, &w, "/api/team/status/dev-0001").json()["tether_id"], "123456789");
+}
+
+#[test]
+fn team_delete_needs_write() {
+    let (s, admin) = server();
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "crit")).status, 200);
+    let (w, r) = writer_and_reader(&s, &admin);
+    assert_eq!(s.admin(&r, "DELETE", "/api/team/status/dev-0001", b"").status, 403);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").status, 200);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0001", b"").status, 204);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").status, 404);
+    assert!(!s.dir.join("status/dev-0001.json").exists());
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0001", b"").status, 404);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/x/../../keys", b"").status, 404);
+    let r = post(&s, &a, "dev-0001", &full("dev-0001", 2, "crit"));
+    assert_eq!((r.status, r.text()), (401, "unknown device".into()));
+}
+
+#[test]
+fn the_admin_device_list_pages_and_filters_by_token() {
+    let admin = generate_key();
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    let k = key_to_b64(&generate_key().verifying_key());
+    let (ta, tb) = ("tokenAtokenAtokenA", "tokenBtokenBtokenB");
+    let lines: String = (0..1005)
+        .map(|i| json!({"op": "set", "uuid": format!("dev-{i:04}"), "key": k, "tether_id": null, "label": "t", "enrolled": now(), "token": if i % 2 == 0 { ta } else { tb }}).to_string() + "\n")
+        .collect();
+    std::fs::write(dir.join("status/keys.jsonl"), lines).unwrap();
+    let s = start_in(dir, &admin);
+    let get = |q: &str| {
+        let r = s.admin(&admin, "GET", &format!("/api/admin/status/devices{q}"), b"");
+        assert_eq!(r.status, 200, "{q}: {}", r.text());
+        r.json()
+    };
+    let uuids = |v: &Value| v["devices"].as_array().unwrap().iter().map(|d| d["uuid"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let p1 = get("");
+    assert_eq!((uuids(&p1).len(), uuids(&p1)[0].as_str(), &p1["next"]), (1000, "dev-0000", &json!("dev-0999")));
+    assert_eq!((&p1["devices"][0]["token"], &p1["devices"][0]["host"], &p1["devices"][0]["last_seen"]), (&json!(ta), &Value::Null, &Value::Null));
+    let p2 = get("?after=dev-0999");
+    assert_eq!((uuids(&p2), &p2["next"]), (["dev-1000", "dev-1001", "dev-1002", "dev-1003", "dev-1004"].map(String::from).to_vec(), &Value::Null));
+    // A filter looks at no more than one page of pins per request: short pages, `next` moves on.
+    let a = get(&format!("?token={ta}"));
+    assert_eq!((uuids(&a).len(), &a["next"]), (500, &json!("dev-0999")), "token A on the first 1000 pins");
+    let a2 = get(&format!("?token={ta}&after=dev-0999"));
+    assert_eq!((uuids(&a2).len(), &a2["next"]), (3, &Value::Null), "503 of the 1005 have token A");
+    assert!(uuids(&a).iter().chain(&uuids(&a2)).all(|u| u[4..].parse::<u32>().unwrap() % 2 == 0));
+    assert_eq!(uuids(&get(&format!("?token={tb}&after=dev-0500")))[0], "dev-0501");
+    // A filter that matches nothing: empty pages, still paged.
+    let none = get("?token=nobodynobodynobody");
+    assert_eq!((uuids(&none).len(), &none["next"]), (0, &json!("dev-0999")));
+    let none = get("?token=nobodynobodynobody&after=dev-0999");
+    assert_eq!((uuids(&none).len(), &none["next"]), (0, &Value::Null));
+    for bad in ["?token=x", "?after=../x", "?limit=5"] {
+        assert_eq!(s.admin(&admin, "GET", &format!("/api/admin/status/devices{bad}"), b"").status, 400, "{bad}");
+    }
+}
+
+#[test]
+fn new_routes_refuse_other_credentials() {
+    let (s, admin) = server();
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let dev = generate_key();
+    assert_eq!(enroll(&s, &dev, "dev-0001", Some("123456789"), &tok).status, 200);
+    let (w, _) = writer_and_reader(&s, &admin);
+    let rv = json!({"id": "abcdefghABCDEFGH", "exp": now() + 60}).to_string();
+    let admin_routes: [(&str, &str, &[u8]); 3] = [("POST", "/api/admin/status/revoke", rv.as_bytes()), ("GET", "/api/admin/status/revoked", b""), ("GET", "/api/admin/status/devices", b"")];
+    for (m, p, body) in admin_routes {
+        assert_eq!(s.admin(&w, m, p, body).status, 401, "member key on {m} {p}");
+        assert_eq!(signed(&s, &dev, "dev-0001", m, p, body).status, 401, "device key on {m} {p}");
+    }
+    let link: &[u8] = br#"{"tether_id":"123456789"}"#;
+    let team_routes: [(&str, &str, &[u8]); 3] = [("POST", "/api/team/status/dev-0001/link", link), ("DELETE", "/api/team/status/dev-0001/link", b""), ("DELETE", "/api/team/status/dev-0001", b"")];
+    for (m, p, body) in team_routes {
+        assert_eq!(s.admin(&admin, m, p, body).status, 401, "admin key on {m} {p}");
+        assert_eq!(signed(&s, &dev, "dev-0001", m, p, body).status, 401, "device key on {m} {p}");
+    }
+    // Nothing changed: the claim is still only a claim.
+    let h = team_get(&s, &w, "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["claimed_id"]), (&Value::Null, &json!("123456789")));
+    assert_eq!(s.admin(&admin, "GET", "/api/admin/status/revoked", b"").json(), json!({}));
+}
+
+#[test]
+fn unlink_dismisses_the_claim_until_a_member_allows_one() {
+    let (s, admin) = server();
+    let (w, r) = writer_and_reader(&s, &admin);
+    // A token issued for the ID: Unlink holds, the same token enrolling again changes nothing.
+    let bound = status::make_token("t", now() + 3600, Some("123456789"), &admin).unwrap().0;
+    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &bound).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").json()["tether_id"], "123456789");
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0001/link", b"").status, 204);
+    for tok in [&bound, &any] {
+        assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), tok).status, 200);
+        let h = team_get(&s, &r, "/api/team/status/dev-0001").json();
+        assert_eq!((&h["tether_id"], &h["claimed_id"], &h["no_claim"]), (&Value::Null, &Value::Null, &json!(true)), "still unlinked");
+    }
+    // Reports naming the ID are accepted and the field ignored.
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "crit")).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").json()["claimed_id"], Value::Null);
+    // Allow a new claim (write only): the next enrolment or report names the claim again.
+    assert_eq!(s.admin(&r, "POST", "/api/team/status/dev-0001/allow-claim", b"").status, 403);
+    assert_eq!(s.admin(&w, "POST", "/api/team/status/dev-0001/allow-claim", b"").status, 204);
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &any).status, 200);
+    let h = team_get(&s, &r, "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["claimed_id"], &h["no_claim"]), (&Value::Null, &json!("123456789"), &json!(false)));
+    // An unbound device, dismissed, then allowed: a report restores the claim; across a restart.
+    let b = generate_key();
+    assert_eq!(enroll(&s, &b, "dev-0002", Some("222222222"), &any).status, 200);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0002/link", b"").status, 204);
+    assert_eq!(s.admin(&w, "POST", "/api/team/status/dev-0002/allow-claim", b"").status, 204);
+    assert_eq!(post(&s, &b, "dev-0002", &full("dev-0002", 1, "ok").replace("123456789", "222222222")).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0002").json()["claimed_id"], "222222222");
+    let s = restart(s, &admin);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0002").json()["claimed_id"], "222222222");
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").json()["claimed_id"], "123456789");
+}
+
+#[test]
+fn legacy_pins_bring_only_claims() {
+    let admin = generate_key();
+    let a = generate_key();
+    let m = |s: &Srv| writer_and_reader(s, &admin).1;
+    // A `pin` line from before verified IDs.
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    let line = json!({"op": "pin", "uuid": "dev-0001", "key": key_to_b64(&a.verifying_key()), "tether_id": "123456789", "label": "t", "enrolled": now()});
+    std::fs::write(dir.join("status/keys.jsonl"), format!("{line}\n")).unwrap();
+    let s = start_in(dir, &admin);
+    let h = team_get(&s, &m(&s), "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["claimed_id"]), (&Value::Null, &json!("123456789")));
+    // A bound token for that ID can still go to another device: nothing verified it here.
+    let bound = status::make_token("t", now() + 3600, Some("123456789"), &admin).unwrap().0;
+    assert_eq!(enroll(&s, &generate_key(), "dev-0002", None, &bound).status, 200);
+    drop(s);
+    // The earlier keys.json, migrated.
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    let old = json!({"dev-0001": {"key": key_to_b64(&a.verifying_key()), "tether_id": "123456789", "label": "t", "enrolled": now()}});
+    std::fs::write(dir.join("status/keys.json"), old.to_string()).unwrap();
+    let s = start_in(dir, &admin);
+    let h = team_get(&s, &m(&s), "/api/team/status/dev-0001").json();
+    assert_eq!((&h["tether_id"], &h["claimed_id"]), (&Value::Null, &json!("123456789")));
+    assert!(std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap().contains(r#""claimed_id":"123456789""#));
+}
+
+#[test]
+fn used_tokens_survive_a_compaction() {
+    let admin = generate_key();
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    let (bound, id) = status::make_token("t", now() + 3600, Some("123456789"), &admin).unwrap();
+    let k = key_to_b64(&generate_key().verifying_key());
+    // Many lines for one pin, then the token's use: well past the compaction threshold.
+    let mut lines: String = (0..100).map(|_| json!({"op": "set", "uuid": "dev-0001", "key": k, "tether_id": null, "label": "t", "enrolled": now()}).to_string() + "\n").collect();
+    lines += &(json!({"op": "used", "token": id, "uuid": "dev-0001", "exp": now() + 3600}).to_string() + "\n");
+    std::fs::write(dir.join("status/keys.jsonl"), lines).unwrap();
+    let s = start_in(dir, &admin);
+    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    assert_eq!(enroll(&s, &generate_key(), "dev-0002", None, &any).status, 200, "an append starts the compaction");
+    let count = || std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap().lines().count();
+    wait_for("compaction", || count() < 10);
+    assert!(std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap().contains(r#""op":"used""#));
+    let s = restart(s, &admin);
+    assert_eq!(enroll(&s, &generate_key(), "dev-0003", None, &bound).text(), "token already used");
+}
+
+#[test]
+fn revocations_are_capped() {
+    let admin = generate_key();
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    let full: serde_json::Map<String, Value> = (0..10_000).map(|i| (format!("tok{i:013}"), json!(now() + 600))).collect();
+    std::fs::write(dir.join("status/revoked.json"), Value::Object(full).to_string()).unwrap();
+    let s = start_in(dir, &admin);
+    let r = revoke(&s, &admin, "onemoreONEMOREone", now() + 60);
+    assert_eq!((r.status, r.text()), (507, "too many revoked tokens".into()));
+    assert_eq!(revoke(&s, &admin, "tok0000000000007", now() + 900).status, 204, "a known one may be extended");
+}
+
+#[test]
+fn the_periodic_tick_drops_expired_revocations() {
+    let admin = generate_key();
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    std::fs::write(dir.join("status/revoked.json"), json!({"soonsoonSOONSOON": now() + 3, "laterlaterLATERla": now() + 3600}).to_string()).unwrap();
+    let s = start_in(dir, &admin);
+    // The writer's tick runs once a minute.
+    let read = || serde_json::from_slice::<Value>(&std::fs::read(s.dir.join("status/revoked.json")).unwrap()).unwrap();
+    for _ in 0..150 {
+        if read().get("soonsoonSOONSOON").is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert_eq!(read().as_object().unwrap().keys().collect::<Vec<_>>(), ["laterlaterLATERla"]);
+}
+
+// ---- Relay load-protection, round 2.
+
+#[test]
+fn an_unwritable_status_folder_locks_only_the_status_store() {
+    use std::os::unix::fs::PermissionsExt;
+    let admin = generate_key();
+    let dir = new_dir();
+    let st = dir.join("status");
+    std::fs::create_dir_all(&st).unwrap();
+    // A migration is due (keys.json), but the folder cannot be written (read-only, or a full disk).
+    let old = json!({"dev-0001": {"key": key_to_b64(&generate_key().verifying_key()), "tether_id": null, "label": "t", "enrolled": now()}});
+    std::fs::write(st.join("keys.json"), old.to_string()).unwrap();
+    std::fs::set_permissions(&st, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let s = start_in(dir, &admin);
+    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let r = enroll(&s, &generate_key(), "dev-0002", None, &tok);
+    assert_eq!((r.status, r.text()), (503, "status store unavailable".into()));
+    let hb = r#"{"uuid":"hb-000001","id":"123456789","profile":"technician","version":"0.6.3","os":"windows","serial":1}"#;
+    assert_eq!(s.req("POST", "/api/heartbeat", &[], hb.as_bytes()).status, 200, "the relay's other work goes on");
+    assert_eq!(s.req("GET", "/api/policy", &[], b"").status, 404, "no policy published, not a 5xx");
+    std::fs::set_permissions(s.dir.join("status"), std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn a_signed_request_is_not_replayable_after_a_restart() {
+    let (s, admin) = server();
+    let m = member(&s, &admin);
+    let sig = reqauth::sign_request(&m, "GET", "/api/team/me", b"", now());
+    assert_eq!(s.req("GET", "/api/team/me", &[(reqauth::HEADER, &sig)], b"").status, 200);
+    let asig = reqauth::sign_request(&admin, "GET", "/api/admin/team", b"", now());
+    assert_eq!(s.req("GET", "/api/admin/team", &[(reqauth::HEADER, &asig)], b"").status, 200);
+    let s = restart(s, &admin);
+    let r = s.req("GET", "/api/team/me", &[(reqauth::HEADER, &sig)], b"");
+    assert_eq!((r.status, r.text()), (401, "replayed request".into()));
+    let r = s.req("GET", "/api/admin/team", &[(reqauth::HEADER, &asig)], b"");
+    assert_eq!((r.status, r.text()), (401, "replayed request".into()));
+}
+
+#[test]
+fn a_dismissed_device_dropping_its_own_pin_gets_no_claim_back() {
+    let (s, admin) = server();
+    let (w, r) = writer_and_reader(&s, &admin);
+    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &any).status, 200);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0001/link", b"").status, 204);
+    // The device releases its own pin and enrols again (also under another uuid) naming a claim.
+    assert_eq!(signed(&s, &a, "dev-0001", "DELETE", "/api/status", b"").status, 204);
+    for uuid in ["dev-0002", "dev-0003"] {
+        assert_eq!(enroll(&s, &a, uuid, Some("555555555"), &any).status, 200);
+        let h = team_get(&s, &r, &format!("/api/team/status/{uuid}")).json();
+        assert_eq!((&h["claimed_id"], &h["no_claim"]), (&Value::Null, &json!(true)), "{uuid}");
+        assert_eq!(signed(&s, &a, uuid, "DELETE", "/api/status", b"").status, 204);
+    }
+    // Kept across a restart (a `dismissed` line in keys.jsonl).
+    let s = restart(s, &admin);
+    let (w, r) = writer_and_reader(&s, &admin);
+    assert_eq!(enroll(&s, &a, "dev-0004", Some("555555555"), &any).status, 200);
+    let h = team_get(&s, &r, "/api/team/status/dev-0004").json();
+    assert_eq!((&h["claimed_id"], &h["no_claim"]), (&Value::Null, &json!(true)));
+    // A new key with the same token is a new device: it may claim (the boundary the docs state).
+    assert_eq!(enroll(&s, &generate_key(), "dev-0005", Some("555555555"), &any).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0005").json()["claimed_id"], "555555555");
+    // Allow a new claim, as before, lets the dismissed device claim again.
+    assert_eq!(s.admin(&w, "POST", "/api/team/status/dev-0004/allow-claim", b"").status, 204);
+    assert_eq!(enroll(&s, &a, "dev-0004", Some("555555555"), &any).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0004").json()["claimed_id"], "555555555");
+    // A token issued for the ID, on its first use, links a dismissed key that dropped its pin.
+    let b = generate_key();
+    assert_eq!(enroll(&s, &b, "dev-0006", Some("777777777"), &any).status, 200);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0006/link", b"").status, 204);
+    assert_eq!(signed(&s, &b, "dev-0006", "DELETE", "/api/status", b"").status, 204);
+    let bound = status::make_token("t", now() + 3600, Some("777777777"), &admin).unwrap().0;
+    assert_eq!(enroll(&s, &b, "dev-0006", None, &bound).status, 200);
+    let h = team_get(&s, &r, "/api/team/status/dev-0006").json();
+    assert_eq!((&h["tether_id"], &h["no_claim"]), (&json!("777777777"), &json!(false)));
+    // An admin or a member removing the pin leaves no such record (the device is gone for good).
+    let c = generate_key();
+    assert_eq!(enroll(&s, &c, "dev-0007", Some("888888888"), &any).status, 200);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0007/link", b"").status, 204);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0007", b"").status, 204);
+    assert_eq!(enroll(&s, &c, "dev-0007", Some("888888888"), &any).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0007").json()["claimed_id"], "888888888");
+}
+
+#[test]
+fn a_report_claims_only_when_it_is_accepted() {
+    let (s, admin) = server();
+    let r = writer_and_reader(&s, &admin).1;
+    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &any).status, 200);
+    let hb = heartbeat("dev-0001", 1).replace(r#""host""#, r#""tether_id":"123456789","host""#);
+    assert_eq!(post(&s, &a, "dev-0001", &hb).text(), "send a full report");
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").json()["claimed_id"], Value::Null, "a refused post claims nothing");
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 2, "ok")).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").json()["claimed_id"], "123456789");
+    assert!(std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap().contains(r#""claimed_id":"123456789""#));
+}
+
+// ---- Final review fixes.
+
+#[test]
+fn a_dismissed_key_claims_nothing_under_another_uuid() {
+    let (s, admin) = server();
+    let (w, r) = writer_and_reader(&s, &admin);
+    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &any).status, 200);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0001/link", b"").status, 204);
+    // The dismissed pin stays on dev-0001; the same key enrols dev-0002 naming a claim.
+    assert_eq!(enroll(&s, &a, "dev-0002", Some("555555555"), &any).status, 200);
+    let h = team_get(&s, &r, "/api/team/status/dev-0002").json();
+    assert_eq!((&h["claimed_id"], &h["no_claim"]), (&Value::Null, &json!(true)));
+    // Nor does a report naming one; the summary entry says it is dismissed.
+    assert_eq!(post(&s, &a, "dev-0002", &full("dev-0002", 1, "ok").replace("123456789", "555555555")).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0002").json()["claimed_id"], Value::Null);
+    let sum = team_get(&s, &r, "/api/team/status").json();
+    assert_eq!((&sum["hosts"][0]["uuid"], &sum["hosts"][0]["no_claim"]), (&json!("dev-0002"), &json!(true)));
+    // Across a restart.
+    let s = restart(s, &admin);
+    let (w, r) = writer_and_reader(&s, &admin);
+    assert_eq!(enroll(&s, &a, "dev-0003", Some("555555555"), &any).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0003").json()["no_claim"], json!(true));
+    // Allowing a new claim on every pin of that key ends it.
+    for u in ["dev-0001", "dev-0002", "dev-0003"] {
+        assert_eq!(s.admin(&w, "POST", &format!("/api/team/status/{u}/allow-claim"), b"").status, 204);
+    }
+    assert_eq!(enroll(&s, &a, "dev-0004", Some("555555555"), &any).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0004").json()["claimed_id"], "555555555");
+}
+
+#[test]
+fn dismissed_keys_are_capped_also_when_loaded() {
+    let admin = generate_key();
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    // 10 001 dismissed keys, one more than the cap: the oldest goes at start.
+    let (old, newer) = (generate_key(), generate_key());
+    let line = |k: &str, at: u64| json!({"op": "dismissed", "key": k, "at": at}).to_string() + "\n";
+    let mut lines = line(&key_to_b64(&old.verifying_key()), now() - 2000);
+    lines += &line(&key_to_b64(&newer.verifying_key()), now() - 1500);
+    lines += &(0..9_999).map(|i| line(&format!("fake{i:08}"), now() - 1000 + i % 500)).collect::<String>();
+    std::fs::write(dir.join("status/keys.jsonl"), lines).unwrap();
+    let s = start_in(dir, &admin);
+    let (w, r) = writer_and_reader(&s, &admin);
+    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    assert_eq!(enroll(&s, &old, "dev-0001", Some("111111111"), &any).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").json()["claimed_id"], "111111111", "dropped at load");
+    // A new tombstone at the cap drops the oldest left, with a `forgotten` line (kept after a restart).
+    let c = generate_key();
+    assert_eq!(enroll(&s, &c, "dev-0002", Some("222222222"), &any).status, 200);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0002/link", b"").status, 204);
+    assert_eq!(signed(&s, &c, "dev-0002", "DELETE", "/api/status", b"").status, 204);
+    // Replaying the file (compacted meanwhile or not) gives the capped set without both dropped keys.
+    let mut set = std::collections::HashSet::new();
+    for l in std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap().lines() {
+        let v: Value = serde_json::from_str(l).unwrap();
+        match v["op"].as_str() {
+            Some("dismissed") => set.insert(v["key"].as_str().unwrap().to_owned()),
+            Some("forgotten") => set.remove(v["key"].as_str().unwrap()),
+            _ => false,
+        };
+    }
+    assert!(set.len() == 10_000 && !set.contains(&key_to_b64(&old.verifying_key())) && !set.contains(&key_to_b64(&newer.verifying_key())), "{}", set.len());
+    let s = restart(s, &admin);
+    let r = writer_and_reader(&s, &admin).1;
+    assert_eq!(enroll(&s, &newer, "dev-0003", Some("333333333"), &any).status, 200);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0003").json()["claimed_id"], "333333333");
+}
+
+#[test]
+fn a_report_that_is_not_stored_claims_nothing() {
+    let (s, admin) = server();
+    let r = writer_and_reader(&s, &admin).1;
+    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &any).status, 200);
+    // The report cannot be renamed into place (a folder in its way).
+    std::fs::create_dir_all(s.dir.join("status/dev-0001.json/x")).unwrap();
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok")).status, 500);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").json()["claimed_id"], Value::Null);
+    assert!(!std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap().contains("claimed_id"));
+    std::fs::remove_dir_all(s.dir.join("status/dev-0001.json")).unwrap();
+}
+
+#[test]
+fn the_monitor_index_expiry_is_a_metric() {
+    let (s, k) = server();
+    let doc = monitor_doc(&k, "stable", 1, "monitor/windows-x86_64", "tether-monitor-0.1.0.exe", "0.1.0");
+    assert_eq!(s.admin(&k, "PUT", "/api/admin/release/stable/monitor.json", &doc).status, 204);
+    assert_eq!(metric(&s, r#"tether_api_release_index_expires_timestamp{channel="stable",index="monitor"}"#), Some(2_000_000_000.));
+    assert_eq!(metric(&s, r#"tether_api_release_index_expires_timestamp{channel="stable"}"#), None, "the Tether series are not moved");
+    let s = restart(s, &k);
+    assert_eq!(metric(&s, r#"tether_api_release_index_expires_timestamp{channel="stable",index="monitor"}"#), Some(2_000_000_000.));
+}

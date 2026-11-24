@@ -4,7 +4,8 @@
 import { create } from "zustand";
 import { invoke } from "../ipc";
 import { errorText } from "../policy";
-import { cleanTags, emptyStore, MAX_NAME, MAX_NOTES, shared, applyShared, STORE_VERSION, type HostEntry, type OrgDevice, type Peer, type SharedDoc, type Store } from "./model";
+import { mergeStatus, statusNote } from "./health";
+import { cleanTags, emptyStore, MAX_NAME, MAX_NOTES, storeId, shared, applyShared, STORE_VERSION, type HostEntry, type OrgDevice, type Peer, type SharedDoc, type StatusSummary, type Store } from "./model";
 import { merge3, readShared } from "./sync";
 
 export type OnlineState = "idle" | "loading" | "ok" | "unsupported" | "error";
@@ -25,6 +26,10 @@ interface S {
   onlineState: OnlineState;
   team: TeamInfo;
   saveError?: string;
+  /** Health summaries of all relays, merged (one per uuid). */
+  status: StatusSummary[];
+  /** Why no health data could be read (e.g. reporting switched off on the server). */
+  statusError?: string;
 }
 
 export const useHosts = create<S>(() => ({
@@ -32,6 +37,7 @@ export const useHosts = create<S>(() => ({
   store: emptyStore(),
   peers: [],
   org: [],
+  status: [],
   online: null,
   onlineState: "idle",
   team: {},
@@ -54,7 +60,9 @@ export function readStore(raw: string): { store: Store; block?: string } {
     /* handled below */
   }
   if (!d || typeof d !== "object" || Array.isArray(d)) return { store: emptyStore(), block: `The host list (${FILE}) is damaged, so it was not loaded and changes are not saved. Restore the file from a backup, or rename or delete it and restart Tether to start a new list.` };
-  const store = { ...emptyStore(), ...d, v: STORE_VERSION, hosts: d.hosts ?? {}, tags: d.tags ?? {}, rules: d.rules ?? [], searches: d.searches ?? [] };
+  // Agent-only rows (`m:<uuid>`) are never stored; an entry for one (an earlier version) is dropped.
+  const hosts = Object.fromEntries(Object.entries(d.hosts ?? {}).filter(([id]) => !id.startsWith("m:")));
+  const store = { ...emptyStore(), ...d, v: STORE_VERSION, hosts, tags: d.tags ?? {}, rules: d.rules ?? [], searches: d.searches ?? [] };
   return typeof d.v === "number" && d.v > STORE_VERSION ? { store, block: `The host list (${FILE}) was saved by a newer version of Tether: it is shown, but changes are not saved. Update Tether to change it.` } : { store };
 }
 
@@ -100,7 +108,8 @@ function edit(ids: string[], f: (e: HostEntry, id: string) => HostEntry, sharedC
   const hosts = { ...s.hosts };
   const ro = sharedChange && readOnly();
   for (const id of ids) {
-    const old = hosts[id] ?? {};
+    if (!storeId(id)) continue; // never `hosts["__proto__"] = …`, nor an agent-only row
+    const old = (Object.hasOwn(hosts, id) && hosts[id]) || {};
     const e = f({ ...old }, id);
     if (ro) Object.assign(e, { name: old.name, tags: old.tags });
     // Drop keys that became empty so the file stays small.
@@ -192,13 +201,19 @@ export const actions = {
     } catch (e) {
       team.me = null;
       team.error = errorText(e).replace(/^(not-member|unsupported): /, "");
-      set({ team, org: [] });
+      set({ team, org: [], status: [], statusError: undefined });
       return;
     }
     set({ team });
     if (get().store.team?.showOrg !== false) {
       const org = await invoke<OrgDevice[]>("team_devices").catch(() => null);
       if (org) set({ org });
+      try {
+        const r = await invoke<Parameters<typeof mergeStatus>[0]>("team_status");
+        set({ status: mergeStatus(r), statusError: statusNote(r) });
+      } catch (e) {
+        set({ status: [], statusError: statusNote([{ relay: "", error: errorText(e) }]) });
+      }
     }
     await teamSync();
   },

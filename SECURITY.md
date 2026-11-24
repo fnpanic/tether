@@ -21,6 +21,7 @@ is left.
 | Admin key, updater key | Tether Manage vault on the admin's PC (argon2id + XChaCha20-Poly1305) |
 | Host secrets at rest | Permanent password hash, 2FA secret, remembered passwords (obfuscated, see below) |
 | Metadata | Device IDs, IPs, machine uuids, connection times on hbbs/hbbr/tether-api; audit log |
+| Device health reports | `status/` on each relay: pinned device keys, the last report and the history of each device that runs a monitoring agent; readable by the relay operator and team members |
 | Mac build signing material | Sent per job to the Mac build runner ([docs/mac-build-runner.md](docs/mac-build-runner.md)) |
 
 ### Trust boundaries
@@ -153,6 +154,93 @@ never replaced (`apps/desktop/src-tauri/src/team.rs::key_at`).
 - **Limits**: 120 requests/min per member key, 60 failed signatures/min per IP (a failure tries every
   roster key, at most 500, under the state lock), body limits 64 KiB (roster) and 512 KiB (tags);
   `team/roster.json` and `team/tags.json` are `0600`.
+
+### Device status (health reports)
+
+A monitoring agent on a machine can report its health to the relay ([docs/health.md](docs/health.md),
+[docs/api.md](docs/api.md#device-status-health-reports)). It adds two kinds of caller to the relay:
+devices that sign with their own key, and members that read what the devices posted. The feature
+runs nothing on a device and opens no port on it.
+
+- **Device keys are pinned.** A device generates an Ed25519 key and enrols with an admin-signed
+  token. The relay pins the key to the device's uuid in `status/keys.jsonl`. Every report and removal is signed (`Tether-Sig: device-v1`, message prefix
+  `tether-device-v1`) over the relay's host name, the method, the path, the time, a nonce and the
+  body hash, so a captured request is worth nothing at another relay and cannot be replayed
+  (±300 s, nonces kept 601 s in memory, `seq` must increase on every post). A device key never
+  passes as an admin or member key, and an admin or member signature never passes on a device
+  route (separate prefix and header version, tested both ways). A second key for a pinned uuid or
+  Tether ID is refused (`409`). Only an admin-signed `DELETE /api/admin/status/<uuid>`, a
+  member-signed `DELETE /api/team/status/<uuid>` from a member with `write`, or the device's own
+  signed `DELETE /api/status` releases a pin; the journal names who did it.
+- **Tether IDs are verified, not claimed.** A device's Tether ID, the only thing that puts its
+  health on a host row in the technician app, is set in two ways only: the admin issued the token
+  for that Tether ID (`tether_id` in the signed token; it enrols one device per relay, a second uuid gets
+  `409 token already used` there, and a request naming another ID `409 token is issued for another
+  id`; only its first use links, so it cannot undo a member's Unlink), or a roster member with `write` confirmed the device's claim
+  (`POST /api/team/status/<uuid>/link`, after one explicit confirmation in the app; the pin records
+  the member's name and the time). A Tether ID the device names with any other token is kept as
+  `claimed_id`, shown as a claim on a row of its own, and never joins a host row by itself. A
+  report can neither set nor change a Tether ID. A member's Unlink also dismisses the
+  claim (`no_claim`) until a member allows a new one; the same key under another uuid, with the
+  dismissed pin still there or after the device dropped it itself, comes back with `no_claim`
+  and claims nothing (the relay remembers dismissed keys). The boundary: a
+  holder of a valid enrolment token not issued for an ID can always enrol a *new* device (new
+  key) that claims any Tether ID. A claim joins nothing and is fixed for that device until a
+  technician acts; to stop claim rows from an unwanted source, revoke the token and remove its
+  devices (`monitor-publish devices --token <id>`, `remove`). The app refuses to link a claim to
+  a host that already has a linked health agent, so a confirmed impostor cannot hide that host's
+  health behind a link conflict. Pin records from before verified IDs are
+  read with their Tether ID as a claim. **Single use is per relay:** each relay records a
+  token's use itself, so a copy of a token issued for one ID can link a second device on a relay
+  the first device has not enrolled on; the technician app then shows a link conflict and joins
+  neither device to the host. Give such tokens only to that machine and keep them short-lived.
+  **What this does not prove:** both ways are the word of
+  a trusted person (the admin who issued the token, the technician who confirmed), not a
+  cryptographic proof by Tether on that machine. A technician who confirms the claim of the wrong
+  agent shows that agent's reports on the wrong host until someone unlinks it.
+- **What a token holder can do.** Enrol devices until the token expires or is revoked: any uuid
+  that is not pinned yet, up to 30 new pins per minute per IP and `STATUS_MAX_DEVICES` in total;
+  with a token issued for a Tether ID, one device with that ID. A token is valid 1 to 30 days and
+  can be **revoked** before that (`POST /api/admin/status/revoke`, `monitor-publish revoke`):
+  the relay then answers `401 token revoked`. Revoking does not remove the devices that enrolled
+  with it already; `monitor-publish devices --token <id>` lists them and `remove` removes them.
+  Issue tokens for as short as the rollout takes and treat them like a password. A holder can
+  fill the device cap, which makes `507` for devices that enrol later, and can make devices that
+  claim any Tether ID; a claim shows only as a claim until a member confirms it.
+- **What a token holder cannot do.** Read any report, summary or history (those routes need a
+  roster member's key). Replace or change an existing pin, post as another device, remove a pin,
+  link a Tether ID, set or change the Tether ID of a pinned device (a report cannot), sign an
+  admin or member request, or reach anything outside the status routes. A device key holder can post, and remove
+  the pin of, that device only. A device's reports can therefore be forged by whoever controls
+  that machine (as for any agent); they are shown as what the device said, never as a fact the
+  relay checked.
+- **Report content is untrusted.** The relay never parses the report's `body`: it checks that it
+  is a JSON object in valid UTF-8, stores it byte for byte (64 KiB at most) and returns it as it
+  is. The technician app shows every text from a report as plain text, shortened to fit. Nothing a
+  report says changes a device, a policy or an access decision.
+- **Who can read reports.** The relay operator, who can read `status/`, and every member of the
+  team roster (no `write` or `audit` flag needed; linking, unlinking and removing a device need
+  `write`, refused with `403` otherwise). Reports are readable on the relay, not
+  end-to-end encrypted: machine name, installed product names and versions, check titles, values
+  and hints ([PRIVACY.md](PRIVACY.md)). An unauthenticated caller can tell whether a uuid is
+  enrolled (`401 unknown device` against `401 signature does not match`); uuids are not secrets.
+- **Limits** (all before the signature check and the parser, so the cheap path stays cheap):
+  64 KiB per post, one accepted post per uuid per 60 s, 10 correctly signed but refused posts per
+  uuid per minute, 60 failed signatures or unknown uuids per minute per IP (IPv6: per /64), 30 new
+  enrolments or refused tokens per minute per IP. A forged post that names a device's uuid is not
+  counted against that device. The relay paces devices with `next` (`STATUS_TARGET_RPS`) and
+  `STATUS=off` turns every status route into `503` at once, before any body is read.
+- **Fail closed.** When `status/keys.jsonl` or `status/revoked.json` cannot be read (anything but
+  a last line of `keys.jsonl` cut short by a crash), the status routes answer
+  `503 status store unavailable` and nothing under `status/` is written: an empty pin list would
+  hand every uuid to the next token holder, an empty revocation list would make revoked tokens
+  valid again. Sessions, policy and
+  updates are not affected. Recovery: restore or repair the file and restart tether-api
+  ([docs/health.md](docs/health.md#the-locked-state)).
+- **The monitor release index** is signed like the Tether one and refused in the other direction:
+  `monitor.json` takes only the apps `monitor` and `monitor-packs`, `releases.json` only Tether's,
+  so the agent's files can never be offered to an installed Tether client. The agent verifies the
+  index, the size, the SHA-256 and the minisign signature of each artifact before installing.
 
 ## Least privilege and attack surface
 
@@ -442,6 +530,10 @@ Report vulnerabilities privately to the maintainers. Do not open a public issue.
 - While a relay accepts v1 request signatures, a captured admin or team request can be replayed at
   another relay within ±300 s. Remedy: update the relays first (with `RELAY_HOST`), then the apps,
   then set `TETHER_SIG_V1=off` (W14).
+- A device's Tether ID in the health view rests on a token issued for that ID or on a
+  technician's confirmation, both the word of a trusted person, not a cryptographic proof by
+  Tether on that machine ([Device status](#device-status-health-reports)). Reports are readable
+  by the relay operator and every team member, not end-to-end encrypted.
 - A custom app's settings apply above the policy profile, except for features the profile locks:
   it can add restrictions and defaults, and its branding (title, accent, welcome text) applies,
   but it cannot unlock what the policy locks.

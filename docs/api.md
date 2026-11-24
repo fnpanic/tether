@@ -156,7 +156,10 @@ rejects a nonce seen in the last 601 s (longer than the whole window a signature
 The nonce of a release upload is remembered for about 70 minutes, longer than the slowest upload
 the server lets finish, so a captured upload cannot be replayed as a slow upload that ends after
 the nonce was forgotten.
-Failure: `401` with a short reason. Bodies over the limits: `413`.
+Failure: `401` with a short reason. Bodies over the limits: `413`. Devices that report their health
+sign with the same layout under their own prefix and header version (`Tether-Sig: device-v1`, see
+[Device status](#device-status-health-reports)); a device signature never passes on an admin or
+team route, and an admin or member signature never on a device route.
 
 **The relay must know its own name.** tether-api accepts a v2 signature only when `host` is one of
 the names in its environment variable `RELAY_HOST` (comma-separated; an entry may be a host name
@@ -199,6 +202,10 @@ keeps blocking replays in memory.
 | `PUT /api/admin/download-page` | HTML (≤ 512 KiB) | `204`, stored as `download/index.html` |
 | `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>` | – | Session audit records (above), newest first. All optional: `since` (default 0), `limit` 1–5000 (default 1000), `device` matches `id` or `uuid` exactly (URL-encoded). Unknown parameter or bad value: `400`. One answer holds at most about 8 MiB of records; when older ones were left out for that, it carries the header `X-Audit-Truncated: 1` (the Sessions page of Tether Manage then names the relay). |
 | `GET /api/admin/status` | – | `{version, disk_free, devices, policy_serial, server_keys_serial, release_generation, release_indexes: {<channel>: {serial, expires}}, uptime, last_prune: {time, files, bytes} \| null}` |
+| `DELETE /api/admin/status/<uuid>` | – | `204`: the device's pin (with its link or claim), last report and history are removed (journal line `status: pin of <uuid> removed by an admin`). `404` for an invalid or unknown uuid. `503` while `STATUS=off` or the status store is locked. See [Device status](#device-status-health-reports). |
+| `POST /api/admin/status/revoke` | `{"id":"<token id>","exp":<the token's exp>}` | `204`, also when the id is revoked already (the later `exp` is kept). `400 exp has passed` when `exp` is not in the future (an expired token is refused anyway; nothing is stored). The relay refuses that token from then on (`401 token revoked`); devices that enrolled with it stay enrolled. Kept in `status/revoked.json` until `exp`. `400` for a bad id or body, `507 too many revoked tokens` with 10 000 kept (expired ones leave within a minute), `503` as above. |
+| `GET /api/admin/status/revoked` | – | `{"<token id>":<exp>,…}`, the revocations that have not expired. |
+| `GET /api/admin/status/devices[?token=<id>][&after=<uuid>]` | – | The pins, sorted by uuid: `{"devices":[{"uuid","token","label","tether_id","claimed_id","linked_by","linked_at","linked_token","no_claim","host","enrolled","last_seen"}],"next":"<uuid>" \| null}`. Each request looks at no more than 1000 pins: `token` keeps only the pins enrolled with that token among them, so a page can be short or empty while `next` is set. `next`: pass it as `after` for the next page; `null` when no pin follows. `host` (the last full report's) and `last_seen` are `null` before the first post; `token` is `null` for pins from before token ids. `400` for an unknown parameter or a bad value. |
 | `PUT /api/admin/team` | team roster (≤ 64 KiB, below) | `204`. Validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600). `{"members":[]}` turns team access off. |
 | `GET /api/admin/team` | – | the roster (`{"members":[]}` when none) |
 
@@ -232,9 +239,209 @@ Limits: 120 requests/min per member key and 60 failed signatures/min per IP (IPv
 | `GET /api/team/tags` | – | `{"rev":<u64>,"doc":<JSON or null>,"updated_by":"<name>","updated_at":<unix>}`; `rev` 0, `doc` null, `updated_by` "" and `updated_at` 0 when none was stored |
 | `PUT /api/team/tags` | a JSON object (≤ 512 KiB), header `If-Match: <rev>` (decimal, quotes tolerated) | `200 {"rev":<new>}`. Member without `write`: `403`. Missing or bad `If-Match`, body not a JSON object: `400`. `rev` is not the current one: `409` with the current `{"rev","doc","updated_by","updated_at"}`. Too large: `413`. Stored atomically as `team/tags.json` (0600) with `rev + 1`, `updated_by` = the member's roster name. The relay does not look inside the document. |
 | `GET /api/team/audit?device=<id or uuid>&since=<unix>&limit=<n>` | – | Session audit records of one device, same format as `GET /api/admin/audit`, newest first. Members with `audit` only (else `403`). `device` required (`400` without); `since` default 0; `limit` 1–500, default 200; unknown parameter `400`. |
+| `GET /api/team/status` | – | The health summary of every host that has a full report (below). Any member; `ETag`, `304` on `If-None-Match`. |
+| `GET /api/team/status/<uuid>` | – | One device's last report and its history (below). Any member. `404` for an invalid or unenrolled uuid. |
+| `POST /api/team/status/<uuid>/link` | `{"tether_id":"…"}` (must equal the device's claim) | `204`: the claim is confirmed, the device's Tether ID is now that one, with the member's roster name and the time as `linked_by` and `linked_at`; the same link again is `204`. Members with `write` only (else `403`). `400` bad body or Tether ID; `404` unknown uuid; `409 tether_id is not the one this device claims`, `409 tether_id is pinned to another device`. Journal line `status: <uuid> linked to <id> by team member <name>`. |
+| `DELETE /api/team/status/<uuid>/link` | – | `204`: the link and the claim are removed and the pin gets `no_claim`: the device claims nothing again (not by enrolling, also not with the token issued for that ID after its first use, not by reports, whose `tether_id` is then ignored) until a member allows it. When such a device then releases its own pin (`DELETE /api/status`), the relay keeps its key (a `dismissed` line, 180 days, at most 10 000): enrolling again with that key and a token not issued for a Tether ID gives a pin with `no_claim` and no claim, whatever uuid or claim it names. `write` only (`403`); `404` unknown uuid. Journal line `status: … of <uuid> dismissed by team member <name>`. A new key enrolled with a valid token can always claim: revoke the token to stop that. |
+| `POST /api/team/status/<uuid>/allow-claim` | – | `204`: clears `no_claim` on this pin; the device's next enrolment or report names its claim again (still only a claim), unless another pin of the same device key is still dismissed: then allow or remove those too. `write` only (`403`); `404` unknown uuid. Journal line. |
+| `DELETE /api/team/status/<uuid>` | – | `204`: as `DELETE /api/admin/status/<uuid>` (pin, link or claim, report, history), journal line `status: pin of <uuid> removed by team member <name>`. `write` only (`403`); `404` unknown uuid. |
 
 The roster is per relay: publish it to every relay (Tether Manage does). Tags are stored per relay
 too: a client should read and write them on one relay (the first that answers).
+
+## Device status (health reports)
+
+A monitoring agent on a machine enrols with an admin-signed token and then posts signed reports;
+members of the team roster read them. Overview, operation and what the report fields mean:
+[health.md](health.md). Status is per relay, like tags: an agent enrols on every relay it knows
+and posts to one at a time; the technician app reads every relay and keeps the newest answer for
+each device. While `STATUS=off` every route in this section answers `503 status reporting is off`
+with `Retry-After: 3600`; while the store is locked (`status/keys.jsonl` or `status/revoked.json`
+unreadable) every one answers `503 status store unavailable`, also with `Retry-After: 3600`.
+
+**Identity.** `uuid` is 8–64 characters `[A-Za-z0-9-]` (the Tether install uuid when Tether is
+installed, else one the agent makes up). The device key is an Ed25519 key the agent generates; its
+public half goes to the relay as standard base64 (padded) of the 32 raw bytes, the encoding of
+`tether_trust::key_to_b64`. Weak (small-order) keys are refused. `tether_id` is optional,
+1–32 printable ASCII characters without spaces.
+
+**Tether IDs are verified.** A device's `tether_id` (what the technician app joins a host row by)
+comes from a token issued for it, or from a team member's confirmation
+(`POST /api/team/status/<uuid>/link`). A `tether_id` the device names with any other token is kept
+as its `claimed_id` and shown as a claim only. Reports never change either.
+
+**Enrolment token.** The base64url string, without padding, of the JSON of a
+`tether_trust::envelope::Signed` document signed with an admin key, whose payload is
+`{"purpose":"status-enroll","exp":<unix seconds>,"label":"<1–64 characters, no control characters>","id":"<16–32 [A-Za-z0-9]>","tether_id":"<optional>"}`
+(unknown fields refused, `id` required). `id` is random; it is what a relay revokes and records
+on each pin made with the token. With `tether_id` (a Tether ID, never starting with `m:`) the token
+is issued for that ID: it enrols one device, which gets exactly that ID. `scripts/status-token.sh`
+and `tools/monitor-publish token` issue tokens valid 1 to 30 days
+([health.md](health.md#creating-an-enrolment-token)); the relay accepts one until `exp` or until
+it is revoked, for any number of devices unless it is issued for a Tether ID.
+`tether_trust::status::make_token(label, exp, tether_id, admin_key)` makes one and answers
+`(token, id)`; `tether_trust::status::verify_token(token, admin_keys, now)` checks one.
+
+### `POST /api/status/enroll` (unsigned)
+
+Body (JSON, ≤ 4096 bytes, unknown fields rejected):
+```json
+{"uuid":"3f2a9c4e-0b1d-4e57-9d1a-6c2f8a7b5e10","pubkey":"<std base64, 32 bytes>","token":"<token>","tether_id":"123456789"}
+```
+The relay pins the key to the uuid and answers `200` `{"releases":<u64>,"next":<u64>}`, the same
+answer as a status post. With a token issued for a Tether ID, the pin gets that ID (a `tether_id`
+in the request must be the same); with any other token a `tether_id` in the request becomes the
+pin's `claimed_id`, unless the device's key is dismissed (a member unlinked a pin of that key, still
+there or released by the device itself): then the new pin gets `no_claim` and no claim. Enrolling the same uuid with the same key again is `200` and changes nothing,
+except that a claim is added when the pin has no Tether ID, no claim and no `no_claim`, and a token issued for a
+Tether ID sets it on a pin without one, on its first use only; a pin cannot be replaced by another key.
+
+| Status | Body | Meaning |
+|---|---|---|
+| `400` | `bad uuid`, `bad pubkey`, `bad tether_id`, or the JSON error | malformed |
+| `401` | `enrollment token: <reason>` (`signed by an untrusted key`, `expired`, `not an enrollment token`, `bad label`, `bad id`, `bad tether_id`) | token refused |
+| `401` | `token revoked` | the token was revoked |
+| `409` | `token is issued for another id` | the request names another `tether_id` than the token |
+| `409` | `token already used` | a token issued for a Tether ID was used by another uuid (or by this one, whose pin was removed since) |
+| `409` | `uuid is enrolled with another key`, `tether_id is pinned to another value`, `tether_id is enrolled with another key` | an admin must remove the pin first (`DELETE /api/admin/status/<uuid>`), or the device does it itself |
+| `413` | `body too large` | |
+| `429` | `too many requests`, `Retry-After: 60` | more than 30 new enrolments or refused tokens per minute from one IP (IPv6: per /64). The same uuid and key again is never counted. |
+| `503` | `status enrollment needs ADMIN_PUB_KEY` | the relay has no admin key |
+| `503` | `status reporting is off`, `status store unavailable` | see above |
+| `507` | `too many devices (STATUS_MAX_DEVICES)` | the cap is reached; pins that exist are not affected |
+| `507` | `insufficient storage` | the data disk is nearly full |
+
+### Request signature `device-v1`
+
+Status requests from a device carry
+```
+Tether-Sig: device-v1 uuid=<uuid> host=<relay host> ts=<unix secs> nonce=<16-64 [A-Za-z0-9]> sig=<std base64 of the 64-byte signature>
+```
+The signed message has the layout of the admin v2 message under its own prefix:
+```
+tether-device-v1\n<host>\n<METHOD>\n<path with query>\n<ts>\n<nonce>\n<hex sha256 of the body>
+```
+`host` is `reqauth::host_of` of the relay's base URL (lower case, no scheme, port or path) and must
+be one of the relay's `RELAY_HOST` names. `METHOD` is upper case, `path` includes the query string
+(`/api/status`), the body hash covers the exact bytes sent (an empty body hashes zero bytes).
+`uuid` is not part of the message: the relay picks the key by it, and the body's `uuid` must equal
+it. Build it with `tether_trust::reqauth::sign_device_request(key, uuid, relay_base, method, path,
+body, ts)`. The relay allows ±300 s of clock skew and refuses a nonce it saw in the last 601 s.
+Device nonces are kept in memory only (not in `nonces.json`): `seq` must increase on every post,
+so a replay after a restart still fails unless it is newer than the last one the relay flushed.
+
+Every answer, whatever its status, carries the HTTP `Date` header. An agent can keep
+`offset = Date − local time` and sign with `ts = local now + offset`; a post answered
+`401 request timestamp outside allowed clock skew` shows the clock is off.
+
+### `POST /api/status` (device-signed)
+
+Body ≤ 65 536 bytes (`413` answered from `Content-Length` before the body is read), JSON, in one
+of two shapes: a **full report** and a **heartbeat** that leaves out `products`, `changes` and
+`body`. All fields and rules: [health.md](health.md#the-report-format). The relay never reads
+`body` beyond checking that it is a JSON object (it must be valid UTF-8); the file it stores is
+the bytes that were sent.
+
+Order of work, so that cheap refusals come first: off or locked (`503`), size (`413`), the header
+(its uuid must be valid before it is used), the per-uuid limit, the per-IP failure limit, the key
+lookup, the signature, and only then the body is parsed and the rules applied. A heartbeat writes
+no file, except that the first post naming a Tether ID for a device with neither an ID nor a claim
+(claims allowed) appends that claim to `keys.jsonl`, once per device. A full report is written and synced before the answer, and its `changes` are appended to
+the device's history.
+
+| Status | Body | Meaning |
+|---|---|---|
+| `200` | `{"releases":<u64>,"next":<u64>}` | accepted |
+| `400` | the reason: `report is not UTF-8`, a JSON error, a field rule (`next must be 60-3600`, `at most 50 faults`, `a full report has products, changes and body, a heartbeat none of them`, …), `uuid does not match the signature` | refused; the agent has a bug |
+| `401` | `missing signature`, `unsupported signature version`, `malformed signature header`, `unknown device`, `signature does not match`, `request timestamp outside allowed clock skew`, `request signed for another relay`, `replayed request`, `this relay does not know its own host name …` | not enrolled here, or the signature or clock is wrong |
+| `409` | `seq must increase` | `seq` is not above the last accepted one |
+| `409` | `send a full report` | a heartbeat without a stored full report: the next post must be a full one |
+| `409` | `tether_id is pinned to another value` | the report names another Tether ID than the device's (or, without one, than its claim); a report never sets or changes it. A device with neither: the ID becomes its claim (only once the report is accepted and stored), unless the device's link was dismissed (`no_claim`, also for its key under any uuid): then the field is ignored |
+| `413` | `body too large` | |
+| `429` | `report too frequent`, `Retry-After: <s>` | an accepted post from this uuid less than 60 s ago |
+| `429` | `too many refused reports`, `Retry-After: 60` | more than 10 correctly signed posts from this uuid that were refused with `400` or `409` in a minute |
+| `429` | `too many failed requests`, `Retry-After: 60` | more than 60 failed device signatures or unknown uuids per minute from this IP (IPv6: per /64) |
+| `503` | `status reporting is off`, `status store unavailable`, `busy` | back off |
+| `507` | `insufficient storage` | the data disk is nearly full |
+
+Only accepted posts count for the 60 s limit, so a post forged with a device's uuid cannot lock
+that device out; a signed post counts for the refused limit only after the signature checked out.
+
+`next` is `min(3600, max(300, ceil(enrolled / STATUS_TARGET_RPS)))` seconds, with `enrolled` the
+number of pins on this relay. It is the interval the device should follow: it spreads the devices
+over time, 10 posts per second by default. A device is **stale** when `now > last_seen + 3 × next`
+with the `next` it was last told; the relay computes that on read and keeps no timers. An agent
+should post at `next` with jitter over the interval, and on `429`, `503`, a timeout or a connection
+error back off exponentially from 60 s to 3600 s, honouring `Retry-After`, with one connection at a
+time. It may post a full report early after a change of state, but not twice within 60 s. A relay
+from before device status answers `404` to `/api/status` and `/api/status/enroll`: it cannot take
+reports, so the agent treats it like a relay that refused (enrolment there failed; post to another
+relay of its list) and tries it again with its normal backoff, as it may be updated later.
+
+`releases` is an opaque change hint for the monitor index ([below](#monitor-release-index-downloadchannelmonitorjson)):
+the sum of the serials of the stored `monitor.json` files over all channels. Compare it for
+inequality only; when it changes, fetch your channel's `monitor.json`. It is not the release
+generation of the heartbeat.
+
+### `DELETE /api/status` (device-signed, no body)
+
+Releases the device's pin and deletes its stored report, history and last-seen entry on this
+relay. `204`; the `401`, `429` and `503` answers are those of a post. An agent sends it to every
+relay on uninstall.
+
+### `GET /api/team/status` (member-signed)
+
+Any member of the roster. The summary of every host that has a full report, sorted by uuid:
+```json
+{"built":1795000200,"hosts":[
+ {"uuid":"3f2a9c4e-0b1d-4e57-9d1a-6c2f8a7b5e10","tether_id":"123456789","claimed_id":null,"linked_at":1794999000,"no_claim":false,"last_seen":1795000123,"next":300,"stale":false,
+  "host":"FRONT-DESK-1","agent":"0.1.0","overall":"crit",
+  "counts":{"ok":31,"warn":2,"crit":1,"unknown":3,"setup":1},
+  "products":[{"name":"Example App","version":"26.3.2","role":"server"}],
+  "faults":[{"id":"app/db-service","state":"crit","since":"2026-11-23T07:55:00Z"}]}]}
+```
+`tether_id` is the verified one (`null` when none), `claimed_id` the one the device claims and nobody
+confirmed yet (`null` when none; never both), `linked_at` when the verified link was made, `no_claim`
+`true` when a member dismissed its link (it claims nothing until a member allows a new claim); `last_seen` and `built` are the relay's unix time. An entry holds at most 8 products and 10 faults; when more were reported it also has
+`more_products` and `more_faults` with the number left out (the host's report has them all). The
+summary is rebuilt at most every 30 s from a snapshot and sent from `status/summary.json`, so
+`stale` is as of that build. `ETag` is `"<16 hex>"`, the first 16 hex digits of the SHA-256 over
+the `hosts` array, so an unchanged summary keeps its tag and answers `304` to `If-None-Match`.
+
+### `GET /api/team/status/<uuid>` (member-signed)
+
+```json
+{"uuid":"…","tether_id":"123456789","claimed_id":null,"enrolled":1794990000,"linked_by":"Anna Berger","linked_at":1794999000,"linked_token":null,"no_claim":false,
+ "last_seen":1795000123,"next":300,"stale":false,
+ "report":{…the last full report, byte for byte…},
+ "history":[{"id":"app/db-service","from":"ok","to":"crit","time":"2026-11-23T07:55:00Z","at":1795000100}]}
+```
+`report` is `null` before the first full report; `last_seen` and `next` are `null` for a device that
+never posted. `linked_by` and `linked_at` say who confirmed the Tether ID and when the link was
+made; for a link by a token issued for that ID `linked_by` is `null` and `linked_token` is that
+token's id. All three are `null` without a Tether ID. `no_claim` is `true` after a member
+dismissed the link. `history` is the state changes of the last 90 days, oldest first; `at` is the
+relay's time when the change was stored. `404` for an invalid uuid or one that is not enrolled.
+
+### Storage, limits and settings
+
+`/var/lib/tether-api/status/` (`0700`, files `0600`): `keys.jsonl` (the pins), `revoked.json`
+(revoked token ids with their expiry; unreadable, it locks the status routes like `keys.jsonl`), `<uuid>.json` (the
+last full report), `<uuid>.history.jsonl` (changes, appended; at most 2000 lines and 90 days, cut
+in the background), `seen.json` (last post of each device, flushed at most every 5 minutes), and
+`summary.json`. A pin without a post for 180 days (never posted: since enrolment) is removed with
+its files. `keys.jsonl` or `revoked.json` that cannot be read locks the status routes (503) until it is repaired or
+moved away and tether-api is restarted; the rest of the relay is not affected. Details and backup:
+[health.md](health.md#storage-and-backup).
+
+| Setting (`/etc/tether/api.env`) | Default | |
+|---|---|---|
+| `STATUS` | on | `off`: every route above answers `503 status reporting is off`, `Retry-After: 3600`; posts are refused before the body is read |
+| `STATUS_TARGET_RPS` | `10` | posts per second the devices are paced to (at least 1); sets `next` |
+| `STATUS_MAX_DEVICES` | `20000` | pins at most; more is `507`, existing pins keep working |
+
+Metrics: `tether_api_status_hosts{state}`, `tether_api_status_write_errors`, and the request
+counters of the endpoints `status` and `team` ([monitoring.md](monitoring.md#tether-api-12700121120metrics)).
 
 ## Download layout and update manifests
 
@@ -362,6 +569,44 @@ old format for them.
 - These builds skip a `packed` copy whose encoding they do not know (the index stays valid), so a
   later encoding needs no third file.
 
+### Monitor release index (`download/<channel>/monitor.json`)
+
+The device-status agent and its check packs have a signed index of their own, so that nothing a
+Tether client reads changes when they are published. It is the document, envelope, signature and
+rollout of the Tether index above (`tether-releases/1`, `Index::open_for`), with these differences:
+
+- The only keys are `monitor/windows-x86_64` and `monitor-packs/any`. `releases.json` and
+  `releases-v2.json` refuse these keys, and `monitor.json` refuses Tether's (`400`, the reason
+  from the index check). A Tether client never reads `monitor.json`.
+- Artifacts are `download/<channel>/monitor/windows-x86_64/tether-monitor-<version>.exe` and
+  `download/<channel>/monitor-packs/any/monitor-packs-<version>.json`, each with a `.sig`
+  (minisign, the updater key; the trusted comment names the file and the version). A pack version
+  passes the same version rule as Tether's (`2026.11.23`, `2026.11.23.2`). There are no packed
+  copies, and entries list relay URLs only (no CDN copy).
+- Upload, serial rule (`409` unless above the stored serial), `ETag: "<serial>"`, `304` on
+  `If-None-Match`, `Cache-Control: no-cache` and `404` when none: as for `releases.json`
+  (`PUT /api/admin/release/<channel>/monitor.json`, signed request). Caddy and nginx route
+  `GET /download/<channel>/monitor.json` to tether-api like the two Tether index files.
+- Uploading or deleting it does not move the release generation of the heartbeat. The sum of its
+  serials over all channels is the `releases` hint in the answers to status posts.
+- The agent verifies it the way Tether verifies its own: `release::Index::open_for(raw,
+  admin_keys, channel, release::MONITOR_APPS)`, `release::choose_for` for the cache and serial
+  floor, and each artifact's size, SHA-256 and signature before it is installed.
+- Release clean-up ([release-cleanup.md](release-cleanup.md)) reads `monitor.json` for the
+  `monitor` and `monitor-packs` folders and protects the versions it publishes.
+
+```json
+{"type":"tether-releases/1","channel":"stable","serial":3,"issued":1795000000,"expires":1797592000,
+ "releases":{
+  "monitor/windows-x86_64":{"version":"0.1.0","file":"tether-monitor-0.1.0.exe","size":4200000,
+    "sha256":"<64 lowercase hex>","signature":"<base64 of the .sig>",
+    "urls":["https://{relay}/download/stable/monitor/windows-x86_64/tether-monitor-0.1.0.exe"],
+    "notes":"","mandatory":false,"minimumVersion":"","forced":false,"security":false,
+    "rollout":{"start":1795000000,"steps":[[0,1],[3600,10],[21600,50],[86400,100]]},"halted":false},
+  "monitor-packs/any":{"version":"2026.11.23","file":"monitor-packs-2026.11.23.json","…":"same fields"}}}
+```
+Publishing it: [updates.md](updates.md#device-status-agent-monitorjson-and-enrolment-tokens).
+
 ## Custom apps (branded TetherQS downloads)
 
 A custom app is a signed `tether_trust::custom::CustomProfile` (id, name, accent colour, welcome
@@ -436,3 +681,14 @@ Per-IP limits (heartbeats of new devices, audit posts, `/q/`, failed team signat
 client by its /64; an IPv4 client reported in the mapped form (`::ffff:a.b.c.d`) is counted as
 that IPv4 address. Device lists are written through a temp file, not a buffer; custom-app profiles
 stay on disk (`custom/<id>.json`). Every JSON write is temp file + rename; no database.
+
+Device status ([above](#device-status-health-reports)) is built so that it cannot starve the rest:
+a post is refused for size from `Content-Length` before its body is read (64 KiB; `STATUS=off`
+refuses before any read), and the cheap checks (header, 60 s per uuid, refused posts per uuid,
+failed signatures per IP, key lookup) come before the signature and the parse. Heartbeats touch no
+disk, apart from a device's first claim (one appended `keys.jsonl` line, once per device); a full report is written without the state lock held. `seen.json`, the team summary
+(rebuilt at most every 30 s, from a snapshot), the compaction of `keys.jsonl` and the trimming of
+history files run on a background thread or after the lock is released, so no request does work in
+proportion to the number of devices while holding it. Memory grows with the pins: each holds its
+key and a summary entry of at most 8 products and 10 faults, which is why `STATUS_MAX_DEVICES`
+defaults to 20 000, the size load-tested within `MemoryMax=64M` ([scaling.md](scaling.md)).

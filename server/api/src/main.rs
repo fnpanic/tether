@@ -13,6 +13,7 @@ mod audit;
 mod maczip;
 mod metrics;
 mod prune;
+mod status;
 mod team;
 
 use std::collections::HashMap;
@@ -335,28 +336,37 @@ struct App {
     /// Set by a handler (`App::defer`) whose file work runs after the state lock is released.
     later: Option<Later>,
     nonces: HashMap<String, u64>,
+    /// A nonce was used since `nonces.json` was last written: `serve` writes it after the state
+    /// lock is released and before the answer goes out ([`persist_nonces`]).
+    nonces_dirty: bool,
+    /// Nonces recorded since start: `serve` compares it around `route`, so only a request that
+    /// recorded one waits for `nonces.json` (an unsigned request never does).
+    nonces_used: u64,
     tickets: Vec<Ticket>,
     policy_serial: Option<u64>,
     server_keys_serial: Option<u64>,
     team: team::Team,
+    status: status::Status,
     /// Release generation G (`release-generation`).
     release_gen: u64,
     /// Per channel: serial and expiry of the stored `releases.json`.
     indexes: HashMap<String, (u64, u64)>,
     /// The same for `releases-v2.json` (release::INDEX_V2_FILE: with xz copies, for new builds).
     indexes_v2: HashMap<String, (u64, u64)>,
+    /// The same for `monitor.json` (release::MONITOR_INDEX_FILE: the device-status agent's index).
+    monitor_indexes: HashMap<String, (u64, u64)>,
     /// Devices that reported a newly staged update, by (profile, version), since start.
     downloads: std::collections::BTreeMap<(String, String), u64>,
 }
 
-/// `/download/<channel>/releases.json` (or `releases-v2.json`) → (channel, file name).
+/// `/download/<channel>/releases.json` (or `releases-v2.json`, `monitor.json`) → (channel, file name).
 fn release_index_channel(p: &str) -> Option<(&str, &str)> {
     let (ch, rest) = p.strip_prefix("/download/")?.split_once('/')?;
     (is_index_file(rest) && valid_channel(ch)).then_some((ch, rest))
 }
 
 fn is_index_file(name: &str) -> bool {
-    name == release::INDEX_FILE || name == release::INDEX_V2_FILE
+    release::index_apps(name).is_some()
 }
 
 /// Distinct (profile, version) series in the download counter; heartbeats are unauthenticated.
@@ -364,10 +374,10 @@ const MAX_DOWNLOAD_SERIES: usize = 64;
 
 /// Serial and expiry of a stored release index (verified against the key it names: it was
 /// checked against the trusted keys on upload).
-fn index_meta(raw: &[u8]) -> Option<(u64, u64)> {
+fn index_meta(raw: &[u8], name: &str) -> Option<(u64, u64)> {
     let doc: envelope::Signed = serde_json::from_slice(raw).ok()?;
     let key = tether_trust::key_from_b64(&doc.key).ok()?;
-    let i = release::Index::from_json(&envelope::open(&doc, &[key]).ok()?).ok()?;
+    let i = release::Index::from_json_for(&envelope::open(&doc, &[key]).ok()?, release::index_apps(name)?).ok()?;
     Some((i.serial, i.expires))
 }
 
@@ -558,6 +568,10 @@ fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<
             lock(app).open_ticket(&p["/api/diag/".len()..], now())?;
             (LIMIT_DIAG, 0o600, None, &DIAG_UPLOADS)
         }
+        // Status: off and size answered before the body is read.
+        ("POST" | "DELETE", "/api/status") | ("POST", "/api/status/enroll") if status::conf().off => return Err(status::off()),
+        ("POST", "/api/status") => return read_body(rq, status::LIMIT_STATUS).map(Body::Mem),
+        ("POST", "/api/status/enroll") => return read_body(rq, tether_trust::status::ENROLL_MAX as u64).map(Body::Mem),
         _ => return read_body(rq, LIMIT_PAGE).map(Body::Mem),
     };
     let _slot = UploadSlot::take(pool).ok_or_else(|| text(503, "too many uploads at once, retry later").with_header(hdr("Retry-After", "30")))?;
@@ -568,6 +582,49 @@ fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<
         *nonce = Some(with_mapped(path, |b| verify_sig(&keys, rq, "PUT", &url, b, t)).map_err(internal)??);
     }
     Ok(body)
+}
+
+/// `STATUS_TRACE_LOCK=1` (a diagnosis setting, off by default): every state-lock hold over 20 ms
+/// is logged with what held it (`lock held <ms> ms: <what>`).
+pub(crate) fn traced(what: impl FnOnce() -> String, held: Duration) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var("STATUS_TRACE_LOCK").as_deref() == Ok("1")) && held > Duration::from_millis(20) {
+        eprintln!("lock held {} ms: {}", held.as_millis(), what());
+    }
+}
+
+/// Serialises the writers of `nonces.json`: the snapshot is taken inside it, so an older snapshot
+/// never replaces a newer file.
+static NONCE_FILE: Mutex<()> = Mutex::new(());
+
+/// Writes `nonces.json` (synced, renamed) without the state lock: the lock is held only to copy the
+/// map and clear the flag. Persisted so a restart does not reopen the replay window; called before
+/// the answer, so a nonce is durable when its request is answered. A failed write (disk full) is
+/// only logged: the nonce still blocks replays in memory, and deletes that free space must work.
+fn persist_nonces(app: &Mutex<App>) {
+    let _file = NONCE_FILE.lock().unwrap_or_else(|e| e.into_inner());
+    let (snap, data) = {
+        let mut a = lock(app);
+        if !a.nonces_dirty {
+            return; // a request that came later wrote it already, with this nonce in it
+        }
+        a.nonces_dirty = false;
+        (a.nonces.clone(), a.data.clone())
+    };
+    let tmp = tmp_path(&data);
+    let r = (|| {
+        let f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut w = BufWriter::new(&f);
+        serde_json::to_writer(&mut w, &snap).map_err(io::Error::other)?;
+        w.flush()?;
+        drop(w);
+        f.sync_all()?;
+        fs::rename(&tmp, data.join("nonces.json"))
+    })();
+    if let Err(e) = r {
+        let _ = fs::remove_file(&tmp);
+        eprintln!("error: nonces.json: {e}");
+    }
 }
 
 fn lock(app: &Mutex<App>) -> MutexGuard<'_, App> {
@@ -607,11 +664,18 @@ fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
         })
     } else {
         read_request_body(app, &mut rq, data).map(|body| {
-            let (r, later) = {
+            let (r, later, nonce) = {
                 let mut a = lock(app);
+                let held = Instant::now();
+                let used = a.nonces_used;
                 let r = a.route(&mut rq, &body);
-                (r, a.later.take())
+                let out = (r, a.later.take(), a.nonces_used != used);
+                traced(|| format!("{} {}", rq.method(), rq.url().split('?').next().unwrap_or("")), held.elapsed());
+                out
             };
+            if nonce {
+                persist_nonces(app);
+            }
             match (r, later) {
                 (Ok(_), Some(f)) => f(app),
                 (r, _) => r,
@@ -792,14 +856,13 @@ impl App {
         let policy_serial = fs::read(data.join("policy.json")).ok().and_then(|b| stored_meta(&b)).map(|m| m.serial);
         let server_keys_serial = fs::read(data.join("server-keys.json")).ok().and_then(|b| stored_meta(&b)).map(|m| m.serial);
         let release_gen = fs::read_to_string(data.join("release-generation")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-        let (mut indexes, mut indexes_v2) = (HashMap::new(), HashMap::new());
+        let (mut indexes, mut indexes_v2, mut monitor_indexes) = (HashMap::new(), HashMap::new(), HashMap::new());
         for e in fs::read_dir(data.join("download"))?.flatten() {
             let ch = e.file_name().to_string_lossy().into_owned();
-            if let Some(m) = fs::read(e.path().join(release::INDEX_FILE)).ok().and_then(|b| index_meta(&b)) {
-                indexes.insert(ch.clone(), m);
-            }
-            if let Some(m) = fs::read(e.path().join(release::INDEX_V2_FILE)).ok().and_then(|b| index_meta(&b)) {
-                indexes_v2.insert(ch, m);
+            for (name, map) in [(release::INDEX_FILE, &mut indexes), (release::INDEX_V2_FILE, &mut indexes_v2), (release::MONITOR_INDEX_FILE, &mut monitor_indexes)] {
+                if let Some(m) = fs::read(e.path().join(name)).ok().and_then(|b| index_meta(&b, name)) {
+                    map.insert(ch.clone(), m);
+                }
             }
         }
         let mut custom: Vec<CustomMeta> = Vec::new();
@@ -818,18 +881,22 @@ impl App {
             audit_dev_hits: HashMap::new(),
             audit: audit::Log::open(data.join("audit"), audit_days, audit_max)?,
             team: team::Team::open(&data)?,
+            status: status::Status::open(&data),
             custom,
             later: None,
             devices: devices.into_iter().map(|d| (d.uuid.clone(), d)).collect(),
             devices_dirty: false,
             ip_hits: HashMap::new(),
             nonces: load_json(&data.join("nonces.json")),
+            nonces_dirty: false,
+            nonces_used: 0,
             tickets: load_json(&data.join("diag/tickets.json")),
             policy_serial,
             server_keys_serial,
             release_gen,
             indexes,
             indexes_v2,
+            monitor_indexes,
             downloads: Default::default(),
             started: now(),
             keys,
@@ -893,16 +960,14 @@ impl App {
             return Err(text(401, "replayed request"));
         }
         self.nonces.insert(nonce, now() + keep);
-        self.save_nonces();
+        self.nonce_used();
         Ok(())
     }
 
-    /// Persisted so a restart does not reopen the replay window. A failed save (disk full) is
-    /// only logged: the nonce still blocks replays in memory, and deletes that free space must work.
-    pub(crate) fn save_nonces(&self) {
-        if let Err(e) = self.save("nonces.json", &self.nonces) {
-            eprintln!("error: nonces.json: {e}");
-        }
+    /// A nonce was used: `nonces.json` is written before this request is answered.
+    pub(crate) fn nonce_used(&mut self) {
+        self.nonces_dirty = true;
+        self.nonces_used += 1;
     }
 
     /// The checks a release upload must pass before its body is read (the signature covers the
@@ -953,6 +1018,9 @@ impl App {
                 Ok(r.with_header(hdr("Cache-Control", "no-cache")))
             }
             ("POST", "/api/heartbeat") => self.heartbeat(rq, body),
+            ("POST", "/api/status/enroll") => self.status_enroll(rq, body),
+            ("POST", "/api/status") => self.status_post(rq, body, &url),
+            ("DELETE", "/api/status") => self.status_delete(rq, body, &url),
             ("POST", "/api/audit/conn") => self.audit_post(rq, body, "conn"),
             ("POST", "/api/audit/file") => self.audit_post(rq, body, "file"),
             ("POST", "/api/audit/alarm") => self.audit_post(rq, body, "alarm"),
@@ -1116,6 +1184,8 @@ impl App {
             ("GET", r) if r.starts_with("diag/") || r.starts_with("policy-history/") => LIMIT_SMALL,
             ("POST", r) if r.starts_with("diag/") && r.ends_with("/close") => LIMIT_SMALL,
             ("DELETE", r) if r.starts_with("diag/") => LIMIT_SMALL,
+            ("DELETE", r) if r.starts_with("status/") => LIMIT_SMALL,
+            ("POST", "status/revoke") | ("GET", "status/revoked" | "status/devices") => LIMIT_SMALL,
             _ => return Err(not_found()),
         };
         let body = body.bytes(limit)?;
@@ -1145,6 +1215,10 @@ impl App {
             ("GET", "diag") => self.list_tickets(url),
             ("POST", r) if r.starts_with("diag/") => self.close_ticket(r["diag/".len()..].strip_suffix("/close").unwrap_or_default()),
             ("DELETE", r) if r.starts_with("diag/") => self.delete_ticket(&r["diag/".len()..]),
+            ("DELETE", r) if r.starts_with("status/") => self.admin_status_delete(&r["status/".len()..], "an admin", false),
+            ("POST", "status/revoke") => self.status_revoke(body),
+            ("GET", "status/revoked") => self.status_revoked(),
+            ("GET", "status/devices") => self.status_devices(url),
             ("GET", "audit") => self.audit_read(url),
             ("GET", "releases") => self.list_releases(),
             ("GET", r) if r.starts_with("policy-history/") => {
@@ -1426,7 +1500,8 @@ impl App {
             // The signed release index: verified like a policy, serials only go up. The same
             // document again (Manage's "publish to missing relays") is accepted unchanged.
             let raw = fs::read(tmp).map_err(internal)?;
-            let ix = release::Index::open(&raw, &self.keys, &ch.0).map_err(|e| text(400, &e))?;
+            let apps = release::index_apps(&ch.1).expect("index_channel names an index file");
+            let ix = release::Index::open_for(&raw, &self.keys, &ch.0, apps).map_err(|e| text(400, &e))?;
             if let Some((cur, _)) = self.index_map(&ch.1).get(&ch.0) {
                 if ix.serial < *cur || (ix.serial == *cur && fs::read(dest).ok().as_deref() != Some(&raw[..])) {
                     return Err(text(409, "serial must be greater than the current release index's"));
@@ -1445,14 +1520,29 @@ impl App {
     }
 
     fn index_map(&self, name: &str) -> &HashMap<String, (u64, u64)> {
-        if name == release::INDEX_V2_FILE { &self.indexes_v2 } else { &self.indexes }
+        match name {
+            release::INDEX_V2_FILE => &self.indexes_v2,
+            release::MONITOR_INDEX_FILE => &self.monitor_indexes,
+            _ => &self.indexes,
+        }
     }
 
     fn index_map_mut(&mut self, name: &str) -> &mut HashMap<String, (u64, u64)> {
-        if name == release::INDEX_V2_FILE { &mut self.indexes_v2 } else { &mut self.indexes }
+        match name {
+            release::INDEX_V2_FILE => &mut self.indexes_v2,
+            release::MONITOR_INDEX_FILE => &mut self.monitor_indexes,
+            _ => &mut self.indexes,
+        }
     }
 
-    /// `download/<channel>/releases.json` (or `releases-v2.json`) → (channel, file name).
+    /// The `releases` hint of status answers: the sum of the stored `monitor.json` serials over
+    /// all channels (a status post names no channel). It changes on every upload but can also go
+    /// down (an index deleted, a relay rebuilt), so agents compare it with `!=`, never `>`.
+    fn status_releases(&self) -> u64 {
+        self.monitor_indexes.values().map(|m| m.0).sum()
+    }
+
+    /// `download/<channel>/releases.json` (or `releases-v2.json`, `monitor.json`) → (channel, file name).
     fn index_channel(&self, dest: &Path) -> Option<(String, String)> {
         let rel = dest.strip_prefix(self.data.join("download")).ok()?;
         let mut it = rel.iter();
@@ -1461,10 +1551,11 @@ impl App {
         (is_index_file(&name) && it.next().is_none()).then_some((ch, name))
     }
 
-    /// Every change of an index or a `latest.json` bumps G, written for hbbs (`release-generation`,
-    /// group-readable: hbbs's user is in group tether-api, see install.sh).
+    /// Every change of a Tether index or a `latest.json` bumps G, written for hbbs
+    /// (`release-generation`, group-readable: hbbs's user is in group tether-api, see install.sh).
+    /// `monitor.json` does not: Tether clients do not read it (its hint is [`Self::status_releases`]).
     fn bump_generation(&mut self, dest: &Path) {
-        if !dest.file_name().and_then(|n| n.to_str()).is_some_and(|n| is_index_file(n) || n == "latest.json") {
+        if !dest.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == release::INDEX_FILE || n == release::INDEX_V2_FILE || n == "latest.json") {
             return;
         }
         self.release_gen += 1;
@@ -1537,14 +1628,22 @@ impl App {
             devices_24h: active.len(),
             release_generation: self.release_gen,
             indexes: self.indexes.iter().map(|(c, (s, e))| (c.clone(), *s, *e)).collect(),
+            monitor_expires: self.monitor_indexes.iter().map(|(c, (_, e))| (c.clone(), *e)).collect(),
             by_version: metrics::top(by_version, metrics::MAX_VERSION_SERIES),
             update_states: states.into_iter().collect(),
             downloads: self.downloads.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            status_hosts: self.status_hosts(t),
         })
     }
 
     /// Periodic housekeeping: expiry, rate-limit and nonce pruning, device flush.
     fn maintain(&mut self) {
+        let held = Instant::now();
+        self.maintain_now();
+        traced(|| "maintain".into(), held.elapsed());
+    }
+
+    fn maintain_now(&mut self) {
         let t = now();
         let before = self.devices.len();
         self.devices.retain(|_, d| d.last_seen + DEVICE_TTL > t);
@@ -1555,12 +1654,9 @@ impl App {
         self.audit_dev_hits.retain(|_, (start, _)| t < *start + 60);
         self.audit.prune(t, 0);
         self.team.maintain(t);
-        let n = self.nonces.len();
+        // Pruned in memory only: the file keeps the old entries until the next write (harmless:
+        // the first maintain after a restart prunes them again).
         self.nonces.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
-        if self.nonces.len() != n {
-            let nonces = self.nonces.clone();
-            let _ = self.save("nonces.json", &nonces).map_err(internal);
-        }
         let diag = self.data.join("diag");
         let n = self.tickets.len();
         self.tickets.retain(|k| {
@@ -1575,6 +1671,8 @@ impl App {
             let _ = self.save("diag/tickets.json", &tickets).map_err(internal);
         }
         self.flush_devices();
+        // Last: it queues the status writer's tick, whose writes then do not overlap the fsyncs above.
+        self.status_maintain(t);
     }
 
     fn flush_devices(&mut self) {
@@ -1750,6 +1848,11 @@ fn main() {
         _ => d,
     };
     let (audit_days, audit_max) = (env_num("AUDIT_RETENTION_DAYS", 90), env_num("AUDIT_MAX_MB", 50).saturating_mul(1 << 20));
+    status::set_conf(status::Conf {
+        off: std::env::var("STATUS").is_ok_and(|v| v.trim() == "off"),
+        rps: env_num("STATUS_TARGET_RPS", 10).max(1),
+        max_devices: env_num("STATUS_MAX_DEVICES", 20_000) as usize,
+    });
     let mut app = App::open(data.clone(), keys, audit_days, audit_max).unwrap_or_else(|e| {
         eprintln!("data dir: {e}");
         std::process::exit(1);
@@ -1768,6 +1871,7 @@ fn main() {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
     }
     let app = Arc::new(Mutex::new(app));
+    status::start_writer(&app);
     let data = Arc::new(data);
     let busy = Arc::new(AtomicUsize::new(0));
     let mut last_maint = now();
@@ -1803,4 +1907,5 @@ fn main() {
         std::thread::sleep(Duration::from_millis(50));
     }
     lock(&app).flush_devices();
+    status::flush_at_exit(&app);
 }

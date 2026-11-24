@@ -106,6 +106,39 @@ Audit volume: ~7 records/s × ~450 B ≈ 120 MB per busy day, so the default `AU
 less than a day. For 90 days set `AUDIT_MAX_MB=12000` in `/etc/tether/api.env` (12 GB disk;
 the admin audit view reads files linearly, so keep `since` narrow).
 
+Device status (`/api/status`): the relay paces devices to `STATUS_TARGET_RPS` (10 posts/s) by
+the `next` it answers. `tools/load/status-run.sh` (same PC as below): 20 000 devices with 4
+products and 3 faults each (every 20th: 8 and 10), posting at that pace for 10 min with 5 % full
+reports, 2 new enrolments per second for 5 min, the team summary (member-signed) every 30 s and
+`/metrics` every 15 s (*measured*, 2026-11-24, after `nonces.json` moved out of the state lock):
+
+| | baseline p50 / p99 / p99.9 / max | during the run p50 / p99 / p99.9 / max |
+|---|---|---|
+| `POST /api/heartbeat` | 0.42 / 0.83 / 1.08 / 7.4 ms | 0.42 / 0.85 / 3.44 / 13.7 ms |
+| `GET /api/policy` | 0.41 / 0.80 / 1.27 / 7.4 ms | 0.42 / 0.84 / 3.09 / 16.2 ms |
+
+6 044 status posts, all 200 (no 429); 600 enrolments, all 200; no 5xx. All criteria passed,
+including "no request slower than 50 ms". With `SELF_CHECK=1` the generator reports its own
+pauses (a 1 ms sleep woke up at most 2.9 ms late during the run), and with `STATUS_TRACE_LOCK=1`
+tether-api logs every state-lock hold over 20 ms: none in this run. tether-api RSS: 30.6 MiB
+right after start with the 20 000 pins, 32.2 MiB after the warm-up (the reference), 34.2 MiB at
+the end and at the peak. The run before (2026-11-23) failed the 50 ms limit (117.7 ms): every
+member- or admin-signed request then wrote and fsynced `nonces.json` under the state lock; it is
+now written after the lock is released, before the answer.
+
+Disk writes of the status store at 20 000 devices: `seen.json` (about 22 MB, *estimated* from the
+entry sizes) is rewritten at most every 5 minutes, about 6 GB a day; a hard kill loses at most 5
+minutes of last-seen times (a stop by systemd flushes it). Summary entries are capped at 2 KiB.
+
+Pre-existing, independent of device status: `maintain` writes and fsyncs `devices.json` (the
+Tether heartbeat list, about 1.4 MB per 10 000 devices, *measured* above) under the state lock
+once a minute when it changed. That hold grows with the fleet (*not measured* at 50 000; a few
+to some tens of ms *estimated*). Follow-up: flush it from a snapshot outside the lock, as
+`seen.json` is. The
+default `STATUS_MAX_DEVICES` is 20 000, the size tested within `MemoryMax=64M`; for more devices
+allow about 1.5 MiB per 1 000 devices above that (for example 50 000 devices: `MemoryMax=128M`,
+*not measured*).
+
 Releases: a 35 MB update to all 10 000 devices is 350 GB, normally spread over
 `update.check-hours` (6 h: 130 Mbit/s). A **forced** update or a policy change makes every device
 check within its 15-minute policy cycle: 350 GB in 15 min would need 3.1 Gbit/s, so one 1 Gbit

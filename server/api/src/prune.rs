@@ -78,19 +78,22 @@ pub fn scan(download: &Path) -> BTreeMap<(String, String), Vec<DirFile>> {
 
 /// The stored index, verified against the key it names (it was checked against the trusted keys
 /// on upload; an index from a rotated-out key still protects what it names). `Err`: unreadable.
-fn stored_index(raw: &[u8]) -> Result<release::Index, ()> {
+fn stored_index(raw: &[u8], apps: &[&str]) -> Result<release::Index, ()> {
     let doc: envelope::Signed = serde_json::from_slice(raw).map_err(drop)?;
     let key = tether_trust::key_from_b64(&doc.key).map_err(drop)?;
-    release::Index::from_json(&envelope::open(&doc, &[key]).map_err(drop)?).map_err(drop)
+    release::Index::from_json_for(&envelope::open(&doc, &[key]).map_err(drop)?, apps).map_err(drop)
 }
 
-/// What publishes a folder now. `Err`: a `releases.json` or `latest.json` that cannot be read, so
-/// what it publishes is unknown and nothing in the folder may go.
+/// What publishes a folder now: `monitor.json` for the monitor apps, `releases.json` for the
+/// others. `Err`: an index or `latest.json` that cannot be read, so what it publishes is unknown
+/// and nothing in the folder may go.
 fn published(download: &Path, channel: &str, dir: &str) -> Result<(Protect, Option<u64>), ()> {
     let mut p = Protect::default();
     let mut serial = None;
-    if let Ok(raw) = fs::read(download.join(channel).join("releases.json")) {
-        let ix = stored_index(&raw)?;
+    let app = dir.split('/').next().unwrap_or_default();
+    let file = if release::MONITOR_APPS.contains(&app) { release::MONITOR_INDEX_FILE } else { release::INDEX_FILE };
+    if let Ok(raw) = fs::read(download.join(channel).join(file)) {
+        let ix = stored_index(&raw, release::index_apps(file).unwrap_or_default())?;
         serial = Some(ix.serial);
         p.index = ix.releases.get(dir).map(|e| e.version.clone());
     }
@@ -188,7 +191,7 @@ impl App {
         Ok(json(&out))
     }
 
-    /// `DELETE /api/admin/release/<channel>/<path>`: 409 for `releases.json`, any `latest.json` and
+    /// `DELETE /api/admin/release/<channel>/<path>`: 409 for the indexes, any `latest.json` and
     /// every file of a version the index or `latest.json` publishes, unless `?force=1`.
     pub(crate) fn delete_guarded(&mut self, dest: &Path, url: &str) -> Result<Resp, Resp> {
         let force = url.split_once('?').is_some_and(|(_, q)| q.split('&').any(|kv| kv == "force=1"));
@@ -212,7 +215,7 @@ impl App {
     fn published_file(&self, download: &Path, rel: &str) -> Option<String> {
         let parts: Vec<&str> = rel.split('/').collect();
         let name = *parts.last()?;
-        if name == release::INDEX_FILE || name == release::INDEX_V2_FILE || name == "latest.json" {
+        if release::index_apps(name).is_some() || name == "latest.json" {
             return Some(format!("{rel} is what devices read"));
         }
         let [channel, app, platform, file] = parts[..] else { return None };

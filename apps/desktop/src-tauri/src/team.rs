@@ -2,6 +2,9 @@
 //! `/api/team/*` once an admin has added its public key to the team roster in Tether Manage.
 //! The private key never leaves this file and this process; the webview only sees the public half.
 
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
 use hbb_common::config::Config;
 use serde_json::Value;
 use tether_trust::{reqauth, SigningKey};
@@ -11,6 +14,9 @@ type R<T> = Result<T, String>;
 const DEVICES_MAX: usize = 4 * 1024 * 1024;
 const TAGS_MAX: usize = 1024 * 1024;
 const AUDIT_MAX: usize = 2 * 1024 * 1024;
+const STATUS_MAX: usize = 16 << 20;
+/// One report (≤ 64 KiB) plus 90 days of history.
+const REPORT_MAX: usize = 1 << 20;
 /// The relay refuses larger tag documents (docs/api.md, team endpoints).
 pub const TAGS_PUT_MAX: usize = 512 * 1024;
 
@@ -97,6 +103,13 @@ fn now() -> u64 {
 }
 
 /// Readable answer for the UI; `offline:`-prefixed when no relay was reached.
+/// Only a real "no" forgets a relay's health list: membership gone (401, 403), no health
+/// support (404) or reporting switched off. Anything else may pass, and the hosts must not
+/// flip to "no agent" (and back, with a burst of notifications) because of it.
+fn status_drops_cache(code: u16, body: &[u8]) -> bool {
+    matches!(code, 401 | 403 | 404) || (code == 503 && body.starts_with(b"status reporting is off"))
+}
+
 fn status_error(code: u16, body: &str) -> String {
     match code {
         // Requests are signed for one relay (v2). A relay from before that, or one that does not
@@ -107,30 +120,39 @@ fn status_error(code: u16, body: &str) -> String {
         403 => "Your team membership does not allow this.".into(),
         404 => "unsupported: The server does not offer team access yet.".into(),
         413 => "The shared tags are too large for the server (512 KB).".into(),
+        409 => format!("Refused by the server: {}", body.chars().take(200).collect::<String>()),
+        503 if body.starts_with("status reporting is off") => "off: Health reporting is switched off on this server.".into(),
         429 => "Too many requests; try again in a minute.".into(),
         _ => format!("The server answered {code}: {}", body.chars().take(200).collect::<String>()),
     }
 }
 
-/// One signed request. `path` includes the query string (it is part of the signature).
-fn call(method: &str, path: &str, body: Option<&[u8]>, if_match: Option<u64>, limit: usize) -> R<(u16, Vec<u8>)> {
+/// One signed request to the first reachable relay, or to the first reachable of `hosts`.
+/// `path` includes the query string (it is part of the signature). Answers status, ETag, body.
+fn call_via(hosts: Option<&[String]>, method: &str, path: &str, body: Option<&[u8]>, headers: &[(&str, String)], limit: usize) -> R<(u16, Option<String>, Vec<u8>)> {
     let k = key()?;
     let body = body.unwrap_or_default().to_vec();
-    let r = crate::policy::api(|c, base| {
+    let build = |c: &reqwest::blocking::Client, base: &str| {
         // A fresh signature (and nonce) per attempt: the relay rejects a replayed one, and each
         // is made for the relay it goes to.
         let sig = reqauth::sign_request_for(&k, base, method, path, &body, now());
         let url = format!("{base}{path}");
-        let rq = if method == "PUT" { c.put(url).header("Content-Type", "application/json").body(body.clone()) } else { c.get(url) };
-        let rq = rq.header(reqauth::HEADER, sig);
-        match if_match {
-            Some(rev) => rq.header("If-Match", rev.to_string()),
-            None => rq,
-        }
-    })?;
+        let rq = c.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET), url);
+        let rq = if body.is_empty() { rq } else { rq.header("Content-Type", "application/json").body(body.clone()) };
+        headers.iter().fold(rq.header(reqauth::HEADER, sig), |rq, (n, v)| rq.header(*n, v))
+    };
+    let r = match hosts {
+        Some(h) => crate::policy::api_via(h, build),
+        None => crate::policy::api(build),
+    }?;
     let code = r.status().as_u16();
+    let etag = r.headers().get("ETag").and_then(|v| v.to_str().ok()).map(str::to_owned);
     let raw = tether_trust::read_limited(r, limit)?;
-    Ok((code, raw))
+    Ok((code, etag, raw))
+}
+
+fn call(method: &str, path: &str, body: Option<&[u8]>, headers: &[(&str, String)], limit: usize) -> R<(u16, Vec<u8>)> {
+    call_via(None, method, path, body, headers, limit).map(|(c, _, b)| (c, b))
 }
 
 fn json_ok(code: u16, raw: &[u8]) -> R<Value> {
@@ -141,17 +163,17 @@ fn json_ok(code: u16, raw: &[u8]) -> R<Value> {
 }
 
 pub fn me() -> R<Value> {
-    let (c, b) = call("GET", "/api/team/me", None, None, 4096)?;
+    let (c, b) = call("GET", "/api/team/me", None, &[], 4096)?;
     json_ok(c, &b)
 }
 
 pub fn devices() -> R<Value> {
-    let (c, b) = call("GET", "/api/team/devices", None, None, DEVICES_MAX)?;
+    let (c, b) = call("GET", "/api/team/devices", None, &[], DEVICES_MAX)?;
     json_ok(c, &b)
 }
 
 pub fn tags_get() -> R<Value> {
-    let (c, b) = call("GET", "/api/team/tags", None, None, TAGS_MAX)?;
+    let (c, b) = call("GET", "/api/team/tags", None, &[], TAGS_MAX)?;
     json_ok(c, &b)
 }
 
@@ -164,7 +186,7 @@ pub fn tags_put(rev: u64, doc: &str) -> R<Value> {
     if !matches!(serde_json::from_str::<Value>(doc), Ok(Value::Object(_))) {
         return Err("invalid tag document".into());
     }
-    let (c, b) = call("PUT", "/api/team/tags", Some(doc.as_bytes()), Some(rev), TAGS_MAX)?;
+    let (c, b) = call("PUT", "/api/team/tags", Some(doc.as_bytes()), &[("If-Match", rev.to_string())], TAGS_MAX)?;
     match c {
         409 => Ok(serde_json::json!({ "ok": false, "conflict": json_ok(200, &b)? })),
         _ => {
@@ -176,8 +198,166 @@ pub fn tags_put(rev: u64, doc: &str) -> R<Value> {
 
 pub fn audit(device: &str, since: u64) -> R<Value> {
     crate::security::check_peer_id(device)?;
-    let (c, b) = call("GET", &format!("/api/team/audit?device={device}&since={since}&limit=200"), None, None, AUDIT_MAX)?;
+    let (c, b) = call("GET", &format!("/api/team/audit?device={device}&since={since}&limit=200"), None, &[], AUDIT_MAX)?;
     json_ok(c, &b)
+}
+
+/// Each relay's last health summary answer (`{built, hosts}`) and its ETag ("" = none sent).
+/// `Arc`: a 304 and the copy kept here share one value.
+static STATUS_CACHE: Mutex<BTreeMap<String, (String, Arc<Value>)>> = Mutex::new(BTreeMap::new());
+
+/// Health is kept per relay (docs/api.md): every relay is asked.
+/// `[{"relay","hosts":[…]} | {"relay","error"} | {"relay","hosts","error"}]`; the last form is a relay
+/// that could not be reached, with its last answer. Err only when every relay failed.
+pub fn status() -> R<Value> {
+    let relays: Vec<String> = crate::policy::relay_bases().into_iter().map(|(h, _)| h).collect();
+    status_with(&relays, &STATUS_CACHE, |relay, inm| call_via(Some(&[relay.to_owned()]), "GET", "/api/team/status", None, inm, STATUS_MAX))
+}
+
+/// [`status`] with the relays, the cache and the signed request given (tests: a stand-in answer).
+fn status_with(relays: &[String], cache: &Mutex<BTreeMap<String, (String, Arc<Value>)>>, call: impl Fn(&str, &[(&str, String)]) -> R<(u16, Option<String>, Vec<u8>)>) -> R<Value> {
+    let mut out = Vec::new();
+    let mut first_err = None;
+    let mut all_failed = true;
+    for relay in relays.iter().cloned() {
+        let cached = cache.lock().unwrap().get(&relay).cloned();
+        let inm: Vec<(&str, String)> = cached.iter().filter(|(e, _)| !e.is_empty()).map(|(e, _)| ("If-None-Match", e.clone())).collect();
+        let hosts = |v: &Value| v.get("hosts").cloned().unwrap_or_else(|| Value::Array(vec![]));
+        let entry = match call(&relay, &inm) {
+            Ok((304, _, _)) if cached.is_some() => Ok(cached.as_ref().unwrap().1.clone()),
+            Ok((c, etag, raw)) => {
+                let v = json_ok(c, &raw).map(Arc::new);
+                let mut cache = cache.lock().unwrap();
+                match &v {
+                    Ok(v) => {
+                        cache.insert(relay.clone(), (etag.unwrap_or_default(), v.clone()));
+                    }
+                    // The relay answered no (off, membership gone): its old data is not shown any more.
+                    Err(_) if status_drops_cache(c, &raw) => {
+                        cache.remove(&relay);
+                    }
+                    // A passing failure (5xx, 429, 408, a garbled answer): handled as not reached below.
+                    Err(_) => {}
+                }
+                v
+            }
+            Err(e) => Err(e),
+        };
+        // Not reached, or a passing failure (cache kept above): its last answer stays in the list,
+        // with the error beside it.
+        if let (Err(e), Some((_, v))) = (&entry, &cached) {
+            if cache.lock().unwrap().contains_key(&relay) {
+                first_err.get_or_insert_with(|| e.clone());
+                out.push(serde_json::json!({ "relay": relay, "hosts": hosts(v), "error": e }));
+                all_failed = false;
+                continue;
+            }
+        }
+        out.push(match entry {
+            Ok(v) => {
+                all_failed = false;
+                serde_json::json!({ "relay": relay, "hosts": hosts(&v) })
+            }
+            Err(e) => {
+                first_err.get_or_insert_with(|| e.clone());
+                serde_json::json!({ "relay": relay, "error": e })
+            }
+        });
+    }
+    match first_err {
+        Some(e) if all_failed => Err(e),
+        _ if out.is_empty() => Err("offline: no server compiled into this build".into()),
+        _ => Ok(Value::Array(out)),
+    }
+}
+
+/// One host's last report and history from `relay` (one of this build's relays).
+pub fn status_host(relay: &str, uuid: &str) -> R<Value> {
+    if !tether_trust::status::valid_uuid(uuid) {
+        return Err("invalid host id".into());
+    }
+    // The webview names the relay: signed requests go only to this build's own relays.
+    if !crate::policy::relay_bases().iter().any(|(h, _)| h == relay) {
+        return Err("unknown server".into());
+    }
+    let (c, _, b) = call_via(Some(&[relay.to_owned()]), "GET", &format!("/api/team/status/{uuid}"), None, &[], REPORT_MAX)?;
+    json_ok(c, &b)
+}
+
+/// Changes one health device on every relay of this build: pins (and so links) are kept per relay,
+/// and the host list shows the newest summary of any of them. A relay that does not know the device
+/// (404) is skipped. Err names each relay that refused or could not be reached.
+fn status_change(method: &str, uuid: &str, suffix: &str, body: Option<&[u8]>) -> R<()> {
+    if !tether_trust::status::valid_uuid(uuid) {
+        return Err("invalid host id".into());
+    }
+    let (mut done, mut errs) = (false, Vec::new());
+    for (relay, _) in crate::policy::relay_bases() {
+        match call_via(Some(std::slice::from_ref(&relay)), method, &format!("/api/team/status/{uuid}{suffix}"), body, &[], 4096) {
+            Ok((c, _, _)) if (200..300).contains(&c) => done = true,
+            Ok((404, _, _)) => {}
+            Ok((c, _, b)) => errs.push(format!("{relay}: {}", status_error(c, &String::from_utf8_lossy(&b)))),
+            Err(e) => errs.push(format!("{relay}: {e}")),
+        }
+    }
+    match (done, errs.is_empty()) {
+        (_, false) => Err(errs.join(" · ")),
+        (false, true) => Err("No server knows this agent any more.".into()),
+        (true, true) => Ok(()),
+    }
+}
+
+/// Confirms an agent's claim to `tether_id` (a member with write; the relay checks the claim).
+pub fn status_link(uuid: &str, tether_id: &str) -> R<()> {
+    if !tether_trust::status::valid_uuid(uuid) {
+        return Err("invalid host id".into());
+    }
+    if !tether_trust::status::valid_tether_id(tether_id) || tether_id.starts_with("m:") {
+        return Err("invalid Tether ID".into());
+    }
+    let body = serde_json::json!({ "tether_id": tether_id }).to_string();
+    status_change("POST", uuid, "/link", Some(body.as_bytes()))
+}
+
+/// Removes an agent's link or claim.
+pub fn status_unlink(uuid: &str) -> R<()> {
+    status_change("DELETE", uuid, "/link", None)
+}
+
+/// After an Unlink: lets the agent claim a Tether ID again (still only a claim).
+pub fn status_allow_claim(uuid: &str) -> R<()> {
+    status_change("POST", uuid, "/allow-claim", None)
+}
+
+/// Removes an agent from health monitoring: pin, link or claim, and its stored reports.
+pub fn status_remove(uuid: &str) -> R<()> {
+    status_change("DELETE", uuid, "", None)
+}
+
+/// The cached summary entries linked to a Tether ID, one per device (its newest over all relays,
+/// with `relay`); no request. Two or more: a link conflict, for which no device's health is shown.
+pub fn status_find(tether_id: &str) -> Vec<Value> {
+    find_in(&STATUS_CACHE.lock().unwrap(), tether_id)
+}
+
+fn find_in(cache: &BTreeMap<String, (String, Arc<Value>)>, tether_id: &str) -> Vec<Value> {
+    let seen = |x: &Value| x.get("last_seen").and_then(Value::as_u64).unwrap_or(0);
+    let mut by: BTreeMap<String, Value> = BTreeMap::new();
+    for (relay, (_, v)) in cache {
+        for h in v.get("hosts").and_then(Value::as_array).into_iter().flatten() {
+            if h.get("tether_id").and_then(Value::as_str) != Some(tether_id) {
+                continue;
+            }
+            let uuid = h.get("uuid").and_then(Value::as_str).unwrap_or_default().to_owned();
+            // On a tie the first relay in name order, as the host list (health.ts mergeStatus).
+            if by.get(&uuid).is_none_or(|b| seen(h) > seen(b)) {
+                let mut h = h.clone();
+                h["relay"] = Value::from(relay.as_str());
+                by.insert(uuid, h);
+            }
+        }
+    }
+    by.into_values().collect()
 }
 
 #[cfg(test)]
@@ -235,5 +415,83 @@ mod tests {
         }
         assert!(status_error(404, "").starts_with("unsupported:"));
         assert!(status_error(500, &"x".repeat(1000)).len() < 260);
+    }
+
+    #[test]
+    fn link_inputs_are_checked_before_any_request() {
+        for uuid in ["bad uuid!", "short", "../../api/admin/status"] {
+            assert_eq!(status_link(uuid, "123456789").unwrap_err(), "invalid host id");
+            assert_eq!(status_unlink(uuid).unwrap_err(), "invalid host id");
+            assert_eq!(status_remove(uuid).unwrap_err(), "invalid host id");
+            assert_eq!(status_allow_claim(uuid).unwrap_err(), "invalid host id");
+        }
+        for id in ["", "a b", "m:dev-0001", &"1".repeat(33)] {
+            assert_eq!(status_link("dev-0001", id).unwrap_err(), "invalid Tether ID", "{id:?}");
+        }
+    }
+
+    fn cache_of(entries: &[(&str, Value)]) -> BTreeMap<String, (String, Arc<Value>)> {
+        entries.iter().map(|(r, v)| (r.to_string(), (String::new(), Arc::new(v.clone())))).collect()
+    }
+
+    #[test]
+    fn a_session_finds_every_device_linked_to_its_peer() {
+        let h = |uuid: &str, id: &str, seen: u64| serde_json::json!({"uuid": uuid, "tether_id": id, "last_seen": seen});
+        // One device on two relays: its newest entry, with the relay it came from.
+        let c = cache_of(&[("a", serde_json::json!({"hosts": [h("u1", "111", 5), h("u9", "999", 1)]})), ("b", serde_json::json!({"hosts": [h("u1", "111", 7)]}))]);
+        let found = find_in(&c, "111");
+        assert_eq!((found.len(), &found[0]["relay"], &found[0]["last_seen"]), (1, &Value::from("b"), &Value::from(7)));
+        // Two devices linked to one ID on different relays: both (a conflict, no health shown).
+        let c = cache_of(&[("a", serde_json::json!({"hosts": [h("u1", "111", 5)]})), ("b", serde_json::json!({"hosts": [h("u2", "111", 9)]}))]);
+        assert_eq!(find_in(&c, "111").iter().map(|x| x["uuid"].as_str().unwrap()).collect::<Vec<_>>(), ["u1", "u2"]);
+        assert!(find_in(&c, "222").is_empty());
+    }
+
+    #[test]
+    fn the_summary_cache_reuses_its_etag_and_is_dropped_only_on_a_real_no() {
+        let relays = vec!["a".to_owned()];
+        let cache = Mutex::new(BTreeMap::new());
+        let body = br#"{"built":1,"hosts":[{"uuid":"u1","tether_id":"111"}]}"#.to_vec();
+        let sent = Mutex::new(Vec::new());
+        let ask = |answer: Result<(u16, Option<String>, Vec<u8>), String>| {
+            status_with(&relays, &cache, |relay, h| {
+                assert_eq!(relay, "a");
+                sent.lock().unwrap().push(h.iter().find(|(n, _)| *n == "If-None-Match").map(|(_, v)| v.clone()));
+                answer.clone()
+            })
+        };
+        let hosts = |v: &Value| v[0]["hosts"][0]["uuid"].clone();
+        let r = ask(Ok((200, Some("\"e1\"".into()), body.clone()))).unwrap();
+        assert_eq!((hosts(&r), r[0].get("error")), (Value::from("u1"), None));
+        // Unchanged: a 304 to the tag sent, the cached hosts.
+        let r = ask(Ok((304, Some("\"e1\"".into()), vec![]))).unwrap();
+        assert_eq!((hosts(&r), sent.lock().unwrap().last().cloned().flatten()), (Value::from("u1"), Some("\"e1\"".to_owned())));
+        // Passing failures keep the cache: the hosts stay, with the error beside them.
+        for a in [Ok((500, None, b"oops".to_vec())), Ok((503, None, b"busy".to_vec())), Ok((429, None, vec![])), Ok((408, None, vec![])), Err("offline: timed out".to_owned())] {
+            let r = ask(a.clone()).unwrap();
+            assert_eq!(hosts(&r), Value::from("u1"), "{a:?}");
+            assert!(r[0]["error"].is_string(), "{a:?}");
+        }
+        assert_eq!(sent.lock().unwrap().last().cloned().flatten(), Some("\"e1\"".to_owned()), "the tag is still sent");
+        // A real no (membership gone, no health support, reporting off): the cache goes.
+        for a in [(401, b"unknown member".to_vec()), (403, vec![]), (404, vec![]), (503, b"status reporting is off".to_vec())] {
+            ask(Ok((200, Some("\"e2\"".into()), body.clone()))).unwrap();
+            assert!(ask(Ok((a.0, None, a.1.clone()))).is_err(), "{a:?}");
+            assert!(cache.lock().unwrap().is_empty(), "{a:?}");
+            assert!(ask(Ok((500, None, vec![]))).is_err(), "nothing cached to show: {a:?}");
+            assert_eq!(sent.lock().unwrap().last().cloned().flatten(), None, "no tag after a drop: {a:?}");
+        }
+    }
+
+    #[test]
+    fn status_errors_are_classified() {
+        assert!(status_error(503, "status reporting is off").starts_with("off:"));
+        assert!(!status_error(503, "busy").starts_with("off:"));
+        for (code, body) in [(401, "unknown member"), (403, "x"), (404, "not found"), (503, "status reporting is off")] {
+            assert!(status_drops_cache(code, body.as_bytes()), "{code} {body}");
+        }
+        for (code, body) in [(500, "oops"), (502, ""), (503, "busy"), (429, "too many requests"), (408, ""), (200, "not json")] {
+            assert!(!status_drops_cache(code, body.as_bytes()), "{code} {body}");
+        }
     }
 }

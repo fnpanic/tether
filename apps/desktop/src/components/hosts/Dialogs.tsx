@@ -4,7 +4,7 @@ import { Copy, Keyboard, Lock, Plus, Power, RefreshCw, Trash2, Users } from "luc
 import { Button, IconButton, Modal, Segmented, TextField, Toggle } from "../ui";
 import { formatId, inTauri, invoke } from "../../lib/ipc";
 import { label, newId, normTag, TAG_COLORS, tagColor, type Host, type Store, type TagColor } from "../../lib/hosts/model";
-import { exportCsv, exportJson, mergeImport, parseImport, type Imported } from "../../lib/hosts/io";
+import { exportCsv, exportFaultsCsv, exportJson, mergeImport, parseImport, type Imported } from "../../lib/hosts/io";
 import { parse, search } from "../../lib/hosts/query";
 import { actions, teamSync, useHosts, useReadOnly } from "../../lib/hosts/store";
 import { errorText } from "../../lib/policy";
@@ -108,8 +108,9 @@ export function Rules({ hosts, store, onClose }: { hosts: Host[]; store: Store; 
   const [tag, setTag] = useState("");
   const [when, setWhen] = useState("");
   const ro = useReadOnly();
-  const p = useMemo(() => parse(when), [when]);
-  const n = useMemo(() => (p.node ? search(hosts, p).length : 0), [hosts, p]);
+  // As a rule reads it: health terms are plain words there (older desktops of the team read them so).
+  const p = useMemo(() => parse(when, true), [when]);
+  const n = useMemo(() => (p.node ? search(hosts, p, undefined, true).length : 0), [hosts, p]);
   const add = () => {
     const t = normTag(tag);
     if (!t || !p.node) return;
@@ -160,6 +161,7 @@ export function Rules({ hosts, store, onClose }: { hosts: Host[]; store: Store; 
           <Plus size={15} /> Add rule
         </Button>
       </form>
+      <div className="mt-2 text-footnote text-muted">Health terms (health:, product:, role: …) are not available in rules: there they are plain words. Use them in the search box or a saved search.</div>
       <div className="mt-4 flex justify-end">
         <Button variant="pearl" onClick={onClose}>
           Close
@@ -180,16 +182,38 @@ async function saveFile(name: string, content: string, type: string): Promise<bo
   return true;
 }
 
-export function Export({ store, selection, onClose, onToast }: { store: Store; selection: string[]; onClose: () => void; onToast: (m: string) => void }) {
-  const [fmt, setFmt] = useState<"json" | "csv">("json");
-  const [scope, setScope] = useState<"all" | "sel">(selection.length > 1 ? "sel" : "all");
+export function Export({
+  store,
+  selection,
+  shown = [],
+  hosts,
+  health = false,
+  onClose,
+  onToast,
+}: {
+  store: Store;
+  selection: string[];
+  /** The rows of the current search, in list order. */
+  shown?: Host[];
+  hosts?: Map<string, Host>;
+  /** Health data exists: health fields and the failing-checks CSV are offered. */
+  health?: boolean;
+  onClose: () => void;
+  onToast: (m: string) => void;
+}) {
+  const [fmt, setFmt] = useState<"json" | "csv" | "faults">("json");
+  // With health data, "All with tags or names" would silently leave out agent-only and untagged rows.
+  const [scope, setScope] = useState<"all" | "shown" | "sel">(selection.length > 1 ? "sel" : health ? "shown" : "all");
   const [notes, setNotes] = useState(false);
   const go = async () => {
-    const o = { notes, ids: scope === "sel" ? selection : undefined };
-    const content = fmt === "json" ? exportJson(store, o) : exportCsv(store, o);
+    const ids = scope === "sel" ? selection : scope === "shown" ? shown.map((h) => h.id) : undefined;
+    const o = { notes, ids, hosts: health ? hosts : undefined };
+    // Failing checks: "All" means every host with health data, not only those with tags or names.
+    const list = ids ? ids.map((id) => hosts?.get(id)).filter((h): h is Host => !!h) : [...(hosts?.values() ?? [])];
+    const content = fmt === "json" ? exportJson(store, o) : fmt === "csv" ? exportCsv(store, o) : exportFaultsCsv(list);
     const day = new Date().toISOString().slice(0, 10);
     try {
-      if (await saveFile(`tether-hosts-${day}.${fmt}`, content, fmt === "json" ? "application/json" : "text/csv")) {
+      if (await saveFile(fmt === "faults" ? `tether-health-faults-${day}.csv` : `tether-hosts-${day}.${fmt}`, content, fmt === "json" ? "application/json" : "text/csv")) {
         onToast("Hosts exported");
         onClose();
       }
@@ -198,24 +222,36 @@ export function Export({ store, selection, onClose, onToast }: { store: Store; s
     }
   };
   return (
-    <Modal onClose={onClose} width={460}>
+    <Modal onClose={onClose} width={580}>
       <H>Export hosts</H>
-      <P>Names, tags, pins, tag colours, rules and saved searches. Passwords are never part of the host list.</P>
+      <P>Names, tags, pins, tag colours, rules and saved searches{health ? ", and each host's health: state, counts, products, agent and last report" : ""}. Passwords are never part of the host list.</P>
       <div className="mt-5 space-y-4">
         <div className="flex items-center justify-between">
           <span className="text-caption">Format</span>
-          <Segmented value={fmt} onChange={setFmt} options={[{ value: "json", label: "JSON (everything)" }, { value: "csv", label: "CSV (spreadsheet)" }]} />
+          <Segmented
+            value={fmt}
+            onChange={setFmt}
+            options={[{ value: "json", label: "JSON (everything)" }, { value: "csv", label: "CSV (spreadsheet)" }, ...(health ? [{ value: "faults" as const, label: "Failing checks (CSV)" }] : [])]}
+          />
         </div>
         <div className="flex items-center justify-between">
           <span className="text-caption">Hosts</span>
-          <Segmented value={scope} onChange={setScope} options={[{ value: "all", label: "All with tags or names" }, ...(selection.length ? [{ value: "sel" as const, label: `Selected (${selection.length.toLocaleString()})` }] : [])]} />
+          <Segmented
+            value={scope}
+            onChange={setScope}
+            options={[
+              { value: "all", label: fmt === "faults" ? "All" : "All with tags or names" },
+              { value: "shown" as const, label: `Shown (${shown.length.toLocaleString()})` },
+              ...(selection.length ? [{ value: "sel" as const, label: `Selected (${selection.length.toLocaleString()})` }] : []),
+            ]}
+          />
         </div>
         <div className="flex items-center justify-between gap-4">
           <div>
             <div className="text-caption">Include notes</div>
             <div className="text-footnote text-muted">Notes can contain customer details. Off by default.</div>
           </div>
-          <Toggle label="Include notes" checked={notes} onChange={setNotes} />
+          <Toggle label="Include notes" checked={notes && fmt !== "faults"} disabled={fmt === "faults"} onChange={setNotes} />
         </div>
       </div>
       <div className="mt-7 flex justify-end gap-2">
@@ -358,6 +394,13 @@ export function Team({ onClose, onToast }: { onClose: () => void; onToast: (m: s
               else useHosts.setState({ org: [] });
             }}
           />
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <div className="text-caption">Notify me when a host turns critical or stops reporting</div>
+            <div className="text-footnote text-muted">Windows only. At most once an hour per host, while the host list is open. Only on this PC.</div>
+          </div>
+          <Toggle label="Notify me when a host turns critical or stops reporting" disabled={!cfg?.enabled} checked={!!cfg?.enabled && cfg.healthNotify !== false} onChange={(v) => actions.setTeam({ healthNotify: v })} />
         </div>
       </div>
       <div className="mt-7 flex justify-end gap-2">
@@ -560,6 +603,11 @@ const SYNTAX: [string, string][] = [
   ["ver:<0.5.21  ver:0.5", "Version (compare or prefix)"],
   ["seen:<7d  seen:>30d", "Last activity (m, h, d, w)"],
   ["has:notes  has:tags  has:name", "Has a value"],
+  ["health:crit  health:stale  health:none", "Health: crit, warn, stale, setup, ok, none (no monitor agent), conflict (two devices linked to one host)"],
+  ["product:records  version:26.3  role:server", "Detected products, version prefix, role (server, client, single)"],
+  ["check:backup", "A check whose id contains the text is not OK"],
+  ["agent:0.1  agent:none", "Monitor agent version"],
+  ["since:3d", "Not OK for at least that long (m, h, d, w). Health terms are plain words in tag rules"],
 ];
 
 export function Help({ onClose }: { onClose: () => void }) {

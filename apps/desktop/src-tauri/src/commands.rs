@@ -751,6 +751,14 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         team_tags_get,
         team_tags_put,
         team_audit,
+        team_status,
+        team_status_host,
+        team_status_find,
+        team_status_link,
+        team_status_unlink,
+        team_status_remove,
+        team_status_allow_claim,
+        health_notify,
     ]
 }
 
@@ -844,6 +852,70 @@ async fn team_tags_put(window: tauri::WebviewWindow, rev: u64, doc: String) -> R
 #[tauri::command]
 async fn team_audit(device: String, since: u64) -> R<Value> {
     blocking(move || team::audit(&device, since)).await?
+}
+
+#[tauri::command]
+async fn team_status() -> R<Value> {
+    blocking(team::status).await?
+}
+
+#[tauri::command]
+async fn team_status_host(relay: String, uuid: String) -> R<Value> {
+    blocking(move || team::status_host(&relay, &uuid)).await?
+}
+
+#[tauri::command]
+async fn team_status_link(window: tauri::WebviewWindow, uuid: String, tether_id: String) -> R<()> {
+    main_only(&window)?;
+    blocking(move || team::status_link(&uuid, &tether_id)).await?
+}
+
+#[tauri::command]
+async fn team_status_unlink(window: tauri::WebviewWindow, uuid: String) -> R<()> {
+    main_only(&window)?;
+    blocking(move || team::status_unlink(&uuid)).await?
+}
+
+#[tauri::command]
+async fn team_status_remove(window: tauri::WebviewWindow, uuid: String) -> R<()> {
+    main_only(&window)?;
+    blocking(move || team::status_remove(&uuid)).await?
+}
+
+#[tauri::command]
+async fn team_status_allow_claim(window: tauri::WebviewWindow, uuid: String) -> R<()> {
+    main_only(&window)?;
+    blocking(move || team::status_allow_claim(&uuid)).await?
+}
+
+/// The cached health summaries linked to a Tether ID (session window: two or more are a link
+/// conflict); never a request.
+#[tauri::command]
+fn team_status_find(id: String) -> Vec<Value> {
+    team::status_find(&id)
+}
+
+/// A health notification (host list, spec 10.5): a Windows toast. Other systems: nothing yet
+/// (no notification facility in this app; see the health docs).
+#[tauri::command]
+async fn health_notify(title: String, body: String) -> R<()> {
+    // Device-chosen host names end up here: plain text, bounded.
+    let cut = |s: &str, n: usize| s.chars().filter(|c| !c.is_control()).take(n).collect::<String>();
+    let (title, body) = (cut(&title, 120), cut(&body, 240));
+    #[cfg(windows)]
+    {
+        blocking(move || {
+            tauri_winrt_notification::Toast::new(tauri_winrt_notification::Toast::POWERSHELL_APP_ID)
+                .title(&title)
+                .text1(&body)
+                .show()
+                .map_err(|e| e.to_string())
+        })
+        .await??;
+    }
+    #[cfg(not(windows))]
+    let _ = (title, body);
+    Ok(())
 }
 // --- end advanced mode ---
 

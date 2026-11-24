@@ -2,7 +2,10 @@ name: server
 on:
   push:
     branches: [main]
-    paths: [server/**, vendor/**, crates/**, patches/**, scripts/**, tools/macbuild/**, .github/workflows/server.yml]
+    paths: [server/**, vendor/**, crates/**, patches/**, scripts/**, tools/macbuild/**, tools/monitor-publish/**, tools/load/**, apps/manage/src-tauri/src/keys.rs, .github/workflows/server.yml]
+  # Pull requests that touch the relay, the device-status tools or the shared crates.
+  pull_request:
+    paths: [server/**, crates/**, scripts/**, tools/monitor-publish/**, tools/load/**, apps/manage/src-tauri/src/keys.rs, .github/workflows/server.yml]
   workflow_dispatch:
 
 permissions:
@@ -25,6 +28,14 @@ jobs:
       - name: Test tether-trust
         working-directory: crates/tether-trust
         run: cargo test --release
+      # The device-status admin tool: unit tests, then end to end against the tether-api built above.
+      - name: Test tools/monitor-publish
+        working-directory: tools/monitor-publish
+        run: |
+          cargo test --release
+          TETHER_API_BIN="$RUNNER_TEMP/relay/bin/tether-api" cargo test --release --test e2e -- --ignored
+      - name: Build the status load generator (tools/load/status-run.sh runs it by hand)
+        run: cargo build --release --manifest-path tools/load/status-load/Cargo.toml
       # The Mac build runner and its client (stdlib + ssh-keygen, no network).
       - name: Test tools/macbuild
         run: python3 -m unittest discover -s tools/macbuild

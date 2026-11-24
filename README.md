@@ -35,6 +35,9 @@ in the middle. You run the relay; the apps talk only to it.
   installer, no admin rights. You can brand it: [docs/quick-support.md](docs/quick-support.md).
 - **Hundreds of hosts.** Tags, saved searches, bulk actions and a command palette:
   [docs/advanced.md](docs/advanced.md).
+- **Health of supported machines.** A separate monitoring agent reports to your relay, and the host
+  list shows which machines need attention, with no inbound port on the machine:
+  [docs/health.md](docs/health.md).
 - **Central management.** Tether Manage signs policies and releases on the administrator's PC;
   the relay only serves them: [docs/management.md](docs/management.md).
 - **Also included:** unattended access, file transfer, recording with consent, 2FA, signed

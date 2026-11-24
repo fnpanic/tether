@@ -12,6 +12,15 @@ What goes to those relay servers:
 | Screen, input, clipboard, files and audio of a session | The remote session itself; encrypted between the two devices, the relay only forwards it | not stored |
 | Session audit record: time, device, technician name, IP address, duration, names of transferred files, security alarms | Accountability of remote access (shown in Tether Manage) | daily files, kept for the retention the organization sets |
 | Update checks: app, channel, version | Offering signed updates | access logs of the relay |
+| Health report, only on machines where the organization installed a monitoring agent: machine name, names and versions of installed products, the state, title, value and hint of each check, agent version, time of the last report | Showing the health of supported machines to technicians | the last full report and 90 days of state changes; removed when the device is removed or after 180 days without a report |
+
+Health reports come from a separate monitoring agent, not from Tether or TetherQS, and only if the
+organization installed it. They go to the same relay servers, are not end-to-end encrypted, and can be
+read by the relay's operator and by every member of the organization's technician team in Tether.
+What a report contains is decided by the agent; the format is described in [docs/health.md](docs/health.md).
+When a technician links a monitoring agent to a host in Tether, the relay stores that technician's
+name (as in the team roster) and the time with the device's enrolment; every team member sees it,
+and it is removed with the device.
 
 Session recordings are made only when recording is switched on and are saved on the technician's
 computer. They are uploaded only if the organization's signed policy sets an upload target

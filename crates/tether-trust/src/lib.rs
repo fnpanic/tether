@@ -9,6 +9,7 @@
 //! - [`custom`]: signed custom TetherQS apps (trailer appended to the exe, distribution tokens).
 //! - [`release`]: signed release index, rollout, artifact binding (docs/update-design.md).
 //! - [`serverkeys`]: signed list of accepted server keys (server key rotation).
+//! - [`status`]: device status enrollment token and report types (device-status agent → relay).
 //! - [`team`]: team roster (technician keys for `/api/team/*`) and key fingerprints.
 
 pub mod custom;
@@ -17,6 +18,7 @@ pub mod policy;
 pub mod release;
 pub mod reqauth;
 pub mod serverkeys;
+pub mod status;
 pub mod team;
 pub mod version;
 

@@ -1,7 +1,8 @@
 // Host query language (docs/advanced.md#query-syntax): fuzzy words, #tags, field filters,
 // AND (space) / OR (|) / NOT (- or !), parentheses. Never throws: a broken query still filters by
 // what could be read, and `error` says what was ignored.
-import { osFamily, type Host } from "./model";
+import { notSince } from "./health";
+import { osFamily, type Host, type StatusProduct } from "./model";
 
 export type Node =
   | { k: "and" | "or"; c: Node[] }
@@ -17,7 +18,12 @@ export interface Parsed {
   error?: string;
 }
 
-const FIELDS = new Set(["id", "name", "host", "os", "ver", "user", "note", "tag", "is", "has", "seen", "src"]);
+/** The fields of a tag rule: those from before health data existed. In a rule, health:, product:,
+ *  version:, role:, check:, agent: and since: stay plain words, as older desktops of a team read the
+ *  same shared rule (docs/advanced.md). */
+const RULE_FIELDS = new Set(["id", "name", "host", "os", "ver", "user", "note", "tag", "is", "has", "seen", "src"]);
+/** The search box and saved searches also read the health summary. */
+const FIELDS = new Set([...RULE_FIELDS, "health", "product", "version", "role", "check", "agent", "since"]);
 
 type Tok = { t: "(" | ")" | "or" | "and" | "not" } | { t: "term"; v: string; quoted: boolean };
 
@@ -61,14 +67,14 @@ function tokenize(q: string): Tok[] {
   return out;
 }
 
-function term(v: string, quoted: boolean): Node {
+function term(v: string, quoted: boolean, fields: Set<string>): Node {
   if (!quoted || !v.includes(" ") || v.includes(":")) {
     if (v.startsWith("#") && v.length > 1) {
       const prefix = v.endsWith("*");
       return { k: "tag", v: v.slice(1, prefix ? -1 : undefined).toLowerCase(), prefix };
     }
     const m = /^([a-z]+):(>=|<=|>|<|=)?(.*)$/i.exec(v);
-    if (m && FIELDS.has(m[1].toLowerCase()) && m[3]) {
+    if (m && fields.has(m[1].toLowerCase()) && m[3]) {
       const f = m[1].toLowerCase();
       if (f === "tag") {
         const prefix = m[3].endsWith("*");
@@ -84,7 +90,9 @@ function term(v: string, quoted: boolean): Node {
  *  query from a shared team doc must not overflow the stack while the page renders). */
 const MAX_DEPTH = 200;
 
-export function parse(q: string): Parsed {
+/** `rule`: a tag rule's condition (no health fields, see RULE_FIELDS). */
+export function parse(q: string, rule = false): Parsed {
+  const fields = rule ? RULE_FIELDS : FIELDS;
   const toks = tokenize(q);
   let pos = 0;
   let depth = 0;
@@ -143,7 +151,7 @@ export function parse(q: string): Parsed {
     }
     pos++;
     if (t?.t !== "term") return null;
-    const n = term(t.v, t.quoted);
+    const n = term(t.v, t.quoted, fields);
     if (n.k === "word") words.push(n.v);
     return n;
   };
@@ -252,20 +260,47 @@ function field(h: Host, f: string, op: string, v: string, now: number): boolean 
       const ago = now - last;
       return op === ">" || op === ">=" ? ago >= s : ago <= s;
     }
+    case "health":
+      return h.health === v;
+    case "product":
+      return !!h.status?.products.some((p) => p.name.toLowerCase().includes(v));
+    // Alone: any product. Next to product: in one AND group, matches() pairs them on the same product.
+    case "version":
+      return !!h.status?.products.some((p) => p.version?.toLowerCase().startsWith(v));
+    case "role":
+      return !!h.status?.products.some((p) => p.role === v);
+    case "check":
+      return !!h.status?.faults.some((f) => f.id.includes(v));
+    case "agent":
+      return v === "none" ? !h.status : !!h.status?.agent.startsWith(v);
+    case "since": {
+      const s = age(v);
+      const t = h.status && (h.health === "warn" || h.health === "crit") ? notSince(h.status) : null;
+      return s !== null && t !== null && t <= now - s;
+    }
   }
   return false;
 }
 
-export function matches(n: Node, h: Host, now: number): boolean {
+/** `rule`: words match the text a rule read before health data existed (`Host.rhay`). */
+export function matches(n: Node, h: Host, now: number, rule = false): boolean {
   switch (n.k) {
-    case "and":
-      return n.c.every((c) => matches(c, h, now));
+    case "and": {
+      // `product:x version:26.3`: one product must match both (spec 10.3, "combine with product:").
+      const pv = n.c.filter((c): c is Extract<Node, { k: "field" }> => c.k === "field" && (c.f === "product" || c.f === "version"));
+      if (pv.some((c) => c.f === "product") && pv.some((c) => c.f === "version")) {
+        const one = (p: StatusProduct, c: (typeof pv)[number]) => (c.f === "product" ? p.name.toLowerCase().includes(c.v) : !!p.version?.toLowerCase().startsWith(c.v));
+        if (!h.status?.products.some((p) => pv.every((c) => one(p, c)))) return false;
+        return n.c.every((c) => (pv as Node[]).includes(c) || matches(c, h, now, rule));
+      }
+      return n.c.every((c) => matches(c, h, now, rule));
+    }
     case "or":
-      return n.c.some((c) => matches(c, h, now));
+      return n.c.some((c) => matches(c, h, now, rule));
     case "not":
-      return !matches(n.c, h, now);
+      return !matches(n.c, h, now, rule);
     case "word":
-      return fuzzy(h.hay, n.v) > 0;
+      return fuzzy(rule ? (h.rhay ?? h.hay) : h.hay, n.v) > 0;
     case "tag":
       return hasTag(h, n.v, n.prefix);
     case "field":
@@ -273,15 +308,16 @@ export function matches(n: Node, h: Host, now: number): boolean {
   }
 }
 
-/** Hosts matching `q`; with free-text words, best match first (else input order). */
-export function search(hosts: Host[], q: string | Parsed, now = Date.now() / 1000): Host[] {
-  const p = typeof q === "string" ? parse(q) : q;
+/** Hosts matching `q`; with free-text words, best match first (else input order). `rule`: as a tag
+ *  rule reads `q` (the Rules dialog's count). */
+export function search(hosts: Host[], q: string | Parsed, now = Date.now() / 1000, rule = false): Host[] {
+  const p = typeof q === "string" ? parse(q, rule) : q;
   if (!p.node) return hosts;
   const node = p.node;
-  if (!p.words.length) return hosts.filter((h) => matches(node, h, now));
+  if (!p.words.length) return hosts.filter((h) => matches(node, h, now, rule));
   const scored: { h: Host; s: number }[] = [];
   for (const h of hosts) {
-    if (!matches(node, h, now)) continue;
+    if (!matches(node, h, now, rule)) continue;
     let s = 0;
     for (const w of p.words) s += fuzzy(h.hay, w);
     scored.push({ h, s: s + (h.pinned ? 50 : 0) + (h.online === "on" ? 20 : 0) });

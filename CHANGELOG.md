@@ -7,6 +7,65 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ## [Unreleased]
 
+### Device health (not in a numbered version yet)
+
+- **Health of supported machines in the host list.** A relay can now store health reports from a
+  monitoring agent, a separate program that is not part of Tether: a device enrols once with a
+  short-lived token an administrator creates (`scripts/status-token.sh`), then signs every report
+  with its own key (`Tether-Sig: device-v1`). The host list shows a health dot and Health,
+  Products and Agent columns, finds hosts with `health:`, `product:`, `version:`, `role:`,
+  `check:`, `agent:` and `since:`, and has a built-in view *Needs attention* (critical, not
+  reporting, or in a link conflict). The host detail gains a Health section with the failing checks first, setup items,
+  90 days of history, all checks and the raw report; a session window has a Health button; the
+  export adds health fields and a CSV with one row per failing check. On Windows Tether notifies
+  when a host turns critical or stops reporting, at most once per host and hour; a switch in the
+  team dialog turns it off. Machines with an agent but without Tether appear as rows without a
+  connect action. `role:` used to be a plain word that found tags; it now means the detected
+  role (`#role:server` still finds the tag) in the search box; in tag rules all the new terms stay
+  plain words as before, so shared rules tag the same hosts on older desktops.
+  Needs the technician to be in the team roster. Report format, relay settings and operation:
+  [docs/health.md](docs/health.md).
+- **Relay (tether-api).** New routes `POST /api/status/enroll`, `POST` and `DELETE /api/status`,
+  `GET /api/team/status[/<uuid>]` and `DELETE /api/admin/status/<uuid>`
+  ([docs/api.md](docs/api.md#device-status-health-reports)). The relay paces the devices
+  (`STATUS_TARGET_RPS`, default 10 posts per second), keeps heartbeats in memory, writes
+  `seen.json`, the summary cache, the compaction of `status/keys.jsonl` and history trimming
+  off the request path, caps enrolment (`STATUS_MAX_DEVICES`, default 20 000) and can switch the
+  whole feature off (`STATUS=off`). A pin or revocation file it cannot read (`keys.jsonl`, `revoked.json`) locks only the status routes (503);
+  sessions, policy and updates are not affected. New gauges `tether_api_status_hosts` and
+  `tether_api_status_write_errors`; `/api/team/*` requests are now counted as endpoint `team`
+  instead of `other`. Privacy and security: [PRIVACY.md](PRIVACY.md),
+  [SECURITY.md](SECURITY.md#device-status-health-reports).
+- **A second signed release index per channel, `monitor.json`,** carries the agent
+  (`monitor/windows-x86_64`) and its check packs (`monitor-packs/any`). `releases.json` refuses
+  these keys and `monitor.json` refuses Tether's, so installed Tether clients never read it and
+  Tether's release generation does not move. Publish with `scripts/monitor-publish.sh` (it runs
+  `tools/monitor-publish`, which reads Tether Manage's key file); Tether Manage has no screen for
+  it yet. The new `Caddyfile` and `nginx.conf` route `monitor.json` to tether-api,
+  so they go out with it ([docs/updates.md](docs/updates.md#device-status-agent-monitorjson-and-enrolment-tokens)).
+  It expires 30 days after a publish: `monitor-publish refresh` (`scripts/monitor-refresh.sh`)
+  signs it again with a new expiry, the tool never publishes below the highest serial it ever
+  published (`monitor-serials.json`), and `tether_api_release_index_expires_timestamp{index="monitor"}`
+  shows the expiry.
+- **Tokens can be revoked, Tether IDs are verified, devices can be removed.** An enrolment token
+  now carries a random id (required; tokens without one are refused) and can be issued for one
+  Tether ID (`--tether-id`): that token enrols one device, with exactly that ID. Tokens are
+  revoked with `monitor-publish revoke` (admin route `POST /api/admin/status/revoke`, kept in
+  `status/revoked.json`; a revoked token gets `401 token revoked`); devices that enrolled with it
+  stay until removed. A Tether ID that a device names with any other token is only a claim: the
+  host list shows the agent on a row of its own with "Claims to be …" and **Link to this host**,
+  which a team member with `write` confirms once (`POST /api/team/status/<uuid>/link`; the relay
+  records who and when, and the detail shows it with **Unlink**, which also dismisses the claim
+  until a member chooses **Allow a new claim**). Nothing links by itself, and a report cannot
+  change a link. Two devices linked to one Tether ID on different relays are shown as a **link
+  conflict**, joined to neither. Pins from before this change keep their Tether ID only as a claim. **Remove from health monitoring…** in the Health section (members
+  with `write`, `DELETE /api/team/status/<uuid>`) and `monitor-publish remove` remove a device on
+  every relay; `monitor-publish devices` lists them (`GET /api/admin/status/devices`, paged) and
+  `monitor-publish tokens` the issued tokens (a local journal without the tokens themselves).
+  A bound token or a technician's confirmation is the word of a trusted person, not a proof by
+  Tether on the machine ([SECURITY.md](SECURITY.md#device-status-health-reports)).
+- Checked and not checked: to be filled in at release.
+
 ### 0.6.3 (2026-11-23; files in dist/, ready to publish; frozen)
 
 Six files in `dist/` (Windows setup and TetherQS signed; Mac files universal, as built by the

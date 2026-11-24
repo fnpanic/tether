@@ -1294,7 +1294,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "min by (channel) (tether_api_release_index_expires_timestamp{job=\"api\",node=~\"$node\"}) - time()",
+          "expr": "min by (channel) (tether_api_release_index_expires_timestamp{job=\"api\",node=~\"$node\",index=\"\"}) - time()",
           "legendFormat": "{{channel}}",
           "refId": "A",
           "instant": true

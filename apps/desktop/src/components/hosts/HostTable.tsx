@@ -5,12 +5,13 @@ import { ArrowDown, ArrowUp, Pin } from "lucide-react";
 import { PlatformIcon } from "../ui";
 import { formatId } from "../../lib/ipc";
 import { label, osFamily, type Host, type Store } from "../../lib/hosts/model";
-import { ago, OnlineDot, TagChip } from "./bits";
+import { healthRank, healthText } from "../../lib/hosts/health";
+import { ago, HealthDot, OnlineDot, TagChip } from "./bits";
 
 export const ROW = 36;
 const OVERSCAN = 8;
 
-export type SortKey = "smart" | "name" | "id" | "os" | "version" | "last";
+export type SortKey = "smart" | "name" | "id" | "os" | "version" | "last" | "health" | "products" | "agent";
 export interface Sort {
   key: SortKey;
   desc: boolean;
@@ -21,18 +22,43 @@ export interface Sort {
 const COLS =
   "grid-cols-[32px_16px_minmax(120px,1fr)_112px] @min-[600px]:grid-cols-[32px_16px_minmax(150px,1.3fr)_112px_minmax(120px,1.7fr)] @min-[900px]:grid-cols-[32px_16px_minmax(170px,1.3fr)_112px_minmax(150px,1.7fr)_128px_72px_96px]";
 const WIDE = "hidden @min-[900px]:block";
+// With health data (deviations: no column chooser): Health from the start (icon only while narrow),
+// OS/version/last active from 1050px, Products and Agent from 1300px.
+const HCOLS =
+  "grid-cols-[32px_16px_minmax(120px,1fr)_112px_16px] @min-[600px]:grid-cols-[32px_16px_minmax(130px,1.3fr)_112px_minmax(80px,1.7fr)_150px] @min-[1050px]:grid-cols-[32px_16px_minmax(170px,1.3fr)_112px_minmax(150px,1.7fr)_150px_128px_72px_96px] @min-[1300px]:grid-cols-[32px_16px_minmax(170px,1.3fr)_112px_minmax(150px,1.7fr)_150px_minmax(140px,1.2fr)_64px_128px_72px_96px]";
+const HWIDE = "hidden @min-[1050px]:block";
+const XWIDE = "hidden @min-[1300px]:block";
+
+const NONE = "\uffff"; // sorts after every text: rows without the value go last
+const pad = (v: string) => v.split(".").map((x) => x.padStart(5, "0")).join(".");
+const productText = (h: Host) => (h.status?.products ?? []).map((p) => [p.name, p.version].filter(Boolean).join(" ")).join(", ");
 
 export function sortHosts(rows: Host[], s: Sort): Host[] {
   if (s.key === "smart") return rows;
   const k = s.key;
   const val = (h: Host): string | number =>
-    k === "name" ? label(h).toLowerCase() : k === "id" ? h.id : k === "os" ? `${osFamily(h.os)} ${h.os}`.toLowerCase() : k === "version" ? h.version.split(".").map((x) => x.padStart(5, "0")).join(".") : Math.max(h.last, h.seen);
+    k === "name"
+      ? label(h).toLowerCase()
+      : k === "id"
+        ? h.id
+        : k === "os"
+          ? `${osFamily(h.os)} ${h.os}`.toLowerCase()
+          : k === "version"
+            ? pad(h.version)
+            : // Health ascending = worst first (the first click answers "what needs me").
+              k === "health"
+              ? -(healthRank(h.health) * 1e8 + (h.status?.counts.crit ?? 0) * 1e4 + (h.status?.counts.warn ?? 0))
+              : k === "products"
+                ? productText(h).toLowerCase() || NONE
+                : k === "agent"
+                  ? (h.status ? pad(h.status.agent) : NONE)
+                  : Math.max(h.last, h.seen);
   const d = s.desc ? -1 : 1;
-  return [...rows].sort((a, b) => {
-    const x = val(a);
-    const y = val(b);
-    return x < y ? -d : x > y ? d : 0;
-  });
+  // Each row's key once, not per comparison (5,000 rows: ~60,000 comparisons).
+  return rows
+    .map((h) => ({ h, k: val(h) }))
+    .sort((a, b) => (a.k < b.k ? -d : a.k > b.k ? d : 0))
+    .map((x) => x.h);
 }
 
 /** Default order without a search: pinned, online, most recently used. */
@@ -49,10 +75,12 @@ const Row = memo(function Row({
   selected,
   meta,
   now,
+  hv,
   onRow,
   onToggle,
   onOpen,
 }: {
+  hv: boolean;
   h: Host;
   top: number;
   index: number;
@@ -75,7 +103,7 @@ const Row = memo(function Row({
       onMouseDown={(e) => onRow(h.id, e)}
       onDoubleClick={() => onOpen(h.id)}
       style={{ transform: `translateY(${top}px)` }}
-      className={`absolute inset-x-0 top-0 grid h-9 ${COLS} items-center gap-3 rounded-md px-2 text-caption ${
+      className={`absolute inset-x-0 top-0 grid h-9 ${hv ? HCOLS : COLS} items-center gap-3 rounded-md px-2 text-caption ${
         selected ? "bg-accent/12" : cursor ? "bg-tile-2" : "hover:bg-tile-2"
       } ${cursor ? "ring-1 ring-inset ring-focus/60" : ""}`}
     >
@@ -114,13 +142,29 @@ const Row = memo(function Row({
           <TagChip key={t} tag={t} meta={meta} auto={auto} />
         ))}
       </span>
-      <span role="gridcell" className={`truncate text-footnote text-muted ${WIDE}`} title={h.os}>
+      {hv && (
+        <>
+          <span role="gridcell" className="flex min-w-0 items-center gap-1.5">
+            <HealthDot s={h.health} />
+            <span className={`hidden truncate text-footnote @min-[600px]:inline ${h.health === "crit" || h.health === "warn" || h.health === "stale" ? "text-ink-80" : "text-muted"}`} title={healthText(h, now)}>
+              {healthText(h, now)}
+            </span>
+          </span>
+          <span role="gridcell" className={`truncate text-footnote text-muted ${XWIDE}`} title={productText(h)}>
+            {productText(h) || "—"}
+          </span>
+          <span role="gridcell" className={`truncate font-mono text-footnote text-muted ${XWIDE}`}>
+            {h.status?.agent || "—"}
+          </span>
+        </>
+      )}
+      <span role="gridcell" className={`truncate text-footnote text-muted ${hv ? HWIDE : WIDE}`} title={h.os}>
         {h.os ? `${osFamily(h.os)} ${/\d[\d.]*/.exec(h.os)?.[0] ?? ""}`.trim() : "—"}
       </span>
-      <span role="gridcell" className={`truncate font-mono text-footnote text-muted ${WIDE}`}>
+      <span role="gridcell" className={`truncate font-mono text-footnote text-muted ${hv ? HWIDE : WIDE}`}>
         {h.version || "—"}
       </span>
-      <span role="gridcell" className={`truncate text-footnote text-muted ${WIDE}`} title={h.seen ? `Last heartbeat ${new Date(h.seen * 1000).toLocaleString()}` : undefined}>
+      <span role="gridcell" className={`truncate text-footnote text-muted ${hv ? HWIDE : WIDE}`} title={h.seen ? `Last heartbeat ${new Date(h.seen * 1000).toLocaleString()}` : undefined}>
         {ago(Math.max(h.last, h.seen), now)}
       </span>
     </div>
@@ -138,7 +182,10 @@ export function HostTable({
   onToggle,
   onToggleAll,
   onOpen,
+  health = false,
 }: {
+  /** Health data exists: the Health, Products and Agent columns are shown. */
+  health?: boolean;
   rows: Host[];
   cursor: string | null;
   selected: Set<string>;
@@ -183,6 +230,8 @@ export function HostTable({
   const first = Math.max(0, Math.floor(top / ROW) - OVERSCAN);
   const last = Math.min(rows.length, Math.ceil((top + height) / ROW) + OVERSCAN);
   const all = rows.length > 0 && rows.every((h) => selected.has(h.id));
+  const hv = health;
+  const wide = hv ? "hidden @min-[1050px]:flex" : "hidden @min-[900px]:flex";
 
   const head = (k: SortKey, text: string, cls = "") => (
     <button
@@ -199,7 +248,7 @@ export function HostTable({
 
   return (
     <div role="grid" aria-label="Hosts" aria-rowcount={rows.length + 1} aria-multiselectable className="@container flex min-h-0 flex-1 flex-col">
-      <div role="row" aria-rowindex={1} className={`grid h-8 shrink-0 ${COLS} items-center gap-3 border-b border-hairline px-4`}>
+      <div role="row" aria-rowindex={1} className={`grid h-8 shrink-0 ${hv ? HCOLS : COLS} items-center gap-3 border-b border-hairline px-4`}>
         <span className="grid place-items-center">
           <input type="checkbox" aria-label="Select all shown" checked={all} onChange={onToggleAll} tabIndex={-1} className="h-3.5 w-3.5 accent-[var(--accent)]" />
         </span>
@@ -207,9 +256,16 @@ export function HostTable({
         {head("name", "Name")}
         {head("id", "ID")}
         <span className="hidden text-footnote font-semibold text-muted @min-[600px]:block">Tags</span>
-        {head("os", "OS", "hidden @min-[900px]:flex")}
-        {head("version", "Version", "hidden @min-[900px]:flex")}
-        {head("last", "Last active", "hidden @min-[900px]:flex")}
+        {hv && (
+          <>
+            {head("health", "Health", "hidden @min-[600px]:flex")}
+            {head("products", "Products", "hidden @min-[1300px]:flex")}
+            {head("agent", "Agent", "hidden @min-[1300px]:flex")}
+          </>
+        )}
+        {head("os", "OS", wide)}
+        {head("version", "Version", wide)}
+        {head("last", "Last active", wide)}
       </div>
       <div ref={ref} data-testid="host-scroll" onScroll={(e) => setTop(e.currentTarget.scrollTop)} className="relative min-h-0 flex-1 overflow-y-auto px-2 py-1">
         <div style={{ height: rows.length * ROW }} className="relative">
@@ -223,6 +279,7 @@ export function HostTable({
               selected={selected.has(h.id)}
               meta={meta}
               now={now}
+              hv={hv}
               onRow={onRow}
               onToggle={onToggle}
               onOpen={onOpen}

@@ -265,3 +265,45 @@ fn delete_guard_and_force() {
     assert_eq!(s.req("DELETE", &format!("/api/admin/release/{QS}/TetherQS-0.5.5.exe"), &[(reqauth::HEADER, &sig)], b"").0, 401);
     assert!(s.exists(&format!("{QS}/TetherQS-0.5.5.exe")));
 }
+
+/// A signed index `file` (monitor.json or a Tether index) naming `version` under `key`.
+fn named_index(k: &SigningKey, serial: u64, key: &str, file: &str, version: &str) -> Vec<u8> {
+    let entry = json!({
+        "version": version, "file": file, "size": 1, "sha256": "a".repeat(64), "signature": "U0lH",
+        "urls": [format!("https://{{relay}}/download/stable/{key}/{file}")], "rollout": {"start": 0, "steps": [[0, 100]]}
+    });
+    let payload = json!({"type": "tether-releases/1", "channel": "stable", "serial": serial, "issued": 1, "expires": 2_000_000_000u64, "releases": {key: entry}});
+    serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&payload).unwrap(), k)).unwrap()
+}
+
+/// Monitor keys stay out of releases-v2.json; the packs folder is pruned by what monitor.json names.
+#[test]
+fn monitor_packs_prune_and_v2_refusal() {
+    let k = generate_key();
+    let s = start(&k);
+    let (st, b) = s.admin(&k, "PUT", "/api/admin/release/stable/releases-v2.json", &named_index(&k, 1, "monitor/windows-x86_64", "tether-monitor-0.1.0.exe", "0.1.0"));
+    assert_eq!(st, 400);
+    assert!(String::from_utf8_lossy(&b).contains("bad release key"));
+    let (st, _) = s.admin(&k, "PUT", "/api/admin/release/stable/releases-v2.json", &named_index(&k, 1, "monitor-packs/any", "monitor-packs-2026.11.23.json", "2026.11.23"));
+    assert_eq!(st, 400);
+
+    let packs = "stable/monitor-packs/any";
+    for v in ["2026.11.20", "2026.11.21", "2026.11.22", "2026.11.23"] {
+        s.put(&k, &format!("{packs}/monitor-packs-{v}.json"), b"{}");
+        s.put(&k, &format!("{packs}/monitor-packs-{v}.json.sig"), b"S");
+    }
+    s.put(&k, "stable/monitor.json", &named_index(&k, 1, "monitor-packs/any", "monitor-packs-2026.11.22.json", "2026.11.22"));
+    s.age();
+    let plan = s.prune(&k, json!({"dry_run": true, "keep": 1}));
+    let g = group(&plan, "monitor-packs/any");
+    assert_eq!((g["published"].clone(), g["index_serial"].clone()), (json!("2026.11.22"), json!(1)));
+    assert_eq!(versions(&g["keep"]), ["2026.11.23", "2026.11.22", "2026.11.21"]);
+    assert_eq!(versions(&g["drop"]), ["2026.11.20"]);
+    let out = s.prune(&k, json!({"dry_run": false, "keep": 1, "delete": [{"channel": "stable", "dir": "monitor-packs/any", "version": "2026.11.20"}]}));
+    let mut files: Vec<String> = out["deleted"][0]["files"].as_array().unwrap().iter().map(|f| f.as_str().unwrap().to_owned()).collect();
+    files.sort();
+    assert_eq!(files, ["monitor-packs-2026.11.20.json", "monitor-packs-2026.11.20.json.sig"]);
+    assert!(!s.exists(&format!("{packs}/monitor-packs-2026.11.20.json")) && s.exists(&format!("{packs}/monitor-packs-2026.11.21.json")));
+    let (st, b) = s.admin(&k, "DELETE", &format!("/api/admin/release/{packs}/monitor-packs-2026.11.22.json.sig"), b"");
+    assert_eq!(st, 409, "{}", String::from_utf8_lossy(&b));
+}

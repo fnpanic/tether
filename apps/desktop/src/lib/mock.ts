@@ -140,6 +140,26 @@ export const mock = {
         return { name: "Anna (Helpdesk)", write: new URLSearchParams(location.search).get("team") !== "ro", audit: true } as T;
       case "team_devices":
         return (await fleet()).org as T;
+      case "team_status":
+        return [
+          { relay: "relay.example.com", hosts: (await fleet()).status },
+          { relay: "relay2.example.com", hosts: (await fleet()).second },
+        ] as T;
+      case "team_status_host":
+        return (await fleet()).report(String(a.uuid)) as T;
+      case "team_status_find": {
+        const f = await fleet();
+        const all = [...f.status.map((s) => ({ ...s, relay: "relay.example.com" })), ...f.second.map((s) => ({ ...s, relay: "relay2.example.com" }))];
+        return all.filter((x) => x.tether_id === a.id) as T;
+      }
+      case "team_status_link":
+        return (await fleet()).link(String(a.uuid), String(a.tetherId)) as T;
+      case "team_status_unlink":
+        return (await fleet()).unlink(String(a.uuid)) as T;
+      case "team_status_allow_claim":
+        return (await fleet()).allowClaim(String(a.uuid)) as T;
+      case "team_status_remove":
+        return (await fleet()).remove(String(a.uuid)) as T;
       case "team_tags_get":
         return { rev: team.rev, doc: team.doc, updated_by: team.by, updated_at: team.at } as T;
       case "team_tags_put":

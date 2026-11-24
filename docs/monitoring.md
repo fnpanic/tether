@@ -110,14 +110,16 @@ Answered to loopback peers only; Caddy forwards only `/api/*` and `/q/*`, so it 
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `tether_api_requests_total` | counter | `endpoint`, `code` | requests; `endpoint` = `policy`, `server_keys`, `heartbeat`, `audit_conn`, `audit_file`, `audit_alarm`, `diag_upload`, `custom_download`, `admin`, `metrics`, `other` |
+| `tether_api_requests_total` | counter | `endpoint`, `code` | requests; `endpoint` = `policy`, `server_keys`, `heartbeat`, `audit_conn`, `audit_file`, `audit_alarm`, `diag_upload`, `custom_download`, `admin`, `metrics`, `other`, `release_index`, `status` (`/api/status`, `/api/status/*`), `team` (`/api/team/*`) |
 | `tether_api_request_duration_seconds` | histogram | `endpoint` | time from request to response written (5 ms … 120 s) |
 | `tether_api_workers_active`, `tether_api_workers_max` | gauge | | requests being served, and the cap (32) |
 | `tether_api_busy_rejected_total` | counter | | 503 busy at the cap |
 | `tether_api_body_timeouts_total` | counter | | request bodies that did not arrive in time |
 | `tether_api_devices`, `tether_api_devices_active_24h` | gauge | | devices in the list, and with a heartbeat within 24 h |
+| `tether_api_status_hosts` | gauge | `state` = `ok` / `warn` / `crit` / `stale` | hosts with a full device-status report ([health.md](health.md)) by state; `stale` (no post for three intervals) takes precedence over the reported state, `unknown` counts as `ok`; counted at each scrape |
+| `tether_api_status_write_errors` | counter | | failed writes of the device status store since start: `seen.json`, `summary.json`, `revoked.json`, the `keys.jsonl` compaction, syncs and expiry, history trimming, and a report's claim line whose sync failed; at most one is logged per minute |
 | `tether_api_release_generation` | gauge | | release generation G (bumped by every `releases.json` or `latest.json` change; heartbeat answer and hbbs push) |
-| `tether_api_release_index_serial`, `tether_api_release_index_expires_timestamp` | gauge | `channel` | serial and expiry of the stored signed release index |
+| `tether_api_release_index_serial`, `tether_api_release_index_expires_timestamp` | gauge | `channel`; the expiry also with `index="monitor"` | serial and expiry of the stored signed release index (`releases.json`); the expiry series with `index="monitor"` are the device-status agent's `monitor.json` ([health.md](health.md#publishing-an-agent-or-a-check-pack-update)). The shipped rule and dashboard select `index=""`, so they cover `releases.json` only, as before |
 | `tether_api_devices_by_version` | gauge | `profile`, `version` | devices with a heartbeat within 24 h by installed version (30 largest groups, the rest `version="other"`) |
 | `tether_api_devices_update_state` | gauge | `state` | devices (24 h) by reported update state (`idle`, `waiting-rollout`, `downloading`, `staged`, `waiting-idle`, `failed`, `stale`, `halted`, `unknown` = older clients) |
 | `tether_api_release_downloads_total` | counter | `profile`, `version` | devices that reported a newly downloaded and verified update since start (downloads by version, wherever they came from: relay or CDN; at most 64 series) |
@@ -236,6 +238,25 @@ Overview and in Grafana › Alerting (Alertmanager data source).
 
 The 150-session threshold of HbbrSaturated is a guess for a CX23's shared ~1 Gbit/s: tune it in
 `tether.yml` once real numbers exist.
+
+No rule for device health is shipped: whether a critical host is worth a page depends on the fleet.
+`tether_api_status_hosts` and examples of rules are in [health.md](health.md#metrics). For the
+device-status agent's index, which expires 30 days after the last publish or refresh, a rule like
+this one (not shipped) warns a week ahead:
+
+```yaml
+- alert: MonitorIndexExpiringSoon
+  expr: min by (channel) (tether_api_release_index_expires_timestamp{index="monitor"}) - time() < 7 * 86400
+  for: 1h
+  labels: { severity: warning }
+  annotations:
+    summary: "monitor.json of channel {{ $labels.channel }} expires in {{ $value | humanizeDuration }}"
+    description: "Run bash scripts/monitor-refresh.sh <channel> <relays> from the admin machine (docs/health.md)."
+```
+
+Since device status, `/api/team/*` requests count as `endpoint="team"` and the status routes as
+`endpoint="status"`; before, both counted as `endpoint="other"`. Check dashboards and alert rules
+of your own that select `endpoint="other"` (the shipped ones do not).
 
 ### Notifications
 

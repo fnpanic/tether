@@ -31,6 +31,22 @@ pub const INDEX_FILE: &str = "releases.json";
 /// the xz copies cannot go into [`INDEX_FILE`] while such builds are around. Clients take the
 /// highest serial over both files (this one on a tie), so a stale or missing one does no harm.
 pub const INDEX_V2_FILE: &str = "releases-v2.json";
+/// The signed index of the device-status agent and its check packs (same format, own app names).
+pub const MONITOR_INDEX_FILE: &str = "monitor.json";
+/// Apps allowed in [`INDEX_FILE`] and [`INDEX_V2_FILE`].
+pub const TETHER_APPS: &[&str] = &["technician", "customer"];
+/// Apps allowed in [`MONITOR_INDEX_FILE`].
+pub const MONITOR_APPS: &[&str] = &["monitor", "monitor-packs"];
+
+/// App set of an index file name: `releases.json` / `releases-v2.json` -> [`TETHER_APPS`],
+/// `monitor.json` -> [`MONITOR_APPS`].
+pub fn index_apps(file: &str) -> Option<&'static [&'static str]> {
+    match file {
+        INDEX_FILE | INDEX_V2_FILE => Some(TETHER_APPS),
+        MONITOR_INDEX_FILE => Some(MONITOR_APPS),
+        _ => None,
+    }
+}
 /// Packed encodings this build unpacks.
 pub const PACKED_ENCODINGS: &[&str] = &["gzip", "xz"];
 /// Largest index document a client reads.
@@ -176,9 +192,9 @@ fn valid_file(f: &str) -> bool {
     !f.is_empty() && f.len() <= 255 && f != "." && f != ".." && f.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-fn valid_key(k: &str) -> bool {
+fn valid_key(k: &str, apps: &[&str]) -> bool {
     let mut it = k.split('/');
-    matches!((it.next(), it.next(), it.next()), (Some(a), Some(p), None) if matches!(a, "technician" | "customer") && valid_file(p))
+    matches!((it.next(), it.next(), it.next()), (Some(a), Some(p), None) if apps.contains(&a) && valid_file(p))
 }
 
 impl Entry {
@@ -239,7 +255,13 @@ impl Entry {
 }
 
 impl Index {
+    /// [`Self::validate_for`] the Tether apps.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_for(TETHER_APPS)
+    }
+
+    /// Release keys must be `<app>/<platform>` with `app` in `apps`.
+    pub fn validate_for(&self, apps: &[&str]) -> Result<(), String> {
         if self.kind != INDEX_TYPE {
             return Err(format!("not a release index (type {:?})", self.kind));
         }
@@ -253,7 +275,7 @@ impl Index {
             return Err("too many releases".into());
         }
         for (k, e) in &self.releases {
-            if !valid_key(k) {
+            if !valid_key(k, apps) {
                 return Err(format!("bad release key {k:?}"));
             }
             e.validate().map_err(|err| format!("{k}: {err}"))?;
@@ -262,18 +284,27 @@ impl Index {
     }
 
     pub fn from_json(payload: &[u8]) -> Result<Self, String> {
+        Self::from_json_for(payload, TETHER_APPS)
+    }
+
+    pub fn from_json_for(payload: &[u8], apps: &[&str]) -> Result<Self, String> {
         let i: Index = serde_json::from_slice(payload).map_err(|e| format!("invalid release index: {e}"))?;
-        i.validate()?;
+        i.validate_for(apps)?;
         Ok(i)
     }
 
     /// Verify a signed document against the admin keys, parse it, and require `channel` (a
     /// document from another channel is rejected).
     pub fn open(raw: &[u8], admin: &[VerifyingKey], channel: &str) -> Result<Self, String> {
+        Self::open_for(raw, admin, channel, TETHER_APPS)
+    }
+
+    /// [`Self::open`] for an index whose apps are `apps` ([`index_apps`]).
+    pub fn open_for(raw: &[u8], admin: &[VerifyingKey], channel: &str, apps: &[&str]) -> Result<Self, String> {
         if raw.len() > MAX_INDEX {
             return Err("release index too large".into());
         }
-        let i = Self::from_json(&envelope::open_json(raw, admin)?)?;
+        let i = Self::from_json_for(&envelope::open_json(raw, admin)?, apps)?;
         if i.channel != channel {
             return Err(format!("release index is for channel {:?}, not {channel:?}", i.channel));
         }
@@ -290,7 +321,11 @@ impl Index {
 
 /// The cached index (the signed document as fetched) at `path` if valid and not below the floor.
 pub fn load(path: &Path, admin: &[VerifyingKey], channel: &str) -> Option<Index> {
-    Index::open(&std::fs::read(path).ok()?, admin, channel).ok().filter(|i| i.serial >= floor(path, admin))
+    load_for(path, admin, channel, TETHER_APPS)
+}
+
+pub fn load_for(path: &Path, admin: &[VerifyingKey], channel: &str, apps: &[&str]) -> Option<Index> {
+    Index::open_for(&std::fs::read(path).ok()?, admin, channel, apps).ok().filter(|i| i.serial >= floor(path, admin))
 }
 
 fn floor_path(path: &Path) -> PathBuf {
@@ -329,11 +364,16 @@ pub fn prune_staged(dir: &Path, keep: Option<&Path>) -> usize {
 /// raised. `Err` only when no document is usable and at least one was invalid or too old (the
 /// reasons, for the log). `Ok(None)`: nothing fetched.
 pub fn choose(path: &Path, docs: &[(String, Vec<u8>)], admin: &[VerifyingKey], channel: &str) -> Result<Option<(String, Index)>, String> {
+    choose_for(path, docs, admin, channel, TETHER_APPS)
+}
+
+/// [`choose`] for an index whose apps are `apps` ([`index_apps`]).
+pub fn choose_for(path: &Path, docs: &[(String, Vec<u8>)], admin: &[VerifyingKey], channel: &str, apps: &[&str]) -> Result<Option<(String, Index)>, String> {
     let fl = floor(path, admin);
     let mut best: Option<(usize, Index)> = None;
     let mut errors = Vec::new();
     for (i, (base, raw)) in docs.iter().enumerate() {
-        match Index::open(raw, admin, channel) {
+        match Index::open_for(raw, admin, channel, apps) {
             Ok(ix) if ix.serial < fl => errors.push(format!("{base}: release index serial {} is older than the accepted {fl}", ix.serial)),
             Ok(ix) if best.as_ref().is_none_or(|b| ix.serial > b.1.serial) => best = Some((i, ix)),
             Ok(_) => {}
@@ -564,6 +604,10 @@ pub const NAMES: &[(&str, &str, &str, &str)] = &[
     ("customer", MAC, "TetherQS-", "-universal.zip"),
 ];
 
+/// Artifact names of the [`MONITOR_APPS`] (same shape as [`NAMES`]). Kept out of [`NAMES`] so
+/// Manage's Tether publishing ([`build_of`]) never sees them.
+pub const MONITOR_NAMES: &[(&str, &str, &str, &str)] = &[("monitor", WINDOWS, "tether-monitor-", ".exe"), ("monitor-packs", "any", "monitor-packs-", ".json")];
+
 /// App, platform and version of a release artifact from its file name (`TetherQS-0.5.1.exe`).
 pub fn build_of(file: &str) -> Option<(&'static str, &'static str, String)> {
     NAMES.iter().find_map(|&(k, p, pre, suf)| {
@@ -607,8 +651,13 @@ fn unstored(file: &str) -> Option<String> {
 
 /// The version a file in `<app>/<platform>/` belongs to: the artifact, `<artifact>.sig`,
 /// `<artifact>.gz` (customer Windows), and for the mac technician app `<dmg>` and `<dmg>.sig`.
+/// For the [`MONITOR_NAMES`]: the artifact and `<artifact>.sig` (no packed twins).
 /// `None` for `latest.json` and anything else.
 pub fn file_version(app: &str, platform: &str, file: &str) -> Option<String> {
+    if let Some(&(_, _, pre, suf)) = MONITOR_NAMES.iter().find(|n| (n.0, n.1) == (app, platform)) {
+        let v = file.strip_suffix(".sig").unwrap_or(file).strip_prefix(pre)?.strip_suffix(suf)?;
+        return valid_version(v).then(|| v.to_owned());
+    }
     let base = file
         .strip_suffix(".sig")
         .or_else(|| file.strip_suffix(".gz").filter(|_| wants_packed(app, platform)))
@@ -825,6 +874,28 @@ mod tests {
 
     fn doc(i: &Index, k: &crate::SigningKey) -> Vec<u8> {
         serde_json::to_vec(&envelope::sign(&serde_json::to_vec(i).unwrap(), k)).unwrap()
+    }
+
+    #[test]
+    fn tether_index_still_refuses_monitor_keys() {
+        let admin = crate::generate_key();
+        let trusted = [admin.verifying_key()];
+        let e = entry("0.1.0", b"x", "U0lH");
+        let mon = index(3, vec![("monitor/windows-x86_64", e.clone()), ("monitor-packs/any", e.clone())]);
+        assert!(Index::open(&doc(&mon, &admin), &trusted, "stable").unwrap_err().contains("bad release key"));
+        assert_eq!(Index::open_for(&doc(&mon, &admin), &trusted, "stable", MONITOR_APPS).unwrap(), mon);
+        let tether = index(3, vec![("technician/windows-x86_64", e)]);
+        assert!(Index::open_for(&doc(&tether, &admin), &trusted, "stable", MONITOR_APPS).is_err());
+        assert_eq!(index_apps("releases.json"), Some(TETHER_APPS));
+        assert_eq!(index_apps("releases-v2.json"), Some(TETHER_APPS));
+        assert_eq!(index_apps("monitor.json"), Some(MONITOR_APPS));
+        assert_eq!(index_apps("latest.json"), None);
+        assert_eq!(file_version("monitor", WINDOWS, "tether-monitor-0.1.0.exe.sig").as_deref(), Some("0.1.0"));
+        assert_eq!(file_version("monitor", WINDOWS, "tether-monitor-0.1.0.exe").as_deref(), Some("0.1.0"));
+        assert_eq!(file_version("monitor-packs", "any", "monitor-packs-2026.11.23.json").as_deref(), Some("2026.11.23"));
+        assert_eq!(file_version("monitor-packs", "any", "monitor-packs-2026.11.23.json.gz"), None, "no packed twins for monitor files");
+        assert_eq!(file_version("technician", WINDOWS, "tether-monitor-0.1.0.exe"), None);
+        assert_eq!(build_of("tether-monitor-0.1.0.exe"), None, "Manage's Tether publishing never sees monitor files");
     }
 
     #[test]

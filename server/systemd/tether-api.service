@@ -15,6 +15,10 @@ EnvironmentFile=-/etc/tether/server.env
 # Optional: AUDIT_RETENTION_DAYS (default 90, 0 = store no audit records), AUDIT_MAX_MB (default 50),
 # TETHER_SIG_V1=off (refuse the older request signatures that are not bound to a relay, once
 # every Tether Manage and technician app signs the new way).
+# Device status: STATUS=off (every status route answers 503, Retry-After: 3600),
+# STATUS_TARGET_RPS (posts per second the devices are paced to, default 10),
+# STATUS_MAX_DEVICES (enrolled devices at most, default 20000; more needs a larger MemoryMax,
+# docs/scaling.md).
 EnvironmentFile=/etc/tether/api.env
 ExecStart=/usr/local/bin/tether-api --data /var/lib/tether-api --listen 127.0.0.1:21120
 Restart=always
