@@ -1,0 +1,32 @@
+[package]
+name = "oidc-mock"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Mock OpenID Connect provider shaped like Microsoft Entra ID v2.0, for tests and local development only (no security, loopback only)"
+publish = false
+
+[dependencies]
+# The relay's patched tiny_http (see [patch.crates-io] below), same version.
+tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+sha2 = "0.10"
+# RS256 signing; the relay's token check (plan C5) uses the same crate.
+rsa = { version = "0.9", features = ["sha2"] }
+# Seedable generator for keys, codes and token ids; OS entropy when no seed is given.
+rand_chacha = "0.3"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[patch.crates-io]
+tiny_http = { path = "../../server/api/patched/tiny_http" }
+
+# RSA key generation takes seconds in an unoptimised build.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3
+
+# Not part of any workspace.
+[workspace]
