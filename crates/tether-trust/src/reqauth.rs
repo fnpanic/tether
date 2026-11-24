@@ -9,6 +9,8 @@
 //! and prefix, so a device key never passes as an admin or member key and the reverse:
 //! `Tether-Sig: device-v1 uuid=<uuid> host=<relay host> ts=<unix secs> nonce=<…> sig=<b64>`, signed
 //! `"tether-device-v1\n" + host + "\n" + METHOD + ...` as v2. The uuid only selects the key.
+//! A member header (v1 or v2) may end with ` kid=<16 hex>` ([`crate::team::key_id`]), not signed:
+//! the relay then checks only that roster key ([`sign_request_for_kid`], [`header_kid`]).
 //! The path includes the query string. The server allows `MAX_SKEW_SECS` clock skew and must
 //! reject a nonce it has seen within the last `NONCE_TTL_SECS`.
 
@@ -98,6 +100,26 @@ pub fn sign_request_for(key: &SigningKey, relay: &str, method: &str, path: &str,
     format!("v2 host={host} ts={now} nonce={nonce} sig={}", b64().encode(sig.to_bytes()))
 }
 
+/// [`sign_request_for`] with ` kid=<team::key_id>` appended: tells a relay of 0.7 or later which
+/// member key to check (an older relay refuses the header as malformed). Not signed: it only
+/// selects the key the signature is then verified with.
+pub fn sign_request_for_kid(key: &SigningKey, relay: &str, method: &str, path: &str, body: &[u8], now: u64) -> String {
+    format!("{} kid={}", sign_request_for(key, relay, method, path, body, now), crate::team::key_id(&key.verifying_key()))
+}
+
+/// The `kid=` of a v1 or v2 header without verifying anything (key lookup before the check).
+pub fn header_kid(header: &str) -> Option<&str> {
+    let mut parts = header.split_whitespace();
+    if !matches!(parts.next(), Some("v1" | "v2")) {
+        return None;
+    }
+    parts.find_map(|p| p.strip_prefix("kid="))
+}
+
+fn valid_kid(k: &str) -> bool {
+    k.len() == 16 && k.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Verify a v1 header. `nonce_unused` must return true and remember the nonce if it was not seen
 /// before (replay protection); it is called only after the signature checks out.
 pub fn verify_request(
@@ -139,6 +161,8 @@ pub fn verify_request_for(
             Some(("ts", v)) => ts = v.parse::<u64>().ok(),
             Some(("nonce", v)) => nonce = Some(v),
             Some(("sig", v)) => sig = Some(v),
+            // Selects the key (the caller's lookup, `header_kid`); not part of the signed message.
+            Some(("kid", v)) if valid_kid(v) => {}
             _ => return Err("malformed signature header".into()),
         }
     }
@@ -361,6 +385,34 @@ mod tests {
             let r = verify_request_for(&h, &k.verifying_key(), Relay { hosts: &hosts, v1: true }, "GET", "/api/admin/status", &body_digest(b""), 1_000_000, |_| true);
             assert!(r.is_err(), "{hosts:?}");
         }
+    }
+
+    #[test]
+    fn kid_names_the_key_and_is_not_signed() {
+        let k = crate::generate_key();
+        let pk = k.verifying_key();
+        let hosts = ["relay-a.example.com".to_owned()];
+        let r = Relay { hosts: &hosts, v1: true };
+        let d = body_digest(b"");
+        let h = sign_request_for_kid(&k, "https://relay-a.example.com", "GET", "/api/team/me", b"", 1_000_000);
+        let kid = crate::team::key_id(&pk);
+        assert!(h.starts_with("v2 host=relay-a.example.com ts=1000000 nonce=") && h.ends_with(&format!(" kid={kid}")), "{h}");
+        assert_eq!(header_kid(&h), Some(kid.as_str()));
+        assert!(verify_request_for(&h, &pk, r, "GET", "/api/team/me", &d, 1_000_000, |_| true).is_ok());
+        // Only a selector: changing it does not break the signature, it only names another key.
+        let other = h.replace(&kid, "0123456789abcdef");
+        assert_eq!(header_kid(&other), Some("0123456789abcdef"));
+        assert!(verify_request_for(&other, &pk, r, "GET", "/api/team/me", &d, 1_000_000, |_| true).is_ok());
+        assert!(verify_request_for(&h, &crate::generate_key().verifying_key(), r, "GET", "/api/team/me", &d, 1_000_000, |_| true).is_err());
+        // Old headers have none; a malformed one is refused, not ignored.
+        assert_eq!(header_kid(&sign_request_for(&k, "relay-a.example.com", "GET", "/", b"", 1)), None);
+        assert_eq!(header_kid("device-v1 uuid=x kid=0123456789abcdef"), None);
+        for bad in ["kid=0123", "kid=0123456789abcdeg", "kid=", "kid=0123456789abcdef0"] {
+            let h = format!("{} {bad}", sign_request_for(&k, "relay-a.example.com", "GET", "/api/team/me", b"", 1_000_000));
+            assert_eq!(verify_request_for(&h, &pk, r, "GET", "/api/team/me", &d, 1_000_000, |_| true).unwrap_err(), "malformed signature header", "{bad}");
+        }
+        let v1 = format!("{} kid={kid}", sign_request(&k, "GET", "/api/team/me", b"", 1_000_000));
+        assert!(verify_request(&v1, &pk, "GET", "/api/team/me", b"", 1_000_000, |_| true).is_ok(), "v1 may carry one too");
     }
 
     #[test]
