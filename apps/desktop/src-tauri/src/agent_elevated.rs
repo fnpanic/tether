@@ -180,6 +180,15 @@ pub fn candidate(docs: &[(String, Vec<u8>)], cache: &Path, admin: &[VerifyingKey
     Ok((Candidate::from_entry(e, &base, &ix), raw))
 }
 
+/// This process's Tether ID and the 32-byte seed of the key it registers with the rendezvous
+/// server: its own config (the user's `Tether.toml`, TetherQS's `Tether-QS.toml`, the service's).
+pub fn own_identity() -> Option<(String, [u8; 32])> {
+    let id = hbb_common::config::Config::get_id();
+    let (sk, _) = hbb_common::config::Config::get_key_pair();
+    let seed: [u8; 32] = sk.get(..32)?.try_into().ok()?;
+    (!id.is_empty() && sk.len() == 64).then_some((id, seed))
+}
+
 /// The policy's grant, verified with the admin keys and made for Tether's proof: `(token, id)`.
 pub fn grant(token: &str, admin: &[VerifyingKey], now: u64) -> Result<(String, String), String> {
     let g = token.trim();

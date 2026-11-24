@@ -1131,10 +1131,7 @@ mod win {
 
         fn own_identity(&self) -> Option<(String, [u8; 32])> {
             // The key pair this process registers with the rendezvous server (its own config).
-            let id = hbb_common::config::Config::get_id();
-            let (sk, _) = hbb_common::config::Config::get_key_pair();
-            let seed: [u8; 32] = sk.get(..32)?.try_into().ok()?;
-            (!id.is_empty() && sk.len() == 64).then_some((id, seed))
+            crate::agent_elevated::own_identity()
         }
 
         fn service_exists(&self) -> Result<bool, String> {
