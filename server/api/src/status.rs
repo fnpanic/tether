@@ -576,14 +576,17 @@ pub struct Status {
     /// Software lists recorded: count and the running sum of their sizes (`STATUS_SBOM_MAX_TOTAL_MB`).
     sbom_files: u64,
     sbom_bytes: u64,
-    /// uuid → when its last software list was accepted, for an hour (a deleted list still counts).
+    /// uuid → when its last software list was accepted, or refused after a valid signature
+    /// (400, 507 store full), for an hour (a deleted list still counts).
     sbom_last: HashMap<String, u64>,
     /// uuids whose software list is being written (outside the lock).
     sbom_writing: HashSet<String>,
     /// The global budget: (second, lists let through to the signature check in it).
     sbom_budget: (u64, u64),
-    /// When the last `Job::SbomScan` was queued from `status_maintain`.
+    /// When the last `Job::SbomScan` was queued (the start-up one counts).
     sbom_scanned: u64,
+    /// A scan's thread is running.
+    sbom_scanning: bool,
 }
 
 impl Status {
@@ -683,7 +686,7 @@ impl Status {
         }
         let sbom = dev.values().filter_map(|s| s.sbom.as_ref());
         let (sbom_files, sbom_bytes) = (sbom.clone().count() as u64, sbom.map(|r| r.size).sum());
-        let mut s = Status { data: data.to_owned(), keys, dev, by_tether, used, dismissed, nc_keys, revoked: Arc::new(revoked), log_lines, sbom_files, sbom_bytes, ..Default::default() };
+        let mut s = Status { data: data.to_owned(), keys, dev, by_tether, used, dismissed, nc_keys, revoked: Arc::new(revoked), log_lines, sbom_files, sbom_bytes, sbom_scanned: now(), ..Default::default() };
         if !dropped.is_empty() {
             s.keys_append(&dropped)?.sync_data()?;
         }
@@ -894,11 +897,16 @@ fn sbom_store(app: &Mutex<App>, uuid: String, sig: String, key: String, ip: Stri
             rate_ok(&mut s.fail_hits, ip, t, u32::MAX);
             return Err(text(401, &e));
         }
+        // Refused after a valid signature: the device's fault, so it uses the device's hour (its
+        // slot stays used): one device cannot keep the global budget busy. A relay-side failure
+        // (disk full, a write error) uses nothing of the device's.
         if !object {
+            s.sbom_last.insert(uuid, now());
             return Err(text(400, "not a JSON object"));
         }
         s.sbom_hour(&uuid, now())?;
         if !s.sbom_fits(&uuid, len) {
+            s.sbom_last.insert(uuid, now());
             return Err(sbom_full());
         }
         a.check_space(len)?;
@@ -916,6 +924,7 @@ fn sbom_store(app: &Mutex<App>, uuid: String, sig: String, key: String, ip: Stri
             return Err(text(401, "unknown device"));
         }
         if !a.status.sbom_fits(&uuid, len) {
+            a.status.sbom_last.insert(uuid.clone(), now());
             return Err(sbom_full());
         }
         fs::rename(&tmp, file(&a.data, &uuid, "sbom.json")).map(|()| at).map_err(crate::internal)
@@ -1579,6 +1588,13 @@ impl App {
         Ok(t)
     }
 
+    /// A software list whose body did not arrive (a short body, a read error): its budget slot
+    /// goes back and the sender's IP has one failure more, as for a refused signature.
+    pub(crate) fn sbom_unread(&mut self, rq: &Request, slot: u64) {
+        self.status.sbom_slot_back(slot);
+        rate_ok(&mut self.status.fail_hits, crate::rate_ip(rq), now(), u32::MAX);
+    }
+
     /// `PUT /api/status/sbom`: the failure limit and the key lookup here (the body is moved out,
     /// not copied), the rest after the lock is released ([`sbom_store`]).
     pub(crate) fn status_sbom_put(&mut self, rq: &Request, body: &mut Body, url: &str) -> Result<Resp, Resp> {
@@ -1587,7 +1603,10 @@ impl App {
         let (raw, slot) = (std::mem::take(raw), *slot);
         let (uuid, sig) = Self::device_header(rq)?;
         let (ip, t) = (crate::rate_ip(rq), now());
-        self.fail_limit(&ip, t)?;
+        if let Err(e) = self.fail_limit(&ip, t) {
+            self.status.sbom_slot_back(slot); // the limit tripped since the precheck
+            return Err(e);
+        }
         let Some(key) = self.status.keys.get(&uuid).map(|p| p.key.clone()) else {
             // Removed since the precheck.
             self.status.sbom_slot_back(slot);
@@ -2097,11 +2116,25 @@ pub(crate) fn start_writer(app: &Arc<Mutex<App>>) {
                 Job::Revoked(done) => {
                     let _ = done.send(revoked_job(&app));
                 }
-                Job::SbomScan => sbom_scan(&app),
+                // Its own thread (one at a time): a long scan must not hold up a revocation
+                // (`status_revoke` waits for this thread) or the `seen.json` flush.
+                Job::SbomScan => {
+                    if !std::mem::replace(&mut lock(&app).status.sbom_scanning, true) {
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            sbom_scan(&app);
+                            lock(&app).status.sbom_scanning = false;
+                        });
+                    }
+                }
             }
         }
     });
 }
+
+/// Pause after each software list the scan reads: spreads the disk reads (the scan has its own
+/// thread, so this delays nothing else).
+const SBOM_SCAN_PAUSE: Duration = Duration::from_millis(10);
 
 /// A file's modification time in unix seconds (0 if unknown).
 fn mtime(m: &fs::Metadata) -> u64 {
@@ -2112,8 +2145,10 @@ fn mtime(m: &fs::Metadata) -> u64 {
 /// a hard stop a stored software list may lack its record, or have one from before it was
 /// replaced (its size or mtime differs from the record's `size` and `at`): both are rebuilt from
 /// the file (size, mtime, hash). A record without a file is dropped; a file whose uuid has no
-/// pin is removed. One pass over the folder, the records copied out in chunks, one stat per file,
-/// then a read and one short lock hold per mismatch.
+/// pin is removed. A file with the recorded content but another mtime (a restore, a copy) gets the
+/// record's time back, so the next scan does not read it again. One pass over the folder, the
+/// records copied out in chunks, one stat per file, then a read and one short lock hold per
+/// mismatch. Ends with one journal line (files, read again, records rebuilt).
 fn sbom_scan(app: &Mutex<App>) {
     let data = {
         let a = lock(app);
@@ -2135,6 +2170,7 @@ fn sbom_scan(app: &Mutex<App>) {
             a.status.sbom_record(u, None);
         }
     }
+    let (mut reread, mut rebuilt) = (0, 0);
     for u in &files {
         if crate::STOP.load(Ordering::SeqCst) {
             return;
@@ -2160,17 +2196,34 @@ fn sbom_scan(app: &Mutex<App>) {
             Ok((at, b))
         });
         let Ok((at, b)) = read else { continue };
+        reread += 1;
         let rec = Sbom { at, size: b.len() as u64, sha: reqauth::body_digest(&b)[..16].to_owned() };
-        if known.is_some_and(|k| k.sha == rec.sha && k.size == rec.size) {
-            continue; // the same content (only its mtime changed): the record stands
+        drop(b);
+        {
+            let mut a = lock(app);
+            // Still pinned, the record as it was looked at, no upload running, the file still there.
+            let cur = a.status.dev.get(u.as_str()).and_then(|s| s.sbom.as_ref());
+            if a.status.keys.contains_key(u) && cur == known && !a.status.sbom_writing.contains(u) && path.exists() {
+                match known {
+                    // The same content, only its mtime changed: the file gets the record's time
+                    // back (one syscall, under the lock so no upload replaces it meanwhile); if it
+                    // cannot, the record takes the file's.
+                    Some(k) if k.sha == rec.sha && k.size == rec.size => {
+                        let set = fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(k.at)));
+                        if set.is_err() {
+                            a.status.sbom_record(u, Some(Sbom { at, ..k.clone() }));
+                        }
+                    }
+                    _ => {
+                        a.status.sbom_record(u, Some(rec));
+                        rebuilt += 1;
+                    }
+                }
+            }
         }
-        let mut a = lock(app);
-        // Still pinned, the record as it was looked at, no upload running, the file still there.
-        let cur = a.status.dev.get(u.as_str()).and_then(|s| s.sbom.as_ref());
-        if a.status.keys.contains_key(u) && cur == known && !a.status.sbom_writing.contains(u) && path.exists() {
-            a.status.sbom_record(u, Some(rec));
-        }
+        std::thread::sleep(SBOM_SCAN_PAUSE);
     }
+    eprintln!("status: software lists checked: {} files, {reread} read again, {rebuilt} records rebuilt", files.len());
 }
 
 fn tick(app: &Arc<Mutex<App>>) {

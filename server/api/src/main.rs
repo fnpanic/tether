@@ -582,11 +582,14 @@ fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<
                 return Err(too_large());
             }
             let slot = lock(app).sbom_precheck(rq)?;
-            let b = read_body(rq, n as u64)?;
-            if b.len() != n {
-                return Err(text(400, "request body incomplete"));
-            }
-            return Ok(Body::Sbom(b, slot));
+            // A body that does not arrive costs its sender a failure, not the budget.
+            return match read_body(rq, n as u64) {
+                Ok(b) if b.len() == n => Ok(Body::Sbom(b, slot)),
+                r => {
+                    lock(app).sbom_unread(rq, slot);
+                    Err(r.err().unwrap_or_else(|| text(400, "request body incomplete")))
+                }
+            };
         }
         ("POST", "/api/status") => return read_body(rq, status::LIMIT_STATUS).map(Body::Mem),
         ("POST", "/api/status/enroll") => return read_body(rq, tether_trust::status::ENROLL_MAX as u64).map(Body::Mem),

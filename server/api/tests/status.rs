@@ -1856,12 +1856,14 @@ fn sbom_is_off_by_default_and_status_off_wins() {
 
 #[test]
 fn sbom_body_rules() {
-    let (s, _admin, k) = sbom_server(7, &[], |_| {});
-    // Not an object, or not JSON: 400, nothing stored, the hour not used up.
-    for body in [&b"[1,2]"[..], b"\"x\"", b"not json", b"{\"a\":1} {}", b"{\"a\":1", b""] {
-        let r = sbom_put(&s, &k[0], "dev-0001", body);
+    let (s, _admin, k) = sbom_server(12, &[], |_| {});
+    // Not an object, or not JSON: 400 and nothing stored (each from its own device: a refusal
+    // after a valid signature uses the device's hour).
+    for (i, body) in [&b"[1,2]"[..], b"\"x\"", b"not json", b"{\"a\":1} {}", b"{\"a\":1", b""].into_iter().enumerate() {
+        let u = format!("dev-{:04}", i + 7);
+        let r = sbom_put(&s, &k[i + 6], &u, body);
         assert_eq!((r.status, r.text()), (400, "not a JSON object".into()), "{}", String::from_utf8_lossy(body));
-        assert!(sbom_file(&s, "dev-0001").is_none());
+        assert!(sbom_file(&s, &u).is_none());
     }
     assert_eq!(sbom_put(&s, &k[0], "dev-0001", b"{}").status, 204);
     // 512 KiB of valid JSON that is no software list: stored.
@@ -1909,11 +1911,12 @@ fn sbom_forged_uploads_do_not_use_up_the_hour_and_the_budget_holds() {
     assert_eq!((r.status, r.text()), (401, "unknown device".into()));
     assert!(sbom_file(&s, "dev-0001").is_none());
     assert_eq!(sbom_put(&s, &k[0], "dev-0001", &doc).status, 204, "the device's own allowance is untouched");
-    // A signed request is used once, also when it was refused.
+    // A signed request refused for its body is not taken again within the hour, a replay
+    // included (stopped before the signature is looked at).
     let sig = reqauth::sign_device_request(&k[1], "dev-0002", RELAY, "PUT", PUT_SBOM, b"[1]", now());
     assert_eq!(s.req("PUT", PUT_SBOM, &[(reqauth::HEADER, &sig)], b"[1]").status, 400);
     let r = s.req("PUT", PUT_SBOM, &[(reqauth::HEADER, &sig)], b"[1]");
-    assert_eq!((r.status, r.text()), (401, "replayed request".into()));
+    assert_eq!((r.status, r.text()), (429, "upload too frequent".into()));
     drop(s);
     // The global budget: one upload per second, another within that second is refused.
     let (s, _admin, k) = sbom_server(3, &[("STATUS_SBOM_RPS", "1")], |_| {});
@@ -1931,7 +1934,7 @@ fn sbom_forged_uploads_do_not_use_up_the_hour_and_the_budget_holds() {
 fn sbom_total_cap() {
     // 1 MiB in all; dev-0001 holds 700 KB, dev-0003 100 KB, from before.
     let (big, small) = (sbom_doc(700_000, 'd'), sbom_doc(100_000, 'e'));
-    let (s, _admin, k) = sbom_server(3, &[("STATUS_SBOM_MAX_KB", "1024"), ("STATUS_SBOM_MAX_TOTAL_MB", "1")], |d| {
+    let (s, _admin, k) = sbom_server(4, &[("STATUS_SBOM_MAX_KB", "1024"), ("STATUS_SBOM_MAX_TOTAL_MB", "1")], |d| {
         prep_sbom(d, "dev-0001", &big, now() - 7200);
         prep_sbom(d, "dev-0003", &small, now() - 7200);
     });
@@ -1941,12 +1944,14 @@ fn sbom_total_cap() {
     // A larger replacement that does not fit is refused; the previous document stays.
     assert_eq!(sbom_put(&s, &k[2], "dev-0003", &sbom_doc(400_000, 'g')).status, 507);
     assert_eq!(sbom_file(&s, "dev-0003").unwrap(), small);
-    // One that is not larger is taken; then there is room for dev-0002.
+    // One that is not larger is taken; then there is room for another device. dev-0002's 507
+    // used its hour.
     let smaller = sbom_doc(500_000, 'h');
     assert_eq!(sbom_put(&s, &k[0], "dev-0001", &smaller).status, 204);
     assert_eq!(sbom_file(&s, "dev-0001").unwrap(), smaller);
     assert_eq!(metric(&s, "tether_api_status_sbom_bytes"), Some(600_000.));
-    assert_eq!(sbom_put(&s, &k[1], "dev-0002", &sbom_doc(300_000, 'f')).status, 204);
+    assert_eq!(sbom_put(&s, &k[1], "dev-0002", &sbom_doc(300_000, 'f')).status, 429);
+    assert_eq!(sbom_put(&s, &k[3], "dev-0004", &sbom_doc(300_000, 'f')).status, 204);
     assert_eq!(metric(&s, "tether_api_status_sbom_files"), Some(3.));
     assert_eq!(metric(&s, "tether_api_status_sbom_bytes"), Some(900_000.));
 }
@@ -2071,6 +2076,68 @@ fn sbom_put_needs_a_content_length() {
     assert!(raw.starts_with("HTTP/1.1 411"), "{raw}");
     assert!(sbom_file(&s, "dev-0001").is_none());
     assert_eq!(sbom_put(&s, &k[0], "dev-0001", b"{}").status, 204, "nothing used up");
+}
+
+#[test]
+fn sbom_bodies_that_do_not_arrive_cost_the_sender_not_the_budget() {
+    // One upload per second for all devices: a held slot would show at once.
+    let (s, _admin, k) = sbom_server(2, &[("STATUS_SBOM_RPS", "1")], |_| {});
+    let stranger = generate_key();
+    // Heads naming a pinned uuid, 5000 bytes declared (over tiny_http's own 1 KiB read), 10 sent.
+    for i in 0..200 {
+        let sig = reqauth::sign_device_request(&stranger, "dev-0001", RELAY, "PUT", PUT_SBOM, b"", now());
+        let r = send_declared(&s, "PUT", PUT_SBOM, &[(reqauth::HEADER, &sig), ("X-Forwarded-For", "203.0.113.7")], 5000, b"{\"a\":\"xxx\"");
+        let want = if i < 60 { (400, "request body incomplete") } else { (429, "too many failed requests") };
+        assert_eq!((r.status, r.text().as_str()), want, "short body {i}");
+    }
+    let doc = sbom_doc(300, 'n');
+    let sig = reqauth::sign_device_request(&k[1], "dev-0002", RELAY, "PUT", PUT_SBOM, &doc, now());
+    assert_eq!(s.req("PUT", PUT_SBOM, &[(reqauth::HEADER, &sig), ("X-Forwarded-For", "192.0.2.2")], &doc).status, 204, "the budget is free");
+    let sig = reqauth::sign_device_request(&k[0], "dev-0001", RELAY, "PUT", PUT_SBOM, &doc, now());
+    let r = s.req("PUT", PUT_SBOM, &[(reqauth::HEADER, &sig), ("X-Forwarded-For", "192.0.2.1")], &doc);
+    assert!(matches!(r.status, 204 | 429) && r.text() != "upload too frequent", "the named device's hour is untouched: {} {}", r.status, r.text());
+}
+
+#[test]
+fn sbom_a_refused_upload_uses_the_device_hour() {
+    let (s, _admin, k) = sbom_server(2, &[("STATUS_SBOM_RPS", "2")], |_| {});
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", b"not json").status, 400);
+    let r = sbom_put(&s, &k[0], "dev-0001", b"still not json");
+    assert_eq!((r.status, r.text()), (429, "upload too frequent".into()));
+    assert!(r.header("Retry-After").unwrap().parse::<u64>().unwrap() > 3500);
+    assert_eq!(sbom_put(&s, &k[1], "dev-0002", b"{}").status, 204, "another device gets the budget");
+}
+
+#[test]
+fn sbom_scan_puts_back_touched_mtimes_and_does_not_hold_up_revocations() {
+    const N: usize = 200;
+    let (s, admin, _k) = sbom_server(N, &[], |d| {
+        for i in 1..=N {
+            let u = format!("dev-{i:04}");
+            prep_sbom(d, &u, format!("{{\"n\":{i}}}").as_bytes(), now() - 7200);
+            // A restore that did not keep mtimes.
+            let p = d.join(format!("status/{u}.sbom.json"));
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(SystemTime::now()).unwrap();
+        }
+    });
+    let scans = |s: &Srv| std::fs::read_to_string(&s.err).unwrap().lines().filter(|l| l.contains("software lists checked")).map(str::to_owned).collect::<Vec<_>>();
+    // The start-up scan reads 200 files with a pause each (seconds); a revocation does not wait for it.
+    let r = revoke(&s, &admin, "abcdefghABCDEFGH", now() + 3600);
+    assert_eq!(r.status, 204);
+    assert!(scans(&s).is_empty(), "answered while the scan runs");
+    wait_for("the scan", || !scans(&s).is_empty());
+    assert_eq!(scans(&s), [format!("status: software lists checked: {N} files, {N} read again, 0 records rebuilt")]);
+    // The files have the recorded times back.
+    let seen: Value = serde_json::from_slice(&std::fs::read(s.dir.join("status/seen.json")).unwrap()).unwrap();
+    for i in 1..=N {
+        let u = format!("dev-{i:04}");
+        let m = std::fs::metadata(s.dir.join(format!("status/{u}.sbom.json"))).unwrap().modified().unwrap();
+        assert_eq!(m.duration_since(UNIX_EPOCH).unwrap().as_secs(), seen[&u]["sbom"]["at"].as_u64().unwrap(), "{u}");
+    }
+    // The next scan reads nothing.
+    let s = restart_env(s, &admin, &[("STATUS_SBOM", "on")], false);
+    wait_for("the second scan", || scans(&s).len() == 2);
+    assert_eq!(scans(&s)[1], format!("status: software lists checked: {N} files, 0 read again, 0 records rebuilt"));
 }
 
 #[test]
