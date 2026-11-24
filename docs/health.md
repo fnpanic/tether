@@ -335,7 +335,13 @@ one customer inside this deployment. Only an enrolment token sets it:
   signature` and the device keeps its customer. When it changes, tether-api writes `status: customer of <uuid> set to
   <customer> by token <id>` to its journal. The pin keeps the token it first enrolled with, so
   `monitor-publish devices --token` still lists it under that one; only the journal line names the
-  token that changed it.
+  token that changed it. While the device's pin exists, knowing its uuid and public key is not
+  enough to move it (the public key is on the device and in the relay's `status/keys.jsonl`; no
+  route returns it). Where a relay has no pin for that uuid (the device was removed, the pin was
+  dropped after 180 days without a report, or the device never enrolled on that relay), a first
+  enrolment is accepted unsigned (old agents) or signed with the key in the request, so a token
+  holder who also knows that uuid and public key could create the pin there under the token's
+  customer.
 - A token without a customer changes nothing: a device that has one keeps it.
 - To take a customer away, remove the device ([Removing a device](#removing-a-device)) and let it
   enrol again with a token without one.

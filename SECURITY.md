@@ -218,8 +218,14 @@ runs nothing on a device and opens no port on it.
   (`Tether-Sig: device-v1`, as for a status post), or the relay answers `401 changing the customer
   needs the device's signature` and changes nothing. With it, the device gets the token's customer
   (journal: `status: customer of <uuid> set to <customer> by token <id>`; the pin keeps the token
-  it first enrolled with). Knowing a device's uuid and public key is therefore not enough to move
-  it; a signature that is present but wrong is refused on every enrolment, and an unsigned
+  it first enrolled with). While the device's pin exists, knowing its uuid and public key is
+  therefore not enough to move it (the public key is on the device and in the relay's
+  `status/keys.jsonl`; no route returns it). Where there is no pin for that uuid on a relay
+  (after a team member or admin removed the device, after the pin was dropped for 180 days
+  without a report, or on a relay the device never enrolled on), a first enrolment is accepted
+  unsigned (old agents) or signed with the key in the request, so a token holder who also knows
+  that uuid and public key could create the pin there under the token's customer. A signature
+  that is present but wrong is refused on every enrolment, and an unsigned
   enrolment that changes no customer is accepted as before. Every roster member sees every device whatever its customer: the customer
   groups devices inside one deployment, and organisations that must not see each other's machines
   need separate deployments ([docs/several-organisations.md](docs/several-organisations.md)).

@@ -99,8 +99,12 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   the default build, an existing install cannot become an instance, and each organisation
   publishes only its own build
   ([docs/several-organisations.md](docs/several-organisations.md#two-organisations-on-one-pc)).
-  Checked: the unit tests with and without the value, refused values, one Windows installer built
-  and inspected. Not checked: installing it, two builds side by side, the service and firewall
+  A release build also checks that the Tauri product name matches the instance (`Tether` for
+  none, `Tether-<instance>` otherwise) and stops with a message when it does not. Checked: the
+  unit tests with and without the value, refused values, three real Windows bundle runs
+  (none installed): `north` with its `--config` built `Tether-north_0.6.3_x64-setup.exe`;
+  `north` without it stopped at the product-name check; the default build with north's
+  `--config` stopped at it. Not checked: installing it, two builds side by side, the service and firewall
   rule on a real PC, updates, the macOS build.
 
 ### 0.6.3 (2026-11-23; files in dist/, ready to publish; frozen)

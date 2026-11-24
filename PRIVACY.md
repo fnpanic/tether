@@ -13,7 +13,7 @@ What goes to those relay servers:
 | Session audit record: time, device, technician name, IP address, duration, names of transferred files, security alarms | Accountability of remote access (shown in Tether Manage) | daily files, kept for the retention the organization sets |
 | Update checks: app, channel, version | Offering signed updates | access logs of the relay |
 | Health report, only on machines where the organization installed a monitoring agent: machine name, names and versions of installed products, the state, title, value and hint of each check, agent version, time of the last report | Showing the health of supported machines to technicians | the last full report and 90 days of state changes; removed when the device is removed or after 180 days without a report |
-| Customer reference, only on machines where the organization installed a monitoring agent and its administrator put one in the enrolment token: a short label such as a customer number (set by the administrator, never by the machine) | Grouping supported machines by customer in Tether | with the device's enrolment, until the device is removed |
+| Customer reference, only on machines where the organization installed a monitoring agent and its administrator put one in the enrolment token: a short label such as a customer number (set by the administrator, never by the machine) | Grouping supported machines by customer in Tether | with the device's enrolment: removed when the device is removed or after 180 days without a report |
 
 Health reports come from a separate monitoring agent, not from Tether or TetherQS, and only if the
 organization installed it. They go to the same relay servers, are not end-to-end encrypted, and can be
