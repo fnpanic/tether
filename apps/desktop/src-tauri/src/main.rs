@@ -1,6 +1,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod agent;
+mod agent_elevated;
 mod app;
 mod cli;
 mod commands;

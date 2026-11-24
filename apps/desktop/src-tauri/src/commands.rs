@@ -449,12 +449,13 @@ fn from_wire(a: TetherAgentAnswer) -> crate::agent::AgentAnswer {
     crate::agent::AgentAnswer { state: a.state, version: a.version, installed_by: a.installed_by, detail: a.detail, at: a.at }
 }
 
-/// Host: the core's handler for a technician's request (set in `main`, every process).
-pub fn host_agent(action: AgentAction) -> TetherAgentAnswer {
+/// Host: the core's handler for a technician's request (set in `main`, every process). `viewer`: the
+/// name their program gave (the elevated path's dialog shows it as not verified).
+pub fn host_agent(action: AgentAction, viewer: &str) -> TetherAgentAnswer {
     to_wire(match action {
         AgentAction::Status => crate::agent::status(),
-        AgentAction::Install => crate::agent::request(crate::agent::Action::Install),
-        AgentAction::Remove => crate::agent::request(crate::agent::Action::Remove),
+        AgentAction::Install => crate::agent::request(crate::agent::Action::Install, viewer),
+        AgentAction::Remove => crate::agent::request(crate::agent::Action::Remove, viewer),
     })
 }
 
@@ -485,6 +486,41 @@ async fn ask_agent(peer: &impl AgentPeer, action: &str, status_wait: std::time::
 async fn session_agent(key: String, action: String) -> R<crate::agent::AgentAnswer> {
     let s = core::session(&key).ok_or_else(|| "Not connected to the remote device.".to_owned())?;
     ask_agent(&s, &action, AGENT_STATUS_WAIT).await
+}
+
+/// Settings › this computer's agent (spec 7.3): whether its service is there, who installed it and
+/// when; never a secret (agent.rs `local_status`).
+#[tauri::command]
+async fn health_agent_status() -> R<crate::agent::AgentAnswer> {
+    blocking(crate::agent::local_status).await
+}
+
+/// The home view's Install card is shown (policy `install`, Tether without its service, no agent).
+#[tauri::command]
+async fn health_agent_offer(window: tauri::WebviewWindow) -> R<bool> {
+    main_only(&window)?;
+    blocking(crate::agent::offer).await
+}
+
+/// The card's Install…: the same pre-dialog and prompt as a technician's request.
+#[tauri::command]
+async fn health_agent_install(window: tauri::WebviewWindow) -> R<crate::agent::AgentAnswer> {
+    main_only(&window)?;
+    blocking(crate::agent::install_here).await
+}
+
+/// The pre-dialog waiting for an answer, if any (the main window shows it).
+#[tauri::command]
+fn health_agent_consent_pending(window: tauri::WebviewWindow) -> R<Option<crate::agent_elevated::Dialog>> {
+    main_only(&window)?;
+    Ok(crate::agent_elevated::pending())
+}
+
+/// The person's answer to pre-dialog `id` (only the main window; remote input never reaches it).
+#[tauri::command]
+fn health_agent_consent_answer(window: tauri::WebviewWindow, id: u64, yes: bool) -> R<bool> {
+    main_only(&window)?;
+    Ok(crate::agent_elevated::answer(id, yes))
 }
 
 /// The webview drew a natively decoded picture (see `TauriSink::video`).
@@ -766,6 +802,11 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         session_chat,
         session_restart_remote,
         session_agent,
+        health_agent_status,
+        health_agent_offer,
+        health_agent_install,
+        health_agent_consent_pending,
+        health_agent_consent_answer,
         session_webcodecs_failed,
         session_frame_drawn,
         session_codec,
@@ -1233,8 +1274,9 @@ mod tests {
         assert_eq!(super::from_wire(w), a);
         // The host's own answer on this machine comes from agent.rs (a test is not Tether's
         // LocalSystem service, or not Windows).
-        let st = super::host_agent(Action::Status);
-        assert!(matches!(st.state.as_str(), "needs-service" | "not-supported"), "{}", st.state);
+        let st = super::host_agent(Action::Status, "Sam");
+        // Without Tether's service the elevated path answers; the policy here is `manual`.
+        assert!(matches!(st.state.as_str(), "needs-service" | "not-supported" | "not-allowed"), "{}", st.state);
     }
 
     fn request(action: i32) -> TetherAgentRequest {
@@ -1316,19 +1358,21 @@ mod tests {
 
     #[test]
     fn core_waits_for_the_app_at_most_the_bound() {
-        fn slow(_: Action) -> TetherAgentAnswer {
+        fn slow(_: Action, _: &str) -> TetherAgentAnswer {
             std::thread::sleep(Duration::from_millis(400));
             TetherAgentAnswer { state: "installed".into(), ..Default::default() }
         }
-        fn quick(a: Action) -> TetherAgentAnswer {
-            TetherAgentAnswer { state: format!("{a:?}"), ..Default::default() }
+        fn quick(a: Action, viewer: &str) -> TetherAgentAnswer {
+            TetherAgentAnswer { state: format!("{a:?}"), detail: viewer.to_owned(), ..Default::default() }
         }
         let rt = hbb_common::tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_time().build().unwrap();
         // No handler (TetherQS, or an app that does not manage the agent): not supported.
-        assert_eq!(rt.block_on(core_agent::host_answer(Action::Install, None, Duration::from_secs(1))).state, "not-supported");
-        assert_eq!(rt.block_on(core_agent::host_answer(Action::Remove, Some(quick), Duration::from_secs(1))).state, "Remove");
+        assert_eq!(rt.block_on(core_agent::host_answer(Action::Install, None, String::new(), Duration::from_secs(1))).state, "not-supported");
+        let a = rt.block_on(core_agent::host_answer(Action::Remove, Some(quick), "Sam at the desk".into(), Duration::from_secs(1)));
+        // The handler gets the name the viewer gave (shown on the host as not verified).
+        assert_eq!((a.state.as_str(), a.detail.as_str()), ("Remove", "Sam at the desk"));
         let t = std::time::Instant::now();
-        let late = rt.block_on(core_agent::host_answer(Action::Install, Some(slow), Duration::from_millis(50)));
+        let late = rt.block_on(core_agent::host_answer(Action::Install, Some(slow), String::new(), Duration::from_millis(50)));
         assert!(t.elapsed() < Duration::from_millis(300));
         // The action goes on: "running", and a later status shows the outcome.
         assert_eq!(late.state, "running");
@@ -1357,6 +1401,7 @@ mod tests {
         rt().block_on(core_agent::serve(
             action,
             Some(handler),
+            "Sam".to_owned(),
             wait,
             guard,
             move |m| {
@@ -1383,13 +1428,13 @@ mod tests {
 
     #[test]
     fn core_serve_audits_only_what_the_app_did() {
-        fn refused(_: Action) -> TetherAgentAnswer {
+        fn refused(_: Action, _: &str) -> TetherAgentAnswer {
             TetherAgentAnswer { state: "needs-service".into(), ..Default::default() }
         }
-        fn busy(_: Action) -> TetherAgentAnswer {
+        fn busy(_: Action, _: &str) -> TetherAgentAnswer {
             TetherAgentAnswer { state: "busy".into(), ..Default::default() }
         }
-        fn installed(_: Action) -> TetherAgentAnswer {
+        fn installed(_: Action, _: &str) -> TetherAgentAnswer {
             TetherAgentAnswer { state: "installed".into(), ..Default::default() }
         }
         // Refused or busy: answered, but no audit record and no line in the connection window.
@@ -1416,7 +1461,7 @@ mod tests {
 
     #[test]
     fn core_serve_post_is_one_bounded_attempt() {
-        fn removed(_: Action) -> TetherAgentAnswer {
+        fn removed(_: Action, _: &str) -> TetherAgentAnswer {
             TetherAgentAnswer { state: "removed-by-tether".into(), ..Default::default() }
         }
         // A relay that never answers: given up after the bound, the guard is freed.
@@ -1443,7 +1488,7 @@ mod tests {
             let Some(misc::Union::TetherAgentAnswer(a)) = misc.union else { panic!("not an answer") };
             a
         }
-        fn slow(_: Action) -> TetherAgentAnswer {
+        fn slow(_: Action, _: &str) -> TetherAgentAnswer {
             std::thread::sleep(Duration::from_millis(600));
             TetherAgentAnswer { state: "installed".into(), ..Default::default() }
         }
@@ -1456,6 +1501,7 @@ mod tests {
             let served = core_agent::serve(
                 Action::Install,
                 Some(slow),
+                "Sam".to_owned(),
                 Duration::from_millis(50),
                 guard,
                 |m| drop(tx.send(m)),

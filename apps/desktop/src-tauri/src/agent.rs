@@ -38,20 +38,14 @@ use tether_trust::{
     VerifyingKey,
 };
 
-/// The agent's Windows service.
-const SERVICE: &str = "TetherMonitor";
-/// The agent's folder name under `%ProgramFiles%` and `%ProgramData%`.
-const AGENT_FOLDER: &str = "Tether Monitor";
-const AGENT_EXE: &str = "tether-monitor.exe";
-/// `HKLM\<key>` `RemovedAt`: written by the practice's `uninstall` (admin only), deleted by an install.
-const REMOVED_KEY: &str = r"SOFTWARE\Tether Monitor";
-const REMOVED_VALUE: &str = "RemovedAt";
-/// App and release key in `monitor.json`.
-const APP: &str = "monitor";
+pub use crate::agent_elevated::{Action, AgentAnswer};
+use crate::agent_elevated::{active, parse_identity, tidy, AGENT_FOLDER, STAGED_EXE};
+
 const STATE_FILE: &str = "health-agent.json";
+/// What Settings shows on this computer, readable by its users (the state folder is not): only
+/// [`public_answer`]'s fields.
+const PUBLIC_FILE: &str = "health-agent-status.json";
 const DOWNLOAD_DIR: &str = "health-agent";
-/// The verified download is always staged under this name: no file name from the network is run.
-const STAGED_EXE: &str = "health-agent.exe";
 /// Agents before this have no `uninstall --by-tether` (installed by hand only).
 const FIRST_TETHER_AWARE: &str = "0.2.0";
 const BACKOFF: [u64; 3] = [3600, 6 * 3600, 86_400];
@@ -63,48 +57,6 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(600);
 const NEEDS_SERVICE: &str = "needs Tether's service";
 
-// ----------------------------------------------------------------------------- interface (A6)
-
-/// A technician's request in a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    Status,
-    Install,
-    Remove,
-}
-
-impl Action {
-    /// `status`, `install`, `remove`; anything else is None.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "status" => Some(Self::Status),
-            "install" => Some(Self::Install),
-            "remove" => Some(Self::Remove),
-            _ => None,
-        }
-    }
-}
-
-/// What the host answers. `state`: `not-installed`, `installed`, `installed-by-hand`,
-/// `removed-locally`, `removed-by-tether`, `failed`, `not-allowed` (policy `manual`, or an install
-/// while the policy removes), `needs-service` (not Tether's LocalSystem service), `not-supported`
-/// (not Windows), `busy` (another action runs). `installed_by`: `policy`, `session` or empty;
-/// `detail`: the agent's last line or the reason; `at`: unix seconds of the last change (0: none).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct AgentAnswer {
-    pub state: String,
-    pub version: String,
-    pub installed_by: String,
-    pub detail: String,
-    #[serde(default)]
-    pub at: u64,
-}
-
-impl AgentAnswer {
-    fn only(state: &str, detail: &str) -> Self {
-        Self { state: state.into(), detail: detail.into(), ..Default::default() }
-    }
-}
 
 // ----------------------------------------------------------------------------- state
 
@@ -203,6 +155,26 @@ pub(crate) trait Sys {
     fn clock(&self) -> u64 {
         now()
     }
+    /// Writes `data` to `path` (in the state folder) readable by this computer's users, writable
+    /// only by SYSTEM and Administrators.
+    fn write_public(&self, path: &Path, data: &[u8]) -> Result<(), String>;
+}
+
+/// The public copy of the state: whether Tether's agent is there, by whom, when; nothing else.
+fn public_answer(st: &State) -> AgentAnswer {
+    let state = match st.state.as_str() {
+        _ if st.ours => "installed",
+        "" => "not-installed",
+        s => s,
+    };
+    AgentAnswer { state: state.into(), version: st.version.clone(), installed_by: st.by.clone(), detail: String::new(), at: st.at }
+}
+
+/// Settings' line from the public copy: only a known state and the three plain fields, no detail.
+fn read_public(raw: &[u8]) -> Option<AgentAnswer> {
+    let a: AgentAnswer = serde_json::from_slice(raw).ok().filter(|_| raw.len() <= 4096)?;
+    let ok = |s: &str, n: usize| s.len() <= n && s.chars().all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c));
+    (matches!(a.state.as_str(), "installed" | "not-installed" | "removed-locally" | "removed-by-tether" | "failed") && ok(&a.version, 32) && matches!(a.installed_by.as_str(), "" | "policy" | "session")).then(|| AgentAnswer { detail: String::new(), ..a })
 }
 
 /// What the policy and the build say (no Debug: it holds the grant).
@@ -219,9 +191,6 @@ pub(crate) struct Inputs {
     pub dir: PathBuf,
 }
 
-fn active(mode: &str) -> bool {
-    matches!(mode, "on-request" | "install" | "remove")
-}
 
 /// The one place that decides whether the manager acts here: Tether's `--server` process (not the
 /// connection manager or the UI, which run the policy loop too) running as LocalSystem.
@@ -235,34 +204,6 @@ fn download_time(size: u64) -> Duration {
     Duration::from_secs((120 + size / 65_536).min(600))
 }
 
-/// What goes to a remote technician: control characters out; a path under a user profile cut
-/// from its word on; anything that could be a grant or a proof (a run of more than 64 base64
-/// characters) replaced; at most 300 characters.
-fn tidy(detail: &str) -> String {
-    let mut s: String = detail.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-    let low = s.to_ascii_lowercase();
-    if let Some(i) = ["\\users\\", "/users/"].iter().filter_map(|p| low.find(p)).min() {
-        let start = s[..i].char_indices().rev().find(|(_, c)| c.is_whitespace()).map_or(0, |(w, c)| w + c.len_utf8());
-        s.truncate(start);
-        s.push_str("[path removed]");
-    }
-    let b64 = |c: char| c.is_ascii_alphanumeric() || "+/=_-.".contains(c);
-    let (mut out, mut run) = (String::with_capacity(s.len()), String::new());
-    let flush = |run: &mut String, out: &mut String| {
-        out.push_str(if run.len() > 64 { "[removed]" } else { run });
-        run.clear();
-    };
-    for c in s.chars() {
-        if b64(c) {
-            run.push(c);
-        } else {
-            flush(&mut run, &mut out);
-            out.push(c);
-        }
-    }
-    flush(&mut run, &mut out);
-    out.trim().chars().take(300).collect()
-}
 
 fn tidied(a: AgentAnswer) -> AgentAnswer {
     AgentAnswer { detail: tidy(&a.detail), ..a }
@@ -335,25 +276,6 @@ fn line_of(r: &Ran) -> String {
     tidy(&l.unwrap_or_else(|| format!("exit code {}", r.code)))
 }
 
-/// `identity`'s line.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Identity {
-    uuid: String,
-    pubkey: String,
-}
-
-fn parse_identity(out: &str) -> Result<Identity, String> {
-    let bad = || "the agent's identity is not what Tether expects".to_owned();
-    // One line of at most 512 bytes, the key exactly in its canonical encoding (it is signed as given).
-    let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
-    let line = lines.next().filter(|l| l.len() <= 512 && lines.next().is_none()).ok_or_else(bad)?;
-    let i: Identity = serde_json::from_str(line).map_err(|_| bad())?;
-    if !status::valid_uuid(&i.uuid) || tether_trust::key_from_b64(&i.pubkey).map(|k| tether_trust::key_to_b64(&k)).ok().as_deref() != Some(i.pubkey.as_str()) {
-        return Err(bad());
-    }
-    Ok(i)
-}
 
 pub(crate) struct Manager<'a> {
     pub sys: &'a dyn Sys,
@@ -371,7 +293,7 @@ impl Manager<'_> {
     /// are deleted, so they count as absent and the next write replaces them.
     fn sweep(&self) -> Result<(), String> {
         let ch = &self.p.channel;
-        for name in [STATE_FILE.to_owned(), format!("monitor-{ch}.json"), format!("monitor-{ch}.serial")] {
+        for name in [STATE_FILE.to_owned(), PUBLIC_FILE.to_owned(), format!("monitor-{ch}.json"), format!("monitor-{ch}.serial")] {
             let path = self.p.dir.join(&name);
             if !self.sys.file_trusted(&path) {
                 log::warn!("health agent: {name} is not owned by SYSTEM or Administrators: ignored and deleted");
@@ -386,7 +308,13 @@ impl Manager<'_> {
             return Ok(());
         }
         let raw = serde_json::to_vec(st).map_err(|e| e.to_string())?;
-        crate::policy::write_atomic(&self.p.dir.join(STATE_FILE), &raw).map_err(|e| format!("{STATE_FILE}: {e}"))
+        crate::policy::write_atomic(&self.p.dir.join(STATE_FILE), &raw).map_err(|e| format!("{STATE_FILE}: {e}"))?;
+        // The copy this computer's users may read (Settings): no grant, proof, path or agent line.
+        let public = serde_json::to_vec(&public_answer(st)).map_err(|e| e.to_string())?;
+        if let Err(e) = self.sys.write_public(&self.p.dir.join(PUBLIC_FILE), &public) {
+            log::warn!("health agent: {PUBLIC_FILE}: {e}");
+        }
+        Ok(())
     }
 
     fn fail(st: &mut State, why: String, now: u64) {
@@ -544,15 +472,7 @@ impl Manager<'_> {
 
     /// The policy's grant, verified with the admin keys: `(token, id)`.
     fn grant(&self, now: u64) -> Result<(String, String), String> {
-        let g = self.p.grant.trim();
-        if g.is_empty() {
-            return Err("the policy has no enrolment grant".into());
-        }
-        let p = status::verify_token(g, &self.p.admin, now).map_err(|e| format!("the policy's enrolment grant: {e}"))?;
-        if !p.tether_proof {
-            return Err("the policy's enrolment grant is not one for Tether".into());
-        }
-        Ok((g.to_owned(), p.id))
+        crate::agent_elevated::grant(&self.p.grant, &self.p.admin, now)
     }
 
     /// The agent `monitor.json` offers now. `Ok(None)`: the rollout has not reached this machine
@@ -562,21 +482,9 @@ impl Manager<'_> {
             return Err("this build has no update keys".into());
         }
         let ch = &self.p.channel;
-        let docs = self.sys.fetch_index(ch);
         let cache = self.p.dir.join(format!("monitor-{ch}.json"));
-        let (base, ix) = release::choose_for(&cache, &docs, &self.p.admin, ch, release::MONITOR_APPS)?.ok_or("no relay answered with the agent's index")?;
-        if ix.stale(now) {
-            return Err("the agent's index has expired".into());
-        }
-        let e = ix.releases.get(&format!("{APP}/{}", release::WINDOWS)).ok_or("the agent's index has no agent for Windows")?;
-        if e.halted {
-            return Err(format!("the agent {} is halted", e.version));
-        }
-        if !e.file.ends_with(".exe") || release::file_version(APP, release::WINDOWS, &e.file).as_deref() != Some(e.version.as_str()) {
-            return Err("the agent's index names an unexpected file".into());
-        }
-        let c = Candidate::from_entry(e, &base, &ix);
-        if rollout && !c.eligible(release::bucket(&self.p.uuid, APP, &c.version), now, &self.p.rollout) {
+        let (c, _) = crate::agent_elevated::candidate(&self.sys.fetch_index(ch), &cache, &self.p.admin, ch, now)?;
+        if rollout && !c.eligible(release::bucket(&self.p.uuid, crate::agent_elevated::APP, &c.version), now, &self.p.rollout) {
             log::info!("health agent: the rollout of {} has not reached this computer yet", c.version);
             return Ok(None);
         }
@@ -838,15 +746,35 @@ pub fn tick(eff: &tether_trust::policy::Effective, now: u64) {
     }
 }
 
-/// A technician's request in a session, run to its end with its real outcome (the core answers the
-/// session `running` meanwhile when it takes longer, see [`exclusive`]).
+/// No Tether service runs on this computer: this process hosts for the user, and the agent goes
+/// through the elevation prompt (agent_elevated.rs) instead of the manager.
 #[cfg(windows)]
-pub fn request(action: Action) -> AgentAnswer {
+fn without_service() -> bool {
+    !win::Real.service_process() && !librustdesk::platform::is_self_service_running()
+}
+
+/// The elevated path for this process: its own identity key (the user's `Tether.toml`), its policy.
+#[cfg(windows)]
+fn elevated(eff: &tether_trust::policy::Effective) -> crate::agent_elevated::Host<'static> {
+    let i = inputs(eff);
+    let relays = crate::policy::relay_bases().into_iter().map(|(host, _)| host).collect();
+    let p = crate::agent_elevated::Inputs { mode: i.mode, grant: i.grant, channel: i.channel, admin: i.admin, updater_key: i.updater_key, elevate: true, identity: win::Real.own_identity(), org: crate::APP_NAME.to_owned(), relays };
+    crate::agent_elevated::Host { m: &win::UserMachine, p }
+}
+
+/// A technician's request in a session, run to its end with its real outcome (the core answers the
+/// session `running` meanwhile when it takes longer, see [`exclusive`]). `viewer`: the name their
+/// program gave (the elevated path's dialog shows it as not verified).
+#[cfg(windows)]
+pub fn request(action: Action, viewer: &str) -> AgentAnswer {
     let what = match action {
         Action::Status => return status(),
         Action::Install => "installing the agent",
         Action::Remove => "removing the agent",
     };
+    if without_service() {
+        return elevated(&crate::policy::effective()).request(action, Some(viewer), now());
+    }
     let m = Manager { sys: &win::Real, p: inputs(&crate::policy::effective()) };
     if !win::Real.service_process() {
         return m.request(action, now());
@@ -857,6 +785,9 @@ pub fn request(action: Action) -> AgentAnswer {
 /// What the host answers to `status`: `busy` while an action runs ([`busy_now`]).
 #[cfg(windows)]
 pub fn status() -> AgentAnswer {
+    if without_service() {
+        return elevated(&crate::policy::effective()).status(now());
+    }
     let slot = *running();
     if let Some(b) = busy_now(slot) {
         if win::Real.service_process() {
@@ -866,17 +797,65 @@ pub fn status() -> AgentAnswer {
     (Manager { sys: &win::Real, p: inputs(&crate::policy::effective()) }).status(now())
 }
 
+/// Settings on this computer (the UI process, never the service): whether the agent's service is
+/// there and whether Tether installed it, when and why: from the service's public copy, else this
+/// user's own record of the prompt path. Never a secret.
+#[cfg(windows)]
+pub fn local_status() -> AgentAnswer {
+    if !crate::agent_elevated::win::service_exists().unwrap_or(false) {
+        return AgentAnswer::only("not-installed", "");
+    }
+    let public = win::program_data().join(crate::APP_NAME).join(PUBLIC_FILE);
+    let by_service = win::file_trusted(&public).then(|| std::fs::read(&public).ok()).flatten().and_then(|b| read_public(&b)).filter(|a| a.state == "installed");
+    by_service.unwrap_or_else(|| match elevated(&crate::policy::effective()).status(now()) {
+        a if a.state == "installed" => AgentAnswer { detail: String::new(), ..a },
+        _ => AgentAnswer::only("installed-by-hand", ""),
+    })
+}
+
+/// The home view's card (spec 7.2): the policy asks to install, Tether runs without its service,
+/// the agent is not there and was not removed on this computer.
+#[cfg(windows)]
+pub fn offer() -> bool {
+    let eff = crate::policy::effective();
+    eff.get("health.agent") == "install" && without_service() && matches!(elevated(&eff).status(now()).state.as_str(), "not-installed" | "failed" | "removed-by-tether")
+}
+
+/// The card's Install…: the person at this computer asked (the same dialog and prompt).
+#[cfg(windows)]
+pub fn install_here() -> AgentAnswer {
+    if !without_service() {
+        return AgentAnswer::only("needs-service", "Tether's service installs the agent on this computer");
+    }
+    elevated(&crate::policy::effective()).request(Action::Install, None, now())
+}
+
 #[cfg(not(windows))]
 pub fn tick(_eff: &tether_trust::policy::Effective, _now: u64) {}
 
 #[cfg(not(windows))]
-pub fn request(_action: Action) -> AgentAnswer {
+pub fn request(_action: Action, _viewer: &str) -> AgentAnswer {
     AgentAnswer::only("not-supported", "the health monitoring agent is for Windows")
 }
 
 #[cfg(not(windows))]
 pub fn status() -> AgentAnswer {
-    request(Action::Status)
+    request(Action::Status, "")
+}
+
+#[cfg(not(windows))]
+pub fn local_status() -> AgentAnswer {
+    status()
+}
+
+#[cfg(not(windows))]
+pub fn offer() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn install_here() -> AgentAnswer {
+    status()
 }
 
 // ----------------------------------------------------------------------------- Windows
@@ -885,12 +864,10 @@ pub fn status() -> AgentAnswer {
 mod win {
     use super::*;
     use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::{GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SERVICE_DOES_NOT_EXIST, GENERIC_READ, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{GetLastError, LocalFree, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES};
-    use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, OPEN_EXISTING};
-    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_ANY, RRF_SUBKEY_WOW6464KEY};
-    use windows_sys::Win32::System::Services::{CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS};
+    use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ATTRIBUTE_REPARSE_POINT};
 
     /// Protected: SYSTEM and Administrators full control, inherited by files and folders, nothing else.
     const SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
@@ -905,9 +882,6 @@ mod win {
         std::env::var_os("ProgramData").map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from)
     }
 
-    fn program_files() -> PathBuf {
-        std::env::var_os("ProgramFiles").map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from)
-    }
 
     /// SYSTEM or the Administrators group.
     pub(super) fn trusted_owner(sid: &str) -> bool {
@@ -1008,27 +982,7 @@ mod win {
         }
     }
 
-    /// Read through a handle that shares reading only: nobody can write, rename or delete the
-    /// file while the guard lives; the loader's own open (read and execute) is still allowed.
-    pub(super) fn open_locked(path: &Path) -> Result<(Vec<u8>, Box<dyn std::any::Any>), String> {
-        use std::io::Read;
-        use std::os::windows::fs::MetadataExt;
-        use std::os::windows::io::FromRawHandle;
-        let err = |e: std::io::Error| format!("{}: {e}", path.display());
-        let w = wide(path.as_os_str());
-        let h = unsafe { CreateFileW(w.as_ptr(), GENERIC_READ, FILE_SHARE_READ, null_mut(), OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) };
-        if h == INVALID_HANDLE_VALUE {
-            return Err(err(std::io::Error::last_os_error()));
-        }
-        let f = unsafe { std::fs::File::from_raw_handle(h) };
-        let md = f.metadata().map_err(err)?;
-        if md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !md.is_file() || md.len() > release::MAX_ARTIFACT {
-            return Err(format!("{} is not a plain file of at most {} bytes: refused", path.display(), release::MAX_ARTIFACT));
-        }
-        let mut bytes = Vec::with_capacity(md.len() as usize);
-        (&f).take(release::MAX_ARTIFACT + 1).read_to_end(&mut bytes).map_err(err)?;
-        Ok((bytes, Box::new(f)))
-    }
+    pub(super) use crate::agent_elevated::win::open_locked;
 
     /// What is kept of each of stdout and stderr: the last bytes, cut to whole lines.
     const TAIL: usize = 4096;
@@ -1100,6 +1054,74 @@ mod win {
         Ok(Ran { code: status.code().unwrap_or(-1), out: text(&out), err: text(&err) })
     }
 
+    /// The elevated path's machine for this process (a Tether without its service).
+    pub struct UserMachine;
+
+    impl crate::agent_elevated::Machine for UserMachine {
+        fn user_dir(&self) -> PathBuf {
+            crate::agent_elevated::win::user_dir()
+        }
+        fn agent_service(&self) -> Result<bool, String> {
+            crate::agent_elevated::win::service_exists()
+        }
+        fn removed_at(&self) -> Option<u64> {
+            crate::agent_elevated::win::removed_at()
+        }
+        fn installed_exe(&self) -> PathBuf {
+            crate::agent_elevated::win::installed_exe()
+        }
+        fn fetch_index(&self, channel: &str) -> Vec<(String, Vec<u8>)> {
+            Real.fetch_index(channel)
+        }
+        fn download(&self, c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
+            crate::update::download_within(c, key, Some(download_time(c.size)))
+        }
+        fn prepare_stage(&self, dir: &Path) -> Result<(), String> {
+            crate::agent_elevated::win::prepare_stage(dir)
+        }
+        fn open_locked(&self, path: &Path) -> Result<(Vec<u8>, Box<dyn std::any::Any>), String> {
+            open_locked(path)
+        }
+        fn pipe_name(&self) -> Result<String, String> {
+            crate::agent_elevated::win::pipe_name()
+        }
+        fn create_pipe(&self, name: &str) -> Result<Box<dyn crate::agent_elevated::Pipe>, String> {
+            crate::agent_elevated::win::create_pipe(name)
+        }
+        fn launch(&self, exe: &Path, args: &[&str]) -> Result<Box<dyn crate::agent_elevated::Child>, crate::agent_elevated::Launch> {
+            crate::agent_elevated::win::launch(exe, args)
+        }
+        fn consent(&self, d: &crate::agent_elevated::Dialog) -> crate::agent_elevated::Consent {
+            crate::agent_elevated::ask_window(d.clone(), crate::app::show_agent_consent, crate::agent_elevated::CONSENT_WAIT)
+        }
+    }
+
+    /// The public copy's access list: SYSTEM and Administrators full control, Users read.
+    const PUBLIC_SDDL: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)";
+
+    pub(super) fn write_public(path: &Path, data: &[u8]) -> Result<(), String> {
+        crate::policy::write_atomic(&path.to_path_buf(), data).map_err(|e| e.to_string())?;
+        let w = wide(path.as_os_str());
+        let sddl = wide(std::ffi::OsStr::new(PUBLIC_SDDL));
+        unsafe {
+            let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, null_mut()) == 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            let (mut present, mut defaulted, mut dacl): (i32, i32, *mut ACL) = (0, 0, null_mut());
+            let r = if GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) == 0 {
+                Err(std::io::Error::last_os_error().to_string())
+            } else {
+                match SetNamedSecurityInfoW(w.as_ptr() as *mut u16, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, null_mut(), null_mut(), dacl, null_mut()) {
+                    0 => Ok(()),
+                    e => Err(std::io::Error::from_raw_os_error(e as i32).to_string()),
+                }
+            };
+            LocalFree(sd);
+            r
+        }
+    }
+
     pub struct Real;
 
     impl Sys for Real {
@@ -1116,24 +1138,7 @@ mod win {
         }
 
         fn service_exists(&self) -> Result<bool, String> {
-            let name = wide(std::ffi::OsStr::new(SERVICE));
-            unsafe {
-                let m = OpenSCManagerW(null_mut(), null_mut(), SC_MANAGER_CONNECT);
-                if m.is_null() {
-                    return Err(format!("service manager: {}", std::io::Error::last_os_error()));
-                }
-                let s = OpenServiceW(m, name.as_ptr(), SERVICE_QUERY_STATUS);
-                let r = if !s.is_null() {
-                    CloseServiceHandle(s);
-                    Ok(true)
-                } else if GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST {
-                    Ok(false)
-                } else {
-                    Err(format!("the {SERVICE} service: {}", std::io::Error::last_os_error()))
-                };
-                CloseServiceHandle(m);
-                r
-            }
+            crate::agent_elevated::win::service_exists()
         }
 
         fn versions(&self) -> (Option<String>, Option<String>) {
@@ -1159,21 +1164,7 @@ mod win {
         }
 
         fn removed_at(&self) -> Option<u64> {
-            let (key, name) = (wide(std::ffi::OsStr::new(REMOVED_KEY)), wide(std::ffi::OsStr::new(REMOVED_VALUE)));
-            let mut buf = [0u16; 64];
-            let mut size = std::mem::size_of_val(&buf) as u32;
-            let mut kind = 0u32;
-            let r = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), RRF_RT_ANY | RRF_SUBKEY_WOW6464KEY, &mut kind, buf.as_mut_ptr().cast(), &mut size) };
-            if r == ERROR_FILE_NOT_FOUND {
-                return None;
-            }
-            // Anything there but a readable number still counts as removed (the practice's choice wins).
-            const REG_SZ: u32 = 1;
-            let text = (r == 0 && kind == REG_SZ).then(|| {
-                let n = (size as usize / 2).min(buf.len());
-                String::from_utf16_lossy(&buf[..n]).trim_end_matches('\0').trim().to_owned()
-            });
-            Some(text.and_then(|t| t.parse().ok()).unwrap_or(0))
+            crate::agent_elevated::win::removed_at()
         }
 
         fn secure_dir(&self, dir: &Path) -> Result<(), String> {
@@ -1216,7 +1207,11 @@ mod win {
         }
 
         fn installed_exe(&self) -> PathBuf {
-            program_files().join(AGENT_FOLDER).join(AGENT_EXE)
+            crate::agent_elevated::win::installed_exe()
+        }
+
+        fn write_public(&self, path: &Path, data: &[u8]) -> Result<(), String> {
+            write_public(path, data)
         }
     }
 
@@ -1227,6 +1222,7 @@ mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
+    use crate::agent_elevated::AGENT_EXE;
     use tether_trust::{envelope, release::{Entry, Index, Rollout}, SigningKey};
 
     const NOW: u64 = 1_900_000_000;
@@ -1380,6 +1376,9 @@ mod tests {
         }
         fn clock(&self) -> u64 {
             self.clock.get()
+        }
+        fn write_public(&self, path: &Path, data: &[u8]) -> Result<(), String> {
+            std::fs::write(path, data).map_err(|e| e.to_string())
         }
         fn open_locked(&self, path: &Path) -> Result<(Vec<u8>, Box<dyn std::any::Any>), String> {
             if self.tamper.get() {
@@ -1778,6 +1777,7 @@ mod tests {
             fn open_locked(&self, p: &Path) -> Result<(Vec<u8>, Box<dyn std::any::Any>), String> { self.0.open_locked(p) }
             fn run(&self, e: &Path, a: &[&str], s: Option<&str>, t: Duration) -> Result<Ran, String> { self.0.run(e, a, s, t) }
             fn installed_exe(&self) -> PathBuf { self.0.installed_exe() }
+            fn write_public(&self, p: &Path, d: &[u8]) -> Result<(), String> { self.0.write_public(p, d) }
         }
         let sys = DlRefused(&w.fake);
         Manager { sys: &sys, p: w.p.clone() }.tick(NOW).unwrap();
@@ -1816,6 +1816,35 @@ mod tests {
         assert!(w.runs().is_empty() && w.fake.fetches.get() == 0);
         assert_eq!(Action::parse("status"), Some(Action::Status));
         assert_eq!(Action::parse("rm -rf"), None);
+    }
+
+    #[test]
+    fn no_policy_check_starts_anything_outside_the_service_in_any_mode() {
+        // The elevated path (agent_elevated.rs) is reachable only from a session request or the
+        // local click: a policy check outside the service runs, fetches and asks nothing.
+        for mode in ["manual", "on-request", "install", "remove"] {
+            let mut w = world("tick-user", mode);
+            w.fake.user = true;
+            let _ = w.tick(NOW);
+            assert!(w.runs().is_empty() && w.fake.fetches.get() == 0 && w.files().is_empty(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn the_public_copy_says_only_whether_by_whom_and_when() {
+        let w = world("public", "install");
+        w.tick(NOW).unwrap();
+        let raw = std::fs::read(w.p.dir.join(PUBLIC_FILE)).unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        assert!(!text.contains(&w.token) && !text.contains("ok") && !text.contains(&w.grant_id), "{text}");
+        assert_eq!(read_public(&raw), Some(AgentAnswer { state: "installed".into(), version: "0.2.0".into(), installed_by: "policy".into(), detail: String::new(), at: NOW }));
+        // a copy with anything else in it is not shown
+        assert_eq!(read_public(br#"{"state":"installed","version":"0.2.0 <b>","installed_by":"policy","detail":"x","at":1}"#), None);
+        assert_eq!(read_public(br#"{"state":"pwned","version":"","installed_by":"","detail":"","at":1}"#), None);
+        assert_eq!(read_public(br#"{"state":"installed","version":"","installed_by":"policy","detail":"call 0900","at":1}"#).unwrap().detail, "");
+        // a technician's removal is public too
+        assert_eq!(w.m().request(Action::Remove, NOW + 10).state, "removed-by-tether");
+        assert_eq!(read_public(&std::fs::read(w.p.dir.join(PUBLIC_FILE)).unwrap()).unwrap().state, "removed-by-tether");
     }
 
     #[test]

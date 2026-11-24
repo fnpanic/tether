@@ -3735,7 +3735,7 @@ index a88e33a..6cadca4 100644
 +    }
 +}
 diff --git a/src/server/connection.rs b/src/server/connection.rs
-index 4b2eec8..1dffd33 100644
+index 4b2eec8..582f60b 100644
 --- a/src/server/connection.rs
 +++ b/src/server/connection.rs
 @@ -194,6 +194,10 @@ lazy_static::lazy_static! {
@@ -3901,7 +3901,7 @@ index 4b2eec8..1dffd33 100644
          #[cfg(not(any(target_os = "android", target_os = "ios")))]
          if crate::is_server() && Config::get_option("allow-only-conn-window-open") == "Y" {
              if !crate::check_process("", !crate::platform::is_root()) {
-@@ -1624,6 +1690,56 @@ impl Connection {
+@@ -1624,6 +1690,57 @@ impl Connection {
          });
      }
  
@@ -3928,6 +3928,7 @@ index 4b2eec8..1dffd33 100644
 +        tokio::spawn(agent::serve(
 +            action,
 +            agent::handler(),
++            self.lr.my_name.clone(),
 +            agent::HOST_WAIT,
 +            running,
 +            move |m| inner.send(Arc::new(m)),
@@ -3958,7 +3959,7 @@ index 4b2eec8..1dffd33 100644
      fn post_alarm_audit(&self, typ: AlarmAuditType, info: Value) {
          let url = crate::get_audit_server(
              Config::get_option("api-server"),
-@@ -1783,6 +1899,12 @@ impl Connection {
+@@ -1783,6 +1900,12 @@ impl Connection {
          }
      }
  
@@ -3971,7 +3972,7 @@ index 4b2eec8..1dffd33 100644
      pub(super) fn normalize_port_forward_target(pf: &mut PortForward) -> (String, bool) {
          let mut is_rdp = false;
          if pf.host == "RDP" && pf.port == 0 {
-@@ -1932,6 +2054,19 @@ impl Connection {
+@@ -1932,6 +2055,19 @@ impl Connection {
              self.tx_from_authed.clone(),
              self.lr.clone(),
          ));
@@ -3991,7 +3992,7 @@ index 4b2eec8..1dffd33 100644
          self.session_last_recv_time = SESSIONS
              .lock()
              .unwrap()
-@@ -2212,6 +2347,9 @@ impl Connection {
+@@ -2212,6 +2348,9 @@ impl Connection {
                      dir
                  );
              }
@@ -4001,7 +4002,7 @@ index 4b2eec8..1dffd33 100644
              let dir = if is_allowed_dir { &dir } else { "" };
              if !wait_session_id_confirm {
                  self.read_dir(dir, show_hidden);
-@@ -2233,9 +2371,49 @@ impl Connection {
+@@ -2233,9 +2372,49 @@ impl Connection {
                  self.try_sub_monitor_services();
              }
          }
@@ -4051,7 +4052,7 @@ index 4b2eec8..1dffd33 100644
      fn try_sub_camera_displays(&mut self) {
          if let Some(s) = self.server.upgrade() {
              let mut s = s.write().unwrap();
-@@ -2890,6 +3068,11 @@ impl Connection {
+@@ -2890,6 +3069,11 @@ impl Connection {
              // Move the CloseReason forward, as this message needs to be received when unauthorized, especially for kcp.
              if let Some(misc::Union::CloseReason(s)) = &misc.union {
                  log::info!("receive close reason: {}", s);
@@ -4063,7 +4064,7 @@ index 4b2eec8..1dffd33 100644
                  self.on_close("Peer close", true).await;
                  raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
                  return false;
-@@ -2970,6 +3153,11 @@ impl Connection {
+@@ -2970,6 +3154,11 @@ impl Connection {
                          sleep(1.).await;
                          return false;
                      }
@@ -4075,7 +4076,7 @@ index 4b2eec8..1dffd33 100644
                      let (addr, _is_rdp) = Self::normalize_port_forward_target(&mut pf);
                      self.port_forward_address = addr;
                  }
-@@ -3040,7 +3228,21 @@ impl Connection {
+@@ -3040,7 +3229,21 @@ impl Connection {
                  crate::get_builtin_option(keys::OPTION_ALLOW_LOGON_SCREEN_PASSWORD) == "Y"
                      && is_logon();
  
@@ -4098,7 +4099,7 @@ index 4b2eec8..1dffd33 100644
                  || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()
              {
                  #[cfg(not(any(target_os = "android", target_os = "ios")))]
-@@ -3198,6 +3400,10 @@ impl Connection {
+@@ -3198,6 +3401,10 @@ impl Connection {
                      if self.is_authed_view_camera_conn() {
                          return true;
                      }
@@ -4109,7 +4110,7 @@ index 4b2eec8..1dffd33 100644
                      #[cfg(any(target_os = "android", target_os = "ios"))]
                      if let Err(e) = call_main_service_pointer_input("mouse", me.mask, me.x, me.y) {
                          log::debug!("call_main_service_pointer_input fail:{}", e);
-@@ -3334,6 +3540,11 @@ impl Connection {
+@@ -3334,6 +3541,11 @@ impl Connection {
                      if self.is_authed_view_camera_conn() {
                          return true;
                      }
@@ -4121,7 +4122,7 @@ index 4b2eec8..1dffd33 100644
                      if self.peer_keyboard_enabled() {
                          if is_enter(&me) {
                              CLICK_TIME.store(get_time(), Ordering::SeqCst);
-@@ -3635,6 +3846,67 @@ impl Connection {
+@@ -3635,6 +3847,67 @@ impl Connection {
                                  }
                              }
                          }
@@ -4189,7 +4190,7 @@ index 4b2eec8..1dffd33 100644
                          match fa.union {
                              Some(file_action::Union::ReadEmptyDirs(rd)) => {
                                  self.read_empty_dirs(&rd.path, rd.include_hidden);
-@@ -4028,10 +4300,21 @@ impl Connection {
+@@ -4028,10 +4301,21 @@ impl Connection {
                          .lock()
                          .unwrap()
                          .user_auto_adjust_fps(self.inner.id(), fps),
@@ -4215,7 +4216,7 @@ index 4b2eec8..1dffd33 100644
                      #[cfg(windows)]
                      Some(misc::Union::SelectedSid(sid)) => {
                          if let Some(current_process_sid) =
-@@ -4081,6 +4364,11 @@ impl Connection {
+@@ -4081,6 +4365,11 @@ impl Connection {
                              }
                          }
                      }
@@ -4227,7 +4228,7 @@ index 4b2eec8..1dffd33 100644
                      _ => {}
                  },
                  Some(message::Union::AudioFrame(frame)) => {
-@@ -4689,6 +4977,10 @@ impl Connection {
+@@ -4689,6 +4978,10 @@ impl Connection {
          let mut err;
          if !self.keyboard {
              err = "No permission".to_string();
@@ -4238,7 +4239,7 @@ index 4b2eec8..1dffd33 100644
          } else {
              err = "No need to elevate".to_string();
              if !crate::platform::is_installed() && !portable_client::running() {
-@@ -5306,6 +5598,7 @@ impl Connection {
+@@ -5306,6 +5599,7 @@ impl Connection {
              return;
          }
          self.closed = true;
@@ -4246,7 +4247,7 @@ index 4b2eec8..1dffd33 100644
          // If voice A,B -> C, and A,B has voice call
          // B disconnects, C will reset the voice call input.
          //
-@@ -5354,6 +5647,10 @@ impl Connection {
+@@ -5354,6 +5648,10 @@ impl Connection {
          msg_out.set_misc(misc);
          self.send(msg_out).await;
          raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
@@ -4257,7 +4258,7 @@ index 4b2eec8..1dffd33 100644
      }
  
      async fn handle_read_job_init_result(
-@@ -5811,6 +6108,90 @@ impl Connection {
+@@ -5811,6 +6109,90 @@ impl Connection {
          }
      }
  
@@ -4348,7 +4349,7 @@ index 4b2eec8..1dffd33 100644
      fn is_authed_remote_conn(&self) -> bool {
          if let Some(id) = self.authed_conn_id.as_ref() {
              return id.conn_type() == AuthConnType::Remote;
-@@ -6553,6 +6934,7 @@ pub enum AlarmAuditType {
+@@ -6553,6 +6935,7 @@ pub enum AlarmAuditType {
      TerminalOsLoginConcurrency = 8,
      SessionScopeViolation = 9,
      IdWhitelist = 10,
@@ -4356,7 +4357,7 @@ index 4b2eec8..1dffd33 100644
  }
  
  pub enum FileAuditType {
-@@ -7233,6 +7615,13 @@ mod test {
+@@ -7233,6 +7616,13 @@ mod test {
      // test that admits connections holds this first; a poisoned lock is still a lock.
      static UNAUTHORIZED_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
  
@@ -4370,7 +4371,7 @@ index 4b2eec8..1dffd33 100644
      fn unauthorized_count() -> usize {
          UNAUTHORIZED_CONNS.lock().unwrap().len()
      }
-@@ -7901,3 +8290,181 @@ mod test {
+@@ -7901,3 +8291,181 @@ mod test {
          assert!(!replaced_by(&conn(3, remote, key(7, "other")), 2, &mine));
      }
  }
@@ -7098,17 +7099,18 @@ index 50eb3e2..008ddf7 100644
      ] {
 diff --git a/src/tauri_ui/agent.rs b/src/tauri_ui/agent.rs
 new file mode 100644
-index 0000000..274db9b
+index 0000000..3893da8
 --- /dev/null
 +++ b/src/tauri_ui/agent.rs
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,293 @@
 +//! Tether: the health monitoring agent through a session (`Misc` `TetherAgentRequest` and
 +//! `TetherAgentAnswer`, message.proto).
 +//!
 +//! Host (`server/connection.rs`): a request carries only an action from a closed set; it is taken
 +//! only from a logged-in remote session with the control permission, one at a time per
 +//! connection, an install or remove at most once per [`CHANGE_PACE`], and handed to the app's
-+//! [`Handler`] (set by the desktop app; TetherQS sets none, so it answers `not-supported`), which is
++//! [`Handler`] (set by the desktop app and TetherQS; without one the answer is `not-supported`) with
++//! the name the viewer gave (`LoginRequest.my_name`, not verified: the app shows it as such), which is
 +//! waited for at most [`HOST_WAIT`] (then the answer is `running`, and the host goes on waiting for
 +//! the outcome without holding the connection; a later `status` shows it). An install or remove the
 +//! app acted on is posted to the session audit log as an alarm record naming only the action and
@@ -7145,8 +7147,9 @@ index 0000000..274db9b
 +use super::TauriHandler;
 +use crate::{client::Interface, ui_session_interface::Session};
 +
-+/// The app's answer to an action (runs on a blocking thread; may take minutes).
-+pub type Handler = fn(Action) -> TetherAgentAnswer;
++/// The app's answer to an action (runs on a blocking thread; may take minutes). The `&str` is the
++/// name the viewer gave at login, as reported (not verified).
++pub type Handler = fn(Action, &str) -> TetherAgentAnswer;
 +
 +static HANDLER: OnceLock<Handler> = OnceLock::new();
 +
@@ -7237,11 +7240,11 @@ index 0000000..274db9b
 +
 +/// Host: the app's answer, or `running` after `wait` (the app's action itself goes on; the app
 +/// answers `busy` to the next request until it is done, and `status` shows its outcome).
-+pub async fn host_answer(action: Action, handler: Option<Handler>, wait: Duration) -> TetherAgentAnswer {
++pub async fn host_answer(action: Action, handler: Option<Handler>, viewer: String, wait: Duration) -> TetherAgentAnswer {
 +    let Some(f) = handler else {
 +        return answer("not-supported", NO_HANDLER);
 +    };
-+    match tokio::time::timeout(wait, tokio::task::spawn_blocking(move || f(action))).await {
++    match tokio::time::timeout(wait, tokio::task::spawn_blocking(move || f(action, &viewer))).await {
 +        Ok(Ok(a)) => a,
 +        Ok(Err(_)) => answer("failed", "the action stopped unexpectedly"),
 +        Err(_) => answer("running", RUNNING),
@@ -7283,6 +7286,7 @@ index 0000000..274db9b
 +pub async fn serve<F: Future<Output = ResultType<()>>>(
 +    action: Action,
 +    handler: Option<Handler>,
++    viewer: String,
 +    wait: Duration,
 +    running: InFlightGuard,
 +    send: impl FnOnce(Message),
@@ -7293,7 +7297,7 @@ index 0000000..274db9b
 +    let Some(f) = handler else {
 +        return send(answer_message(action, answer("not-supported", NO_HANDLER)));
 +    };
-+    let mut job = tokio::task::spawn_blocking(move || f(action));
++    let mut job = tokio::task::spawn_blocking(move || f(action, &viewer));
 +    let ended = |r: Result<TetherAgentAnswer, tokio::task::JoinError>| r.unwrap_or_else(|_| answer("failed", "the action stopped unexpectedly"));
 +    let a = match tokio::time::timeout(wait, &mut job).await {
 +        Ok(r) => ended(r),
