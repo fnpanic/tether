@@ -40,6 +40,7 @@ fn explain(status: u16, body: &str) -> String {
         401 if reason.contains("RELAY_HOST") => "The relay does not know its own host name. Set RELAY_HOST on the relay to the name entered under Status and relays.",
         401 if reason.contains("signed for another relay") => "The relay knows itself under another host name. Enter the relay's own name (its RELAY_HOST) under Status and relays.",
         401 => "The server did not accept this app's admin signature. Check that the server's ADMIN_PUB_KEY contains this app's admin public key and that the PC clock is correct.",
+        400 if reason.contains("unknown feature") => "This relay runs an older tether-api that does not know a feature of this policy. Update the relay first, then publish again.",
         404 => "Not found on the server.",
         409 if reason.starts_with("published release") => "The relay keeps the published release.",
         409 => "The server already has a newer version. Reload and try again.",
@@ -512,5 +513,8 @@ pub(crate) mod tests {
         assert!(unset.contains("Set RELAY_HOST on the relay") && !unset.contains("ADMIN_PUB_KEY"), "{unset}");
         let other = explain(401, "request signed for another relay");
         assert!(other.contains("relay's own name") && !other.contains("ADMIN_PUB_KEY"), "{other}");
+        // An old relay validates the policy and does not know a newer feature (health.agent, 0.7.0).
+        let feature = explain(400, "profile technician: unknown feature \"health.agent\"");
+        assert!(feature.starts_with("This relay runs an older tether-api that does not know a feature of this policy") && feature.contains("Update the relay first") && feature.contains("health.agent"), "{feature}");
     }
 }

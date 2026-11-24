@@ -21,6 +21,8 @@ const FEATURES: Feature[] = [
   f("policy.fast-apply", "policy", "Fast apply (check every minute)", "bool", "N"),
   f("customer.title", "customer", "Window title / company name", "text", "Tether Support", ["customer"]),
   f("customer.close-after-session", "customer", "Quit when the session ends", "bool", "N", ["customer"]),
+  f("health.agent", "health", "Monitoring agent installed and removed by Tether (Windows; manual: as before)", "choice", "manual", undefined, ["manual", "on-request", "install", "remove"]),
+  f("health.enrol-grant", "health", "Enrolment grant for agents Tether installs (set by Tether Manage)", "text", ""),
   f("customer.elevate", "customer", "Admin access for UAC prompts (Elevate button, technician requests)", "bool", "Y", ["customer"]),
 ];
 
@@ -238,6 +240,16 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
     policy_draft: () => draft,
     policy_save_draft: () => (draft = a.bundle),
     policy_check: () => null,
+    grant_create: () => `mockgrant${Date.now()}`,
+    grant_revoke: () => servers.map((s) => ok(s, { note: "Grant revoked" })),
+    grants_revoke_pending: () => [],
+    grants_info: () => {
+      const layers: Record<string, unknown> = {};
+      const each = (k: string, l: Layer) => l["health.enrol-grant"]?.value && (layers[k] = { status: "valid", id: "0123456789abcdef0123456789abcdef", exp: now + 300 * 86400, customer: null, made_here: true, renew: false, why: null });
+      Object.entries(a.bundle.profiles as Record<string, Layer>).forEach(([p, l]) => each(`profile:${p}`, l));
+      Object.entries(a.bundle.groups as Record<string, { overrides: Layer }>).forEach(([g, x]) => each(`group:${g}`, x.overrides));
+      return { layers, pending: [] };
+    },
     policy_preview: () => resolve(a.bundle, a.profile, a.device),
     policy_diff: () => diff(a.from, a.to),
     policy_live: () => {

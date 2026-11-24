@@ -5,6 +5,8 @@ import { useApp } from "../App";
 import { api, host, invoke, PROFILES, when, type Bundle, type Device, type Effective, type Feature, type Layer, type Rule } from "../lib/ipc";
 import { byArea, FeatureRow, sameRule, shown, type Lang } from "../components/features";
 import { ChangeList } from "../components/publish";
+import { GrantRow } from "../components/grant";
+import { GRANT, layerKey, type GrantsInfo } from "../lib/grants";
 import { liveCount, unchecked } from "../lib/live";
 import { Badge, Button, Card, ErrorText, IconButton, Label, Modal, PageHeader, SELECTED, Segmented, Select, StatusDot, Table, TextField } from "../components/ui";
 
@@ -193,7 +195,7 @@ function History() {
 }
 
 export function Policy() {
-  const { draft, setDraft, live, invalid, dirty, changes } = useApp();
+  const { draft, setDraft, live, invalid, dirty, changes, toast } = useApp();
   const [features, setFeatures] = useState<Feature[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [tab, setTab] = useState<Tab>("editor");
@@ -201,6 +203,9 @@ export function Policy() {
   const [lang, setLang] = useState<Lang>("en");
   const [only, setOnly] = useState<"all" | "set" | "unpublished">("all");
   const [newGroup, setNewGroup] = useState<{ name: string; profile: string } | null>(null);
+  const [grants, setGrants] = useState<GrantsInfo>({ layers: {}, pending: [] });
+  const reloadGrants = () => invoke<GrantsInfo>("grants_info", { bundle: draft }).then(setGrants, () => {});
+  useEffect(() => void reloadGrants(), [draft]);
 
   useEffect(() => {
     invoke<Feature[]>("features").then(setFeatures);
@@ -224,6 +229,9 @@ export function Policy() {
     const next: Layer = { ...layer };
     if (rule) next[id] = rule;
     else delete next[id];
+    setLayer(next);
+  };
+  const setLayer = (next: Layer) => {
     if (scope.kind === "profile") setDraft({ ...draft, profiles: { ...draft.profiles, [scope.name]: next } });
     else setDraft({ ...draft, groups: { ...draft.groups, [scope.name]: { ...group!, overrides: next } } });
   };
@@ -321,9 +329,24 @@ export function Policy() {
               {areas.map(([area, list]) => (
                 <div key={area} className="mt-4">
                   <h3 className="mb-1 text-caption font-semibold capitalize text-muted">{area}</h3>
-                  {list.map((f) => (
-                    <FeatureRow key={f.id} f={f} rule={layer[f.id]} lang={lang} live={live ? liveRule(f.id) : undefined} onChange={(r) => setRule(f.id, r)} />
-                  ))}
+                  {list.map((f) =>
+                    f.id === GRANT ? (
+                      <GrantRow
+                        key={`${scope.kind}:${scope.name}`}
+                        f={f}
+                        lang={lang}
+                        layerKey={layerKey(scope.kind, scope.name)}
+                        layer={layer}
+                        info={grants.layers[layerKey(scope.kind, scope.name)]}
+                        pending={grants.pending.filter((p) => p.layer === layerKey(scope.kind, scope.name))}
+                        onChange={setLayer}
+                        onReload={reloadGrants}
+                        toast={toast}
+                      />
+                    ) : (
+                      <FeatureRow key={f.id} f={f} rule={layer[f.id]} lang={lang} live={live ? liveRule(f.id) : undefined} onChange={(r) => setRule(f.id, r)} />
+                    ),
+                  )}
                 </div>
               ))}
               {!areas.length && <p className="py-8 text-center text-caption text-muted">{only === "set" ? "Nothing set in this layer: every feature uses the default." : "This layer matches the live policy."}</p>}

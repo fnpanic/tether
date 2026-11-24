@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { Activity, FileCode2, History, KeyRound, Lock, Monitor, Package, Palette, ShieldCheck, Stethoscope, Users } from "lucide-react";
 import { api, emptyBundle, invoke, type AppState, type Bundle, type Change, type Live } from "./lib/ipc";
 import { incomplete } from "./lib/live";
+import { toRenew, type GrantsInfo } from "./lib/grants";
 import type { Roster } from "./lib/team";
 import { SELECTED, useToast } from "./components/ui";
 import { PolicyBar, PolicyPublish } from "./components/policy-publish";
@@ -86,7 +87,17 @@ export function App() {
 
   useEffect(() => {
     if (!state?.unlocked) return;
-    invoke<Bundle>("policy_draft").then(setDraftState, (e) => show(e.message));
+    invoke<Bundle>("policy_draft").then(
+      (b) => {
+        setDraftState(b);
+        // Grants are renewed while the keys are unlocked (docs/management.md).
+        invoke<GrantsInfo>("grants_info", { bundle: b }).then((g) => {
+          const due = toRenew(g);
+          if (due.length) show(`Health monitoring: renew the enrolment grant of ${due.map(([k]) => k.replace(/^profile:(.*)$/, "the $1 profile").replace(/^group:/, "group ")).join(", ")} on the Policy page, then publish.`);
+        }, () => {});
+      },
+      (e) => show(e.message),
+    );
     reloadLive();
   }, [state?.unlocked, state?.settings.server]);
 

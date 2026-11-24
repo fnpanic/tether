@@ -19,7 +19,10 @@ A new Tether Manage in front of an old relay says "This relay runs an older teth
 not know this app's request signatures. Update the relay first."; with a missing or different
 `RELAY_HOST` it says "The relay does not know its own host name. Set RELAY_HOST on the relay to the
 name entered under Status and relays." or "The relay knows itself under another host name. Enter
-the relay's own name (its RELAY_HOST) under Status and relays." (`api.rs::explain`).
+the relay's own name (its RELAY_HOST) under Status and relays." (`api.rs::explain`). A relay
+older than 0.7.0 refuses a policy that uses the health monitoring agent features (`health.agent`,
+`health.enrol-grant`), and Manage then says "This relay runs an older tether-api that does not know
+a feature of this policy. Update the relay first, then publish again."
 
 | Screen | What it does |
 | --- | --- |
