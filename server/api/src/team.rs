@@ -115,6 +115,7 @@ impl App {
             }
             ("GET", "tags") => Ok(json(&self.team.tags)),
             ("GET", "status") => self.team_status_summary(rq),
+            ("GET", r) if r.strip_prefix("status/").is_some_and(|u| u.ends_with("/sbom")) => self.team_status_sbom(rq, r["status/".len()..].strip_suffix("/sbom").unwrap_or_default()),
             ("GET", r) if r.starts_with("status/") => self.team_status_host(&r["status/".len()..]),
             // Health links and removal change what the team sees for a host: `write` only.
             ("POST" | "DELETE", r) if r.starts_with("status/") => {

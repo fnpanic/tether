@@ -10,7 +10,9 @@
 //! `pin` lines are read; appended and synced, compacted in the background), `revoked.json` (revoked
 //! token id → exp, written by the status writer; unreadable, it locks the store), `<uuid>.json` (the last full
 //! report, byte-exact as received), `<uuid>.history.jsonl` (one line per state change, appended),
-//! `seen.json` {uuid: last post}, `summary.json` (the team summary, rebuilt at most every 30 s).
+//! `seen.json` {uuid: last post}, `summary.json` (the team summary, rebuilt at most every 30 s),
+//! `<uuid>.sbom.json` (the device's software list with `STATUS_SBOM=on`, byte-exact as received;
+//! its record, time, size and hash, is kept with the device's entry in `seen.json`).
 //!
 //! The relay also carries session signalling and Tether's updates and has one state lock, so
 //! nothing here does work in proportion to the number of devices while holding it: heartbeats
@@ -80,13 +82,24 @@ const ENROLL_PER_MIN: u32 = 30;
 /// Correctly signed but refused posts (400/409) per uuid and minute.
 const REFUSED_PER_MIN: u32 = 10;
 const HISTORY_DAYS: u64 = 90;
+/// Accepted software lists per uuid: one per this many seconds.
+const SBOM_INTERVAL: u64 = 3600;
 
 /// Relay settings (api.env): `STATUS=off`, `STATUS_TARGET_RPS` (default 10, at least 1),
-/// `STATUS_MAX_DEVICES` (default 20 000, the size load-tested within `MemoryMax=64M`).
+/// `STATUS_MAX_DEVICES` (default 20 000, the size load-tested within `MemoryMax=64M`); the
+/// software list: `STATUS_SBOM=on` (off by default), `STATUS_SBOM_MAX_KB` (default 512),
+/// `STATUS_SBOM_RPS` (accepted for checking per second, all devices; default 2, at least 1),
+/// `STATUS_SBOM_MAX_TOTAL_MB` (default 2048).
 pub struct Conf {
     pub off: bool,
     pub rps: u64,
     pub max_devices: usize,
+    pub sbom: bool,
+    /// Bytes.
+    pub sbom_max: u64,
+    pub sbom_rps: u64,
+    /// Bytes.
+    pub sbom_total: u64,
 }
 
 static CONF: OnceLock<Conf> = OnceLock::new();
@@ -97,7 +110,7 @@ pub fn set_conf(c: Conf) {
 }
 
 pub fn conf() -> &'static Conf {
-    CONF.get_or_init(|| Conf { off: false, rps: 10, max_devices: 20_000 })
+    CONF.get_or_init(|| Conf { off: false, rps: 10, max_devices: 20_000, sbom: false, sbom_max: 512 << 10, sbom_rps: 2, sbom_total: 2048 << 20 })
 }
 
 /// `min(3600, max(300, ceil(enrolled / rps)))`: the relay's budget spread over its devices.
@@ -301,6 +314,19 @@ struct Seen {
     /// `level` of the entry's `overall` (kept so a metrics scrape parses nothing).
     #[serde(skip)]
     level: usize,
+    /// The stored software list (`<uuid>.sbom.json`). A device may have one before its first
+    /// report: then `last_seen` is 0 and there is no `entry`.
+    #[serde(default)]
+    sbom: Option<Sbom>,
+}
+
+/// A stored software list: when it was accepted, its size and the first 16 hex digits of its
+/// SHA-256 (the `ETag` and the summary's `sbom.sha`).
+#[derive(Serialize, Deserialize, Clone)]
+struct Sbom {
+    at: u64,
+    size: u64,
+    sha: String,
 }
 
 impl Seen {
@@ -493,6 +519,8 @@ pub(crate) enum Job {
     Compact,
     /// Write `revoked.json` (a snapshot of the map now), then report the result.
     Revoked(mpsc::Sender<io::Result<()>>),
+    /// Once at start: software-list records and files matched up ([`sbom_scan`]).
+    SbomScan,
 }
 
 #[derive(Default)]
@@ -545,6 +573,15 @@ pub struct Status {
     seen_flushed: u64,
     daily_running: bool,
     writer: Option<mpsc::Sender<Job>>,
+    /// Software lists recorded: count and the running sum of their sizes (`STATUS_SBOM_MAX_TOTAL_MB`).
+    sbom_files: u64,
+    sbom_bytes: u64,
+    /// uuid → when its last software list was accepted, for an hour (a deleted list still counts).
+    sbom_last: HashMap<String, u64>,
+    /// uuids whose software list is being written (outside the lock).
+    sbom_writing: HashSet<String>,
+    /// The global budget: (second, lists let through to the signature check in it).
+    sbom_budget: (u64, u64),
 }
 
 impl Status {
@@ -642,7 +679,9 @@ impl Status {
         for p in keys.values().filter(|p| p.no_claim) {
             *nc_keys.entry(p.key.clone()).or_default() += 1;
         }
-        let mut s = Status { data: data.to_owned(), keys, dev, by_tether, used, dismissed, nc_keys, revoked: Arc::new(revoked), log_lines, ..Default::default() };
+        let sbom = dev.values().filter_map(|s| s.sbom.as_ref());
+        let (sbom_files, sbom_bytes) = (sbom.clone().count() as u64, sbom.map(|r| r.size).sum());
+        let mut s = Status { data: data.to_owned(), keys, dev, by_tether, used, dismissed, nc_keys, revoked: Arc::new(revoked), log_lines, sbom_files, sbom_bytes, ..Default::default() };
         if !dropped.is_empty() {
             s.keys_append(&dropped)?.sync_data()?;
         }
@@ -692,7 +731,8 @@ impl Status {
             return (Vec::new(), None);
         }
         let dev = &self.dev;
-        let gone: Vec<String> = self.keys.iter().filter(|(u, p)| dev.get(u.as_str()).map_or(p.enrolled, |s| s.last_seen) + crate::DEVICE_TTL <= t).map(|(u, _)| u.clone()).collect();
+        // `last_seen` is 0 for a device that sent only a software list.
+        let gone: Vec<String> = self.keys.iter().filter(|(u, p)| dev.get(u.as_str()).map_or(0, |s| s.last_seen).max(p.enrolled) + crate::DEVICE_TTL <= t).map(|(u, _)| u.clone()).collect();
         if gone.is_empty() {
             return (gone, None);
         }
@@ -754,10 +794,115 @@ impl Status {
         if let Some(i) = &pin.tether_id {
             self.by_tether.remove(i);
         }
-        if self.dev.remove(uuid).is_some() {
+        if let Some(s) = self.dev.remove(uuid) {
+            if let Some(r) = s.sbom {
+                (self.sbom_files, self.sbom_bytes) = (self.sbom_files - 1, self.sbom_bytes - r.size);
+            }
             self.seen_dirty = true;
         }
     }
+
+    /// Puts or drops `uuid`'s software-list record, keeping the totals in step.
+    fn sbom_record(&mut self, uuid: &str, rec: Option<Sbom>) {
+        if rec.is_none() && self.dev.get(uuid).is_none_or(|s| s.sbom.is_none()) {
+            return;
+        }
+        let s = self.dev.entry(uuid.into()).or_default();
+        if let Some(old) = s.sbom.take() {
+            (self.sbom_files, self.sbom_bytes) = (self.sbom_files - 1, self.sbom_bytes - old.size);
+        }
+        if let Some(r) = rec {
+            (self.sbom_files, self.sbom_bytes) = (self.sbom_files + 1, self.sbom_bytes + r.size);
+            s.sbom = Some(r);
+        } else if s.last_seen == 0 && s.entry.is_none() {
+            self.dev.remove(uuid); // it existed only for the list
+        }
+        self.seen_dirty = true;
+    }
+
+    fn sbom_size(&self, uuid: &str) -> Option<u64> {
+        self.dev.get(uuid).and_then(|s| s.sbom.as_ref()).map(|r| r.size)
+    }
+
+    /// Whether a list of `len` bytes from `uuid` fits under `STATUS_SBOM_MAX_TOTAL_MB`; one not
+    /// larger than the device's current list always does.
+    fn sbom_fits(&self, uuid: &str, len: u64) -> bool {
+        let old = self.sbom_size(uuid).unwrap_or(0);
+        len <= old || self.sbom_bytes - old + len <= conf().sbom_total
+    }
+
+    /// 429 while `uuid`'s last accepted list is younger than an hour or one is being written.
+    fn sbom_hour(&self, uuid: &str, t: u64) -> Result<(), Resp> {
+        let last = self.dev.get(uuid).and_then(|s| s.sbom.as_ref()).map(|r| r.at).max(self.sbom_last.get(uuid).copied());
+        let wait = if self.sbom_writing.contains(uuid) { Some(60) } else { last.filter(|&a| t < a + SBOM_INTERVAL).map(|a| a + SBOM_INTERVAL - t) };
+        match wait {
+            Some(w) => Err(text(429, "upload too frequent").with_header(hdr("Retry-After", &w.to_string()))),
+            None => Ok(()),
+        }
+    }
+}
+
+fn sbom_full() -> Resp {
+    text(507, "sbom store full (STATUS_SBOM_MAX_TOTAL_MB)")
+}
+
+/// The rest of `PUT /api/status/sbom` after the key lookup, without the state lock but for two
+/// short holds: the signature and the hash over the body and the JSON-object check; under the
+/// lock the nonce, failure count, the hour, the cap and the claim of the write; the file written
+/// and synced; under the lock again the rename and the record.
+#[allow(clippy::too_many_arguments)]
+fn sbom_store(app: &Mutex<App>, uuid: String, sig: String, key: String, ip: String, url: String, raw: Vec<u8>, t: u64) -> Result<Resp, Resp> {
+    let digest = reqauth::body_digest(&raw);
+    let mut nonce = String::new();
+    let verified = tether_trust::key_from_b64(&key).and_then(|k| {
+        reqauth::verify_device_request(&sig, &k, crate::sig_relay().hosts, "PUT", &url, &digest, t, |n| {
+            nonce = n.to_owned();
+            true
+        })
+    });
+    // serde_json skips ignored values with a loop, not by recursion: any depth, bounded by the body.
+    let object = verified.is_ok() && serde_json::from_slice::<Opaque>(&raw).is_ok();
+    let len = raw.len() as u64;
+    let tmp = {
+        let mut a = lock(app);
+        let s = &mut a.status;
+        let fresh = |s: &mut Status| if s.nonces.insert(nonce, t).is_some() { Err("replayed request".to_owned()) } else { Ok(()) };
+        if let Err(e) = verified.and_then(|()| fresh(s)) {
+            rate_ok(&mut s.fail_hits, ip, t, u32::MAX);
+            return Err(text(401, &e));
+        }
+        if !object {
+            return Err(text(400, "not a JSON object"));
+        }
+        s.sbom_hour(&uuid, now())?;
+        if !s.sbom_fits(&uuid, len) {
+            return Err(sbom_full());
+        }
+        a.check_space(len)?;
+        a.status.sbom_writing.insert(uuid.clone());
+        crate::tmp_path(&a.data)
+    };
+    let wrote = write_synced(&tmp, &raw);
+    let mut a = lock(app);
+    a.status.sbom_writing.remove(&uuid);
+    let r = wrote.map_err(crate::internal).and_then(|()| {
+        // Removed, or another list took the room, while this one was written.
+        if !a.status.keys.contains_key(&uuid) {
+            return Err(text(401, "unknown device"));
+        }
+        if !a.status.sbom_fits(&uuid, len) {
+            return Err(sbom_full());
+        }
+        fs::rename(&tmp, file(&a.data, &uuid, "sbom.json")).map_err(crate::internal)
+    });
+    if let Err(e) = r {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let at = now();
+    a.status.sbom_record(&uuid, Some(Sbom { at, size: len, sha: digest[..16].to_owned() }));
+    a.status.sbom_last.insert(uuid, at);
+    Ok(empty(204))
 }
 
 /// Answers `resp` once `keys.jsonl` is synced, after the lock is released.
@@ -792,7 +937,7 @@ fn claim_synced(app: &Mutex<App>, uuid: &str, (log, id): (fs::File, String)) {
 
 fn remove_files(data: &Path, uuids: &[String]) {
     for u in uuids {
-        for ext in ["json", "history.jsonl"] {
+        for ext in ["json", "history.jsonl", "sbom.json"] {
             let _ = fs::remove_file(file(data, u, ext));
         }
     }
@@ -907,12 +1052,17 @@ fn build_summary(app: &Mutex<App>, tmp: &Path, t: u64) -> io::Result<String> {
     let copy = |a: &App, u: &Arc<str>, s: &Seen| {
         s.entry()?;
         let p = a.status.keys.get(&**u);
-        Some((u.clone(), p.and_then(|p| p.tether_id.clone()), p.and_then(|p| p.claimed_id.clone()), p.and_then(|p| p.linked_at), p.is_some_and(|p| p.no_claim), p.and_then(|p| p.customer.clone()), s.last_seen, s.next, s.entry.clone()?))
+        let sbom = s.sbom.as_ref().filter(|_| conf().sbom).map(|r| (r.at, r.sha.clone()));
+        Some((u.clone(), p.and_then(|p| p.tether_id.clone()), p.and_then(|p| p.claimed_id.clone()), p.and_then(|p| p.linked_at), p.is_some_and(|p| p.no_claim), p.and_then(|p| p.customer.clone()), s.last_seen, s.next, s.entry.clone()?, sbom))
     };
     chunks(app, dev_map, copy, |buf| {
         // The head is outside the entry's byte cap (fixed fields only).
-        for (u, tid, claimed, linked_at, no_claim, customer, last_seen, next, entry) in buf.drain(..) {
-            let head = serde_json::json!({"uuid": &*u, "tether_id": tid, "claimed_id": claimed, "linked_at": linked_at, "no_claim": no_claim, "customer": customer, "last_seen": last_seen, "next": next, "stale": stale_at(last_seen, next, t)}).to_string();
+        for (u, tid, claimed, linked_at, no_claim, customer, last_seen, next, entry, sbom) in buf.drain(..) {
+            let mut head = serde_json::json!({"uuid": &*u, "tether_id": tid, "claimed_id": claimed, "linked_at": linked_at, "no_claim": no_claim, "customer": customer, "last_seen": last_seen, "next": next, "stale": stale_at(last_seen, next, t)});
+            if let Some((at, sha)) = sbom {
+                head["sbom"] = serde_json::json!({"at": at, "sha": sha});
+            }
+            let head = head.to_string();
             if !first {
                 h.write_all(b",")?;
             }
@@ -932,6 +1082,11 @@ fn build_summary(app: &Mutex<App>, tmp: &Path, t: u64) -> io::Result<String> {
     Ok(format!("\"{}\"", digest.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>()))
 }
 
+/// `If-None-Match` names `etag` (weak or strong).
+fn etag_matches(inm: Option<&str>, etag: &str) -> bool {
+    inm.is_some_and(|inm| inm.split(',').any(|x| x.trim().trim_start_matches("W/") == etag))
+}
+
 fn stale(s: &Seen, t: u64) -> bool {
     stale_at(s.last_seen, s.next, t)
 }
@@ -947,7 +1102,7 @@ fn file(data: &Path, uuid: &str, ext: &str) -> std::path::PathBuf {
 
 impl App {
     fn status_answer(&self) -> Resp {
-        json(&Answer { releases: self.status_releases(), next: self.status.next_secs() })
+        json(&Answer { releases: self.status_releases(), next: self.status.next_secs(), sbom: conf().sbom })
     }
 
     /// 503 while `STATUS=off`, or while `keys.json` is unreadable (`Status::locked`, logged at
@@ -1157,13 +1312,19 @@ impl App {
         self.device_verify_key(rq, sig, key.as_deref(), method, url, body)
     }
 
+    /// 429 while `ip` has had `FAIL_PER_MIN` failed device signatures within the minute.
+    fn fail_limit(&self, ip: &str, t: u64) -> Result<(), Resp> {
+        if self.status.fail_hits.get(ip).is_some_and(|h| t < h.0 + 60 && h.1 >= FAIL_PER_MIN) {
+            return Err(text(429, "too many failed requests").with_header(hdr("Retry-After", "60")));
+        }
+        Ok(())
+    }
+
     /// As [`Self::device_verify`], against `key` (base64) instead of the pin's.
     fn device_verify_key(&mut self, rq: &Request, sig: &str, key: Option<&str>, method: &str, url: &str, body: &[u8]) -> Result<(), Resp> {
         let ip = crate::rate_ip(rq);
         let t = now();
-        if self.status.fail_hits.get(&ip).is_some_and(|h| t < h.0 + 60 && h.1 >= FAIL_PER_MIN) {
-            return Err(text(429, "too many failed requests").with_header(hdr("Retry-After", "60")));
-        }
+        self.fail_limit(&ip, t)?;
         let r = match key.map(tether_trust::key_from_b64) {
             None => Err("unknown device".to_owned()),
             Some(Err(e)) => Err(e),
@@ -1353,6 +1514,83 @@ impl App {
         let (uuid, sig) = Self::device_header(rq)?;
         self.device_verify(rq, &sig, &uuid, "DELETE", url, raw)?;
         self.admin_status_delete(&uuid, "the device", true)
+    }
+
+    /// The software-list routes: 503 as every status route, then 404 without `STATUS_SBOM=on`.
+    fn sbom_open(&mut self) -> Result<(), Resp> {
+        self.status_open()?;
+        if conf().sbom {
+            Ok(())
+        } else {
+            Err(not_found())
+        }
+    }
+
+    /// `PUT /api/status/sbom` before its body is read (its size is checked before this): the
+    /// device's hour, then the global budget. Nothing here is counted for the device.
+    pub(crate) fn sbom_precheck(&mut self, rq: &Request) -> Result<(), Resp> {
+        self.sbom_open()?;
+        let (uuid, _) = Self::device_header(rq)?;
+        let t = now();
+        self.status.sbom_hour(&uuid, t)?;
+        let (sec, n) = &mut self.status.sbom_budget;
+        if *sec != t {
+            (*sec, *n) = (t, 0);
+        }
+        if *n >= conf().sbom_rps {
+            return Err(text(429, "busy").with_header(hdr("Retry-After", "60")));
+        }
+        *n += 1;
+        Ok(())
+    }
+
+    /// `PUT /api/status/sbom`: the failure limit and the key lookup here, the rest after the lock
+    /// is released ([`sbom_store`]).
+    pub(crate) fn status_sbom_put(&mut self, rq: &Request, body: &Body, url: &str) -> Result<Resp, Resp> {
+        self.sbom_open()?;
+        let raw = body.bytes(conf().sbom_max)?;
+        let (uuid, sig) = Self::device_header(rq)?;
+        let (ip, t) = (crate::rate_ip(rq), now());
+        self.fail_limit(&ip, t)?;
+        let Some(key) = self.status.keys.get(&uuid).map(|p| p.key.clone()) else {
+            rate_ok(&mut self.status.fail_hits, ip, t, u32::MAX);
+            return Err(text(401, "unknown device"));
+        };
+        let (raw, url) = (raw.to_vec(), url.to_owned());
+        self.defer(move |app| sbom_store(app, uuid, sig, key, ip, url, raw, t))
+    }
+
+    /// `DELETE /api/status/sbom`: 204 also when there is none.
+    pub(crate) fn status_sbom_delete(&mut self, rq: &Request, body: &Body, url: &str) -> Result<Resp, Resp> {
+        self.sbom_open()?;
+        let raw = body.bytes(crate::LIMIT_SMALL)?;
+        let (uuid, sig) = Self::device_header(rq)?;
+        self.device_verify(rq, &sig, &uuid, "DELETE", url, raw)?;
+        self.status.sbom_record(&uuid, None);
+        let _ = fs::remove_file(file(&self.data, &uuid, "sbom.json"));
+        Ok(empty(204))
+    }
+
+    /// `GET /api/team/status/<uuid>/sbom`: the list as stored, its hash as the ETag. Opened under
+    /// the lock: an upload renames a new file over it, this one stays readable and matches its tag.
+    pub(crate) fn team_status_sbom(&mut self, rq: &Request, uuid: &str) -> Result<Resp, Resp> {
+        self.sbom_open()?;
+        let rec = st::valid_uuid(uuid).then(|| self.status.dev.get(uuid)).flatten().and_then(|s| s.sbom.as_ref()).ok_or_else(not_found)?;
+        let etag = format!("\"{}\"", rec.sha);
+        if etag_matches(header(rq, "If-None-Match").as_deref(), &etag) {
+            return Ok(empty(304).with_header(hdr("ETag", &etag)));
+        }
+        let f = fs::File::open(file(&self.data, uuid, "sbom.json")).map_err(|_| not_found())?;
+        Ok(tiny_http::Response::from_file(f)
+            .with_header(hdr("Content-Type", "application/vnd.cyclonedx+json"))
+            .with_header(hdr("ETag", &etag))
+            .with_chunked_threshold(usize::MAX)
+            .boxed())
+    }
+
+    /// `tether_api_status_sbom_files` and `_bytes`.
+    pub(crate) fn status_sbom(&self) -> (u64, u64) {
+        (self.status.sbom_files, self.status.sbom_bytes)
     }
 
     /// `DELETE /api/admin/status/<uuid>` (already admin-authenticated), a team member's
@@ -1563,7 +1801,7 @@ impl App {
             last = Some(u.clone());
             if token.is_none() || p.token == token {
                 let s = self.status.dev.get(u.as_str());
-                page.push((u.clone(), p.clone(), s.map(|s| s.last_seen), s.and_then(|s| s.entry.clone())));
+                page.push((u.clone(), p.clone(), s.map(|s| s.last_seen).filter(|&l| l > 0), s.and_then(|s| s.entry.clone())));
             }
         }
         let next = if range.next().is_some() { last } else { None };
@@ -1645,7 +1883,7 @@ impl App {
     /// `summary.json` with its ETag, or 304. Opened under the lock: a rebuild renames a new file
     /// over it, this one stays readable.
     fn summary_file(&self, etag: &str, inm: Option<&str>) -> Result<Resp, Resp> {
-        if inm.is_some_and(|inm| inm.split(',').any(|x| x.trim().trim_start_matches("W/") == etag)) {
+        if etag_matches(inm, etag) {
             return Ok(empty(304).with_header(hdr("ETag", etag)));
         }
         let f = fs::File::open(self.data.join("status/summary.json")).map_err(crate::internal)?;
@@ -1665,7 +1903,7 @@ impl App {
         }
         let pin = self.status.keys.get(uuid).ok_or_else(not_found)?;
         let t = now();
-        let s = self.status.dev.get(uuid);
+        let s = self.status.dev.get(uuid).filter(|s| s.last_seen > 0); // 0: only a software list so far
         let head = serde_json::json!({
             "uuid": uuid,
             "tether_id": pin.tether_id,
@@ -1720,6 +1958,7 @@ impl App {
         self.status.fail_hits.retain(|_, (start, _)| t < *start + 60);
         self.status.enroll_hits.retain(|_, (start, _)| t < *start + 60);
         self.status.refused_hits.retain(|_, (start, _)| t < *start + 60);
+        self.status.sbom_last.retain(|_, at| t < *at + SBOM_INTERVAL);
         self.status.send(Job::Tick);
     }
 
@@ -1742,6 +1981,8 @@ fn write_seen(app: &Mutex<App>, data: &Path) -> io::Result<()> {
         seq: u64,
         next: u64,
         entry: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sbom: Option<Sbom>,
     }
     let tmp = crate::tmp_path(data);
     let r = (|| {
@@ -1749,16 +1990,16 @@ fn write_seen(app: &Mutex<App>, data: &Path) -> io::Result<()> {
         let mut w = io::BufWriter::new(&f);
         w.write_all(b"{")?;
         let mut first = true;
-        let copy = |_: &App, u: &Arc<str>, s: &Seen| Some((u.clone(), s.last_seen, s.seq, s.next, s.entry.clone()));
+        let copy = |_: &App, u: &Arc<str>, s: &Seen| Some((u.clone(), s.last_seen, s.seq, s.next, s.entry.clone(), s.sbom.clone()));
         chunks(app, dev_map, copy, |buf| {
-            for (u, last_seen, seq, next, entry) in buf.drain(..) {
+            for (u, last_seen, seq, next, entry, sbom) in buf.drain(..) {
                 if !first {
                     w.write_all(b",")?;
                 }
                 first = false;
                 serde_json::to_writer(&mut w, &*u).map_err(io::Error::other)?;
                 w.write_all(b":")?;
-                serde_json::to_writer(&mut w, &Out { last_seen, seq, next, entry: entry.as_deref() }).map_err(io::Error::other)?;
+                serde_json::to_writer(&mut w, &Out { last_seen, seq, next, entry: entry.as_deref(), sbom }).map_err(io::Error::other)?;
             }
             Ok(())
         })?;
@@ -1800,6 +2041,7 @@ fn revoked_job(app: &Mutex<App>) -> io::Result<()> {
 /// Starts the status writer thread: all of the status store's periodic and bulk disk work.
 pub(crate) fn start_writer(app: &Arc<Mutex<App>>) {
     let (tx, rx) = mpsc::channel();
+    let _ = tx.send(Job::SbomScan);
     lock(app).status.writer = Some(tx);
     let app = app.clone();
     std::thread::spawn(move || {
@@ -1811,9 +2053,66 @@ pub(crate) fn start_writer(app: &Arc<Mutex<App>>) {
                 Job::Revoked(done) => {
                     let _ = done.send(revoked_job(&app));
                 }
+                Job::SbomScan => sbom_scan(&app),
             }
         }
     });
+}
+
+/// At start, in the background: `seen.json` is written every 5 minutes, so after a hard stop a
+/// stored software list may lack its record (rebuilt here from the file: size, mtime, hash) or a
+/// record its file (dropped). A file whose uuid has no pin is removed. One pass over the folder,
+/// the records copied out in chunks, then one short lock hold per mismatch.
+fn sbom_scan(app: &Mutex<App>) {
+    let data = {
+        let a = lock(app);
+        if a.status.locked {
+            return;
+        }
+        a.data.clone()
+    };
+    let Ok(dir) = fs::read_dir(data.join("status")) else { return };
+    let files: HashSet<String> = dir.flatten().filter_map(|e| e.file_name().into_string().ok()?.strip_suffix(".sbom.json").filter(|u| st::valid_uuid(u)).map(str::to_owned)).collect();
+    let mut have: HashSet<Arc<str>> = HashSet::new();
+    let _ = chunks(app, dev_map, |_, u, s| s.sbom.as_ref().map(|_| u.clone()), |buf| {
+        have.extend(buf.drain(..));
+        Ok(())
+    });
+    for u in have.iter().filter(|u| !files.contains(&***u)) {
+        let mut a = lock(app);
+        if !a.status.sbom_writing.contains(&**u) && !file(&data, u, "sbom.json").exists() {
+            a.status.sbom_record(u, None);
+        }
+    }
+    for u in files.iter().filter(|u| !have.contains(u.as_str())) {
+        if crate::STOP.load(Ordering::SeqCst) {
+            return;
+        }
+        let path = file(&data, u, "sbom.json");
+        {
+            let a = lock(app);
+            if !a.status.keys.contains_key(u) {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            if a.status.sbom_writing.contains(u) || a.status.sbom_size(u).is_some() {
+                continue;
+            }
+        }
+        let read = fs::File::open(&path).and_then(|mut f| {
+            let at = f.metadata()?.modified()?.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let mut b = Vec::new();
+            f.read_to_end(&mut b)?;
+            Ok((at, b))
+        });
+        let Ok((at, b)) = read else { continue };
+        let rec = Sbom { at, size: b.len() as u64, sha: reqauth::body_digest(&b)[..16].to_owned() };
+        let mut a = lock(app);
+        // Still pinned, still without a record, not deleted or replaced meanwhile.
+        if a.status.keys.contains_key(u) && !a.status.sbom_writing.contains(u) && a.status.sbom_size(u).is_none() && path.exists() {
+            a.status.sbom_record(u, Some(rec));
+        }
+    }
 }
 
 fn tick(app: &Arc<Mutex<App>>) {

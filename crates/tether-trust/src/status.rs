@@ -283,6 +283,10 @@ pub struct Answer {
     pub releases: u64,
     /// Seconds until the next post.
     pub next: u64,
+    /// The relay takes the software list (`PUT /api/status/sbom`). Sent only when true, so
+    /// older agents and relays see the answer as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sbom: bool,
 }
 
 /// 8-64 characters `[A-Za-z0-9-]`.
@@ -317,6 +321,15 @@ mod tests {
         assert_eq!(serde_json::to_string(&e).unwrap(), r#"{"uuid":"dev-0001","pubkey":"k","token":"t"}"#);
         assert!(valid_uuid("dev-0001") && !valid_uuid("dev-001") && !valid_uuid("dev_0001"));
         assert!(valid_tether_id("123456789") && !valid_tether_id("1 2") && !valid_tether_id(""));
+    }
+
+    #[test]
+    fn answer_names_sbom_only_when_true() {
+        let a = Answer { releases: 3, next: 300, sbom: false };
+        assert_eq!(serde_json::to_string(&a).unwrap(), r#"{"releases":3,"next":300}"#);
+        assert_eq!(serde_json::to_string(&Answer { sbom: true, ..a }).unwrap(), r#"{"releases":3,"next":300,"sbom":true}"#);
+        assert_eq!(serde_json::from_str::<Answer>(r#"{"releases":3,"next":300}"#).unwrap(), a);
+        assert!(serde_json::from_str::<Answer>(r#"{"releases":3,"next":300,"sbom":true}"#).unwrap().sbom);
     }
 
     /// A token over any payload JSON, signed by `admin`.

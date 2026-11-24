@@ -1701,3 +1701,338 @@ fn customer_survives_restart() {
     assert_eq!(team_get(&s, &m, "/api/team/status").json()["hosts"][0]["customer"], "4711");
     assert!(std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap().contains(r#""customer":"4711""#));
 }
+
+// ---- The software list (SBOM): stored per device byte for byte, served to team members.
+
+const PUT_SBOM: &str = "/api/status/sbom";
+
+fn sha16(b: &[u8]) -> String {
+    reqauth::body_digest(b)[..16].to_owned()
+}
+
+/// A document of exactly `len` bytes (at least 40): a JSON object the relay does not read.
+fn sbom_doc(len: usize, fill: char) -> Vec<u8> {
+    let head = r#"{"bomFormat":"CycloneDX",  "x":""#;
+    format!("{head}{}\"}}", fill.to_string().repeat(len - head.len() - 2)).into_bytes()
+}
+
+fn sbom_put(s: &Srv, dev: &SigningKey, uuid: &str, body: &[u8]) -> Reply {
+    signed(s, dev, uuid, "PUT", PUT_SBOM, body)
+}
+
+/// `dev-0001`..`dev-<n>` pinned with a full report (their keys in order), `prep` on the folder,
+/// then the relay started with the software list on, a budget no test reaches unless `env` sets
+/// one, and `env`.
+fn sbom_server(n: usize, env: &[(&str, &str)], prep: impl FnOnce(&Path)) -> (Srv, SigningKey, Vec<SigningKey>) {
+    let (admin, dir) = (generate_key(), new_dir());
+    let keys: Vec<SigningKey> = (1..=n).map(|_| generate_key()).collect();
+    for (i, k) in keys.iter().enumerate() {
+        prep_device(&dir, &format!("dev-{:04}", i + 1), k, now() - 120, 5);
+    }
+    prep(&dir);
+    let mut e = vec![("STATUS_SBOM", "on"), ("STATUS_SBOM_RPS", "1000")];
+    e.extend_from_slice(env);
+    (spawn_env(dir, &key_to_b64(&admin.verifying_key()), &e), admin, keys)
+}
+
+/// A stored document with its record in `seen.json` (accepted at `at`), before the relay starts.
+fn prep_sbom(dir: &Path, uuid: &str, doc: &[u8], at: u64) {
+    std::fs::write(dir.join(format!("status/{uuid}.sbom.json")), doc).unwrap();
+    update_json(&dir.join("status/seen.json"), |m| {
+        m.get_mut(uuid).unwrap()["sbom"] = json!({"at": at, "size": doc.len(), "sha": sha16(doc)});
+    });
+}
+
+fn sbom_file(s: &Srv, uuid: &str) -> Option<Vec<u8>> {
+    std::fs::read(s.dir.join(format!("status/{uuid}.sbom.json"))).ok()
+}
+
+/// A member's GET of `uuid`'s document, with `If-None-Match` if given.
+fn sbom_get(s: &Srv, m: &SigningKey, uuid: &str, inm: Option<&str>) -> Reply {
+    let p = format!("/api/team/status/{uuid}/sbom");
+    let sig = reqauth::sign_request(m, "GET", &p, b"", now());
+    let mut h = vec![(reqauth::HEADER, sig.as_str())];
+    h.extend(inm.map(|e| ("If-None-Match", e)));
+    s.req("GET", &p, &h, b"")
+}
+
+/// A request whose head declares `declared` bytes of body and sends `body`, then closes its side.
+fn send_declared(s: &Srv, method: &str, path: &str, headers: &[(&str, &str)], declared: usize, body: &[u8]) -> Reply {
+    let mut c = TcpStream::connect(&s.addr).unwrap();
+    c.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {declared}\r\n");
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
+    c.write_all(head.as_bytes()).unwrap();
+    let _ = c.write_all(body);
+    let _ = c.shutdown(std::net::Shutdown::Write);
+    let mut raw = Vec::new();
+    let r = c.read_to_end(&mut raw);
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or_else(|| panic!("no response head to {declared} declared, {} sent: {r:?}", body.len()));
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    let status = head.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+    Reply { status, body: raw[split + 4..].to_vec(), head }
+}
+
+/// Stops `s` (SIGTERM, or SIGKILL with `hard`) and starts the relay again on its folder with `env`.
+fn restart_env(mut s: Srv, admin: &SigningKey, env: &[(&str, &str)], hard: bool) -> Srv {
+    assert!(Command::new("kill").args([if hard { "-KILL" } else { "-TERM" }, &s.child.id().to_string()]).status().unwrap().success());
+    let _ = s.child.wait();
+    let dir = s.dir.clone();
+    std::mem::forget(s); // its Drop would remove the folder
+    spawn_env(dir, &key_to_b64(&admin.verifying_key()), env)
+}
+
+#[test]
+fn sbom_is_stored_byte_for_byte_and_served_to_members() {
+    let (s, admin, k) = sbom_server(2, &[], |_| {});
+    let m = member(&s, &admin);
+    let doc = br#"{ "bomFormat":"CycloneDX","specVersion":"1.6",  "components":[{"name":"Example \t App"}] }"#;
+    let r = sbom_put(&s, &k[0], "dev-0001", doc);
+    assert_eq!((r.status, r.text()), (204, String::new()));
+    assert_eq!(sbom_file(&s, "dev-0001").unwrap(), doc);
+    let r = sbom_get(&s, &m, "dev-0001", None);
+    let tag = format!("\"{}\"", sha16(doc));
+    assert_eq!((r.status, r.body.as_slice(), r.header("Content-Type"), r.header("ETag")), (200, &doc[..], Some("application/vnd.cyclonedx+json".into()), Some(tag.clone())));
+    let r = sbom_get(&s, &m, "dev-0001", Some(&tag));
+    assert_eq!((r.status, r.header("ETag")), (304, Some(tag.clone())));
+    assert_eq!(sbom_get(&s, &m, "dev-0002", None).status, 404, "none stored");
+    assert_eq!(sbom_get(&s, &m, "dev-9999", None).status, 404);
+    // The summary entry and the status answer.
+    let h = team_get(&s, &m, "/api/team/status").json()["hosts"].clone();
+    assert_eq!(h[0]["sbom"]["sha"], sha16(doc));
+    assert!(h[0]["sbom"]["at"].as_u64().unwrap() >= now() - 5);
+    assert!(h[1].get("sbom").is_none(), "no document, no field");
+    let r = post(&s, &k[1], "dev-0002", &heartbeat("dev-0002", 6));
+    assert_eq!(r.json(), json!({"releases": 0, "next": 300, "sbom": true}));
+    // One accepted upload per device and hour.
+    let r = sbom_put(&s, &k[0], "dev-0001", doc);
+    let wait: u64 = r.header("Retry-After").unwrap().parse().unwrap();
+    assert_eq!((r.status, r.text()), (429, "upload too frequent".into()));
+    assert!((3590..=3600).contains(&wait), "{wait}");
+    assert_eq!(metric(&s, "tether_api_status_sbom_files"), Some(1.));
+    assert_eq!(metric(&s, "tether_api_status_sbom_bytes"), Some(doc.len() as f64));
+    // Credentials stay apart: a device key on the team route, a member key on the device routes.
+    assert_eq!(signed(&s, &k[0], "dev-0001", "GET", "/api/team/status/dev-0001/sbom", b"").status, 401);
+    assert_eq!(s.admin(&m, "PUT", PUT_SBOM, doc).status, 401);
+    assert_eq!(s.admin(&m, "DELETE", PUT_SBOM, b"").status, 401);
+    assert_eq!(sbom_file(&s, "dev-0001").unwrap(), doc);
+    // The record survives a restart, and with it the hourly limit.
+    let s = restart_env(s, &admin, &[("STATUS_SBOM", "on")], false);
+    let m = member(&s, &admin);
+    assert_eq!(sbom_get(&s, &m, "dev-0001", None).header("ETag"), Some(tag));
+    assert_eq!(team_get(&s, &m, "/api/team/status").json()["hosts"][0]["sbom"]["sha"], sha16(doc));
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", doc).status, 429);
+    assert_eq!(metric(&s, "tether_api_status_sbom_bytes"), Some(doc.len() as f64));
+}
+
+#[test]
+fn sbom_is_off_by_default_and_status_off_wins() {
+    let admin = generate_key();
+    let dir = new_dir();
+    let a = generate_key();
+    prep_device(&dir, "dev-0001", &a, now() - 120, 5);
+    prep_sbom(&dir, "dev-0001", b"{}", now() - 7200);
+    let s = start_in(dir, &admin);
+    let m = member(&s, &admin);
+    for r in [sbom_put(&s, &a, "dev-0001", b"{}"), signed(&s, &a, "dev-0001", "DELETE", PUT_SBOM, b""), sbom_get(&s, &m, "dev-0001", None)] {
+        assert_eq!(r.status, 404);
+    }
+    assert_eq!(post(&s, &a, "dev-0001", &heartbeat("dev-0001", 6)).json(), json!({"releases": 0, "next": 300}));
+    assert!(team_get(&s, &m, "/api/team/status").json()["hosts"][0].get("sbom").is_none(), "a document from before is not shown");
+    assert!(sbom_file(&s, "dev-0001").is_some(), "nor removed");
+    drop(s);
+    let s = spawn_env(new_dir(), &key_to_b64(&admin.verifying_key()), &[("STATUS", "off"), ("STATUS_SBOM", "on")]);
+    let m = member(&s, &admin);
+    for r in [sbom_put(&s, &a, "dev-0001", b"{}"), signed(&s, &a, "dev-0001", "DELETE", PUT_SBOM, b""), sbom_get(&s, &m, "dev-0001", None)] {
+        assert_eq!((r.status, r.text()), (503, "status reporting is off".into()));
+    }
+}
+
+#[test]
+fn sbom_body_rules() {
+    let (s, _admin, k) = sbom_server(7, &[], |_| {});
+    // Not an object, or not JSON: 400, nothing stored, the hour not used up.
+    for body in [&b"[1,2]"[..], b"\"x\"", b"not json", b"{\"a\":1} {}", b"{\"a\":1", b""] {
+        let r = sbom_put(&s, &k[0], "dev-0001", body);
+        assert_eq!((r.status, r.text()), (400, "not a JSON object".into()), "{}", String::from_utf8_lossy(body));
+        assert!(sbom_file(&s, "dev-0001").is_none());
+    }
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", b"{}").status, 204);
+    // 512 KiB of valid JSON that is no software list: stored.
+    let big = sbom_doc(512 << 10, 'a');
+    assert_eq!(sbom_put(&s, &k[1], "dev-0002", &big).status, 204);
+    assert_eq!(sbom_file(&s, "dev-0002").unwrap(), big);
+    // One byte over: 413 from Content-Length, before the body is read (none is sent).
+    let sig = reqauth::sign_device_request(&k[2], "dev-0003", RELAY, "PUT", PUT_SBOM, b"", now());
+    let r = send_declared(&s, "PUT", PUT_SBOM, &[(reqauth::HEADER, &sig)], (512 << 10) + 1, b"");
+    assert_eq!((r.status, r.text()), (413, "body too large".into()));
+    // Deep nesting: walked without recursion (bounded by the body), stored; unbalanced: 400.
+    let deep = format!("{{\"a\":{}{}}}", "[".repeat(200_000), "]".repeat(200_000));
+    assert_eq!(sbom_put(&s, &k[2], "dev-0003", deep.as_bytes()).status, 204);
+    let open = format!("{{\"a\":{}}}", "[".repeat(200_000));
+    assert_eq!(sbom_put(&s, &k[3], "dev-0004", open.as_bytes()).status, 400);
+    // Content-Length that lies: more sent than declared, only the declared bytes are read.
+    let doc = sbom_doc(100, 'b');
+    let sig = reqauth::sign_device_request(&k[4], "dev-0005", RELAY, "PUT", PUT_SBOM, &doc, now());
+    let mut more = doc.clone();
+    more.extend_from_slice(b"GARBAGE{[");
+    let r = send_declared(&s, "PUT", PUT_SBOM, &[(reqauth::HEADER, &sig)], doc.len(), &more);
+    assert_eq!(r.status, 204);
+    assert_eq!(sbom_file(&s, "dev-0005").unwrap(), doc);
+    // Fewer sent than declared: the read fails, nothing stored. (Up to 1 KiB declared, tiny_http
+    // reads the body itself and drops such a request unanswered.)
+    let doc = sbom_doc(5000, 'b');
+    let sig = reqauth::sign_device_request(&k[5], "dev-0006", RELAY, "PUT", PUT_SBOM, &doc, now());
+    let r = send_declared(&s, "PUT", PUT_SBOM, &[(reqauth::HEADER, &sig)], doc.len() + 50, &doc);
+    assert_eq!((r.status, r.text()), (400, "request body incomplete".into()));
+    assert!(sbom_file(&s, "dev-0006").is_none());
+    assert_eq!(sbom_put(&s, &k[5], "dev-0006", &doc).status, 204, "the hour not used up");
+}
+
+#[test]
+fn sbom_forged_uploads_do_not_use_up_the_hour_and_the_budget_holds() {
+    let (s, _admin, k) = sbom_server(2, &[], |_| {});
+    let doc = sbom_doc(200, 'c');
+    let stranger = generate_key();
+    // Unsigned, signed by another key, and signed by dev-0002 with a header naming dev-0001.
+    assert_eq!(s.req("PUT", PUT_SBOM, &[], &doc).status, 401);
+    let r = sbom_put(&s, &stranger, "dev-0001", &doc);
+    assert_eq!((r.status, r.text()), (401, "signature does not match".into()));
+    assert_eq!(sbom_put(&s, &k[1], "dev-0001", &doc).status, 401);
+    let r = sbom_put(&s, &stranger, "dev-0099", &doc);
+    assert_eq!((r.status, r.text()), (401, "unknown device".into()));
+    assert!(sbom_file(&s, "dev-0001").is_none());
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", &doc).status, 204, "the device's own allowance is untouched");
+    // A signed request is used once, also when it was refused.
+    let sig = reqauth::sign_device_request(&k[1], "dev-0002", RELAY, "PUT", PUT_SBOM, b"[1]", now());
+    assert_eq!(s.req("PUT", PUT_SBOM, &[(reqauth::HEADER, &sig)], b"[1]").status, 400);
+    let r = s.req("PUT", PUT_SBOM, &[(reqauth::HEADER, &sig)], b"[1]");
+    assert_eq!((r.status, r.text()), (401, "replayed request".into()));
+    drop(s);
+    // The global budget: one upload per second, another within that second is refused.
+    let (s, _admin, k) = sbom_server(3, &[("STATUS_SBOM_RPS", "1")], |_| {});
+    let codes: Vec<(u16, String, Option<String>)> = (0..3)
+        .map(|i| {
+            let r = sbom_put(&s, &k[i], &format!("dev-{:04}", i + 1), &doc);
+            (r.status, r.text(), r.header("Retry-After"))
+        })
+        .collect();
+    assert!(codes.iter().filter(|c| c.0 == 204).count() <= 2, "{codes:?}");
+    assert!(codes.contains(&(429, "busy".into(), Some("60".into()))), "{codes:?}");
+}
+
+#[test]
+fn sbom_total_cap() {
+    // 1 MiB in all; dev-0001 holds 700 KB, dev-0003 100 KB, from before.
+    let (big, small) = (sbom_doc(700_000, 'd'), sbom_doc(100_000, 'e'));
+    let (s, _admin, k) = sbom_server(3, &[("STATUS_SBOM_MAX_KB", "1024"), ("STATUS_SBOM_MAX_TOTAL_MB", "1")], |d| {
+        prep_sbom(d, "dev-0001", &big, now() - 7200);
+        prep_sbom(d, "dev-0003", &small, now() - 7200);
+    });
+    let r = sbom_put(&s, &k[1], "dev-0002", &sbom_doc(300_000, 'f'));
+    assert_eq!((r.status, r.text()), (507, "sbom store full (STATUS_SBOM_MAX_TOTAL_MB)".into()));
+    assert!(sbom_file(&s, "dev-0002").is_none());
+    // A larger replacement that does not fit is refused; the previous document stays.
+    assert_eq!(sbom_put(&s, &k[2], "dev-0003", &sbom_doc(400_000, 'g')).status, 507);
+    assert_eq!(sbom_file(&s, "dev-0003").unwrap(), small);
+    // One that is not larger is taken; then there is room for dev-0002.
+    let smaller = sbom_doc(500_000, 'h');
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", &smaller).status, 204);
+    assert_eq!(sbom_file(&s, "dev-0001").unwrap(), smaller);
+    assert_eq!(metric(&s, "tether_api_status_sbom_bytes"), Some(600_000.));
+    assert_eq!(sbom_put(&s, &k[1], "dev-0002", &sbom_doc(300_000, 'f')).status, 204);
+    assert_eq!(metric(&s, "tether_api_status_sbom_files"), Some(3.));
+    assert_eq!(metric(&s, "tether_api_status_sbom_bytes"), Some(900_000.));
+}
+
+#[test]
+fn sbom_delete_and_lifetime() {
+    let doc = sbom_doc(1000, 'i');
+    let (w, r) = (generate_key(), generate_key());
+    let (s, admin, k) = sbom_server(7, &[], |d| {
+        for i in 1..=7 {
+            prep_sbom(d, &format!("dev-{i:04}"), &doc, now() - 7200);
+        }
+        // dev-0005 linked, dev-0006 claiming an ID; dev-0007 not seen for 181 days.
+        let old = now() - 181 * 86_400;
+        update_json(&d.join("status/keys.json"), |m| {
+            m.get_mut("dev-0005").unwrap()["tether_id"] = "123456789".into();
+            m.get_mut("dev-0005").unwrap()["linked_by"] = "W".into();
+            m.get_mut("dev-0006").unwrap()["tether_id"] = "987654321".into();
+            m.get_mut("dev-0007").unwrap()["enrolled"] = old.into();
+        });
+        update_json(&d.join("status/seen.json"), |m| m.get_mut("dev-0007").unwrap()["last_seen"] = old.into());
+    });
+    assert!(sbom_file(&s, "dev-0007").is_none(), "expired with its pin");
+    let roster = json!({"members": [{"name": "W", "key": key_to_b64(&w.verifying_key()), "write": true, "audit": false},
+        {"name": "R", "key": key_to_b64(&r.verifying_key()), "write": false, "audit": false}]});
+    assert_eq!(s.admin(&admin, "PUT", "/api/admin/team", roster.to_string().as_bytes()).status, 204);
+    // The device replaces, then deletes it: 204, also when none is left. Deleting frees no upload.
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", b"{}").status, 204);
+    assert_eq!(signed(&s, &k[0], "dev-0001", "DELETE", PUT_SBOM, b"").status, 204);
+    assert!(sbom_file(&s, "dev-0001").is_none());
+    assert_eq!(sbom_get(&s, &r, "dev-0001", None).status, 404);
+    assert_eq!(signed(&s, &k[0], "dev-0001", "DELETE", PUT_SBOM, b"").status, 204);
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", b"{}").status, 429);
+    assert_eq!(signed(&s, &generate_key(), "dev-0001", "DELETE", PUT_SBOM, b"").status, 401);
+    // Removal of the pin by the device, an admin and a member takes the file along.
+    assert_eq!(signed(&s, &k[1], "dev-0002", "DELETE", "/api/status", b"").status, 204);
+    assert_eq!(s.admin(&admin, "DELETE", "/api/admin/status/dev-0003", b"").status, 204);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0004", b"").status, 204);
+    for u in ["dev-0002", "dev-0003", "dev-0004"] {
+        assert!(sbom_file(&s, u).is_none(), "{u}");
+    }
+    // Unlink and dismiss keep it.
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0005/link", b"").status, 204);
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0006/link", b"").status, 204);
+    for u in ["dev-0005", "dev-0006"] {
+        assert_eq!(sbom_file(&s, u).unwrap(), doc, "{u}");
+        assert_eq!(sbom_get(&s, &r, u, None).status, 200, "{u}");
+    }
+    assert_eq!(metric(&s, "tether_api_status_sbom_files"), Some(2.));
+    assert_eq!(metric(&s, "tether_api_status_sbom_bytes"), Some(2000.));
+}
+
+#[test]
+fn sbom_record_is_rebuilt_after_a_hard_kill() {
+    let doc = sbom_doc(5000, 'j');
+    // dev-0002 has a record but its file is gone: the record is dropped.
+    let (s, admin, k) = sbom_server(2, &[], |d| {
+        prep_sbom(d, "dev-0002", b"{}", now() - 7200);
+        std::fs::remove_file(d.join("status/dev-0002.sbom.json")).unwrap();
+    });
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", &doc).status, 204);
+    // seen.json is written at most every 5 minutes: after SIGKILL the record is not in it.
+    let s = restart_env(s, &admin, &[("STATUS_SBOM", "on")], true);
+    let seen: Value = serde_json::from_slice(&std::fs::read(s.dir.join("status/seen.json")).unwrap()).unwrap();
+    assert!(seen["dev-0001"].get("sbom").is_none());
+    let m = member(&s, &admin);
+    wait_for("the record rebuilt from the file", || sbom_get(&s, &m, "dev-0001", None).status == 200);
+    assert_eq!(sbom_get(&s, &m, "dev-0001", None).header("ETag"), Some(format!("\"{}\"", sha16(&doc))));
+    let h = team_get(&s, &m, "/api/team/status").json()["hosts"].clone();
+    assert_eq!(h[0]["sbom"]["sha"], sha16(&doc));
+    assert!(h[1].get("sbom").is_none());
+    assert_eq!(sbom_get(&s, &m, "dev-0002", None).status, 404);
+    assert_eq!(metric(&s, "tether_api_status_sbom_files"), Some(1.));
+    assert_eq!(metric(&s, "tether_api_status_sbom_bytes"), Some(5000.));
+}
+
+#[test]
+fn sbom_settings_must_be_numbers() {
+    let dir = new_dir();
+    let err = dir.with_extension("err");
+    let st = Command::new(env!("CARGO_BIN_EXE_tether-api"))
+        .args(["--data", dir.to_str().unwrap(), "--listen", "127.0.0.1:0"])
+        .env("STATUS_SBOM_MAX_KB", "lots")
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&err).unwrap())
+        .status()
+        .unwrap();
+    assert!(!st.success());
+    assert!(std::fs::read_to_string(&err).unwrap().contains("STATUS_SBOM_MAX_KB: not a number"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&err);
+}

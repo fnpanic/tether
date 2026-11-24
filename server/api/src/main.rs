@@ -569,7 +569,22 @@ fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<
             (LIMIT_DIAG, 0o600, None, &DIAG_UPLOADS)
         }
         // Status: off and size answered before the body is read.
-        ("POST" | "DELETE", "/api/status") | ("POST", "/api/status/enroll") if status::conf().off => return Err(status::off()),
+        ("POST" | "DELETE", "/api/status") | ("POST", "/api/status/enroll") | ("PUT" | "DELETE", "/api/status/sbom") if status::conf().off => return Err(status::off()),
+        ("PUT" | "DELETE", "/api/status/sbom") if !status::conf().sbom => return Err(not_found()),
+        // The software list: size from Content-Length, the device's hour and the global budget,
+        // then the body; only the declared bytes are read, and all of them.
+        ("PUT", "/api/status/sbom") => {
+            let limit = status::conf().sbom_max;
+            if rq.body_length().is_some_and(|n| n as u64 > limit) {
+                return Err(too_large());
+            }
+            lock(app).sbom_precheck(rq)?;
+            let b = read_body(rq, limit)?;
+            if rq.body_length().is_some_and(|n| n != b.len()) {
+                return Err(text(400, "request body incomplete"));
+            }
+            return Ok(Body::Mem(b));
+        }
         ("POST", "/api/status") => return read_body(rq, status::LIMIT_STATUS).map(Body::Mem),
         ("POST", "/api/status/enroll") => return read_body(rq, tether_trust::status::ENROLL_MAX as u64).map(Body::Mem),
         _ => return read_body(rq, LIMIT_PAGE).map(Body::Mem),
@@ -1021,6 +1036,8 @@ impl App {
             ("POST", "/api/status/enroll") => self.status_enroll(rq, body, &url),
             ("POST", "/api/status") => self.status_post(rq, body, &url),
             ("DELETE", "/api/status") => self.status_delete(rq, body, &url),
+            ("PUT", "/api/status/sbom") => self.status_sbom_put(rq, body, &url),
+            ("DELETE", "/api/status/sbom") => self.status_sbom_delete(rq, body, &url),
             ("POST", "/api/audit/conn") => self.audit_post(rq, body, "conn"),
             ("POST", "/api/audit/file") => self.audit_post(rq, body, "file"),
             ("POST", "/api/audit/alarm") => self.audit_post(rq, body, "alarm"),
@@ -1633,6 +1650,7 @@ impl App {
             update_states: states.into_iter().collect(),
             downloads: self.downloads.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             status_hosts: self.status_hosts(t),
+            status_sbom: self.status_sbom(),
         })
     }
 
@@ -1852,6 +1870,10 @@ fn main() {
         off: std::env::var("STATUS").is_ok_and(|v| v.trim() == "off"),
         rps: env_num("STATUS_TARGET_RPS", 10).max(1),
         max_devices: env_num("STATUS_MAX_DEVICES", 20_000) as usize,
+        sbom: std::env::var("STATUS_SBOM").is_ok_and(|v| v.trim() == "on"),
+        sbom_max: env_num("STATUS_SBOM_MAX_KB", 512).saturating_mul(1 << 10),
+        sbom_rps: env_num("STATUS_SBOM_RPS", 2).max(1),
+        sbom_total: env_num("STATUS_SBOM_MAX_TOTAL_MB", 2048).saturating_mul(1 << 20),
     });
     let mut app = App::open(data.clone(), keys, audit_days, audit_max).unwrap_or_else(|e| {
         eprintln!("data dir: {e}");
