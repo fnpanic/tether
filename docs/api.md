@@ -435,8 +435,8 @@ a nonce and the SHA-256 of the body). Order of work, cheapest first:
 8. the hour again (a second upload from the same device in the meantime), the total cap (`507`; it
    uses the device's hour), the write; `204`.
 
-For `DELETE` the order is `STATUS=off` (`503`), the switch (`404`), the locked store (`503`) and
-then the signature checks of a post. For `GET /api/team/status/<uuid>/sbom` the `503` of an off
+For `DELETE` the order is `STATUS=off` (`503`), the locked store (`503`) and then the signature
+checks of a post; `STATUS_SBOM` does not matter. For `GET /api/team/status/<uuid>/sbom` the `503` of an off
 or locked store comes before the `404`, as for every team route.
 
 The hash, the signature and the write happen outside the state lock.
@@ -449,12 +449,14 @@ The hash, the signature and the write happen outside the state lock.
 | `401` | `missing signature`, `unsupported signature version`, `malformed signature header` | the header; answered before the body is read, not counted as a failure for the IP |
 | `401` | `unknown device` | not enrolled here; answered before the body is read, counted as a failure for the IP |
 | `401` | `signature does not match`, `request timestamp outside allowed clock skew`, `request signed for another relay`, `replayed request`, `this relay does not know its own host name …` | answered after the body was read; counted as a failure for the IP, and the budget slot goes back |
+| `401` | `unknown device` (after the body) | the device was removed (its pin released or deleted) while its upload was read or written; nothing is stored |
 | `404` | `not found` | `STATUS_SBOM` is not `on` |
 | `411` | `length required` | no `Content-Length` (a chunked body is refused) |
 | `413` | `body too large` | more than `STATUS_SBOM_MAX_KB` KiB |
 | `429` | `upload too frequent`, `Retry-After: <s>` | an accepted upload from this uuid, or one refused with `400 not a JSON object` or `507 sbom store full` after a valid signature, less than an hour ago (the seconds left; 60 while an upload from this uuid is being written, also when a second upload of the same device raced this one). A `DELETE` does not reset it (until the relay restarts, see below) |
 | `429` | `busy`, `Retry-After: 60` | more than `STATUS_SBOM_RPS` uploads in this second, all devices together. A request refused for its signature gives its slot back |
 | `429` | `too many failed requests`, `Retry-After: 60` | as for a post: 60 failed requests in a minute from this IP (IPv6: this /64): failed device signatures, unknown uuids and software lists whose body did not arrive. It is the same counter for every device-signed status route, so while it is tripped every status post, removal and upload from that address is refused until the minute is over |
+| `500` | `internal error` | the relay could not write, sync or rename the file (its journal has the error); nothing is stored and the device's hour is not used |
 | `503` | `status reporting is off`, `status store unavailable`, `busy` | back off |
 | `507` | `sbom store full (STATUS_SBOM_MAX_TOTAL_MB)` | the stored lists would exceed `STATUS_SBOM_MAX_TOTAL_MB`; a device that already has a list can still replace it with one that is not larger. Uses the device's hour |
 | `507` | `insufficient storage` | the data disk is nearly full (the relay's fault: uses no hour) |
@@ -463,8 +465,10 @@ A `429` or `503` is retried with the agent's backoff, `413` not until the list c
 
 ### `DELETE /api/status/sbom` (device-signed, no body)
 
-Deletes the device's list. `204`, also when it has none. The `401`, `429` (`too many failed
-requests`) and `503` answers are those of a post; `404` while `STATUS_SBOM` is not `on`. The hour of
+Deletes the device's list. `204`, also when it has none, and also while `STATUS_SBOM` is not `on`:
+a list stored while the feature was on is deleted then and does not come back when it is switched on
+again (a relay before this change answered `404` and kept it). The `401`, `429` (`too many failed
+requests`) and `503` answers are those of a post. The hour of
 `PUT` stays in force after it. For a device that has no document the hour is kept in memory only,
 so a restart of tether-api ends it.
 
@@ -531,7 +535,7 @@ moved away and tether-api is restarted; the rest of the relay is not affected. D
 | `STATUS` | on | `off`: every route above answers `503 status reporting is off`, `Retry-After: 3600`; posts are refused before the body is read |
 | `STATUS_TARGET_RPS` | `10` | posts per second the devices are paced to (at least 1); sets `next` |
 | `STATUS_MAX_DEVICES` | `20000` | pins at most; more is `507`, existing pins keep working |
-| `STATUS_SBOM` | off | `on`: the software-list routes exist and the answer to a post says `"sbom":true`; otherwise they answer `404`. `STATUS=off` wins |
+| `STATUS_SBOM` | off | `on`: the software-list routes exist and the answer to a post says `"sbom":true`; otherwise `PUT /api/status/sbom` and `GET /api/team/status/<uuid>/sbom` answer `404`, while a device's `DELETE /api/status/sbom` still deletes (`204`). `STATUS=off` wins |
 | `STATUS_SBOM_MAX_KB` | `512` | largest software list in KiB; more is `413` |
 | `STATUS_SBOM_RPS` | `2` | software-list uploads taken per second, all devices (at least 1); more is `429 busy` |
 | `STATUS_SBOM_MAX_TOTAL_MB` | `2048` | sum of all stored lists in MiB; an upload that would exceed it is `507` |

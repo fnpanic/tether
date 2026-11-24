@@ -22,6 +22,10 @@ read by the relay's operator and by every member of the organization's technicia
 What a report contains is decided by the agent; the format is described in [docs/health.md](docs/health.md).
 The software list is stored and read in the same way ([docs/health.md](docs/health.md#the-software-list)): it is not
 end-to-end encrypted, and the relay's operator and every team member can read it.
+An organization may also run its own alerting service that reads the relays as a team member does;
+it may keep a copy of each software list and hardware identity and write them into export files on
+the organization's own systems. Those copies and files, and the systems they are passed on to, are
+covered by that organization's privacy statement.
 When a technician links a monitoring agent to a host in Tether, the relay stores that technician's
 name (as in the team roster) and the time with the device's enrolment; every team member sees it,
 and it is removed with the device.

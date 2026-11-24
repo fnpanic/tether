@@ -128,10 +128,13 @@ Reports and history are worth keeping only if you want the history across a rest
 A device can also upload a list of the software installed on it, as one JSON document (the
 monitoring agent that supports it sends CycloneDX 1.6). The relay stores it and hands it to team
 members; it reads no field of it. **Off by default.** `STATUS_SBOM=on` in `api.env` enables it
-(any other value leaves it off). While it is off, the three routes below answer `404` and the
-answer to a post has no `sbom` field. `STATUS=off` wins over it: with `STATUS=off` they answer
+(any other value leaves it off). While it is off, the upload and the team members' read answer
+`404` and the answer to a post has no `sbom` field; a device's own signed
+`DELETE /api/status/sbom` is still carried out (`204`; it has no budget and no hourly limit, so this
+adds no load). `STATUS=off` wins over it: with `STATUS=off` all three answer
 `503 status reporting is off`. Files already stored stay when the feature is switched off, and
-come back when it is switched on again.
+come back when it is switched on again, except those their device deleted meanwhile. A relay
+before this change answered that `DELETE` with `404` and kept the file.
 
 | Setting | Default | Meaning |
 |---|---|---|
