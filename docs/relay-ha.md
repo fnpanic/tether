@@ -208,10 +208,10 @@ the sessions on it to end. New sessions go to node 2 within 3 s. Watch progress 
 Plain HTTP on every node. The OCI security list and firewalld do not open these ports; Caddy
 exposes only `/readyz/relay` (hbbr) and `/rendezvous/pubkey` (hbbs `/pubkey`).
 
-| Port | Process | `/healthz` | `/readyz` | `/pubkey` |
-| --- | --- | --- | --- | --- |
-| 21121 | hbbr | 200 while running | 200 `ready sessions=<paired sessions>` / 503 `draining …` | 404 |
-| 21122 | hbbs | 200 while running | 200 `ready sessions=<hosts registered over WS>` / 503 `draining …` | 200 the public key hbbs signs with ([key-rotation.md](key-rotation.md#checking-the-switch)) |
+| Port | Process | `/healthz` | `/readyz` | `/pubkey` | `/peer-pk/<id>` |
+| --- | --- | --- | --- | --- | --- |
+| 21121 | hbbr | 200 while running | 200 `ready sessions=<paired sessions>` / 503 `draining …` | 404 | 404 |
+| 21122 | hbbs | 200 while running | 200 `ready sessions=<hosts registered over WS>` / 503 `draining …` | 200 the public key hbbs signs with ([key-rotation.md](key-rotation.md#checking-the-switch)) | 200 the standard base64 key hbbs holds for the ID (tether-api's Tether proof enrolment), 404 when unknown; answered only to loopback and to `PEER_LOOKUP_FROM` (comma-separated CIDRs, default empty; a bad entry stops hbbs at start), 404 to everyone else and for an ID outside 6 to 16 of `A-Z a-z 0-9 _ -` |
 
 `HEALTH_PORT=<port>` overrides the port, and `HEALTH_PORT=0` turns the endpoint off.
 `DRAIN_TIMEOUT=<s>` sets the drain window (default 0: exit at once, the old behaviour).
