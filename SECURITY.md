@@ -211,18 +211,20 @@ runs nothing on a device and opens no port on it.
 - **The customer reference is a grouping, not a boundary.** An admin-signed token may name a
   customer (`customer`, 1 to 32 characters `[A-Za-z0-9._-]`); the relay sets it on the pin of the
   device that enrols with it. A device cannot name or change it: neither the enrolment request nor
-  a report has the field, and a request with it is refused (`400`). Enrolment is not signed by the
-  device, and the same uuid with the same public key enrolling again is accepted and, with a token
-  that names a customer, replaces the device's customer (journal: `status: customer of <uuid> set
-  to <customer> by token <id>`; the pin keeps the token it first enrolled with). So whoever holds
-  a valid token for customer A **and** knows another device's uuid and public key can move that
-  device to customer A. uuids are not secrets; the
-  public key is not sent back by any relay route, it is in `status/keys.jsonl` on the relay and
-  with the device. Every roster member sees every device whatever its customer: the customer
+  a report has the field, and a request with it is refused (`400`). A token holder can enrol new
+  devices under the token's customer. An existing device's customer changes only with that
+  device's own key: the same uuid with the same public key enrolling again with a token that names
+  another customer (or any customer, when it had none) must carry the device's request signature
+  (`Tether-Sig: device-v1`, as for a status post), or the relay answers `401 changing the customer
+  needs the device's signature` and changes nothing. With it, the device gets the token's customer
+  (journal: `status: customer of <uuid> set to <customer> by token <id>`; the pin keeps the token
+  it first enrolled with). Knowing a device's uuid and public key is therefore not enough to move
+  it; a signature that is present but wrong is refused on every enrolment, and an unsigned
+  enrolment that changes no customer is accepted as before. Every roster member sees every device whatever its customer: the customer
   groups devices inside one deployment, and organisations that must not see each other's machines
   need separate deployments ([docs/several-organisations.md](docs/several-organisations.md)).
 - **What a token holder cannot do.** Read any report, summary or history (those routes need a
-  roster member's key). Replace or change an existing pin (other than its customer, above), post as another device, remove a pin,
+  roster member's key). Replace or change an existing pin (its customer included, above), post as another device, remove a pin,
   link a Tether ID, set or change the Tether ID of a pinned device (a report cannot), sign an
   admin or member request, or reach anything outside the status routes. A device key holder can post, and remove
   the pin of, that device only. A device's reports can therefore be forged by whoever controls

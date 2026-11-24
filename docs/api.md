@@ -286,12 +286,18 @@ it is revoked, for any number of devices unless it is issued for a Tether ID.
 `tether_trust::status::make_token(label, exp, tether_id, customer, admin_key)` makes one and answers
 `(token, id)`; `tether_trust::status::verify_token(token, admin_keys, now)` checks one.
 
-### `POST /api/status/enroll` (unsigned)
+### `POST /api/status/enroll` (token; device signature optional)
 
 Body (JSON, ≤ 4096 bytes, unknown fields rejected):
 ```json
 {"uuid":"3f2a9c4e-0b1d-4e57-9d1a-6c2f8a7b5e10","pubkey":"<std base64, 32 bytes>","token":"<token>","tether_id":"123456789"}
 ```
+Optional header `Tether-Sig: device-v1 uuid=… host=… ts=… nonce=… sig=…`, made as for
+`POST /api/status` (`tether_trust::reqauth::sign_device_request`) over `POST`, the path
+`/api/status/enroll` and the exact body, with the key in `pubkey`; its `uuid` must be the body's.
+The relay checks it after the token, with the same clock skew, nonce cache and failure limit as a
+status post, and refuses one that is present but invalid on any enrolment. It is needed only to
+change the customer of an existing pin (below); without it every other enrolment works as before.
 The relay pins the key to the uuid and answers `200` `{"releases":<u64>,"next":<u64>}`, the same
 answer as a status post. With a token issued for a Tether ID, the pin gets that ID (a `tether_id`
 in the request must be the same); with any other token a `tether_id` in the request becomes the
@@ -300,6 +306,7 @@ there or released by the device itself): then the new pin gets `no_claim` and no
 except that a claim is added when the pin has no Tether ID, no claim and no `no_claim`, and a token issued for a
 Tether ID sets it on a pin without one, on its first use only, and a token with `customer` sets
 that customer, also over another one (when that changes the customer of a pin that existed, the
+request must carry the device signature, and the
 journal gets `status: customer of <uuid> set to <customer> by token <id>`); a token without `customer` leaves the pin's customer as it is. A pin
 cannot be replaced by another key. The request has no customer field: a device cannot name its
 customer.
@@ -309,6 +316,9 @@ customer.
 | `400` | `bad uuid`, `bad pubkey`, `bad tether_id`, or the JSON error | malformed |
 | `401` | `enrollment token: <reason>` (`signed by an untrusted key`, `expired`, `not an enrollment token`, `bad label`, `bad id`, `bad tether_id`, `bad customer`) | token refused |
 | `401` | `token revoked` | the token was revoked |
+| `401` | `changing the customer needs the device's signature` | the token names another customer than the existing pin has (or one where it has none) and the request is not signed |
+| `401` | `signature names another uuid`, or a status post's signature refusals (`replayed request`, `request timestamp outside allowed clock skew`, …) | a `Tether-Sig` header is present but invalid |
+| `429` | `too many failed requests` | a signed enrolment, after too many failed device signatures from this IP |
 | `409` | `token is issued for another id` | the request names another `tether_id` than the token |
 | `409` | `token already used` | a token issued for a Tether ID was used by another uuid (or by this one, whose pin was removed since) |
 | `409` | `uuid is enrolled with another key`, `tether_id is pinned to another value`, `tether_id is enrolled with another key` | an admin must remove the pin first (`DELETE /api/admin/status/<uuid>`), or the device does it itself |

@@ -66,8 +66,11 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   Tether on the machine ([SECURITY.md](SECURITY.md#device-status-health-reports)).
 - **Customer reference.** An enrolment token can name a customer (`monitor-publish token
   --customer 4711`, or the 4th argument of `scripts/status-token.sh`; 1 to 32 characters
-  `A-Z a-z 0-9 . _ -`). The relay sets it on the device that enrols with the token, also on one
-  that enrols again (the journal says so); a token without one changes nothing, and a device
+  `A-Z a-z 0-9 . _ -`). The relay sets it on the device that enrols with the token. On a device
+  that is already enrolled it changes only when that enrolment carries the device's own signature
+  (`Tether-Sig: device-v1`, as for a report; the journal says so); unsigned, the relay answers
+  `401 changing the customer needs the device's signature`, so a token holder who knows another
+  device's uuid and key can no longer move it. A token without one changes nothing, and a device
   cannot name it. The team summary, the host detail and `GET /api/admin/status/devices` return
   it; the host list has a Customer column, the search term `customer:` and the field in both
   exports; `monitor-publish devices --customer` lists one customer's devices. A relay from before

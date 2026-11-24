@@ -967,8 +967,9 @@ impl App {
         Err(text(503, "status store unavailable").with_header(hdr("Retry-After", "3600")))
     }
 
-    /// `POST /api/status/enroll` (unsigned; the token is admin-signed).
-    pub(crate) fn status_enroll(&mut self, rq: &Request, body: &Body) -> Result<Resp, Resp> {
+    /// `POST /api/status/enroll`: the token is admin-signed; the device's own signature is needed
+    /// only to change the customer of an existing pin.
+    pub(crate) fn status_enroll(&mut self, rq: &Request, body: &Body, url: &str) -> Result<Resp, Resp> {
         self.status_open()?;
         let body = body.bytes(st::ENROLL_MAX as u64)?;
         if self.keys.is_empty() {
@@ -1004,6 +1005,19 @@ impl App {
         };
         if old.as_ref().is_some_and(|p| p.key != key) {
             return Err(text(409, "uuid is enrolled with another key"));
+        }
+        // The device's own signature is optional, but checked when present (against the key it enrols).
+        let signed = header(rq, reqauth::HEADER).is_some();
+        if signed {
+            let (uuid, sig) = Self::device_header(rq)?;
+            if uuid != req.uuid {
+                return Err(text(401, "signature names another uuid"));
+            }
+            self.device_verify_key(rq, &sig, Some(&key), "POST", url, body)?;
+        }
+        // A token holder may enrol new devices for its customer, but only a device can move itself.
+        if !signed && old.as_ref().is_some_and(|o| tok.customer.is_some() && o.customer != tok.customer) {
+            return Err(text(401, "changing the customer needs the device's signature"));
         }
         // A token issued for a Tether ID: that ID, for one device. Any other token: what the
         // device names is only a claim, until a team member links it.
@@ -1141,12 +1155,18 @@ impl App {
 
     /// Failure limit per IP, key lookup, signature (nonces in memory).
     fn device_verify(&mut self, rq: &Request, sig: &str, uuid: &str, method: &str, url: &str, body: &[u8]) -> Result<(), Resp> {
+        let key = self.status.keys.get(uuid).map(|p| p.key.clone());
+        self.device_verify_key(rq, sig, key.as_deref(), method, url, body)
+    }
+
+    /// As [`Self::device_verify`], against `key` (base64) instead of the pin's.
+    fn device_verify_key(&mut self, rq: &Request, sig: &str, key: Option<&str>, method: &str, url: &str, body: &[u8]) -> Result<(), Resp> {
         let ip = crate::rate_ip(rq);
         let t = now();
         if self.status.fail_hits.get(&ip).is_some_and(|h| t < h.0 + 60 && h.1 >= FAIL_PER_MIN) {
             return Err(text(429, "too many failed requests").with_header(hdr("Retry-After", "60")));
         }
-        let r = match self.status.keys.get(uuid).map(|p| tether_trust::key_from_b64(&p.key)) {
+        let r = match key.map(tether_trust::key_from_b64) {
             None => Err("unknown device".to_owned()),
             Some(Err(e)) => Err(e),
             Some(Ok(key)) => {

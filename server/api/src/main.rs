@@ -1018,7 +1018,7 @@ impl App {
                 Ok(r.with_header(hdr("Cache-Control", "no-cache")))
             }
             ("POST", "/api/heartbeat") => self.heartbeat(rq, body),
-            ("POST", "/api/status/enroll") => self.status_enroll(rq, body),
+            ("POST", "/api/status/enroll") => self.status_enroll(rq, body, &url),
             ("POST", "/api/status") => self.status_post(rq, body, &url),
             ("DELETE", "/api/status") => self.status_delete(rq, body, &url),
             ("POST", "/api/audit/conn") => self.audit_post(rq, body, "conn"),

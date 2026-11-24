@@ -329,8 +329,10 @@ one customer inside this deployment. Only an enrolment token sets it:
 - A device that enrols with a token naming a customer gets that customer. The relay keeps it with
   the pin in `keys.jsonl`.
 - **Changing it:** the same device (same uuid and key) enrolling again with a token that names a
-  customer other than the one it has (or any customer, if it had none) gets the new one, and
-  tether-api writes `status: customer of <uuid> set to
+  customer other than the one it has (or any customer, if it had none) gets the new one only when
+  the enrolment carries the device's own signature (the `Tether-Sig: device-v1` header of a
+  status post). Without it the relay answers `401 changing the customer needs the device's
+  signature` and the device keeps its customer. When it changes, tether-api writes `status: customer of <uuid> set to
   <customer> by token <id>` to its journal. The pin keeps the token it first enrolled with, so
   `monitor-publish devices --token` still lists it under that one; only the journal line names the
   token that changed it.
@@ -350,8 +352,9 @@ A relay from before the customer reference refuses a token that names one
 issue such tokens.
 
 The customer reference is not a security boundary: every team member sees every device, whatever
-its customer, and whoever holds a valid token and knows a device's uuid and public key can move it
-to that token's customer ([SECURITY.md](../SECURITY.md#device-status-health-reports)). For
+its customer, and whoever holds a valid token can enrol new devices under that token's customer.
+An existing device moves to another customer only with its own key
+([SECURITY.md](../SECURITY.md#device-status-health-reports)). For
 organisations whose technicians must not see each other's machines, see
 [several-organisations.md](several-organisations.md).
 
@@ -589,8 +592,8 @@ Enrolment, the signature, the answers and the status codes: [api.md](api.md#devi
   Tether ID enrols one device per relay, with that ID (two relays, two devices: a [link
   conflict](#link-conflicts) the app shows instead of choosing). It cannot read anything or
   remove a device. A token that names a customer sets that customer also on a device that is
-  already enrolled, when that device enrols with it again; doing that needs the device's uuid and
-  public key ([Customer reference](#customer-reference)). A device's Tether ID is shown only when a token was issued for it or a team member
+  already enrolled, when that device enrols with it again and signs that enrolment with its own key
+  ([Customer reference](#customer-reference)). A device's Tether ID is shown only when a token was issued for it or a team member
   confirmed it. Both are the word of a trusted person, not a proof by Tether on that machine:
   [SECURITY.md](../SECURITY.md#device-status-health-reports).
 - **Who linked a host** (the member's roster name and the time) is stored with the pin on the
