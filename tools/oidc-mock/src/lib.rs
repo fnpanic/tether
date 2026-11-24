@@ -1,10 +1,11 @@
 //! Mock OpenID Connect provider shaped like Microsoft Entra ID v2.0, for tests and local
 //! development. NO SECURITY: anyone who reaches it gets tokens for any configured user. It listens
-//! on loopback only (unless told otherwise) and `/control` answers loopback peers only.
+//! on loopback only (unless told otherwise) and `/control` answers loopback callers only.
 //!
-//! Endpoints under the issuer `http://<addr>/<tenant>/v2.0`: `/.well-known/openid-configuration`
-//! (also at the root), `/jwks`, `/authorize`, `/token`, `/logout`; and `/control/<call>` (see the
-//! README). Keys are RSA 2048 generated at start from the seed or OS entropy, never stored.
+//! Endpoints laid out like Entra's, found through discovery only: issuer `http://<addr>/<tenant>/v2.0`,
+//! `<issuer>/.well-known/openid-configuration`, `/<tenant>/discovery/v2.0/keys`,
+//! `/<tenant>/oauth2/v2.0/{authorize,token,logout}`; and `/control/<call>` (see the README). Keys are
+//! RSA 2048 generated at start from the seed or OS entropy, never stored.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
@@ -29,6 +30,10 @@ pub const CODE_LIFETIME: u64 = 60;
 pub const OTHER_TENANT: &str = "90000000-0000-4000-8000-000000000009";
 /// The audience the `wrong_aud` shape names.
 pub const OTHER_AUDIENCE: &str = "90000000-0000-4000-8000-0000000000aa";
+/// The client (`azp`) the `wrong_azp` shape names.
+pub const OTHER_CLIENT: &str = "90000000-0000-4000-8000-0000000000cc";
+/// Microsoft Graph's application id, the `aud` of the token issued when the API scope was not requested.
+pub const GRAPH_AUDIENCE: &str = "00000003-0000-0000-c000-000000000000";
 
 /// Start configuration (also the JSON of `--config`; missing fields take the defaults).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,15 +41,21 @@ pub const OTHER_AUDIENCE: &str = "90000000-0000-4000-8000-0000000000aa";
 pub struct Config {
     /// Entra tenant id (`tid`, and part of the issuer).
     pub tenant: String,
-    /// `aud` of access tokens: the API app registration's client id.
+    /// `aud` of v2 access tokens: the API app registration's client id.
     pub audience: String,
     /// The public client (desktop, Manage) allowed at `/authorize` and `/token`.
     pub client_id: String,
-    /// The API scope; its last segment is the token's `scp`.
+    /// The API scope `<App ID URI>/<name>`; `<name>` is the token's `scp`, `<App ID URI>` the v1 `aud`.
+    /// Only a request whose scope names it gets a token for the API.
     pub scope: String,
+    /// The client's registered redirect URIs. Matched on scheme, host and path (plus query); the port is
+    /// ignored for `localhost` and `127.0.0.1`, as Entra does. Default: design 12.2's `http://localhost`.
+    pub redirect_uris: Vec<String>,
     /// Access and id token lifetime in seconds.
     pub lifetime: u64,
     pub users: Vec<User>,
+    /// Host name or address put in the issuer instead of the listen address (needed for `0.0.0.0`).
+    pub issuer_host: Option<String>,
     /// Seed for keys, codes and token ids; none: OS entropy.
     pub seed: Option<u64>,
     /// Fixed clock (unix seconds); none: the system clock.
@@ -79,6 +90,7 @@ impl Default for Config {
             audience: "30000000-0000-4000-8000-000000000003".into(),
             client_id: "20000000-0000-4000-8000-000000000002".into(),
             scope: "api://tether-test/access".into(),
+            redirect_uris: vec!["http://localhost".into()],
             lifetime: 3600,
             users: vec![
                 user(1, "technician", "Test Technician", &[t]),
@@ -93,6 +105,7 @@ impl Default for Config {
                 user(10, "noroles", "No Roles", &[]),
                 disabled,
             ],
+            issuer_host: None,
             seed: None,
             now: None,
         }
@@ -109,9 +122,17 @@ enum Shape {
     WrongIss,
     WrongTid,
     WrongVer,
+    WrongAzp,
     Overage,
+    Hasgroups,
     UnknownKid,
     BadSignature,
+    /// A complete v1.0 token, as a registration without `requestedAccessTokenVersion: 2` gets.
+    V1,
+    /// A v2.0 token whose `aud` is the App ID URI instead of the client id.
+    AudAppIdUri,
+    /// What a client gets when it does not request the API scope: a Microsoft Graph token.
+    Graph,
 }
 
 struct Key {
@@ -194,18 +215,34 @@ fn parse_form(s: &str) -> HashMap<String, String> {
     s.split('&').filter(|p| !p.is_empty()).map(|p| p.split_once('=').unwrap_or((p, ""))).map(|(k, v)| (dec(k), dec(v))).collect()
 }
 
-/// `http://` on 127.0.0.1, localhost or [::1], any port, no fragment, no user info.
-fn loopback_redirect(u: &str) -> bool {
-    let Some(rest) = u.strip_prefix("http://") else { return false };
-    if !u.bytes().all(|b| b.is_ascii_graphic()) || u.contains('#') {
-        return false;
+/// `(scheme, lowercase host, port, path-and-query with a leading /)` of an `http(s)` URI without
+/// fragment, user info or non-graphic characters.
+fn split_uri(u: &str) -> Option<(&str, String, &str, String)> {
+    let (scheme, rest) = u.split_once("://")?;
+    if !matches!(scheme, "http" | "https") || !u.bytes().all(|b| b.is_ascii_graphic()) || u.contains('#') {
+        return None;
     }
-    let auth = &rest[..rest.find(['/', '?']).unwrap_or(rest.len())];
+    let (auth, path) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
     let (host, port) = match auth.rfind(':') {
         Some(i) if !auth[i..].contains(']') => (&auth[..i], &auth[i + 1..]),
         _ => (auth, ""),
     };
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]") && port.bytes().all(|b| b.is_ascii_digit())
+    if host.is_empty() || auth.contains('@') || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let path = if path.starts_with('/') { path.to_owned() } else { format!("/{path}") };
+    Some((scheme, host.to_ascii_lowercase(), port, path))
+}
+
+/// Entra's redirect URI match: scheme, host and path exact; the port ignored for `localhost` and
+/// `127.0.0.1` only; `http` only for those hosts. `localhost` and `127.0.0.1` are different hosts.
+fn redirect_matches(registered: &[String], u: &str) -> bool {
+    let Some((s, h, p, path)) = split_uri(u) else { return false };
+    let loopback = h == "localhost" || h == "127.0.0.1";
+    if s == "http" && !loopback {
+        return false;
+    }
+    registered.iter().filter_map(|r| split_uri(r)).any(|(rs, rh, rp, rpath)| rs == s && rh == h && rpath == path && (loopback || rp == p))
 }
 
 /// Whether a peer may use `/control` (an IPv4-mapped IPv6 loopback counts).
@@ -217,21 +254,46 @@ pub fn loopback_peer(peer: Option<&SocketAddr>) -> bool {
     }
 }
 
+/// A `Host` header naming loopback (`localhost`, `127.x.x.x`, `[::1]`, optional port): a page whose
+/// name was rebound to 127.0.0.1 still sends its own name and is refused.
+fn loopback_host(host: &str) -> bool {
+    let name = match host.rsplit_once(':') {
+        Some((n, port)) if !port.contains(']') && port.bytes().all(|b| b.is_ascii_digit()) => n,
+        _ => host,
+    };
+    name.eq_ignore_ascii_case("localhost") || name == "[::1]" || name.parse::<std::net::Ipv4Addr>().is_ok_and(|a| a.is_loopback())
+}
+
 fn with_params(base: &str, params: &[(&str, Option<&str>)]) -> String {
     let q: Vec<String> = params.iter().filter_map(|(k, v)| v.map(|v| format!("{k}={}", enc(v)))).collect();
     format!("{base}{}{}", if base.contains('?') { '&' } else { '?' }, q.join("&"))
+}
+
+/// What `handle` needs from a request.
+struct Req<'a> {
+    method: &'a str,
+    path: &'a str,
+    query: &'a str,
+    body: &'a str,
+    peer: Option<&'a SocketAddr>,
+    ctype: &'a str,
+    host: &'a str,
 }
 
 struct State {
     cfg: Config,
     issuer: String,
     keys: Vec<Key>,
+    /// kid of the key that signs; a newer key in `keys` is published but not yet used (staged).
+    signing: String,
     rng: ChaCha20Rng,
     codes: HashMap<String, Code>,
     /// refresh token → (oid, scope); never expire (Entra: up to 90 days).
     refresh: HashMap<String, (String, String)>,
     force: Option<Shape>,
     login: Option<String>,
+    /// Entra's "Assignment required?": a user without any role is refused at sign-in (AADSTS50105).
+    assignment_required: bool,
 }
 
 impl State {
@@ -249,14 +311,31 @@ impl State {
         self.cfg.users.iter().find(|u| u.oid == who || u.upn.eq_ignore_ascii_case(who)).cloned()
     }
 
+    fn app_id_uri(&self) -> String {
+        self.cfg.scope.rsplit_once('/').map_or(self.cfg.scope.as_str(), |x| x.0).to_owned()
+    }
+
     fn sign(&mut self, claims: &Value, shape: Option<Shape>) -> String {
-        let kid = if shape == Some(Shape::UnknownKid) { format!("unknown-{}", self.random(9)) } else { self.keys.last().unwrap().kid.clone() };
-        let input = format!("{}.{}", B64.encode(json!({"typ": "JWT", "alg": "RS256", "kid": kid}).to_string()), B64.encode(claims.to_string()));
-        let mut sig = self.keys.last().unwrap().sk.sign(input.as_bytes()).to_vec();
+        let kid = if shape == Some(Shape::UnknownKid) { format!("unknown-{}", self.random(9)) } else { self.signing.clone() };
+        let mut header = json!({"typ": "JWT", "alg": "RS256", "kid": kid});
+        if matches!(shape, Some(Shape::V1 | Shape::Graph)) {
+            header["x5t"] = json!(kid);
+        }
+        let mut signed = header.clone();
+        if shape == Some(Shape::Graph) {
+            // Graph tokens carry a header nonce and are signed over its hash: they do not verify
+            // against the JWKS as a JWT (Microsoft: "proprietary format").
+            let nonce = self.random(32);
+            signed["nonce"] = json!(B64.encode(Sha256::digest(nonce.as_bytes())));
+            header["nonce"] = json!(nonce);
+        }
+        let body = B64.encode(claims.to_string());
+        let sk = &self.keys.iter().find(|k| k.kid == self.signing).expect("signing key").sk;
+        let mut sig = sk.sign(format!("{}.{body}", B64.encode(signed.to_string())).as_bytes()).to_vec();
         if shape == Some(Shape::BadSignature) {
             sig[10] ^= 0x55;
         }
-        format!("{input}.{}", B64.encode(sig))
+        format!("{}.{body}.{}", B64.encode(header.to_string()), B64.encode(sig))
     }
 
     /// Entra's `sub` is pairwise per application; here a hash of client id and oid.
@@ -273,21 +352,38 @@ impl State {
         };
         let tenant = self.cfg.tenant.clone();
         let mut c = json!({
-            "aud": if shape == Some(Shape::WrongAud) { OTHER_AUDIENCE } else { &self.cfg.audience },
+            "aud": match shape { Some(Shape::WrongAud) => OTHER_AUDIENCE.to_owned(), Some(Shape::V1 | Shape::AudAppIdUri) => self.app_id_uri(), Some(Shape::Graph) => GRAPH_AUDIENCE.to_owned(), _ => self.cfg.audience.clone() },
             "iss": if shape == Some(Shape::WrongIss) { self.issuer.replace(&tenant, OTHER_TENANT) } else { self.issuer.clone() },
             "iat": iat, "nbf": nbf, "exp": exp,
-            "azp": self.cfg.client_id, "azpacr": "0",
-            "name": u.name, "oid": u.oid, "preferred_username": u.upn,
+            "name": u.name, "oid": u.oid,
             "scp": self.cfg.scope.rsplit('/').next().unwrap_or(""),
             "sub": self.sub(u),
             "tid": if shape == Some(Shape::WrongTid) { OTHER_TENANT } else { &tenant },
             "uti": self.random(16),
-            "ver": if shape == Some(Shape::WrongVer) { "1.0" } else { "2.0" },
+            "ver": if matches!(shape, Some(Shape::WrongVer | Shape::V1 | Shape::Graph)) { "1.0" } else { "2.0" },
         });
+        if matches!(shape, Some(Shape::V1 | Shape::Graph)) {
+            // v1 claims: issuer sts.windows.net, appid instead of azp, upn/unique_name instead of preferred_username.
+            c["iss"] = json!(format!("https://sts.windows.net/{tenant}/"));
+            for (k, v) in [("appid", json!(self.cfg.client_id)), ("appidacr", json!("0")), ("acr", json!("1")), ("amr", json!(["pwd"])), ("unique_name", json!(u.upn)), ("upn", json!(u.upn))] {
+                c[k] = v;
+            }
+        } else {
+            c["azp"] = json!(if shape == Some(Shape::WrongAzp) { OTHER_CLIENT } else { &self.cfg.client_id });
+            c["azpacr"] = json!("0");
+            c["preferred_username"] = json!(u.upn);
+        }
+        if shape == Some(Shape::Graph) {
+            c["scp"] = json!("openid profile email");
+            c["idtyp"] = json!("user");
+            return self.sign(&c, shape);
+        }
         if !u.roles.is_empty() {
             c["roles"] = json!(u.roles);
         }
-        if shape == Some(Shape::Overage) || u.groups.len() > 200 {
+        if shape == Some(Shape::Hasgroups) {
+            c["hasgroups"] = json!(true);
+        } else if shape == Some(Shape::Overage) || u.groups.len() > 200 {
             c["_claim_names"] = json!({"groups": "src1"});
             c["_claim_sources"] = json!({"src1": {"endpoint": format!("https://graph.microsoft.com/v1.0/users/{}/getMemberObjects", u.oid)}});
         } else if !u.groups.is_empty() {
@@ -306,8 +402,10 @@ impl State {
     }
 
     fn issue(&mut self, u: &User, scope: &str, nonce: Option<&str>) -> Reply {
-        let mut t = json!({"token_type": "Bearer", "scope": scope, "expires_in": self.cfg.lifetime, "ext_expires_in": self.cfg.lifetime, "access_token": self.access_token(u, self.force)});
         let words: Vec<&str> = scope.split(' ').collect();
+        // Without the API scope Entra issues a token for Microsoft Graph (UserInfo), not for the API.
+        let shape = if words.contains(&self.cfg.scope.as_str()) { self.force } else { Some(Shape::Graph) };
+        let mut t = json!({"token_type": "Bearer", "scope": scope, "expires_in": self.cfg.lifetime, "ext_expires_in": self.cfg.lifetime, "access_token": self.access_token(u, shape)});
         if words.contains(&"openid") {
             t["id_token"] = json!(self.id_token(u, nonce));
         }
@@ -319,43 +417,51 @@ impl State {
         reply_json(200, t)
     }
 
-    fn handle(&mut self, method: &str, path: &str, query: &str, body: &str, peer: Option<&SocketAddr>) -> Reply {
-        let prefix = format!("/{}/v2.0", self.cfg.tenant);
-        let p = path.strip_prefix(prefix.as_str()).filter(|p| !p.is_empty()).unwrap_or(path);
-        if let Some(call) = p.strip_prefix("/control/") {
-            if !loopback_peer(peer) {
-                return reply_json(403, json!({"error": "control answers loopback callers only"}));
+    fn handle(&mut self, r: &Req) -> Reply {
+        if let Some(call) = r.path.strip_prefix("/control/") {
+            if !loopback_peer(r.peer) || !loopback_host(r.host) {
+                return reply_json(403, json!({"error": "control answers loopback callers only (peer and Host header)"}));
             }
-            if method != "POST" {
+            if r.method != "POST" {
                 return reply_json(405, json!({"error": "POST"}));
             }
-            let body = if body.trim().is_empty() { Ok(json!({})) } else { serde_json::from_str(body) };
+            // A page in a browser cannot send application/json across origins without a preflight, which this never answers.
+            if !r.ctype.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json") {
+                return reply_json(415, json!({"error": "Content-Type: application/json"}));
+            }
+            let body = if r.body.trim().is_empty() { Ok(json!({})) } else { serde_json::from_str(r.body) };
             return match body.map_err(|e| e.to_string()).and_then(|b| self.control(call, b)) {
                 Ok(v) => reply_json(200, v),
                 Err(e) => reply_json(400, json!({"error": e})),
             };
         }
-        match (method, p) {
-            ("GET", "/.well-known/openid-configuration") => reply_json(200, self.discovery()),
-            ("GET", "/jwks") => reply_json(200, self.jwks()),
-            ("GET", "/authorize") => self.authorize(query),
-            ("POST", "/token") => self.token(&parse_form(body)),
-            ("GET", "/logout") => match parse_form(query).get("post_logout_redirect_uri") {
-                Some(u) if loopback_redirect(u) => redirect(u.clone()),
+        let under = format!("/{}", self.cfg.tenant);
+        match (r.method, r.path.strip_prefix(under.as_str()).unwrap_or("")) {
+            ("GET", "/v2.0/.well-known/openid-configuration") => reply_json(200, self.discovery()),
+            ("GET", "/discovery/v2.0/keys") => reply_json(200, self.jwks()),
+            ("GET", "/oauth2/v2.0/authorize") => self.authorize(r.query),
+            ("POST", "/oauth2/v2.0/token") => self.token(&parse_form(r.body)),
+            ("GET", "/oauth2/v2.0/logout") => match parse_form(r.query).get("post_logout_redirect_uri") {
+                Some(u) if redirect_matches(&self.cfg.redirect_uris, u) => redirect(u.clone()),
                 _ => page(200, "<p>Signed out.</p>"),
             },
             _ => reply_json(404, json!({"error": "not found"})),
         }
     }
 
+    /// `http://<addr>/<tenant>`, the base of the endpoints (the issuer without `/v2.0`).
+    fn root(&self) -> &str {
+        self.issuer.strip_suffix("/v2.0").unwrap_or(&self.issuer)
+    }
+
     fn discovery(&self) -> Value {
-        let i = &self.issuer;
+        let r = self.root();
         json!({
-            "issuer": i,
-            "authorization_endpoint": format!("{i}/authorize"),
-            "token_endpoint": format!("{i}/token"),
-            "jwks_uri": format!("{i}/jwks"),
-            "end_session_endpoint": format!("{i}/logout"),
+            "issuer": self.issuer,
+            "authorization_endpoint": format!("{r}/oauth2/v2.0/authorize"),
+            "token_endpoint": format!("{r}/oauth2/v2.0/token"),
+            "jwks_uri": format!("{r}/discovery/v2.0/keys"),
+            "end_session_endpoint": format!("{r}/oauth2/v2.0/logout"),
             "response_types_supported": ["code"],
             "response_modes_supported": ["query"],
             "subject_types_supported": ["pairwise"],
@@ -375,12 +481,12 @@ impl State {
     fn authorize(&mut self, raw: &str) -> Reply {
         let q = parse_form(raw);
         let get = |k: &str| q.get(k).map(String::as_str).unwrap_or("");
-        let redirect_uri = get("redirect_uri").to_owned();
-        if !loopback_redirect(&redirect_uri) {
-            return page(400, "<p>redirect_uri must be http:// on 127.0.0.1, localhost or [::1] (any port, no fragment).</p>");
-        }
         if get("client_id") != self.cfg.client_id {
             return page(400, "<p>AADSTS700016: unknown client_id.</p>");
+        }
+        let redirect_uri = get("redirect_uri").to_owned();
+        if !redirect_matches(&self.cfg.redirect_uris, &redirect_uri) {
+            return page(400, &format!("<p>AADSTS50011: The redirect URI '{}' specified in the request does not match the redirect URIs configured for the application: {}.</p>", html_escape(&redirect_uri), html_escape(&self.cfg.redirect_uris.join(", "))));
         }
         if get("response_type") != "code" {
             return page(400, "<p>Only response_type=code.</p>");
@@ -397,6 +503,9 @@ impl State {
         let state = q.get("state").map(String::as_str);
         if u.disabled {
             return redirect(with_params(&redirect_uri, &[("error", Some("access_denied")), ("error_description", Some("AADSTS50057: The user account is disabled.")), ("state", state)]));
+        }
+        if self.assignment_required && u.roles.is_empty() {
+            return redirect(with_params(&redirect_uri, &[("error", Some("access_denied")), ("error_description", Some("AADSTS50105: The signed in user is not assigned to a role for the application.")), ("state", state)]));
         }
         let code = self.random(32);
         let c = Code { client_id: get("client_id").into(), redirect_uri: redirect_uri.clone(), challenge: get("code_challenge").into(), oid: u.oid, nonce: q.get("nonce").cloned(), scope: get("scope").into(), at: self.now() };
@@ -461,13 +570,23 @@ impl State {
                 return Ok(json!({"access_token": self.access_token(&u, s)}));
             }
             "rotate" => {
-                let k = new_key(&mut self.rng);
-                if !b["keep_old"].as_bool().unwrap_or(false) {
-                    self.keys.clear();
+                let staged = self.keys.last().is_some_and(|k| k.kid != self.signing);
+                if b["stage"].as_bool().unwrap_or(false) {
+                    // Published now, signing later: what a real rollover does.
+                    let k = new_key(&mut self.rng);
+                    self.keys.push(k);
+                } else {
+                    if !staged {
+                        let k = new_key(&mut self.rng);
+                        self.keys.push(k);
+                    }
+                    self.signing = self.keys.last().unwrap().kid.clone();
+                    if !b["keep_old"].as_bool().unwrap_or(false) {
+                        let s = self.signing.clone();
+                        self.keys.retain(|k| k.kid == s);
+                    }
                 }
-                let kid = k.kid.clone();
-                self.keys.push(k);
-                return Ok(json!({"kid": kid, "kids": self.keys.iter().map(|k| k.kid.clone()).collect::<Vec<_>>()}));
+                return Ok(json!({"kid": self.keys.last().unwrap().kid, "signing": self.signing, "kids": self.keys.iter().map(|k| k.kid.clone()).collect::<Vec<_>>()}));
             }
             "lifetime" => self.cfg.lifetime = b["seconds"].as_u64().filter(|s| *s > 0).ok_or("seconds: a positive number")?,
             "clock" => {
@@ -486,6 +605,7 @@ impl State {
                     None => None,
                 }
             }
+            "assignment" => self.assignment_required = b["required"].as_bool().ok_or("required: true or false")?,
             "user" => self.upsert_user(&b)?,
             _ => return Err(format!("unknown control call {call}")),
         }
@@ -528,9 +648,12 @@ fn serve(st: &Mutex<State>, mut req: Request) {
     let peer = req.remote_addr().copied();
     let url = req.url().to_owned();
     let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+    let header = |name: &'static str| req.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().to_owned()).unwrap_or_default();
+    let (ctype, host) = (header("Content-Type"), header("Host"));
+    let method = req.method().as_str().to_owned();
     let mut body = String::new();
     let _ = req.as_reader().take(1 << 20).read_to_string(&mut body);
-    let r = st.lock().unwrap_or_else(|e| e.into_inner()).handle(req.method().as_str(), path, query, &body, peer.as_ref());
+    let r = st.lock().unwrap_or_else(|e| e.into_inner()).handle(&Req { method: &method, path, query, body: &body, peer: peer.as_ref(), ctype: &ctype, host: &host });
     let h = |k: &str, v: &str| Header::from_bytes(k, v).unwrap();
     let mut resp = Response::from_string(r.body).with_status_code(r.status).with_header(h("Content-Type", r.ctype)).with_header(h("Cache-Control", "no-store"));
     if let Some(l) = r.location {
@@ -551,18 +674,25 @@ pub struct Mock {
 
 impl Mock {
     /// Binds `listen` (port 0: any free port). A non-loopback address is refused unless
-    /// `allow_network`.
+    /// `allow_network`; an unspecified one (`0.0.0.0`, `::`) also needs `cfg.issuer_host`.
     pub fn start(cfg: Config, listen: &str, allow_network: bool) -> Result<Mock, String> {
         let addrs: Vec<SocketAddr> = listen.to_socket_addrs().map_err(|e| format!("{listen}: {e}"))?.collect();
         if addrs.is_empty() || (!allow_network && !addrs.iter().all(|a| loopback_peer(Some(a)))) {
             return Err(format!("refusing to listen on {listen}: not a loopback address (this mock has no security; --allow-network overrides)"));
         }
+        match &cfg.issuer_host {
+            None if addrs.iter().any(|a| a.ip().is_unspecified()) => return Err(format!("{listen}: an unspecified address makes no usable issuer; name the host with --issuer-host")),
+            Some(h) if h.is_empty() || !h.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.[]:".contains(&b)) => return Err(format!("issuer host {h:?}: a host name or address")),
+            _ => {}
+        }
         let server = Arc::new(Server::http(&addrs[..]).map_err(|e| format!("{listen}: {e}"))?);
         let addr = server.server_addr().to_ip().ok_or("not an IP listener")?;
-        let issuer = format!("http://{addr}/{}/v2.0", cfg.tenant);
+        let host = cfg.issuer_host.as_ref().map_or(addr.to_string(), |h| format!("{h}:{}", addr.port()));
+        let issuer = format!("http://{host}/{}/v2.0", cfg.tenant);
         let mut rng = ChaCha20Rng::seed_from_u64(cfg.seed.unwrap_or_else(|| OsRng.next_u64()));
-        let keys = vec![new_key(&mut rng)];
-        let state = Arc::new(Mutex::new(State { cfg: cfg.clone(), issuer: issuer.clone(), keys, rng, codes: HashMap::new(), refresh: HashMap::new(), force: None, login: None }));
+        let key = new_key(&mut rng);
+        let signing = key.kid.clone();
+        let state = Arc::new(Mutex::new(State { cfg: cfg.clone(), issuer: issuer.clone(), keys: vec![key], signing, rng, codes: HashMap::new(), refresh: HashMap::new(), force: None, login: None, assignment_required: false }));
         let (srv, st) = (server.clone(), state.clone());
         let thread = std::thread::spawn(move || {
             for req in srv.incoming_requests() {
@@ -584,6 +714,11 @@ impl Mock {
     /// `http://<addr>/<tenant>/v2.0`, the `iss` of good tokens.
     pub fn issuer(&self) -> String {
         self.issuer.clone()
+    }
+
+    /// The discovery document (the endpoint URLs are only found here).
+    pub fn discovery(&self) -> Value {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).discovery()
     }
 
     /// The start configuration (later `/control` changes are not reflected).
@@ -629,12 +764,32 @@ mod tests {
     }
 
     #[test]
-    fn redirect_hosts() {
-        for ok in ["http://127.0.0.1:1/x", "http://localhost", "http://[::1]", "http://[::1]:80/?a=b"] {
-            assert!(loopback_redirect(ok), "{ok}");
+    fn redirect_uri_matching() {
+        let reg = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let localhost = reg(&["http://localhost"]);
+        // The port is ignored for localhost; no path and "/" are the same; host and path are not ignored.
+        for ok in ["http://localhost", "http://localhost/", "http://localhost:53111/", "http://LOCALHOST:1"] {
+            assert!(redirect_matches(&localhost, ok), "{ok}");
         }
-        for bad in ["http://127.0.0.1:x/", "http://[::2]:1/", "http://localhost.evil/", "http://127.0.0.1 /", "http://127.0.0.1/\r\nX: y", "http://user@127.0.0.1/"] {
-            assert!(!loopback_redirect(bad), "{bad}");
+        for bad in ["http://127.0.0.1:53111/", "http://[::1]:1/", "http://localhost:1/callback", "https://localhost/", "http://localhost.evil/", "http://localhost:x/", "http://user@localhost/", "http://localhost/#f", "http://localhost/\r\nX: y"] {
+            assert!(!redirect_matches(&localhost, bad), "{bad}");
+        }
+        let ip = reg(&["http://127.0.0.1/cb", "https://app.example/cb", "http://example.com/cb"]);
+        assert!(redirect_matches(&ip, "http://127.0.0.1:4000/cb"));
+        assert!(!redirect_matches(&ip, "http://localhost:4000/cb"));
+        assert!(!redirect_matches(&ip, "http://127.0.0.1:4000/CB"), "paths are case-sensitive");
+        assert!(redirect_matches(&ip, "https://app.example/cb"));
+        assert!(!redirect_matches(&ip, "https://app.example:8443/cb"), "the port counts for other hosts");
+        assert!(!redirect_matches(&ip, "http://example.com/cb"), "http only for loopback, even when registered");
+    }
+
+    #[test]
+    fn control_host_header() {
+        for ok in ["127.0.0.1:5", "127.0.0.1", "localhost:80", "LocalHost", "[::1]:9", "127.3.4.5:1"] {
+            assert!(loopback_host(ok), "{ok}");
+        }
+        for bad in ["", "evil.example:5", "evil.example", "127.0.0.1.evil:5", "10.0.0.1:5", "[::2]:1", "localhost.evil"] {
+            assert!(!loopback_host(bad), "{bad}");
         }
     }
 }
