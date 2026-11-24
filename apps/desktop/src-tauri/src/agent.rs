@@ -148,6 +148,10 @@ pub(crate) struct Pending {
 
 /// A pending install older than this (the install's own limit and a margin) did not finish.
 const PENDING_MAX: u64 = INSTALL_TIMEOUT.as_secs() + 60;
+/// After this (past [`PENDING_MAX`]) a mark no longer adopts an agent that appeared.
+const ADOPT_GRACE: u64 = 86_400;
+/// The answer while an install Tether started before it stopped may still run.
+const MAY_STILL_RUN: &str = "an install Tether started before it stopped may still be running; ask again in a few minutes";
 
 // ----------------------------------------------------------------------------- the machine
 
@@ -194,6 +198,11 @@ pub(crate) trait Sys {
     fn run(&self, exe: &Path, args: &[&str], stdin: Option<&str>, timeout: Duration) -> Result<Ran, String>;
     /// The installed agent's program.
     fn installed_exe(&self) -> PathBuf;
+    /// Unix seconds now (the pending mark is stamped when the install child starts, after the
+    /// download that may take minutes).
+    fn clock(&self) -> u64 {
+        now()
+    }
 }
 
 /// What the policy and the build say (no Debug: it holds the grant).
@@ -415,7 +424,10 @@ impl Manager<'_> {
     /// agent is Tether's, installed by whoever asked); none after [`PENDING_MAX`] means it did not.
     fn adopt(st: &mut State, svc: bool, now: u64) {
         let Some(p) = st.pending_install.take() else { return };
-        if svc {
+        // A mark from long ago claims nothing: the agent there may be one the practice installed since.
+        if now >= p.at + PENDING_MAX + ADOPT_GRACE {
+            log::info!("health agent: an old install mark was dropped");
+        } else if svc {
             Self::succeeded(st, "installed", &p.by, "installed while Tether stopped".into(), now);
             st.ours = true;
             st.hold.clear();
@@ -429,6 +441,12 @@ impl Manager<'_> {
     /// One policy check (only modes other than `manual` get here).
     pub fn tick(&self, now: u64) -> Result<(), String> {
         if !active(&self.p.mode) {
+            // Only a stale install mark goes (it would otherwise wait for the mode to come back).
+            if self.sys.service_process() && self.sys.check_dir(&self.p.dir).is_ok() {
+                if let Some(old) = self.load().filter(|s| s.pending_install.as_ref().is_some_and(|p| now >= p.at + PENDING_MAX)) {
+                    self.save(&Some(old.clone()), &State { pending_install: None, ..old })?;
+                }
+            }
             return Ok(());
         }
         if !self.sys.service_process() {
@@ -624,7 +642,8 @@ impl Manager<'_> {
         child("installing the agent");
         let r = self.staged(&c, |exe| {
             let line = self.from_tether_line(exe, &token)?;
-            st.pending_install = Some(Pending { at: now, by: by.into() });
+            // When the child starts: PENDING_MAX covers only its own limit, not the download before it.
+            st.pending_install = Some(Pending { at: self.sys.clock().max(now), by: by.into() });
             self.save(&None, st)?;
             self.sys.run(exe, &["install", "--from-tether", "-"], Some(&line), INSTALL_TIMEOUT)
         });
@@ -739,10 +758,13 @@ impl Manager<'_> {
             let mut st = self.load().unwrap_or_default();
             Self::adopt(&mut st, svc, now);
             self.notice_removal(&mut st, svc, now);
+            if action == Action::Install && !svc && st.pending_install.is_some() && self.p.mode != "remove" {
+                // That install may well succeed: not a failure, and the saved state stays as it is.
+                return Ok(None);
+            }
             let done = match action {
                 Action::Install if self.p.mode == "remove" => Err("not allowed: this computer's policy removes the agent".to_owned()),
                 Action::Install if svc => Err("the agent is already installed".to_owned()),
-                Action::Install if st.pending_install.is_some() => Err("an install Tether started before it stopped may still be running; ask again in a few minutes".to_owned()),
                 Action::Install => self.install(&mut st, "session", now, false).map(|()| st.detail.clone()),
                 Action::Remove if !svc => Err("the agent is not installed".to_owned()),
                 Action::Remove => self.remove().map(|l| {
@@ -763,10 +785,11 @@ impl Manager<'_> {
                 }
             }
             self.save(&self.load(), &st)?;
-            done
+            done.map(Some)
         })();
         match r {
-            Ok(line) => AgentAnswer { detail: line, ..self.status_of(now) },
+            Ok(None) => AgentAnswer::only("busy", MAY_STILL_RUN),
+            Ok(Some(line)) => AgentAnswer { detail: line, ..self.status_of(now) },
             Err(e) => {
                 log::warn!("health agent request: {e}");
                 AgentAnswer { detail: e, ..self.status_of(now) }
@@ -800,7 +823,8 @@ fn inputs(eff: &tether_trust::policy::Effective) -> Inputs {
 /// and this process is Tether's LocalSystem service.
 #[cfg(windows)]
 pub fn tick(eff: &tether_trust::policy::Effective, now: u64) {
-    if !active(eff.get("health.agent")) {
+    // Inactive: only to drop a stale install mark, so only when a state file is there at all.
+    if !active(eff.get("health.agent")) && !win::program_data().join(crate::APP_NAME).join(STATE_FILE).is_file() {
         return;
     }
     if !win::Real.service_process() {
@@ -1298,6 +1322,9 @@ mod tests {
         identity: RefCell<Option<String>>,
         own_id: RefCell<Option<String>>,
         within: RefCell<Vec<Duration>>,
+        /// The clock (0: the time the test passes in); the download moves it on by `download_takes`.
+        clock: Cell<u64>,
+        download_takes: Cell<u64>,
     }
 
     impl Fake {
@@ -1346,7 +1373,13 @@ mod tests {
         }
         fn download(&self, _c: &Candidate, _key: &str, within: Duration) -> Result<Vec<u8>, String> {
             self.within.borrow_mut().push(within);
+            if self.download_takes.get() > 0 {
+                self.clock.set(NOW + self.download_takes.get());
+            }
             Ok(self.artifact.borrow().clone())
+        }
+        fn clock(&self) -> u64 {
+            self.clock.get()
         }
         fn open_locked(&self, path: &Path) -> Result<(Vec<u8>, Box<dyn std::any::Any>), String> {
             if self.tamper.get() {
@@ -1998,6 +2031,62 @@ mod tests {
         assert!(st.detail.contains("interrupted"), "{}", st.detail);
         assert_eq!(w.runs().len(), n, "backs off before the next try");
         assert_eq!(w.m().status(NOW + PENDING_MAX).state, "failed");
+    }
+
+    #[test]
+    fn the_pending_mark_is_stamped_when_the_install_child_starts() {
+        let w = world("pending-late", "install");
+        w.fake.download_takes.set(600);
+        w.fake.codes.borrow_mut().insert("install", (-98, String::new()));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| w.tick(NOW))).is_err());
+        assert_eq!(w.state().unwrap().pending_install.map(|p| p.at), Some(NOW + 600));
+        w.fake.codes.borrow_mut().clear();
+        // 4 minutes after the child started, less than PENDING_MAX after it: still running, not interrupted
+        let n = w.runs().len();
+        w.tick(NOW + 600 + 200).unwrap();
+        let st = w.state().unwrap();
+        assert!(st.pending_install.is_some() && st.state != "failed", "{st:?}");
+        assert_eq!(w.runs().len(), n, "no second installer beside it");
+    }
+
+    #[test]
+    fn an_old_mark_claims_nothing_and_an_inactive_mode_drops_a_stale_one() {
+        let w = world("pending-old", "install");
+        std::fs::create_dir_all(&w.p.dir).unwrap();
+        std::fs::write(w.p.dir.join(STATE_FILE), br#"{"pending_install":{"at":1900000000,"by":"session"}}"#).unwrap();
+        // the practice installed an agent by hand weeks later
+        w.fake.svc.set(true);
+        w.tick(NOW + PENDING_MAX + ADOPT_GRACE + 3600).unwrap();
+        let st = w.state().unwrap_or_default();
+        assert!(!st.ours && st.pending_install.is_none(), "{st:?}");
+        assert_eq!(w.m().status(NOW + PENDING_MAX + ADOPT_GRACE + 3600).state, "installed-by-hand");
+        // a young mark still adopts
+        let w = world("pending-young", "install");
+        std::fs::create_dir_all(&w.p.dir).unwrap();
+        std::fs::write(w.p.dir.join(STATE_FILE), br#"{"pending_install":{"at":1900000000,"by":"session"}}"#).unwrap();
+        w.fake.svc.set(true);
+        w.tick(NOW + 600).unwrap();
+        assert!(w.state().unwrap().ours);
+        // manual: a stale mark is dropped, nothing else happens
+        let w = world("pending-manual", "manual");
+        std::fs::create_dir_all(&w.p.dir).unwrap();
+        std::fs::write(w.p.dir.join(STATE_FILE), br#"{"pending_install":{"at":1900000000,"by":"session"}}"#).unwrap();
+        w.tick(NOW + PENDING_MAX).unwrap();
+        assert_eq!(w.state().unwrap().pending_install, None);
+        assert!(w.runs().is_empty() && w.fake.fetches.get() == 0);
+    }
+
+    #[test]
+    fn an_install_that_may_still_run_answers_busy_and_records_no_failure() {
+        let w = world("pending-busy", "install");
+        w.fake.codes.borrow_mut().insert("install", (-98, String::new()));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| w.m().request(Action::Install, NOW))).is_err());
+        w.fake.codes.borrow_mut().clear();
+        let before = w.state().unwrap();
+        let a = w.m().request(Action::Install, NOW + 20);
+        assert_eq!((a.state.as_str(), a.detail.as_str()), ("busy", MAY_STILL_RUN));
+        assert_eq!(w.state().unwrap(), before, "saved state untouched");
+        assert_ne!(w.m().status(NOW + 30).state, "failed");
     }
 
     #[cfg(windows)]
