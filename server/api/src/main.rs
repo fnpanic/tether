@@ -573,7 +573,8 @@ fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<
         }
         // Status: off and size answered before the body is read.
         ("POST" | "DELETE", "/api/status") | ("POST", "/api/status/enroll") | ("PUT" | "DELETE", "/api/status/sbom") if status::conf().off => return Err(status::off()),
-        ("PUT" | "DELETE", "/api/status/sbom") if !status::conf().sbom => return Err(not_found()),
+        // A device's own DELETE is honoured also with STATUS_SBOM off: a list stored before must not come back.
+        ("PUT", "/api/status/sbom") if !status::conf().sbom => return Err(not_found()),
         // The software list: size from Content-Length (required), the cheap checks and the global
         // budget, then the body; only the declared bytes are read, and all of them.
         ("PUT", "/api/status/sbom") => {

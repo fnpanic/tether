@@ -1553,7 +1553,8 @@ impl App {
         self.admin_status_delete(&uuid, "the device", true)
     }
 
-    /// The software-list routes: 503 as every status route, then 404 without `STATUS_SBOM=on`.
+    /// The software-list routes but a device's DELETE: 503 as every status route, then 404 without
+    /// `STATUS_SBOM=on`.
     fn sbom_open(&mut self) -> Result<(), Resp> {
         self.status_open()?;
         if conf().sbom {
@@ -1617,9 +1618,10 @@ impl App {
         self.defer(move |app| sbom_store(app, uuid, sig, key, ip, url, raw, t, slot))
     }
 
-    /// `DELETE /api/status/sbom`: 204 also when there is none.
+    /// `DELETE /api/status/sbom`: 204 also when there is none, and also with `STATUS_SBOM` off (a
+    /// list stored while it was on must not come back when it is switched on again).
     pub(crate) fn status_sbom_delete(&mut self, rq: &Request, body: &Body, url: &str) -> Result<Resp, Resp> {
-        self.sbom_open()?;
+        self.status_open()?;
         let raw = body.bytes(crate::LIMIT_SMALL)?;
         let (uuid, sig) = Self::device_header(rq)?;
         self.device_verify(rq, &sig, &uuid, "DELETE", url, raw)?;

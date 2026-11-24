@@ -1840,7 +1840,7 @@ fn sbom_is_off_by_default_and_status_off_wins() {
     prep_sbom(&dir, "dev-0001", b"{}", now() - 7200);
     let s = start_in(dir, &admin);
     let m = member(&s, &admin);
-    for r in [sbom_put(&s, &a, "dev-0001", b"{}"), signed(&s, &a, "dev-0001", "DELETE", PUT_SBOM, b""), sbom_get(&s, &m, "dev-0001", None)] {
+    for r in [sbom_put(&s, &a, "dev-0001", b"{}"), sbom_get(&s, &m, "dev-0001", None)] {
         assert_eq!(r.status, 404);
     }
     assert_eq!(post(&s, &a, "dev-0001", &heartbeat("dev-0001", 6)).json(), json!({"releases": 0, "next": 300}));
@@ -1852,6 +1852,34 @@ fn sbom_is_off_by_default_and_status_off_wins() {
     for r in [sbom_put(&s, &a, "dev-0001", b"{}"), signed(&s, &a, "dev-0001", "DELETE", PUT_SBOM, b""), sbom_get(&s, &m, "dev-0001", None)] {
         assert_eq!((r.status, r.text()), (503, "status reporting is off".into()));
     }
+}
+
+/// A device's own DELETE is honoured while the feature is off, so a list stored while it was on
+/// does not come back when it is switched on again; PUT and GET stay 404.
+#[test]
+fn sbom_delete_is_honoured_while_the_feature_is_off() {
+    let (s, admin, k) = sbom_server(2, &[], |_| {});
+    let doc = sbom_doc(500, 'z');
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", &doc).status, 204);
+    assert_eq!(sbom_put(&s, &k[1], "dev-0002", &doc).status, 204);
+    let s = restart_env(s, &admin, &[], false);
+    let m = member(&s, &admin);
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", &doc).status, 404);
+    assert_eq!(sbom_get(&s, &m, "dev-0001", None).status, 404);
+    let r = signed(&s, &k[0], "dev-0001", "DELETE", PUT_SBOM, b"");
+    assert_eq!((r.status, r.text()), (204, String::new()));
+    assert!(sbom_file(&s, "dev-0001").is_none());
+    assert_eq!(signed(&s, &k[0], "dev-0001", "DELETE", PUT_SBOM, b"").status, 204, "also when none is left");
+    assert_eq!(signed(&s, &generate_key(), "dev-0002", "DELETE", PUT_SBOM, b"").status, 401);
+    assert_eq!(sbom_file(&s, "dev-0002").unwrap(), doc, "another device's list is kept");
+    let s = restart_env(s, &admin, &[("STATUS_SBOM", "on")], false);
+    let m = member(&s, &admin);
+    let hosts = team_get(&s, &m, "/api/team/status").json()["hosts"].clone();
+    let host = |u: &str| hosts.as_array().unwrap().iter().find(|h| h["uuid"] == u).unwrap().clone();
+    assert!(host("dev-0001").get("sbom").is_none(), "{hosts}");
+    assert_eq!(host("dev-0002")["sbom"]["sha"], sha16(&doc));
+    assert_eq!(sbom_get(&s, &m, "dev-0001", None).status, 404);
+    assert_eq!(metric(&s, "tether_api_status_sbom_files"), Some(1.));
 }
 
 #[test]
