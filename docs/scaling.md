@@ -133,7 +133,7 @@ was not otherwise idle; made before the review fixes to the order of the upload 
 repeated after them), once without and once with `STATUS_SBOM=on`. With it, one thread uploads
 a 60 KiB document for each device in turn (`PUT /api/status/sbom`, device-signed) at
 `STATUS_SBOM_RPS`, the default 2 per second, for the whole run: 480 uploads, 28 MiB. Everything
-else is as in the run above (2 351 to 2 393 status posts, 480 enrolments, the summary every 30 s).
+else is as in the run above, but with 5 000 devices (2 351 and 2 393 status posts, 480 enrolments).
 p50 / p99 / p99.9 / max in ms, baseline then during the run:
 
 | | without uploads | with uploads |
@@ -154,11 +154,13 @@ In both runs the generator's own criteria show FAIL on a short run: the RSS at t
 than 10 % above the reference taken after a 30 s warm-up (it keeps growing for the first minutes
 of a run; the 20 000-device run above is 10 minutes with a 60 s warm-up) and, without uploads,
 the p99.9 of the probes is above 1.5 x the baseline's (a baseline of 600 samples has a noisy
-p99.9: with uploads the baseline itself had 29.8 ms). So the two runs show that the uploads at the
-default budget cost no more than the noise of this machine and about 0.4 MiB more memory at the
-end; they do not show a pass of the 20 000-device criteria, and the run at 20 000 devices with
-uploads was **not done**. The differences between the two columns are within the spread of one
-run to the next here: do not read them as an effect of the uploads, in either direction.
+p99.9: with uploads the baseline itself had 29.8 ms). The two runs do not separate the uploads' cost from this machine's noise: the uploads were
+accepted (478 of 480) and no `5xx` occurred, and that is all they show. They do not show a pass of the
+20 000-device criteria, the run at 20 000 devices with uploads was **not done**, and both runs
+predate the two rounds of review fixes to the upload checks (the order of the checks, the budget,
+the device's hour, the record scan), which were not measured again. The differences between the two
+columns are within the spread of one run to the next here: do not read them as an effect of the
+uploads, in either direction.
 
 Disk writes of the status store at 20 000 devices: `seen.json` (about 22 MB, *estimated* from the
 entry sizes) is rewritten at most every 5 minutes, about 6 GB a day; a hard kill loses at most 5

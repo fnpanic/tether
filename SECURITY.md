@@ -280,22 +280,33 @@ It is off by default; while off, its three routes answer `404`. `STATUS=off` win
 - **What a hostile enrolled device can not do.** Store more than that one document, or touch
   another device's list: the key is pinned per uuid, and a signature for another uuid, an unsigned
   request or a replayed one is refused with `401`.
-- **Limits, in the order of work.** The switch, `Content-Length` required (`411`) and at most
-  `STATUS_SBOM_MAX_KB` (`413`), both before the body is read; the header, the per-IP limit of 60
-  failed requests a minute and the key lookup (a uuid that is not enrolled here is `401` and
-  counts as a failure for the IP); one accepted upload per uuid per hour; a global budget
-  `STATUS_SBOM_RPS` (default 2 per second, all devices); only then the body, read for exactly the
-  declared bytes; then the signature and the JSON-object check. The hash, the signature check and
-  the write happen outside the state lock. No file is written for a refused request.
-- **Who can use up the global budget.** A device with a valid key, with its one upload per hour.
+- **Limits, in the order of work.** `STATUS=off`, the switch, `Content-Length` required (`411`) and
+  at most `STATUS_SBOM_MAX_KB` (`413`), a locked store, all before the body is read; the header,
+  the per-IP limit of 60 failed requests a minute and the key lookup (a uuid that is not enrolled
+  here is `401` and counts as a failure for the IP); one accepted upload per uuid per hour; a
+  global budget `STATUS_SBOM_RPS` (default 2 per second, all devices); only then the body, read for
+  exactly the declared bytes; then the signature and the JSON-object check. The hash, the
+  signature check and the write happen outside the state lock. No file is written for a refused
+  request.
+- **Who can use up the global budget.** A request takes a slot only after it passed the header,
+  the IP's limit, the key lookup and the device's hour, and a head without a body no longer holds
+  one: a body that does not arrive or a signature that is refused gives the slot back and counts
+  as a failure for the sender's IP. A device with a valid key can use its one upload per hour,
+  and one that is refused after a valid signature (`400 not a JSON object`, `507 sbom store full`)
+  uses that hour too, so one device key cannot keep the budget used up with refused uploads.
   Someone who only knows the uuid of an enrolled device (uuids are not secrets) can take a slot
-  while their body is read, but the signature is then refused, the slot goes back and the attempt
-  counts against their IP's limit of 60 failures a minute, after which that IP gets
-  `429 too many failed requests` before it reaches the budget; unknown uuids never reach it. The
-  limit is per IP, so many source addresses together could still delay real uploads with
-  `429 busy` (the device retries with backoff); nothing else on the relay is affected. A holder
-  of an enrolment token can enrol many devices and use the budget with real uploads: revoke the
-  token and remove its devices.
+  for as long as their request takes to be refused, 60 times a minute from one IP, after which that
+  IP gets `429 too many failed requests` before it reaches the budget. What remains: many source
+  addresses, each sending 60 heads a minute for enrolled uuids, together could delay real
+  uploads with `429 busy` (the device retries with backoff); and a holder of an enrolment token
+  can enrol many devices and use the budget with real uploads of their own (revoke the token and
+  remove its devices). Nothing else on the relay is affected.
+- **The per-IP counter is shared.** The 60 failed requests a minute per address (IPv6: per /64)
+  are the same counter that every device-signed status route uses, so an address that trips it
+  (failed signatures, unknown uuids, bodies that do not arrive) is refused for every status post,
+  removal and upload for the rest of the minute. A site behind one address needs sixty failed
+  requests in a minute to be affected; a source that can forge such requests can silence the
+  health reports of a site behind a shared address for as long as it keeps sending them.
 - **Disk.** `STATUS_SBOM_MAX_TOTAL_MB` (2 048 MiB) limits the sum of all stored lists. A holder of
   an enrolment token can enrol devices (up to `STATUS_MAX_DEVICES`) and fill that sum with junk
   lists of 512 KiB; uploads that would exceed it then get `507`, while devices that already have a

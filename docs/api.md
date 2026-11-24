@@ -420,36 +420,44 @@ to a post carries `"sbom":true`. A device may upload before its first report.
 Signed as a post (`Tether-Sig: device-v1`, over the host name, `PUT`, `/api/status/sbom`, the time,
 a nonce and the SHA-256 of the body). Order of work, cheapest first:
 
-1. off or locked (`503`), then the switch (`404`);
+1. `STATUS=off` (`503`), then the switch (`404`);
 2. `Content-Length` must be there (`411`) and at most `STATUS_SBOM_MAX_KB` KiB (`413`), both before
    the body is read;
-3. the header (`401`), the per-IP failure limit (`429 too many failed requests`) and the key lookup
+3. a locked status store (`503`);
+4. the header (`401`), the per-IP failure limit (`429 too many failed requests`) and the key lookup
    (`401 unknown device`, counted as a failure for the IP);
-4. one accepted upload per uuid per hour (`429 upload too frequent`), then the global budget
+5. one accepted upload per uuid per hour (`429 upload too frequent`), then the global budget
    (`STATUS_SBOM_RPS`, default 2 per second, all devices; `429 busy`);
-5. the body, read for exactly the declared bytes (`400 request body incomplete`);
-6. the signature (`401`; a refused request gives its budget slot back and counts as a failure for
-   the IP), then the check that the body is a JSON object (`400`);
-7. the hour again (a second upload from the same device in the meantime), the total cap (`507`), the
-   write; `204`.
+6. the body, read for exactly the declared bytes (`400 request body incomplete` or
+   `400 could not read body`; either counts as a failure for the IP and gives the budget slot back);
+7. the signature (`401`; a refused request gives its budget slot back and counts as a failure for
+   the IP), then the check that the body is a JSON object (`400`; it uses the device's hour);
+8. the hour again (a second upload from the same device in the meantime), the total cap (`507`; it
+   uses the device's hour), the write; `204`.
+
+For `DELETE` the order is `STATUS=off` (`503`), the switch (`404`), the locked store (`503`) and
+then the signature checks of a post. For `GET /api/team/status/<uuid>/sbom` the `503` of an off
+or locked store comes before the `404`, as for every team route.
 
 The hash, the signature and the write happen outside the state lock.
 
 | Status | Body | Meaning |
 |---|---|---|
 | `204` | | stored (replaces the device's earlier list) |
-| `400` | `not a JSON object` | the body is not one JSON object (an array, a string, text, trailing data, empty) |
-| `400` | `request body incomplete` | fewer bytes arrived than `Content-Length` declared. A body declared up to 1 KiB that is cut short may get no answer at all |
-| `401` | those of a post: `missing signature`, `unsupported signature version`, `malformed signature header`, `unknown device`, `signature does not match`, `request timestamp outside allowed clock skew`, `request signed for another relay`, `replayed request` | not enrolled here (before the body is read), or the signature or clock is wrong (after it) |
+| `400` | `not a JSON object` | the body is not one JSON object (an array, a string, text, trailing data, empty). The signature was valid, so this uses the device's hour: its next `PUT` within the hour is `429 upload too frequent`, a replay of the same request too |
+| `400` | `request body incomplete`, `could not read body` | fewer bytes arrived than `Content-Length` declared, or the read failed. Counts as a failure for the sender's IP (60 a minute lead to `429 too many failed requests`) and gives the budget slot back. A body declared up to 1 KiB that is cut short may get no answer at all |
+| `401` | `missing signature`, `unsupported signature version`, `malformed signature header` | the header; answered before the body is read, not counted as a failure for the IP |
+| `401` | `unknown device` | not enrolled here; answered before the body is read, counted as a failure for the IP |
+| `401` | `signature does not match`, `request timestamp outside allowed clock skew`, `request signed for another relay`, `replayed request`, `this relay does not know its own host name …` | answered after the body was read; counted as a failure for the IP, and the budget slot goes back |
 | `404` | `not found` | `STATUS_SBOM` is not `on` |
 | `411` | `length required` | no `Content-Length` (a chunked body is refused) |
 | `413` | `body too large` | more than `STATUS_SBOM_MAX_KB` KiB |
-| `429` | `upload too frequent`, `Retry-After: <s>` | an accepted upload from this uuid less than an hour ago (the seconds left; 60 while an upload from this uuid is being written, also when a second upload of the same device raced this one). A `DELETE` does not reset it |
+| `429` | `upload too frequent`, `Retry-After: <s>` | an accepted upload from this uuid, or one refused with `400 not a JSON object` or `507 sbom store full` after a valid signature, less than an hour ago (the seconds left; 60 while an upload from this uuid is being written, also when a second upload of the same device raced this one). A `DELETE` does not reset it (until the relay restarts, see below) |
 | `429` | `busy`, `Retry-After: 60` | more than `STATUS_SBOM_RPS` uploads in this second, all devices together. A request refused for its signature gives its slot back |
-| `429` | `too many failed requests`, `Retry-After: 60` | as for a post: more than 60 failed device signatures or unknown uuids per minute from this IP |
+| `429` | `too many failed requests`, `Retry-After: 60` | as for a post: 60 failed requests in a minute from this IP (IPv6: this /64): failed device signatures, unknown uuids and software lists whose body did not arrive. It is the same counter for every device-signed status route, so while it is tripped every status post, removal and upload from that address is refused until the minute is over |
 | `503` | `status reporting is off`, `status store unavailable`, `busy` | back off |
-| `507` | `sbom store full (STATUS_SBOM_MAX_TOTAL_MB)` | the stored lists would exceed `STATUS_SBOM_MAX_TOTAL_MB`; a device that already has a list can still replace it with one that is not larger |
-| `507` | `insufficient storage` | the data disk is nearly full |
+| `507` | `sbom store full (STATUS_SBOM_MAX_TOTAL_MB)` | the stored lists would exceed `STATUS_SBOM_MAX_TOTAL_MB`; a device that already has a list can still replace it with one that is not larger. Uses the device's hour |
+| `507` | `insufficient storage` | the data disk is nearly full (the relay's fault: uses no hour) |
 
 A `429` or `503` is retried with the agent's backoff, `413` not until the list changes.
 
@@ -457,7 +465,8 @@ A `429` or `503` is retried with the agent's backoff, `413` not until the list c
 
 Deletes the device's list. `204`, also when it has none. The `401`, `429` (`too many failed
 requests`) and `503` answers are those of a post; `404` while `STATUS_SBOM` is not `on`. The hour of
-`PUT` stays in force after it.
+`PUT` stays in force after it. For a device that has no document the hour is kept in memory only,
+so a restart of tether-api ends it.
 
 ### `GET /api/team/status/<uuid>/sbom` (member-signed)
 

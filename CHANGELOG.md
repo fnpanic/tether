@@ -92,10 +92,13 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   `Content-Length` (required, `411`; at most `STATUS_SBOM_MAX_KB`, default 512, `413`), the key
   lookup (`401` for a uuid not enrolled here), one accepted upload per device per hour, a global
   budget (`STATUS_SBOM_RPS`, default 2 per second, `429` with `Retry-After`), then the body, the
-  signature (a refused one gives its slot back and counts against the IP) and the JSON check; the
-  total is capped by `STATUS_SBOM_MAX_TOTAL_MB`
+  signature (a refused one, or a body that does not arrive, gives its slot back and counts against
+  the IP; 60 such failures a minute make `429` for that address on every device-signed status
+  route) and the JSON check (`400` and `507 store full` after a valid signature use the device's
+  hour); the total is capped by `STATUS_SBOM_MAX_TOTAL_MB`
   (default 2048, `507`). The file goes with the pin (removal, 180 days without a report). Records and files are matched at
-  start and hourly (a list lost from `seen.json` by a hard stop is rebuilt from the file). A device
+  start and at most hourly, on a thread of its own (a list lost from `seen.json` by a hard stop is
+  rebuilt from the file; one journal line per pass). A device
   may upload before its first report. The answer to a post carries `"sbom": true` when the
   feature is on, the team summary a host's `sbom: {at, sha}`, and `/metrics` has
   `tether_api_status_sbom_files` and `tether_api_status_sbom_bytes`. The technician app does not
@@ -104,8 +107,8 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   [docs/api.md](docs/api.md#put-apistatussbom-device-signed); what it holds and who can read it:
   [PRIVACY.md](PRIVACY.md), [SECURITY.md](SECURITY.md#the-software-list).
   Checked: the relay's integration tests (`server/api/tests/status.rs`, on Linux under WSL) and a
-  short load run (made before the review fixes to the order of the checks and the rebuild of records, and not
-  repeated after them) of 5 000 devices for 240 s, once without and once with uploads at the default
+  short load run (made before both rounds of review fixes to the upload checks and the rebuild of records,
+  and not repeated after them) of 5 000 devices for 240 s, once without and once with uploads at the default
   budget, on a developer PC under WSL ([docs/scaling.md](docs/scaling.md#tether-api)): 478 of 480
   uploads accepted, two `429 busy`, no `5xx`, memory about 15 MiB. Not checked: the run at
   20 000 devices with uploads, a relay on a real server, a real agent's uploads (the agent is not

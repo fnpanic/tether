@@ -160,30 +160,47 @@ size limit. Whatever reads the stored document (your own scripts, the technician
 assume it is CycloneDX or that it is shallow. The file is written and synced to
 `status/<uuid>.sbom.json` before the `204`.
 
-**Limits, in the order the relay applies them to an upload:** the switch (`404`), a
-`Content-Length` (`411 length required` without one) of at most `STATUS_SBOM_MAX_KB` (`413`), the
-header, the per-IP limit on failed requests (`429 too many failed requests`), the key lookup
-(`401 unknown device`), one accepted upload per device per hour (`429 upload too frequent`,
-`Retry-After` is the time left), the global budget (`429 busy`), then the body, then the signature
-and the JSON-object check. Everything before the body is cheap and happens before the global
-budget is touched, so a request for a device that is not enrolled here never uses it. A request
-that is refused for its signature gives its slot in the budget back and counts as a failed request
-for its IP; it does not use up the device's hour. The hour also holds after a `DELETE`, so
-deleting and uploading again does not get around it. A request that declares a body of up to
-1 KiB and then sends fewer bytes may get no answer at all (the HTTP server drops it); nothing is
-stored. A longer one is `400 request body incomplete`.
+**Limits, in the order the relay applies them to an upload:** `STATUS=off` (`503`), the switch
+(`404`), a `Content-Length` (`411 length required` without one) of at most `STATUS_SBOM_MAX_KB`
+(`413`), a locked status store (`503`), the header, the per-IP limit on failed requests
+(`429 too many failed requests`), the key lookup (`401 unknown device`), one accepted upload per
+device per hour (`429 upload too frequent`, `Retry-After` is the time left), the global budget
+(`429 busy`), then the body, then the signature and the JSON-object check. Everything before the
+body is cheap and happens before the global budget is touched, so a request for a device that is
+not enrolled here never uses it.
+
+- A request refused for its signature, or whose body did not arrive (`400 request body
+  incomplete`, `400 could not read body`), gives its slot in the budget back and counts as a failed
+  request for its IP. It does not use up the device's hour.
+- A request with a valid signature that is refused for the device's own fault, `400 not a JSON
+  object` or `507 sbom store full`, uses the device's hour: its next upload within the hour,
+  also a replay of the same request, is `429 upload too frequent` before it reaches the budget.
+  One device cannot keep the global budget busy with refused uploads. `507 insufficient storage`
+  (the relay's own disk) uses no hour.
+- **The per-IP limit.** Sixty failed requests in a minute from one address (IPv6: one /64) make
+  `429 too many failed requests` for the rest of the minute. It is the same counter the other
+  device-signed status routes use, so while it is tripped every status post, removal and upload
+  from that address is refused, not only uploads. For a site behind one address that takes sixty
+  failed requests in a minute (bad signatures, unknown uuids, bodies that do not arrive), for
+  example a broken or misconfigured agent on many machines at once; the minute ends it.
+- The hour also holds after a `DELETE`, so deleting and uploading again does not get around it. For
+  a device that has no document it is kept in memory only, so a restart of tether-api ends it.
+- A request that declares a body of up to 1 KiB and then sends fewer bytes may get no answer at all
+  (the HTTP server drops it); nothing is stored. A longer one is `400 request body incomplete`.
 
 **Lifetime.** The file goes with the device's pin: when the device removes itself, when an
 administrator or a team member removes it ([Removing a device](#removing-a-device)) and when the
 pin expires after 180 days without a report. A device that has not posted a report yet can upload
 before its first report; it is then shown without a report and removed 180 days after its
 enrolment if it never posts. Unlinking a host or dismissing its claim leaves the list in place.
-At each start and then once an hour tether-api matches the records and the files in the
-background (it matters after a hard stop, which loses up to 5 minutes of `seen.json`): a list
-without a record, or one that was replaced shortly before the stop (its size or modification
-time differs from the record), is read again and recorded; a record without a file is dropped;
-and a file whose device is no longer pinned is deleted. A record's time is the file's
-modification time.
+At each start and then at most once an hour tether-api matches the records and the files, on
+a thread of its own so that nothing else waits for it (it matters after a hard stop, which loses up
+to 5 minutes of `seen.json`): a list without a record, or one that was replaced shortly before the
+stop (its size or modification time differs from the record), is read again and recorded; a record
+without a file is dropped; a file whose device is no longer pinned is deleted; and a file whose
+content still matches its record but has another modification time (a restore or a copy) gets the
+recorded time back. Each pass writes one line to the journal: `status: software lists checked: N
+files, R read again, B records rebuilt`. A record's time is the file's modification time.
 
 **Disk.** *Estimated*, not measured at scale: a list is 40 to 80 KiB per machine, about 1.2 GB at
 20 000 machines. The default total of 2 048 MiB leaves room for that; the files are replaced in
