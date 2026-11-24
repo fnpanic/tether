@@ -274,7 +274,7 @@ fn token(admin: &SigningKey, label: &str, days: u64, tether_id: Option<&str>, no
         return Err("--days must be 1 to 30".into());
     }
     let exp = now + days * 86_400;
-    let (tok, id) = tether_trust::status::make_token(label, exp, tether_id, admin)?;
+    let (tok, id) = tether_trust::status::make_token(label, exp, tether_id, None, admin)?;
     Ok((tok, Issued { id, label: label.into(), exp, tether_id: tether_id.map(Into::into), issued: now, revoked: None, partly_revoked: None }))
 }
 

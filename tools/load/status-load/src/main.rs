@@ -308,7 +308,7 @@ fn run(a: &BTreeMap<String, String>) -> bool {
 
     // Enrolment through the API for devices 0..enroll (one IP each: 30 new pins per IP and
     // minute), then an idempotent one of the last device: its answer is the pace for everyone.
-    let token = status::make_token("load", now() + 7200, None, &admin).unwrap().0;
+    let token = status::make_token("load", now() + 7200, None, None, &admin).unwrap().0;
     let t0 = Instant::now();
     for i in 0..enroll.min(devices) {
         let r = enrol(&addr, &token, i, 200).expect("enroll");

@@ -181,9 +181,9 @@ fn team_get(s: &Srv, m: &SigningKey, path: &str) -> Reply {
 fn enroll_pins_uuid_and_tether_id() {
     let (s, admin) = server();
     // A token issued for 123456789 pins that ID; any other token only lets a device claim one.
-    let bound = |id: &str| status::make_token("t", now() + 3600, Some(id), &admin).unwrap().0;
+    let bound = |id: &str| status::make_token("t", now() + 3600, Some(id), None, &admin).unwrap().0;
     let tok = bound("123456789");
-    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let any = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let (a, b) = (generate_key(), generate_key());
     assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
     let r = enroll(&s, &a, "dev-0001", Some("123456789"), &tok);
@@ -193,8 +193,8 @@ fn enroll_pins_uuid_and_tether_id() {
     assert_eq!((r.status, r.text()), (409, "uuid is enrolled with another key".into()));
     let r = enroll(&s, &b, "dev-0002", Some("123456789"), &bound("123456789"));
     assert_eq!((r.status, r.text()), (409, "tether_id is enrolled with another key".into()));
-    assert_eq!(enroll(&s, &b, "dev-0003", None, &status::make_token("t", now() - 1, None, &admin).unwrap().0).status, 401);
-    let r = enroll(&s, &b, "dev-0003", None, &status::make_token("t", now() + 60, None, &generate_key()).unwrap().0);
+    assert_eq!(enroll(&s, &b, "dev-0003", None, &status::make_token("t", now() - 1, None, None, &admin).unwrap().0).status, 401);
+    let r = enroll(&s, &b, "dev-0003", None, &status::make_token("t", now() + 60, None, None, &generate_key()).unwrap().0);
     assert_eq!((r.status, r.text()), (401, "enrollment token: signed by an untrusted key".into()));
     // A report cannot move the pin; the summary shows the pinned ID.
     let r = post(&s, &a, "dev-0001", &full("dev-0001", 1, "crit").replace("123456789", "999999999"));
@@ -218,7 +218,7 @@ fn enroll_pins_uuid_and_tether_id() {
 #[test]
 fn malformed_uuids_and_odd_tether_ids_never_reach_a_path() {
     let (s, admin) = server();
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     for bad in ["../../etc", "dev_0001", "short", "dev-0001/../x"] {
         let r = enroll(&s, &a, bad, None, &tok);
@@ -229,7 +229,7 @@ fn malformed_uuids_and_odd_tether_ids_never_reach_a_path() {
     }
     // A tether_id with path characters is only a map key and a stored value.
     let odd = "../..\\x/y";
-    let tok = status::make_token("t", now() + 3600, Some(odd), &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, Some(odd), None, &admin).unwrap().0;
     assert_eq!(enroll(&s, &a, "dev-0001", Some(odd), &tok).status, 200);
     assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok").replace("123456789", odd.replace('\\', "\\\\").as_str())).status, 200);
     let mut names: Vec<String> = std::fs::read_dir(s.dir.join("status")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
@@ -237,14 +237,14 @@ fn malformed_uuids_and_odd_tether_ids_never_reach_a_path() {
     assert_eq!(names, ["dev-0001.history.jsonl", "dev-0001.json", "keys.jsonl"]);
     let m = member(&s, &admin);
     assert_eq!(team_get(&s, &m, "/api/team/status").json()["hosts"][0]["tether_id"], odd);
-    let r = enroll(&s, &generate_key(), "dev-0002", Some(odd), &status::make_token("t", now() + 3600, Some(odd), &admin).unwrap().0);
+    let r = enroll(&s, &generate_key(), "dev-0002", Some(odd), &status::make_token("t", now() + 3600, Some(odd), None, &admin).unwrap().0);
     assert_eq!((r.status, r.text()), (409, "tether_id is enrolled with another key".into()));
 }
 
 #[test]
 fn reports_heartbeats_seq_and_history() {
     let (s, admin) = server();
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
     let r = post(&s, &a, "dev-0001", &heartbeat("dev-0001", 1));
@@ -309,7 +309,7 @@ fn reports_heartbeats_seq_and_history() {
 #[test]
 fn device_and_member_signatures_stay_apart() {
     let (s, admin) = server();
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
     let m = member(&s, &admin);
@@ -368,7 +368,7 @@ fn unreadable_keys_lock_the_status_store_only() {
     let corrupt = b"{\"dev-0001\": {\"key\": tru".to_vec();
     std::fs::write(dir.join("status/keys.json"), &corrupt).unwrap();
     let s = start_in(dir, &admin);
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     let locked = |r: Reply| {
         assert_eq!((r.status, r.text()), (503, "status store unavailable".into()));
@@ -399,7 +399,7 @@ fn enrollment_limits_and_tether_id_rules() {
     drop(s);
 
     let (s, admin) = server();
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     // Idempotent re-enrollment adds a claim once (not a Tether ID); another one is refused.
     assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
@@ -416,7 +416,7 @@ fn enrollment_limits_and_tether_id_rules() {
         let b = json!({"uuid": uuid, "pubkey": key_to_b64(&dev.verifying_key()), "token": token});
         s.req("POST", "/api/status/enroll", &ip, b.to_string().as_bytes())
     };
-    let expired = status::make_token("t", now() - 1, None, &admin).unwrap().0;
+    let expired = status::make_token("t", now() - 1, None, None, &admin).unwrap().0;
     for i in 0..30 {
         assert_eq!(from_ip(&a, &format!("dev-1{i:03}"), &expired).status, 401, "attempt {i}");
     }
@@ -464,7 +464,7 @@ fn refused_and_failed_posts_are_limited() {
 #[test]
 fn device_delete_is_not_replayable() {
     let (s, admin) = server();
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
     let sig = reqauth::sign_device_request(&a, "dev-0001", RELAY, "DELETE", "/api/status", b"", now());
@@ -512,7 +512,7 @@ fn keys_log_survives_a_torn_line_and_locks_on_a_bad_one() {
     std::fs::write(dir.join("status/keys.jsonl"), format!("{good}{}", &pin("dev-0002")[..20])).unwrap();
     let s = start_in(dir, &admin);
     assert_eq!(std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap(), good);
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     assert_eq!(enroll(&s, &a, "dev-0003", None, &tok).status, 200, "pinned: the same key again");
     assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
     assert_eq!(live_pins(&s.dir), ["dev-0001", "dev-0003"]);
@@ -564,7 +564,7 @@ fn summary_rebuilds_after_30_s_and_keeps_an_unchanged_etag() {
 #[test]
 fn removals_do_not_rebuild_the_summary_and_the_keys_log_is_compacted() {
     let (s, admin) = server();
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
     assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok").replace(r#""tether_id":"123456789","#, "")).status, 200);
@@ -694,7 +694,7 @@ fn status_off_and_device_cap() {
     let admin = generate_key();
     let admin_env = key_to_b64(&admin.verifying_key());
     let s = spawn_env(new_dir(), &admin_env, &[("STATUS", "off")]);
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     let m = member(&s, &admin);
     for r in [
@@ -801,7 +801,7 @@ fn monitor_doc(admin: &SigningKey, channel: &str, serial: u64, key: &str, file: 
 /// The `releases` hint a status post answers (a new device each time: one post per minute).
 fn status_releases(s: &Srv, admin: &SigningKey, uuid: &str) -> u64 {
     let dev = generate_key();
-    let tok = status::make_token("t", now() + 3600, None, admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, admin).unwrap().0;
     assert_eq!(enroll(s, &dev, uuid, None, &tok).status, 200);
     let r = post(s, &dev, uuid, &full(uuid, 1, "ok").replace(r#""tether_id":"123456789","#, ""));
     assert_eq!(r.status, 200, "{}", r.text());
@@ -894,8 +894,8 @@ fn restart(mut s: Srv, admin: &SigningKey) -> Srv {
 #[test]
 fn revoked_tokens_are_refused_across_a_restart() {
     let (s, admin) = server();
-    let (tok, id) = status::make_token("t", now() + 3600, None, &admin).unwrap();
-    let (other, _) = status::make_token("t", now() + 3600, None, &admin).unwrap();
+    let (tok, id) = status::make_token("t", now() + 3600, None, None, &admin).unwrap();
+    let (other, _) = status::make_token("t", now() + 3600, None, None, &admin).unwrap();
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
     assert_eq!(revoke(&s, &admin, &id, now() + 3600).status, 204);
@@ -939,7 +939,7 @@ fn expired_revocations_are_dropped_and_a_bad_file_locks() {
     std::fs::create_dir_all(dir.join("status")).unwrap();
     std::fs::write(dir.join("status/revoked.json"), "{not json").unwrap();
     let s = start_in(dir, &admin);
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let r = enroll(&s, &generate_key(), "dev-0001", None, &tok);
     assert_eq!((r.status, r.text()), (503, "status store unavailable".into()));
     assert_eq!(revoke(&s, &admin, "nextnextNEXTNEXT", now() + 60).status, 503);
@@ -949,7 +949,7 @@ fn expired_revocations_are_dropped_and_a_bad_file_locks() {
 #[test]
 fn a_bound_token_pins_its_id_for_one_device() {
     let (s, admin) = server();
-    let (tok, id) = status::make_token("front desk", now() + 3600, Some("123456789"), &admin).unwrap();
+    let (tok, id) = status::make_token("front desk", now() + 3600, Some("123456789"), None, &admin).unwrap();
     let (a, b) = (generate_key(), generate_key());
     let (w, _) = writer_and_reader(&s, &admin);
     let r = enroll(&s, &a, "dev-0001", Some("555"), &tok);
@@ -974,7 +974,7 @@ fn a_bound_token_pins_its_id_for_one_device() {
 #[test]
 fn an_unbound_token_only_claims_an_id() {
     let (s, admin) = server();
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let (a, b) = (generate_key(), generate_key());
     assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
     assert_eq!(enroll(&s, &b, "dev-0002", Some("123456789"), &tok).status, 200, "a claim pins nothing");
@@ -989,7 +989,7 @@ fn an_unbound_token_only_claims_an_id() {
 #[test]
 fn members_with_write_link_and_unlink() {
     let (s, admin) = server();
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let (a, b) = (generate_key(), generate_key());
     assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
     assert_eq!(enroll(&s, &b, "dev-0002", Some("123456789"), &tok).status, 200);
@@ -1027,7 +1027,7 @@ fn members_with_write_link_and_unlink() {
 #[test]
 fn a_device_cannot_change_its_link() {
     let (s, admin) = server();
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
     let (w, _) = writer_and_reader(&s, &admin);
@@ -1047,7 +1047,7 @@ fn a_device_cannot_change_its_link() {
 #[test]
 fn team_delete_needs_write() {
     let (s, admin) = server();
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
     assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "crit")).status, 200);
@@ -1106,7 +1106,7 @@ fn the_admin_device_list_pages_and_filters_by_token() {
 #[test]
 fn new_routes_refuse_other_credentials() {
     let (s, admin) = server();
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let dev = generate_key();
     assert_eq!(enroll(&s, &dev, "dev-0001", Some("123456789"), &tok).status, 200);
     let (w, _) = writer_and_reader(&s, &admin);
@@ -1133,8 +1133,8 @@ fn unlink_dismisses_the_claim_until_a_member_allows_one() {
     let (s, admin) = server();
     let (w, r) = writer_and_reader(&s, &admin);
     // A token issued for the ID: Unlink holds, the same token enrolling again changes nothing.
-    let bound = status::make_token("t", now() + 3600, Some("123456789"), &admin).unwrap().0;
-    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let bound = status::make_token("t", now() + 3600, Some("123456789"), None, &admin).unwrap().0;
+    let any = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", None, &bound).status, 200);
     assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").json()["tether_id"], "123456789");
@@ -1179,7 +1179,7 @@ fn legacy_pins_bring_only_claims() {
     let h = team_get(&s, &m(&s), "/api/team/status/dev-0001").json();
     assert_eq!((&h["tether_id"], &h["claimed_id"]), (&Value::Null, &json!("123456789")));
     // A bound token for that ID can still go to another device: nothing verified it here.
-    let bound = status::make_token("t", now() + 3600, Some("123456789"), &admin).unwrap().0;
+    let bound = status::make_token("t", now() + 3600, Some("123456789"), None, &admin).unwrap().0;
     assert_eq!(enroll(&s, &generate_key(), "dev-0002", None, &bound).status, 200);
     drop(s);
     // The earlier keys.json, migrated.
@@ -1198,14 +1198,14 @@ fn used_tokens_survive_a_compaction() {
     let admin = generate_key();
     let dir = new_dir();
     std::fs::create_dir_all(dir.join("status")).unwrap();
-    let (bound, id) = status::make_token("t", now() + 3600, Some("123456789"), &admin).unwrap();
+    let (bound, id) = status::make_token("t", now() + 3600, Some("123456789"), None, &admin).unwrap();
     let k = key_to_b64(&generate_key().verifying_key());
     // Many lines for one pin, then the token's use: well past the compaction threshold.
     let mut lines: String = (0..100).map(|_| json!({"op": "set", "uuid": "dev-0001", "key": k, "tether_id": null, "label": "t", "enrolled": now()}).to_string() + "\n").collect();
     lines += &(json!({"op": "used", "token": id, "uuid": "dev-0001", "exp": now() + 3600}).to_string() + "\n");
     std::fs::write(dir.join("status/keys.jsonl"), lines).unwrap();
     let s = start_in(dir, &admin);
-    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let any = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     assert_eq!(enroll(&s, &generate_key(), "dev-0002", None, &any).status, 200, "an append starts the compaction");
     let count = || std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap().lines().count();
     wait_for("compaction", || count() < 10);
@@ -1259,7 +1259,7 @@ fn an_unwritable_status_folder_locks_only_the_status_store() {
     std::fs::write(st.join("keys.json"), old.to_string()).unwrap();
     std::fs::set_permissions(&st, std::fs::Permissions::from_mode(0o500)).unwrap();
     let s = start_in(dir, &admin);
-    let tok = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let tok = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let r = enroll(&s, &generate_key(), "dev-0002", None, &tok);
     assert_eq!((r.status, r.text()), (503, "status store unavailable".into()));
     let hb = r#"{"uuid":"hb-000001","id":"123456789","profile":"technician","version":"0.6.3","os":"windows","serial":1}"#;
@@ -1287,7 +1287,7 @@ fn a_signed_request_is_not_replayable_after_a_restart() {
 fn a_dismissed_device_dropping_its_own_pin_gets_no_claim_back() {
     let (s, admin) = server();
     let (w, r) = writer_and_reader(&s, &admin);
-    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let any = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &any).status, 200);
     assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0001/link", b"").status, 204);
@@ -1317,7 +1317,7 @@ fn a_dismissed_device_dropping_its_own_pin_gets_no_claim_back() {
     assert_eq!(enroll(&s, &b, "dev-0006", Some("777777777"), &any).status, 200);
     assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0006/link", b"").status, 204);
     assert_eq!(signed(&s, &b, "dev-0006", "DELETE", "/api/status", b"").status, 204);
-    let bound = status::make_token("t", now() + 3600, Some("777777777"), &admin).unwrap().0;
+    let bound = status::make_token("t", now() + 3600, Some("777777777"), None, &admin).unwrap().0;
     assert_eq!(enroll(&s, &b, "dev-0006", None, &bound).status, 200);
     let h = team_get(&s, &r, "/api/team/status/dev-0006").json();
     assert_eq!((&h["tether_id"], &h["no_claim"]), (&json!("777777777"), &json!(false)));
@@ -1334,7 +1334,7 @@ fn a_dismissed_device_dropping_its_own_pin_gets_no_claim_back() {
 fn a_report_claims_only_when_it_is_accepted() {
     let (s, admin) = server();
     let r = writer_and_reader(&s, &admin).1;
-    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let any = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", None, &any).status, 200);
     let hb = heartbeat("dev-0001", 1).replace(r#""host""#, r#""tether_id":"123456789","host""#);
@@ -1351,7 +1351,7 @@ fn a_report_claims_only_when_it_is_accepted() {
 fn a_dismissed_key_claims_nothing_under_another_uuid() {
     let (s, admin) = server();
     let (w, r) = writer_and_reader(&s, &admin);
-    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let any = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &any).status, 200);
     assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0001/link", b"").status, 204);
@@ -1391,7 +1391,7 @@ fn dismissed_keys_are_capped_also_when_loaded() {
     std::fs::write(dir.join("status/keys.jsonl"), lines).unwrap();
     let s = start_in(dir, &admin);
     let (w, r) = writer_and_reader(&s, &admin);
-    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let any = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     assert_eq!(enroll(&s, &old, "dev-0001", Some("111111111"), &any).status, 200);
     assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").json()["claimed_id"], "111111111", "dropped at load");
     // A new tombstone at the cap drops the oldest left, with a `forgotten` line (kept after a restart).
@@ -1420,7 +1420,7 @@ fn dismissed_keys_are_capped_also_when_loaded() {
 fn a_report_that_is_not_stored_claims_nothing() {
     let (s, admin) = server();
     let r = writer_and_reader(&s, &admin).1;
-    let any = status::make_token("t", now() + 3600, None, &admin).unwrap().0;
+    let any = status::make_token("t", now() + 3600, None, None, &admin).unwrap().0;
     let a = generate_key();
     assert_eq!(enroll(&s, &a, "dev-0001", None, &any).status, 200);
     // The report cannot be renamed into place (a folder in its way).

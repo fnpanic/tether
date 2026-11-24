@@ -279,7 +279,7 @@ is issued for that ID: it enrols one device, which gets exactly that ID. `script
 and `tools/monitor-publish token` issue tokens valid 1 to 30 days
 ([health.md](health.md#creating-an-enrolment-token)); the relay accepts one until `exp` or until
 it is revoked, for any number of devices unless it is issued for a Tether ID.
-`tether_trust::status::make_token(label, exp, tether_id, admin_key)` makes one and answers
+`tether_trust::status::make_token(label, exp, tether_id, customer, admin_key)` makes one and answers
 `(token, id)`; `tether_trust::status::verify_token(token, admin_keys, now)` checks one.
 
 ### `POST /api/status/enroll` (unsigned)

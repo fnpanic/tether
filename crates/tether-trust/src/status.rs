@@ -34,6 +34,14 @@ pub struct TokenPayload {
     /// Issued for this Tether ID: the token enrols one device, which gets exactly this ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tether_id: Option<String>,
+    /// The customer reference the relay sets on the device that enrols with this token ([`valid_customer`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub customer: Option<String>,
+}
+
+/// 1-32 characters `[A-Za-z0-9._-]`: a customer reference.
+pub fn valid_customer(s: &str) -> bool {
+    (1..=32).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// 16-32 characters `[A-Za-z0-9]`.
@@ -58,18 +66,21 @@ fn short(s: &str, max: usize) -> bool {
 }
 
 /// An enrollment token for `label`, valid until `exp` (unix seconds), with a new random id; with
-/// `tether_id`, issued for that one Tether ID. Answers `(token, id)`.
-pub fn make_token(label: &str, exp: u64, tether_id: Option<&str>, admin: &SigningKey) -> Result<(String, String), String> {
+/// `tether_id`, issued for that one Tether ID; with `customer`, setting it on the device. Answers `(token, id)`.
+pub fn make_token(label: &str, exp: u64, tether_id: Option<&str>, customer: Option<&str>, admin: &SigningKey) -> Result<(String, String), String> {
     if !text(label, 64) {
         return Err("bad label".into());
     }
     if tether_id.is_some_and(|t| !bindable(t)) {
         return Err("bad tether_id".into());
     }
+    if customer.is_some_and(|c| !valid_customer(c)) {
+        return Err("bad customer".into());
+    }
     let mut raw = [0u8; 16];
     rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut raw);
     let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-    let p = TokenPayload { purpose: TOKEN_PURPOSE.into(), exp, label: label.into(), id: id.clone(), tether_id: tether_id.map(Into::into) };
+    let p = TokenPayload { purpose: TOKEN_PURPOSE.into(), exp, label: label.into(), id: id.clone(), tether_id: tether_id.map(Into::into), customer: customer.map(Into::into) };
     let doc = envelope::sign(&serde_json::to_vec(&p).map_err(|e| e.to_string())?, admin);
     Ok((B64URL.encode(serde_json::to_vec(&doc).map_err(|e| e.to_string())?), id))
 }
@@ -95,6 +106,9 @@ pub fn verify_token(token: &str, admin: &[VerifyingKey], now: u64) -> Result<Tok
     }
     if p.tether_id.as_deref().is_some_and(|t| !bindable(t)) {
         return Err("bad tether_id".into());
+    }
+    if p.customer.as_deref().is_some_and(|c| !valid_customer(c)) {
+        return Err("bad customer".into());
     }
     Ok(p)
 }
@@ -313,8 +327,8 @@ mod tests {
     #[test]
     fn token_ids_are_random_and_required() {
         let admin = crate::generate_key();
-        let (t1, id1) = make_token("a", 2_000, None, &admin).unwrap();
-        let (_, id2) = make_token("a", 2_000, None, &admin).unwrap();
+        let (t1, id1) = make_token("a", 2_000, None, None, &admin).unwrap();
+        let (_, id2) = make_token("a", 2_000, None, None, &admin).unwrap();
         assert!(valid_token_id(&id1) && id1 != id2, "{id1} {id2}");
         assert_eq!(verify_token(&t1, &[admin.verifying_key()], 1).unwrap().id, id1);
         for (id, ok) in [("abcdefghABCDEFGH", true), (&"Z9".repeat(16) as &str, true), ("abcdefghABCDEFG", false), (&"a".repeat(33), false), ("abcdefgh-BCDEFGH", false), ("abcdefghABCDEFGé", false)] {
@@ -333,15 +347,15 @@ mod tests {
     fn bound_token_round_trip() {
         let admin = crate::generate_key();
         let k = [admin.verifying_key()];
-        let (t, id) = make_token("front desk", 2_000, Some("123456789"), &admin).unwrap();
-        assert_eq!(verify_token(&t, &k, 1).unwrap(), TokenPayload { purpose: TOKEN_PURPOSE.into(), exp: 2_000, label: "front desk".into(), id, tether_id: Some("123456789".into()) });
+        let (t, id) = make_token("front desk", 2_000, Some("123456789"), None, &admin).unwrap();
+        assert_eq!(verify_token(&t, &k, 1).unwrap(), TokenPayload { purpose: TOKEN_PURPOSE.into(), exp: 2_000, label: "front desk".into(), id, tether_id: Some("123456789".into()), customer: None });
         for bad in ["", "1 2", "m:dev-0001", &"1".repeat(33)] {
-            assert_eq!(make_token("x", 2_000, Some(bad), &admin).unwrap_err(), "bad tether_id", "{bad:?}");
+            assert_eq!(make_token("x", 2_000, Some(bad), None, &admin).unwrap_err(), "bad tether_id", "{bad:?}");
             let forged = raw_token(&format!(r#"{{"purpose":"status-enroll","exp":2000,"label":"a","id":"abcdefghABCDEFGH","tether_id":{}}}"#, serde_json::to_string(bad).unwrap()), &admin);
             assert_eq!(verify_token(&forged, &k, 1).unwrap_err(), "bad tether_id", "{bad:?}");
         }
         // Unbound: no `tether_id` field at all.
-        let (t, _) = make_token("x", 2_000, None, &admin).unwrap();
+        let (t, _) = make_token("x", 2_000, None, None, &admin).unwrap();
         let payload = crate::envelope::open(&serde_json::from_slice(&B64URL.decode(&t).unwrap()).unwrap(), &k).unwrap();
         assert!(!String::from_utf8(payload).unwrap().contains("tether_id"));
     }
@@ -349,16 +363,47 @@ mod tests {
     #[test]
     fn token_round_trip_and_refusals() {
         let admin = crate::generate_key();
-        let (t, id) = make_token("rollout north", 2_000, None, &admin).unwrap();
+        let (t, id) = make_token("rollout north", 2_000, None, None, &admin).unwrap();
         assert!(!t.contains('=') && !t.contains('+') && !t.contains('/'), "base64url without padding");
         let p = verify_token(&t, &[admin.verifying_key()], 1_999).unwrap();
-        assert_eq!(p, TokenPayload { purpose: "status-enroll".into(), exp: 2_000, label: "rollout north".into(), id, tether_id: None });
+        assert_eq!(p, TokenPayload { purpose: "status-enroll".into(), exp: 2_000, label: "rollout north".into(), id, tether_id: None, customer: None });
         assert_eq!(verify_token(&t, &[admin.verifying_key()], 2_000).unwrap_err(), "expired");
         assert_eq!(verify_token(&t, &[crate::generate_key().verifying_key()], 1).unwrap_err(), "signed by an untrusted key");
         let policy = crate::envelope::sign(br#"{"serial":1,"issued_at":1}"#, &admin);
         let as_token = B64URL.encode(serde_json::to_vec(&policy).unwrap());
         assert_eq!(verify_token(&as_token, &[admin.verifying_key()], 1).unwrap_err(), "not an enrollment token");
-        assert!(make_token("", 2_000, None, &admin).is_err() && make_token(&"x".repeat(65), 2_000, None, &admin).is_err());
+        assert!(make_token("", 2_000, None, None, &admin).is_err() && make_token(&"x".repeat(65), 2_000, None, None, &admin).is_err());
+    }
+
+    #[test]
+    fn customer_rule() {
+        for ok in ["4711", "A.b_c-9", &"a".repeat(32)] {
+            assert!(valid_customer(ok), "{ok}");
+        }
+        for bad in ["", &"a".repeat(33), "47 11", "a/b", "a
+", "ä"] {
+            assert!(!valid_customer(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn token_carries_customer() {
+        let admin = crate::generate_key();
+        let k = [admin.verifying_key()];
+        let (t, _) = make_token("x", 2_000, None, Some("4711"), &admin).unwrap();
+        assert_eq!(verify_token(&t, &k, 1).unwrap().customer.as_deref(), Some("4711"));
+        let (t, _) = make_token("x", 2_000, None, None, &admin).unwrap();
+        let payload = crate::envelope::open(&serde_json::from_slice(&B64URL.decode(&t).unwrap()).unwrap(), &k).unwrap();
+        assert!(!String::from_utf8(payload).unwrap().contains("customer"));
+        assert_eq!(verify_token(&t, &k, 1).unwrap().customer, None);
+        assert_eq!(make_token("x", 2_000, None, Some("a/b"), &admin).unwrap_err(), "bad customer");
+    }
+
+    #[test]
+    fn token_with_bad_customer_is_refused() {
+        let admin = crate::generate_key();
+        let forged = raw_token(r#"{"purpose":"status-enroll","exp":2000,"label":"a","id":"abcdefghABCDEFGH","customer":"a b"}"#, &admin);
+        assert_eq!(verify_token(&forged, &[admin.verifying_key()], 1).unwrap_err(), "bad customer");
     }
 
     #[test]
