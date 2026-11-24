@@ -52,6 +52,8 @@ States per layer: `on` (user may change, `value` is the default), `off` (locked 
 | `customer.accent-color` | customer | Accent colour (#rrggbb) | `#0071e3` | customer | – |
 | `customer.welcome` | customer | Welcome text | `Give this ID and password to your support technician.` | customer | – |
 | `customer.close-after-session` | customer | Quit when the session ends | `N` | customer | – |
+| `health.agent` | health | Monitoring agent installed and removed by Tether (Windows; manual: as before) (manual, on-request, install, remove) | `manual` | technician, customer | – |
+| `health.enrol-grant` | health | Enrolment grant for agents Tether installs (set by Tether Manage) | – | technician, customer | – |
 | `customer.elevate` | customer | Admin access for UAC prompts (Elevate button, technician requests) | `Y` | customer | `allow-elevate` |
 
 ## Layers and validation

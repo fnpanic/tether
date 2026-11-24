@@ -169,6 +169,9 @@ pub const FEATURES: &[Feature] = &[
     t!("customer.accent-color", "customer", "Accent colour (#rrggbb)", "Akzentfarbe (#rrggbb)", Kind::Text, "#0071e3", CUST),
     t!("customer.welcome", "customer", "Welcome text", "Begrüßungstext", Kind::Text, "Give this ID and password to your support technician.", CUST),
     b!("customer.close-after-session", "customer", "Quit when the session ends", "Nach Sitzungsende beenden", "N", None, CUST),
+    // Health monitoring (Windows; the agent manager of Tether's service, docs/health.md).
+    c!("health.agent", "health", "Monitoring agent installed and removed by Tether (Windows; manual: as before)", "Überwachungs-Agent, von Tether installiert und entfernt (Windows; manual: wie bisher)", "manual", &["manual", "on-request", "install", "remove"], "manual", None, BOTH),
+    t!("health.enrol-grant", "health", "Enrolment grant for agents Tether installs (set by Tether Manage)", "Registrierungsfreigabe für Agenten, die Tether installiert (von Tether Manage gesetzt)", Kind::Text, "", BOTH),
     b!("customer.elevate", "customer", "Admin access for UAC prompts (Elevate button, technician requests)", "Adminrechte für UAC (Erhöhen-Knopf, Anfragen des Technikers)", "Y", Some("allow-elevate"), CUST),
 ];
 
@@ -209,6 +212,8 @@ fn check_value(f: &Feature, v: &str) -> Result<(), String> {
         // Trimmed, as `version::compare` reads it: a padded minimum always was enforced.
         ("update.minimum-version", _) => v.trim().is_empty() || crate::release::valid_version(v.trim()),
         ("update.channel", _) => v.is_empty() || crate::release::valid_channel(v),
+        // Form only (a token is base64url): the app verifies the signature and the flag.
+        ("health.enrol-grant", _) => v.len() <= 1024 && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
         (_, Kind::Bool) => v == "Y" || v == "N",
         (_, Kind::Choice) => f.choices.contains(&v),
         (_, Kind::Number) => v.parse::<u32>().is_ok(),
@@ -737,6 +742,36 @@ mod tests {
             assert!(e.sources.contains(&source.to_owned()));
         }
         assert!(resolve(None, PROFILE_TECHNICIAN, "d", None).rejected.is_empty());
+    }
+
+    #[test]
+    fn agent_features() {
+        let layer = |id: &str, v: &str| -> Bundle {
+            let mut b = Bundle::default();
+            b.profiles.insert(PROFILE_TECHNICIAN.into(), [(id.to_owned(), rule(State::Locked, Some(v)))].into());
+            b
+        };
+        for v in ["manual", "on-request", "install", "remove"] {
+            layer("health.agent", v).validate().unwrap_or_else(|e| panic!("{v}: {e}"));
+        }
+        assert!(layer("health.agent", "yes").validate().is_err());
+        for p in [PROFILE_TECHNICIAN, PROFILE_CUSTOMER] {
+            let e = resolve(None, p, "d", None);
+            assert_eq!((e.get("health.agent"), e.get("health.enrol-grant")), ("manual", ""), "{p}");
+        }
+        // Form only: base64url, at most 1024 characters (the app checks the signature and the flag).
+        for ok in ["", "eyJwYXlsb2FkIjoi-_0", &"A".repeat(1024)] {
+            layer("health.enrol-grant", ok).validate().unwrap_or_else(|e| panic!("{ok:?}: {e}"));
+        }
+        for bad in ["eyJ wYX", "eyJ+/=", &"A".repeat(1025), "a\nb"] {
+            assert!(layer("health.enrol-grant", bad).validate().is_err(), "{bad:?}");
+        }
+        // An app skips the bad value and keeps the rest of the policy.
+        let newer = br#"{"serial":1,"issued_at":0,"profiles":{"technician":{"health.agent":{"state":"locked","value":"yes"},"permission.clipboard":{"state":"off"}}}}"#;
+        let b = Bundle::from_json(newer).expect("the policy still applies");
+        let e = resolve(Some(&b), PROFILE_TECHNICIAN, "d", None);
+        assert_eq!(e.get("health.agent"), "manual");
+        assert!(e.is_locked("permission.clipboard") && e.rejected.len() == 1, "{:?}", e.rejected);
     }
 
     #[test]
