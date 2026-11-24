@@ -1104,7 +1104,13 @@ fn slow_uploads_leave_workers_for_heartbeats() {
     let (s, k) = admin_server();
     let p = "/api/admin/release/stable/technician/windows-x86_64/big.exe";
     let sig = reqauth::sign_request(&k, "PUT", p, b"", now());
-    let mut conns: Vec<TcpStream> = (0..40).map(|_| partial_upload(&s, "PUT", p, &[(reqauth::HEADER, &sig)], 100_000_000)).collect();
+    // Paced: 40 at the same instant can exceed MAX_WORKERS (32) on a slow machine, which answers a plain 503 "busy".
+    let mut conns: Vec<TcpStream> = (0..40)
+        .map(|_| {
+            std::thread::sleep(Duration::from_millis(10));
+            partial_upload(&s, "PUT", p, &[(reqauth::HEADER, &sig)], 100_000_000)
+        })
+        .collect();
     std::thread::sleep(Duration::from_millis(500));
     let refused: Vec<String> = conns.iter_mut().filter_map(|c| head_of(c, Duration::from_millis(1500))).collect();
     assert_eq!(refused.len(), 36, "{refused:?}");

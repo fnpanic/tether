@@ -135,7 +135,9 @@ mod tests {
             let sid = super::win::current_user_sid().unwrap();
             assert!(sid.starts_with("S-1-"), "{sid}");
             // Exactly one entry, no inheritance: what the file's ACL reads back as.
-            assert_eq!(super::win::dacl_sddl(&p).unwrap(), format!("D:P(A;;FA;;;{sid})"));
+            // SDDL prints the built-in Administrator (RID 500, the CI runner's account) as "LA".
+            let who = if sid.ends_with("-500") { "LA".to_string() } else { sid };
+            assert_eq!(super::win::dacl_sddl(&p).unwrap(), format!("D:P(A;;FA;;;{who})"));
         }
         #[cfg(unix)]
         {

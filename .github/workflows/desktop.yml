@@ -126,7 +126,7 @@ jobs:
 
   # Unsigned universal build (Apple silicon + Intel), the same script as on a developer Mac.
   macos:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
