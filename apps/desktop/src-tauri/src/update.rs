@@ -37,7 +37,7 @@ use tether_trust::{
 use crate::policy;
 
 /// Minisign public key (as `tauri signer generate` prints it); release builds require it.
-const UPDATER_KEY: Option<&str> = option_env!("TETHER_UPDATER_PUB_KEY");
+pub(crate) const UPDATER_KEY: Option<&str> = option_env!("TETHER_UPDATER_PUB_KEY");
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Legacy `latest.json` (clients up to 0.5.23 read only this).
@@ -231,7 +231,7 @@ pub fn status() -> Value {
 // ----------------------------------------------------------------------------- check
 
 /// One relay's document at `path`; 304 answers come from the remembered copy. `Ok(None)`: 404.
-fn fetch_doc(host: &str, path: &str, limit: usize) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn fetch_doc(host: &str, path: &str, limit: usize) -> Result<Option<Vec<u8>>, String> {
     let key = format!("{host}{path}");
     let etag = ETAGS.lock().unwrap().get(&key).map(|e| e.0.clone());
     let r = policy::api_via(&[host.to_owned()], |c, base| {
@@ -376,7 +376,7 @@ fn unpack(encoding: &str, data: &[u8], max: u64) -> Result<Vec<u8>, String> {
 }
 
 /// Every source in turn (the packed copy first), then the verified bytes.
-fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
     let mut last = String::from("no download URL");
     for (url, packed) in c.sources() {
         match download_one(&url, c, packed).and_then(|b| c.accept(b, packed, key, unpack)) {

@@ -675,6 +675,11 @@ pub fn start(ui: bool) {
             Ok(_) => {}
             Err(e) => log::info!("policy check: {e}"),
         }
+        // The health agent: inert unless the policy asks and this is the LocalSystem service.
+        if !ui {
+            let eff = effective();
+            std::thread::spawn(move || crate::agent::tick(&eff, api_now()));
+        }
         // Dev builds without admin keys stay out of the production device list.
         if ui && ADMIN_KEYS.is_some_and(|k| !k.trim().is_empty()) {
             heartbeat();
