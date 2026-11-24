@@ -64,6 +64,18 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   `monitor-publish tokens` the issued tokens (a local journal without the tokens themselves).
   A bound token or a technician's confirmation is the word of a trusted person, not a proof by
   Tether on the machine ([SECURITY.md](SECURITY.md#device-status-health-reports)).
+- **Customer reference.** An enrolment token can name a customer (`monitor-publish token
+  --customer 4711`, or the 4th argument of `scripts/status-token.sh`; 1 to 32 characters
+  `A-Z a-z 0-9 . _ -`). The relay sets it on the device that enrols with the token, also on one
+  that enrols again (the journal says so); a token without one changes nothing, and a device
+  cannot name it. The team summary, the host detail and `GET /api/admin/status/devices` return
+  it; the host list has a Customer column, the search term `customer:` and the field in both
+  exports; `monitor-publish devices --customer` lists one customer's devices. A relay from before
+  this refuses a token with a customer: update tether-api first. It groups devices inside one
+  deployment and is not a security boundary
+  ([docs/health.md](docs/health.md#customer-reference),
+  [SECURITY.md](SECURITY.md#device-status-health-reports)). Separate organisations need separate
+  deployments: [docs/several-organisations.md](docs/several-organisations.md).
 - Checked and not checked: to be filled in at release.
 
 ### 0.6.3 (2026-11-23; files in dist/, ready to publish; frozen)

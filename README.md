@@ -116,6 +116,8 @@ If Tether is useful to you, a star helps others find it.
   [docs/recording.md](docs/recording.md), [docs/cli.md](docs/cli.md),
   [docs/troubleshooting.md](docs/troubleshooting.md), [docs/api.md](docs/api.md),
   [docs/key-rotation.md](docs/key-rotation.md), [docs/upstream.md](docs/upstream.md) (RustDesk pin and upstream review), [docs/download-page.md](docs/download-page.md) (custom download page templates).
+- **Several organisations:** one deployment each; no tenants inside a relay:
+  [docs/several-organisations.md](docs/several-organisations.md).
 - **Scale and HA:** several relays and Kubernetes: [docs/relay-ha.md](docs/relay-ha.md),
   [docs/kubernetes.md](docs/kubernetes.md); performance: [docs/performance.md](docs/performance.md);
   macOS build: [docs/macos.md](docs/macos.md); Mac builds from the PC while the Mac is locked (signed

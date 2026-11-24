@@ -99,7 +99,7 @@ Everything is in `/var/lib/tether-api/status/` (directory `0700`, files `0600`):
 
 | File | Content | If it is lost |
 |---|---|---|
-| `keys.jsonl` | The pins, one line per change: `set` (enrolment, link, unlink, allowing a new claim, a claim taken from an accepted report: uuid, device public key, the token's label and id, time of enrolment, the verified Tether ID, the claimed one, who linked it and when, `no_claim`), `used` (a token issued for one Tether ID was used, with its expiry), `dismissed` and `forgotten` (the key of a device whose link was dismissed released its own pin; kept 180 days, at most 10 000: when full, the oldest goes with a `forgotten` line, also when the file is read at start) and `unpin` (removal); `pin` lines from before are still read. Appended and synced for each change, compacted in the background. | Every device must enrol again, with a valid token ([Locked state](#the-locked-state)). **Back this one up.** |
+| `keys.jsonl` | The pins, one line per change: `set` (enrolment, link, unlink, allowing a new claim, a claim taken from an accepted report: uuid, device public key, the token's label and id, time of enrolment, the verified Tether ID, the claimed one, who linked it and when, `no_claim`, the customer reference), `used` (a token issued for one Tether ID was used, with its expiry), `dismissed` and `forgotten` (the key of a device whose link was dismissed released its own pin; kept 180 days, at most 10 000: when full, the oldest goes with a `forgotten` line, also when the file is read at start) and `unpin` (removal); `pin` lines from before are still read. Appended and synced for each change, compacted in the background. | Every device must enrol again, with a valid token ([Locked state](#the-locked-state)). **Back this one up.** |
 | `revoked.json` | Revoked tokens: `{"<token id>": <its expiry>}`, at most 10 000; an entry is dropped once the token would have expired anyway. Written by the status writer, synced before a revocation is answered. | Revoked tokens that have not expired work again. **Back this one up.** |
 | `<uuid>.json` | The last full report, byte for byte as the agent sent it. | Shown as "No full report yet" until the device posts a full one. |
 | `<uuid>.history.jsonl` | One line per change of a check (`id`, `from`, `to`, `time`, and `at`, the relay's receive time). Kept 90 days and at most 2000 lines. | The history of that device. |
@@ -221,18 +221,23 @@ has a random id and expires after 1 to 30 days. Two kinds:
   A Tether ID they name is only a claim, shown in the host list until a team member links it
   ([Linking an agent to its host](#linking-an-agent-to-its-host)).
 
+Either kind can also carry a **customer reference** (`--customer`, 1 to 32 characters
+`A-Z a-z 0-9 . _ -`): the relay sets it on every device that enrols with the token
+([Customer reference](#customer-reference)). Use one token per customer.
+
 ```bash
 bash scripts/status-token.sh office 7                 # label, days (1 to 30, default 7)
 bash scripts/status-token.sh front-desk 1 123456789   # for that Tether ID only
+bash scripts/status-token.sh example 30 "" 4711       # for customer 4711 ("" = no Tether ID)
 ```
 
 The script builds `tools/monitor-publish` when it is missing and reads the admin key from Tether
 Manage's own key file (`MANAGE_KEYS`, default `%APPDATA%\Tether-Manage\keys.json`). It asks for
 Tether Manage's passphrase, or takes it from `MANAGE_PASSPHRASE`; the passphrase is never an
-argument. The token is printed on standard output, its id, label and expiry on standard error.
+argument. The token is printed on standard output, its id, label, expiry and customer on standard error.
 Give the token to the agent's installer. Treat it like a password for as long as it is valid: see
 [what a token holder can do](../SECURITY.md#device-status-health-reports). The tool keeps a
-journal of the tokens it issued (id, label, expiry, Tether ID; never the token itself) in
+journal of the tokens it issued (id, label, expiry, Tether ID, customer; never the token itself) in
 `monitor-tokens.json` next to the key file; `monitor-publish tokens` lists it and marks expired,
 revoked and partly revoked tokens.
 
@@ -296,8 +301,9 @@ or `409 tether_id is enrolled with another key`) or a reused ID:
 - `monitor-publish remove --uuid <uuid> --relay <relays>` sends an admin-signed
   `DELETE /api/admin/status/<uuid>` to every relay, prints the result per relay ("removed", "not
   enrolled there" or the error) and exits non-zero if one failed. `monitor-publish devices
-  --relay <relays>` lists the enrolled devices (uuid, Tether ID, claimed ID, host name, enrolment
-  and last report): all of them, or with `--token <id>` those of one token.
+  --relay <relays>` lists the enrolled devices (uuid, Tether ID, claimed ID, host name, customer,
+  enrolment and last report): all of them, with `--token <id>` those of one token, with
+  `--customer <ref>` those of one customer.
 - A team member with the `write` permission can do the same from the host list: **Remove from
   health monitoring…** in the host's Health section
   ([Removing a device from the host list](#removing-a-device-from-the-host-list)).
@@ -315,6 +321,39 @@ line each to tether-api's journal on stderr (`status: <uuid> linked to <id> by t
 keeps `linked_by` and `linked_at` of the current link. There is no separate audit log of these
 actions: keep the journal (systemd's) as long as you need that record.
 
+### Customer reference
+
+A device can carry a customer reference, for example `4711`: a label that groups the devices of
+one customer inside this deployment. Only an enrolment token sets it:
+
+- A device that enrols with a token naming a customer gets that customer. The relay keeps it with
+  the pin in `keys.jsonl`.
+- **Changing it:** the same device (same uuid and key) enrolling again with a token that names
+  another customer gets the new one, and tether-api writes `status: customer of <uuid> set to
+  <customer> by token <id>` to its journal. The pin keeps the token it first enrolled with, so
+  `monitor-publish devices --token` still lists it under that one; only the journal line names the
+  token that changed it.
+- A token without a customer changes nothing: a device that has one keeps it.
+- To take a customer away, remove the device ([Removing a device](#removing-a-device)) and let it
+  enrol again with a token without one.
+- **A device cannot set or change it.** Neither the enrolment request nor a report has a field for
+  it; a request or report that names one is refused (`400`, unknown field).
+
+Like everything in the status store it is kept per relay: a device that enrols again on one relay
+only has the new customer there. `monitor-publish devices --customer 4711 --relay <relays>` lists
+one customer's devices. The relay sends every device and the tool keeps those whose customer is
+exactly `4711`.
+
+A relay from before the customer reference refuses a token that names one
+(`401 enrollment token: not an enrollment token`). Update tether-api on every relay before you
+issue such tokens.
+
+The customer reference is not a security boundary: every team member sees every device, whatever
+its customer, and whoever holds a valid token and knows a device's uuid and public key can move it
+to that token's customer ([SECURITY.md](../SECURITY.md#device-status-health-reports)). For
+organisations whose technicians must not see each other's machines, see
+[several-organisations.md](several-organisations.md).
+
 ## For the technician
 
 Health needs the technician to be in the team roster ([management.md](management.md)), because
@@ -328,8 +367,9 @@ the team dialog reads it too. Search terms and the Needs attention view are also
 
 The list shows a dot and a short text per host; the words are there so a state never rests on
 colour alone. The column appears as soon as any host has health data and gets wider with the
-window. Products and Agent are added in a wide window. Click the **Health** header to sort the
-worst hosts first.
+window. Products, Agent and Customer are added in a wide window; Customer shows the host's
+[customer reference](#customer-reference), or "—" without one. Click the **Health** header to sort
+the worst hosts first, the **Customer** header to sort by customer.
 
 | Shown | Meaning |
 |---|---|
@@ -419,6 +459,7 @@ team, older ones included; the Rules dialog says so in one line.
 | `role:server` `client` `single` | A detected product role |
 | `check:backup` | A check whose id contains the text is not OK |
 | `agent:0.1` `agent:none` | Agent version starting with the text; `none` = no agent |
+| `customer:47` `customer:none` | A [customer reference](#customer-reference) starting with the text, in any case (`customer:47` finds `4711`, `customer:711` does not); `none` = no agent, as `agent:none`. A host whose agent has no customer matches neither. |
 | `since:3d` | Warning or critical for at least that long (earliest failing check), units `m h d w` |
 
 Examples: `health:crit -is:offline` (critical and online, so a connection is possible),
@@ -437,7 +478,8 @@ saved searches are shared with the whole team. It appears when the list has heal
 ### The Health section
 
 Select a host: the detail panel has a Health section, loaded from the relay when the host is
-selected and again when a newer report arrives.
+selected and again when a newer report arrives. Under the line with the report time and the agent
+version it says "Customer 4711" when the device has a customer reference.
 
 - The failing checks come first, grouped by their group (critical before warning), each with the
   value, since when it fails and the hint on how to fix it.
@@ -455,8 +497,8 @@ toolbar opens the same information for the connected host.
 ### Export
 
 **Export** in the host list: with health data, the JSON export gets a `health` object per host
-(state, counts, products, agent, time of last report, failing checks) and the CSV the columns
-`health, crit, warn, unknown, setup, products, agent, reported`. The format **Failing checks
+(state, counts, products, agent, customer when there is one, time of last report, failing checks)
+and the CSV the columns `health, crit, warn, unknown, setup, products, agent, customer, reported`. The format **Failing checks
 (CSV)** writes one row per host and failing check (`id,name,uuid,check,state,since`) to
 `tether-health-faults-<date>.csv`. The default scope with health data is the hosts shown.
 The exports hold names and product names from your fleet; handle them like the host list.
@@ -544,8 +586,10 @@ Enrolment, the signature, the answers and the status codes: [api.md](api.md#devi
   post is signed; a device key is never accepted as an admin or member key and the reverse.
 - **The token** allows enrolling new devices until it expires or is revoked; one issued for a
   Tether ID enrols one device per relay, with that ID (two relays, two devices: a [link
-  conflict](#link-conflicts) the app shows instead of choosing). It cannot read anything, change an enrolled device or
-  remove one. A device's Tether ID is shown only when a token was issued for it or a team member
+  conflict](#link-conflicts) the app shows instead of choosing). It cannot read anything or
+  remove a device. A token that names a customer sets that customer also on a device that is
+  already enrolled, when that device enrols with it again; doing that needs the device's uuid and
+  public key ([Customer reference](#customer-reference)). A device's Tether ID is shown only when a token was issued for it or a team member
   confirmed it. Both are the word of a trusted person, not a proof by Tether on that machine:
   [SECURITY.md](../SECURITY.md#device-status-health-reports).
 - **Who linked a host** (the member's roster name and the time) is stored with the pin on the

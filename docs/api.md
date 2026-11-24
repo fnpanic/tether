@@ -205,7 +205,7 @@ keeps blocking replays in memory.
 | `DELETE /api/admin/status/<uuid>` | – | `204`: the device's pin (with its link or claim), last report and history are removed (journal line `status: pin of <uuid> removed by an admin`). `404` for an invalid or unknown uuid. `503` while `STATUS=off` or the status store is locked. See [Device status](#device-status-health-reports). |
 | `POST /api/admin/status/revoke` | `{"id":"<token id>","exp":<the token's exp>}` | `204`, also when the id is revoked already (the later `exp` is kept). `400 exp has passed` when `exp` is not in the future (an expired token is refused anyway; nothing is stored). The relay refuses that token from then on (`401 token revoked`); devices that enrolled with it stay enrolled. Kept in `status/revoked.json` until `exp`. `400` for a bad id or body, `507 too many revoked tokens` with 10 000 kept (expired ones leave within a minute), `503` as above. |
 | `GET /api/admin/status/revoked` | – | `{"<token id>":<exp>,…}`, the revocations that have not expired. |
-| `GET /api/admin/status/devices[?token=<id>][&after=<uuid>]` | – | The pins, sorted by uuid: `{"devices":[{"uuid","token","label","tether_id","claimed_id","linked_by","linked_at","linked_token","no_claim","host","enrolled","last_seen"}],"next":"<uuid>" \| null}`. Each request looks at no more than 1000 pins: `token` keeps only the pins enrolled with that token among them, so a page can be short or empty while `next` is set. `next`: pass it as `after` for the next page; `null` when no pin follows. `host` (the last full report's) and `last_seen` are `null` before the first post; `token` is `null` for pins from before token ids. `400` for an unknown parameter or a bad value. |
+| `GET /api/admin/status/devices[?token=<id>][&after=<uuid>]` | – | The pins, sorted by uuid: `{"devices":[{"uuid","token","label","tether_id","claimed_id","linked_by","linked_at","linked_token","no_claim","customer","host","enrolled","last_seen"}],"next":"<uuid>" \| null}`; `customer` is `null` when none. Each request looks at no more than 1000 pins: `token` keeps only the pins enrolled with that token among them, so a page can be short or empty while `next` is set. `next`: pass it as `after` for the next page; `null` when no pin follows. `host` (the last full report's) and `last_seen` are `null` before the first post; `token` is `null` for pins from before token ids. `400` for an unknown parameter or a bad value. |
 | `PUT /api/admin/team` | team roster (≤ 64 KiB, below) | `204`. Validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600). `{"members":[]}` turns team access off. |
 | `GET /api/admin/team` | – | the roster (`{"members":[]}` when none) |
 
@@ -272,10 +272,14 @@ as its `claimed_id` and shown as a claim only. Reports never change either.
 
 **Enrolment token.** The base64url string, without padding, of the JSON of a
 `tether_trust::envelope::Signed` document signed with an admin key, whose payload is
-`{"purpose":"status-enroll","exp":<unix seconds>,"label":"<1–64 characters, no control characters>","id":"<16–32 [A-Za-z0-9]>","tether_id":"<optional>"}`
+`{"purpose":"status-enroll","exp":<unix seconds>,"label":"<1–64 characters, no control characters>","id":"<16–32 [A-Za-z0-9]>","tether_id":"<optional>","customer":"<optional>"}`
 (unknown fields refused, `id` required). `id` is random; it is what a relay revokes and records
 on each pin made with the token. With `tether_id` (a Tether ID, never starting with `m:`) the token
-is issued for that ID: it enrols one device, which gets exactly that ID. `scripts/status-token.sh`
+is issued for that ID: it enrols one device, which gets exactly that ID. With `customer`
+(1–32 characters `[A-Za-z0-9._-]`, `tether_trust::status::valid_customer`) the relay sets that
+customer reference on the pin of every device that enrols with the token
+([health.md](health.md#customer-reference)); a relay from before the field refuses such a token
+(`401 enrollment token: not an enrollment token`). `scripts/status-token.sh`
 and `tools/monitor-publish token` issue tokens valid 1 to 30 days
 ([health.md](health.md#creating-an-enrolment-token)); the relay accepts one until `exp` or until
 it is revoked, for any number of devices unless it is issued for a Tether ID.
@@ -294,12 +298,16 @@ in the request must be the same); with any other token a `tether_id` in the requ
 pin's `claimed_id`, unless the device's key is dismissed (a member unlinked a pin of that key, still
 there or released by the device itself): then the new pin gets `no_claim` and no claim. Enrolling the same uuid with the same key again is `200` and changes nothing,
 except that a claim is added when the pin has no Tether ID, no claim and no `no_claim`, and a token issued for a
-Tether ID sets it on a pin without one, on its first use only; a pin cannot be replaced by another key.
+Tether ID sets it on a pin without one, on its first use only, and a token with `customer` sets
+that customer, also over another one (when that changes the customer of a pin that existed, the
+journal gets `status: customer of <uuid> set to <customer> by token <id>`); a token without `customer` leaves the pin's customer as it is. A pin
+cannot be replaced by another key. The request has no customer field: a device cannot name its
+customer.
 
 | Status | Body | Meaning |
 |---|---|---|
 | `400` | `bad uuid`, `bad pubkey`, `bad tether_id`, or the JSON error | malformed |
-| `401` | `enrollment token: <reason>` (`signed by an untrusted key`, `expired`, `not an enrollment token`, `bad label`, `bad id`, `bad tether_id`) | token refused |
+| `401` | `enrollment token: <reason>` (`signed by an untrusted key`, `expired`, `not an enrollment token`, `bad label`, `bad id`, `bad tether_id`, `bad customer`) | token refused |
 | `401` | `token revoked` | the token was revoked |
 | `409` | `token is issued for another id` | the request names another `tether_id` than the token |
 | `409` | `token already used` | a token issued for a Tether ID was used by another uuid (or by this one, whose pin was removed since) |
@@ -394,7 +402,7 @@ relay on uninstall.
 Any member of the roster. The summary of every host that has a full report, sorted by uuid:
 ```json
 {"built":1795000200,"hosts":[
- {"uuid":"3f2a9c4e-0b1d-4e57-9d1a-6c2f8a7b5e10","tether_id":"123456789","claimed_id":null,"linked_at":1794999000,"no_claim":false,"last_seen":1795000123,"next":300,"stale":false,
+ {"uuid":"3f2a9c4e-0b1d-4e57-9d1a-6c2f8a7b5e10","tether_id":"123456789","claimed_id":null,"linked_at":1794999000,"no_claim":false,"customer":"4711","last_seen":1795000123,"next":300,"stale":false,
   "host":"FRONT-DESK-1","agent":"0.1.0","overall":"crit",
   "counts":{"ok":31,"warn":2,"crit":1,"unknown":3,"setup":1},
   "products":[{"name":"Example App","version":"26.3.2","role":"server"}],
@@ -402,7 +410,9 @@ Any member of the roster. The summary of every host that has a full report, sort
 ```
 `tether_id` is the verified one (`null` when none), `claimed_id` the one the device claims and nobody
 confirmed yet (`null` when none; never both), `linked_at` when the verified link was made, `no_claim`
-`true` when a member dismissed its link (it claims nothing until a member allows a new claim); `last_seen` and `built` are the relay's unix time. An entry holds at most 8 products and 10 faults; when more were reported it also has
+`true` when a member dismissed its link (it claims nothing until a member allows a new claim),
+`customer` the customer reference an enrolment token set (`null` when none; a relay from before
+it sends no `customer` field); `last_seen` and `built` are the relay's unix time. An entry holds at most 8 products and 10 faults; when more were reported it also has
 `more_products` and `more_faults` with the number left out (the host's report has them all). The
 summary is rebuilt at most every 30 s from a snapshot and sent from `status/summary.json`, so
 `stale` is as of that build. `ETag` is `"<16 hex>"`, the first 16 hex digits of the SHA-256 over
@@ -411,7 +421,7 @@ the `hosts` array, so an unchanged summary keeps its tag and answers `304` to `I
 ### `GET /api/team/status/<uuid>` (member-signed)
 
 ```json
-{"uuid":"…","tether_id":"123456789","claimed_id":null,"enrolled":1794990000,"linked_by":"Anna Berger","linked_at":1794999000,"linked_token":null,"no_claim":false,
+{"uuid":"…","tether_id":"123456789","claimed_id":null,"enrolled":1794990000,"linked_by":"Anna Berger","linked_at":1794999000,"linked_token":null,"no_claim":false,"customer":"4711",
  "last_seen":1795000123,"next":300,"stale":false,
  "report":{…the last full report, byte for byte…},
  "history":[{"id":"app/db-service","from":"ok","to":"crit","time":"2026-11-23T07:55:00Z","at":1795000100}]}
@@ -420,7 +430,7 @@ the `hosts` array, so an unchanged summary keeps its tag and answers `304` to `I
 never posted. `linked_by` and `linked_at` say who confirmed the Tether ID and when the link was
 made; for a link by a token issued for that ID `linked_by` is `null` and `linked_token` is that
 token's id. All three are `null` without a Tether ID. `no_claim` is `true` after a member
-dismissed the link. `history` is the state changes of the last 90 days, oldest first; `at` is the
+dismissed the link. `customer` is the customer reference, `null` when none. `history` is the state changes of the last 90 days, oldest first; `at` is the
 relay's time when the change was stored. `404` for an invalid uuid or one that is not enrolled.
 
 ### Storage, limits and settings

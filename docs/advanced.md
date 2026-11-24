@@ -127,6 +127,7 @@ Space means AND. Every part is case-insensitive.
 | `role:server` `client` `single` | A detected product role. Before health data this was a plain word (in tag rules it still is); `#role:server` still finds that tag |
 | `check:backup` | A check whose id contains the text is not OK |
 | `agent:0.1` `agent:none` | Monitor agent version; `agent:none` as `health:none` |
+| `customer:47` `customer:none` | The customer reference set by the agent's enrolment token, starting with the text, in any case ([health.md](health.md#customer-reference)); `customer:none` as `health:none`, so a host whose agent has no customer matches neither |
 | `since:3d` | Warning or critical for at least that long (earliest failing check), units `m h d w` |
 
 The health terms work in the search box and in saved searches. In a tag rule they are plain words,

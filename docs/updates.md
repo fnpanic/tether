@@ -337,15 +337,17 @@ sources changed, and ask the passphrase) publishes it:
   A missing `monitor-serials.json` means no floor: keep the file with the key file, and copy it
   along when another machine takes over publishing.
 
-- `token --label <text> --days <1-30> [--tether-id <id>]` prints an enrolment token; with a
-  Tether ID it enrols one device, with that ID. Its id, label and expiry go to stderr and to the
+- `token --label <text> --days <1-30> [--tether-id <id>] [--customer <ref>]` prints an enrolment
+  token; with a Tether ID it enrols one device, with that ID; with a customer reference (1 to 32
+  characters `A-Z a-z 0-9 . _ -`) the relay sets it on the devices that enrol with it
+  ([health.md](health.md#customer-reference)). Its id, label, expiry and customer go to stderr and to the
   journal `monitor-tokens.json` next to the key file (never the token itself); `tokens` lists the
   journal and marks expired and revoked tokens.
 - `revoke (--id <token id> [--exp <unix>] | --token-file <path> | --token -) --relay <relays>`
   revokes a token on every relay (expiry from the journal or from the token itself; an `--exp`
   earlier than the journal's is refused; an expired token is refused). It prints "revoked on N of M
   relays" and marks the journal "revoked" only when every relay accepted, else "partly revoked". Devices that enrolled with it stay enrolled: `devices [--token
-  <id>] --relay <relays>` lists the enrolled devices, `remove --uuid <uuid> --relay <relays>`
+  <id>] [--customer <ref>] --relay <relays>` lists the enrolled devices, `remove --uuid <uuid> --relay <relays>`
   removes one from every relay. Each prints one line per relay and exits non-zero if one failed
   ([health.md](health.md#revoking-a-token)).
 
