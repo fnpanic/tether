@@ -415,6 +415,72 @@ fn session_restart_remote(key: String) -> R<()> {
     with_session(&key, |s| s.restart_remote_device())
 }
 
+// --- health monitoring agent through a session (spec 6.4, 7.4)
+
+use librustdesk::ui::agent::{Action as AgentAction, TetherAgentAnswer};
+
+/// A host that knows the message answers `status` at once; no answer within this is an old host.
+const AGENT_STATUS_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What `ask_agent` needs from a session (a fake in the tests).
+trait AgentPeer {
+    fn ask_agent(&self, action: AgentAction) -> hbb_common::tokio::sync::oneshot::Receiver<TetherAgentAnswer>;
+}
+
+impl AgentPeer for core::TauriSession {
+    fn ask_agent(&self, action: AgentAction) -> hbb_common::tokio::sync::oneshot::Receiver<TetherAgentAnswer> {
+        core::TauriSession::ask_agent(self, action)
+    }
+}
+
+/// `status` answers at once; install and remove wait for the host's own bound and a little more.
+fn agent_wait(action: AgentAction, status_wait: std::time::Duration) -> std::time::Duration {
+    match action {
+        AgentAction::Status => status_wait,
+        _ => librustdesk::ui::agent::HOST_WAIT + status_wait,
+    }
+}
+
+fn to_wire(a: crate::agent::AgentAnswer) -> TetherAgentAnswer {
+    TetherAgentAnswer { state: a.state, version: a.version, installed_by: a.installed_by, detail: a.detail, at: a.at, ..Default::default() }
+}
+
+fn from_wire(a: TetherAgentAnswer) -> crate::agent::AgentAnswer {
+    crate::agent::AgentAnswer { state: a.state, version: a.version, installed_by: a.installed_by, detail: a.detail, at: a.at }
+}
+
+/// Host: the core's handler for a technician's request (set in `main`, every process).
+pub fn host_agent(action: AgentAction) -> TetherAgentAnswer {
+    to_wire(match action {
+        AgentAction::Status => crate::agent::status(),
+        AgentAction::Install => crate::agent::request(crate::agent::Action::Install),
+        AgentAction::Remove => crate::agent::request(crate::agent::Action::Remove),
+    })
+}
+
+async fn ask_agent(peer: &impl AgentPeer, action: &str, status_wait: std::time::Duration) -> R<crate::agent::AgentAnswer> {
+    let action = match action {
+        "status" => AgentAction::Status,
+        "install" => AgentAction::Install,
+        "remove" => AgentAction::Remove,
+        _ => return Err("unknown action".to_owned()),
+    };
+    let rx = peer.ask_agent(action);
+    Ok(match hbb_common::tokio::time::timeout(agent_wait(action, status_wait), rx).await {
+        Ok(Ok(a)) => from_wire(a),
+        Ok(Err(_)) => crate::agent::AgentAnswer { state: "failed".into(), detail: "the session ended or asked again".into(), ..Default::default() },
+        Err(_) if action == AgentAction::Status => crate::agent::AgentAnswer { state: "too-old".into(), detail: "Tether on this computer is too old (needs 0.7.0)".into(), ..Default::default() },
+        Err(_) => crate::agent::AgentAnswer { state: "failed".into(), detail: "no answer from the remote computer".into(), ..Default::default() },
+    })
+}
+
+/// The session's health agent dialog: `action` is `status`, `install` or `remove`.
+#[tauri::command]
+async fn session_agent(key: String, action: String) -> R<crate::agent::AgentAnswer> {
+    let s = core::session(&key).ok_or_else(|| "Not connected to the remote device.".to_owned())?;
+    ask_agent(&s, &action, AGENT_STATUS_WAIT).await
+}
+
 /// The webview drew a natively decoded picture (see `TauriSink::video`).
 #[tauri::command]
 fn session_frame_drawn(key: String) {
@@ -693,6 +759,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         session_get_toggle,
         session_chat,
         session_restart_remote,
+        session_agent,
         session_webcodecs_failed,
         session_frame_drawn,
         session_codec,
@@ -1067,6 +1134,185 @@ mod tests {
         assert!(super::session_webcodecs_failed("k".into(), 8, 0).is_err());
         assert!(super::session_webcodecs_failed("k".into(), 255, 0).is_err());
         assert!(super::session_key("k".into(), "KeyA".into(), true, 0, Some("x".repeat(33))).is_err());
+    }
+
+    // --- health agent through a session (viewer command, host wiring, core message handling)
+
+    use librustdesk::ui::agent::{self as core_agent, Action, InFlight, TetherAgentAnswer, TetherAgentRequest};
+    use std::{cell::RefCell, time::Duration};
+
+    fn rt() -> hbb_common::tokio::runtime::Runtime {
+        hbb_common::tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap()
+    }
+
+    /// A session: records what was asked and answers (or never answers, like an old host).
+    struct FakePeer {
+        asked: RefCell<Vec<Action>>,
+        reply: Option<TetherAgentAnswer>,
+        keep: RefCell<Vec<hbb_common::tokio::sync::oneshot::Sender<TetherAgentAnswer>>>,
+    }
+
+    impl FakePeer {
+        fn new(reply: Option<TetherAgentAnswer>) -> Self {
+            Self { asked: RefCell::default(), reply, keep: RefCell::default() }
+        }
+    }
+
+    impl super::AgentPeer for FakePeer {
+        fn ask_agent(&self, action: Action) -> hbb_common::tokio::sync::oneshot::Receiver<TetherAgentAnswer> {
+            self.asked.borrow_mut().push(action);
+            let (tx, rx) = hbb_common::tokio::sync::oneshot::channel();
+            match &self.reply {
+                Some(a) => drop(tx.send(a.clone())),
+                None => self.keep.borrow_mut().push(tx),
+            }
+            rx
+        }
+    }
+
+    fn wire(state: &str, detail: &str) -> TetherAgentAnswer {
+        TetherAgentAnswer { state: state.into(), version: "0.2.0".into(), installed_by: "session".into(), detail: detail.into(), at: 7, ..Default::default() }
+    }
+
+    #[test]
+    fn session_agent_sends_only_a_known_action() {
+        let peer = FakePeer::new(Some(wire("installed", "")));
+        for bad in ["", "upgrade", "Install", "install ", "status;remove", "../tether-monitor.exe", "https://x/y.exe"] {
+            assert!(rt().block_on(super::ask_agent(&peer, bad, Duration::from_millis(50))).is_err(), "{bad}");
+        }
+        assert!(peer.asked.borrow().is_empty(), "nothing sent for an unknown action");
+        for (s, a) in [("status", Action::Status), ("install", Action::Install), ("remove", Action::Remove)] {
+            rt().block_on(super::ask_agent(&peer, s, Duration::from_millis(50))).unwrap();
+            assert_eq!(peer.asked.borrow().last(), Some(&a));
+        }
+    }
+
+    #[test]
+    fn session_agent_returns_the_hosts_answer() {
+        let peer = FakePeer::new(Some(wire("installed", "Installed 0.2.0")));
+        let a = rt().block_on(super::ask_agent(&peer, "install", Duration::from_millis(50))).unwrap();
+        assert_eq!(a, crate::agent::AgentAnswer { state: "installed".into(), version: "0.2.0".into(), installed_by: "session".into(), detail: "Installed 0.2.0".into(), at: 7 });
+    }
+
+    #[test]
+    fn session_agent_old_host_is_too_old() {
+        // An old host ignores the message: no answer within the short wait.
+        let peer = FakePeer::new(None);
+        let a = rt().block_on(super::ask_agent(&peer, "status", Duration::from_millis(50))).unwrap();
+        assert_eq!(a.state, "too-old");
+        assert!(a.detail.contains("too old"), "{}", a.detail);
+        assert_eq!(super::AGENT_STATUS_WAIT, Duration::from_secs(10));
+        // An install waits for the host's own bound (3 minutes) and a little more.
+        assert!(super::agent_wait(Action::Install, super::AGENT_STATUS_WAIT) > core_agent::HOST_WAIT);
+        assert_eq!(super::agent_wait(Action::Status, super::AGENT_STATUS_WAIT), super::AGENT_STATUS_WAIT);
+        assert_eq!(core_agent::HOST_WAIT, Duration::from_secs(180));
+    }
+
+    #[test]
+    fn host_wiring_carries_only_the_answer_fields() {
+        let a = crate::agent::AgentAnswer { state: "failed".into(), version: "0.2.0".into(), installed_by: "policy".into(), detail: "token expired".into(), at: 9 };
+        let w = super::to_wire(a.clone());
+        assert_eq!(w, TetherAgentAnswer { state: "failed".into(), version: "0.2.0".into(), installed_by: "policy".into(), detail: "token expired".into(), at: 9, ..Default::default() });
+        assert_eq!(super::from_wire(w), a);
+        // The host's own answer on this machine comes from agent.rs (a test is not Tether's
+        // LocalSystem service, or not Windows).
+        let st = super::host_agent(Action::Status);
+        assert!(matches!(st.state.as_str(), "needs-service" | "not-supported"), "{}", st.state);
+    }
+
+    fn request(action: i32) -> TetherAgentRequest {
+        let mut r = TetherAgentRequest::new();
+        r.action = hbb_common::protobuf::EnumOrUnknown::from_i32(action);
+        r
+    }
+
+    #[test]
+    fn core_accepts_a_request_only_after_login_with_control() {
+        // Before login: nothing, not even an answer.
+        assert_eq!(core_agent::check(&request(1), false, true), Err(None));
+        assert_eq!(core_agent::check(&request(1), false, false), Err(None));
+        // Logged in without control (view only, or the permission switched off): refused.
+        let refused = core_agent::check(&request(1), true, false).unwrap_err().unwrap();
+        assert_eq!(refused.state, "not-allowed");
+        assert!(refused.detail.contains("control"), "{}", refused.detail);
+        assert!(core_agent::check(&request(0), true, false).is_err());
+        // An action outside the closed set (a newer viewer): refused, never run.
+        let unknown = core_agent::check(&request(7), true, true).unwrap_err().unwrap();
+        assert_eq!(unknown.state, "not-supported");
+        assert_eq!(core_agent::check(&request(0), true, true), Ok(Action::Status));
+        assert_eq!(core_agent::check(&request(1), true, true), Ok(Action::Install));
+        assert_eq!(core_agent::check(&request(2), true, true), Ok(Action::Remove));
+    }
+
+    #[test]
+    fn core_message_parses_and_old_peers_skip_it() {
+        use hbb_common::protobuf::Message as _;
+        use librustdesk::ui::agent::{message, misc, Message};
+        let m = core_agent::request_message(Action::Remove);
+        let back = Message::parse_from_bytes(&m.write_to_bytes().unwrap()).unwrap();
+        let Some(message::Union::Misc(misc)) = back.union else { panic!("not misc") };
+        let Some(misc::Union::TetherAgentRequest(r)) = misc.union else { panic!("not the request") };
+        assert_eq!(core_agent::check(&r, true, true), Ok(Action::Remove));
+        let m = core_agent::answer_message(wire("installed", "x"));
+        let back = Message::parse_from_bytes(&m.write_to_bytes().unwrap()).unwrap();
+        let Some(message::Union::Misc(misc)) = back.union else { panic!("not misc") };
+        assert_eq!(misc.union, Some(misc::Union::TetherAgentAnswer(wire("installed", "x"))));
+        // A Misc variant this build does not know (field 1003, as 1001 and 1002 are to an old
+        // peer) parses to no variant, which every Misc match in the core ignores (`_ => {}`).
+        let mut bytes = core_agent::request_message(Action::Install).write_to_bytes().unwrap();
+        // Field 1001, length-delimited: varint 0x1f4a = ca 3e, then the length 2 (action = 1).
+        let pos = bytes.windows(3).position(|w| w == [0xca, 0x3e, 0x02]).expect("field 1001");
+        bytes[pos] = 0xda; // field 1003: varint 0x1f5a = da 3e
+        let old = Message::parse_from_bytes(&bytes).unwrap();
+        let Some(message::Union::Misc(misc)) = old.union else { panic!("not misc") };
+        assert_eq!(misc.union, None);
+    }
+
+    #[test]
+    fn core_one_request_in_flight_per_connection() {
+        let f = InFlight::default();
+        let g = f.start().expect("first");
+        assert!(f.clone().start().is_none(), "second while the first runs");
+        drop(g);
+        assert!(f.start().is_some(), "free again");
+    }
+
+    #[test]
+    fn core_waits_for_the_app_at_most_the_bound() {
+        fn slow(_: Action) -> TetherAgentAnswer {
+            std::thread::sleep(Duration::from_millis(400));
+            TetherAgentAnswer { state: "installed".into(), ..Default::default() }
+        }
+        fn quick(a: Action) -> TetherAgentAnswer {
+            TetherAgentAnswer { state: format!("{a:?}"), ..Default::default() }
+        }
+        let rt = hbb_common::tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_time().build().unwrap();
+        // No handler (TetherQS, or an app that does not manage the agent): not supported.
+        assert_eq!(rt.block_on(core_agent::host_answer(Action::Install, None, Duration::from_secs(1))).state, "not-supported");
+        assert_eq!(rt.block_on(core_agent::host_answer(Action::Remove, Some(quick), Duration::from_secs(1))).state, "Remove");
+        let t = std::time::Instant::now();
+        let late = rt.block_on(core_agent::host_answer(Action::Install, Some(slow), Duration::from_millis(50)));
+        assert!(t.elapsed() < Duration::from_millis(300));
+        assert_eq!(late.state, "failed");
+        assert!(late.detail.contains("no answer"), "{}", late.detail);
+    }
+
+    #[test]
+    fn core_audit_record_names_only_action_and_outcome() {
+        assert_eq!(core_agent::audit_info(Action::Status, &wire("installed", "")), None);
+        let a = TetherAgentAnswer { state: "installed".into(), version: "0.2.0".into(), installed_by: "session".into(), detail: "C:\\secret\\path token=abc".into(), at: 5, ..Default::default() };
+        let info = core_agent::audit_info(Action::Install, &a).unwrap();
+        assert_eq!(info, serde_json::json!({"agent": "install", "result": "installed"}));
+        let info = core_agent::audit_info(Action::Remove, &wire("failed", "x")).unwrap();
+        assert_eq!(info, serde_json::json!({"agent": "remove", "result": "failed"}));
+        let r = core_agent::audit_record("123456789".into(), "dXVpZA==".into(), 4, &info);
+        let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["conn_id", "id", "info", "nonce", "typ", "uuid"]);
+        assert_eq!(r["typ"], core_agent::AUDIT_TYP);
+        assert_eq!(core_agent::AUDIT_TYP, 30);
+        assert_eq!(r["conn_id"], 4);
+        assert_eq!(r["info"], r#"{"agent":"remove","result":"failed"}"#);
+        assert_eq!(r["nonce"].as_str().unwrap().len(), 36);
     }
 
     #[test]

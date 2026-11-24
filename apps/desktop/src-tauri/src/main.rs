@@ -69,6 +69,8 @@ fn main() -> ExitCode {
     // Cached admin policy (no network) in every role; it never weakens the settings above.
     policy::init();
     diag::apply_verbose_env();
+    // A technician's health agent request in a session, wherever this process hosts one.
+    librustdesk::ui::agent::set_handler(commands::host_agent);
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = cli::run(&args) {

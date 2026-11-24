@@ -219,7 +219,7 @@ index 625f45d..333ff22 100644
 +[patch."https://github.com/rustdesk-org/webrtc"]
 +webrtc-sctp = { path = "../../crates/webrtc-sctp" }
 diff --git a/libs/base/protos/message.proto b/libs/base/protos/message.proto
-index 5f920bc..fea502d 100644
+index 5f920bc..3ff5de4 100644
 --- a/libs/base/protos/message.proto
 +++ b/libs/base/protos/message.proto
 @@ -31,10 +31,31 @@ message VideoFrame {
@@ -272,6 +272,38 @@ index 5f920bc..fea502d 100644
  }
  
  message OptionMessage {
+@@ -872,9 +897,31 @@ message Misc {
+     // is rebuilt, and held again, the next time it is shown, before any connection names it
+     // by id again, so the shape just selected is always there to give.
+     uint64 request_cursor_data = 39;
++    // Tether: the health monitoring agent (Tether's range, as ReleaseHint = 1001 in rendezvous).
++    TetherAgentRequest tether_agent_request = 1001;
++    TetherAgentAnswer tether_agent_answer = 1002;
+   }
+ }
+ 
++// Tether: viewer -> host. Only an action from this closed set; nothing else travels this way.
++message TetherAgentRequest {
++  enum Action {
++    Status = 0;
++    Install = 1;
++    Remove = 2;
++  }
++  Action action = 1;
++}
++
++// Tether: host -> viewer, the host app's answer (`AgentAnswer` in the desktop's agent.rs).
++message TetherAgentAnswer {
++  string state = 1;
++  string version = 2;
++  string installed_by = 3;
++  string detail = 4;
++  uint64 at = 5;
++}
++
+ message VoiceCallRequest {
+   int64 req_timestamp = 1;
+   // Indicates whether the request is a connect action or a disconnect action.
 diff --git a/libs/base/src/config/keys.rs b/libs/base/src/config/keys.rs
 index 5f5bf8f..1228f95 100644
 --- a/libs/base/src/config/keys.rs
@@ -2393,7 +2425,7 @@ index ea71ca4..fad142a 100644
 +    }
 +}
 diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
-index 1b197a8..65d0ea5 100644
+index 1b197a8..aeccdfd 100644
 --- a/src/client/io_loop.rs
 +++ b/src/client/io_loop.rs
 @@ -14,6 +14,9 @@ use crate::{
@@ -2503,6 +2535,17 @@ index 1b197a8..65d0ea5 100644
                      let display = vf.display as usize;
                      if !self.video_threads.contains_key(&display) {
                          self.new_video_thread(display);
+@@ -2474,6 +2528,10 @@ impl<T: InvokeUiSession> Remote<T> {
+                     Some(misc::Union::FollowCurrentDisplay(d_idx)) => {
+                         self.handler.set_current_display(d_idx);
+                     }
++                    // Tether: the host's answer about its health monitoring agent.
++                    Some(misc::Union::TetherAgentAnswer(a)) => {
++                        self.handler.tether_agent_answer(a);
++                    }
+                     _ => {}
+                 },
+                 Some(message::Union::TestDelay(t)) => {
 diff --git a/src/common.rs b/src/common.rs
 index 4bc5bc2..ae0b4a4 100644
 --- a/src/common.rs
@@ -3675,7 +3718,7 @@ index a88e33a..6cadca4 100644
 +    }
 +}
 diff --git a/src/server/connection.rs b/src/server/connection.rs
-index 4b2eec8..52d1149 100644
+index 4b2eec8..bbd3506 100644
 --- a/src/server/connection.rs
 +++ b/src/server/connection.rs
 @@ -194,6 +194,10 @@ lazy_static::lazy_static! {
@@ -3698,25 +3741,30 @@ index 4b2eec8..52d1149 100644
  
  fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
      if a.len() != b.len() {
-@@ -383,6 +389,8 @@ pub struct Connection {
+@@ -383,6 +389,11 @@ pub struct Connection {
      file: bool,
      restart: bool,
      recording: bool,
 +    #[cfg(feature = "tauri")]
 +    last_record_request: Option<Instant>,
++    // Tether: a health agent request of this connection is running.
++    #[cfg(feature = "tauri")]
++    tether_agent: crate::ui::agent::InFlight,
      block_input: bool,
      privacy_mode: bool,
      control_permissions: Option<ControlPermissions>,
-@@ -598,6 +606,8 @@ impl Connection {
+@@ -598,6 +609,10 @@ impl Connection {
              file: Self::permission(keys::OPTION_ENABLE_FILE_TRANSFER, &control_permissions),
              restart: Self::permission(keys::OPTION_ENABLE_REMOTE_RESTART, &control_permissions),
              recording: Self::permission(keys::OPTION_ENABLE_RECORD_SESSION, &control_permissions),
 +            #[cfg(feature = "tauri")]
 +            last_record_request: None,
++            #[cfg(feature = "tauri")]
++            tether_agent: Default::default(),
              block_input: Self::permission(keys::OPTION_ENABLE_BLOCK_INPUT, &control_permissions),
              privacy_mode: Self::permission(keys::OPTION_ENABLE_PRIVACY_MODE, &control_permissions),
              control_permissions,
-@@ -663,6 +673,11 @@ impl Connection {
+@@ -663,6 +678,11 @@ impl Connection {
              conn_audit_primary_auth: ConnAuditPrimaryAuth::None,
              conn_audit_two_factor: ConnAuditTwoFactor::None,
          };
@@ -3728,7 +3776,7 @@ index 4b2eec8..52d1149 100644
          let addr = hbb_common::try_into_v4(addr);
          if !conn.on_open(addr).await {
              conn.closed = true;
-@@ -847,6 +862,7 @@ impl Connection {
+@@ -847,6 +867,7 @@ impl Connection {
                                  }
                              } else if &name == "file" {
                                  conn.file = enabled;
@@ -3736,7 +3784,7 @@ index 4b2eec8..52d1149 100644
                                  conn.send_permission(Permission::File, enabled).await;
                                  #[cfg(feature = "unix-file-copy-paste")]
                                  if !enabled {
-@@ -864,6 +880,7 @@ impl Connection {
+@@ -864,6 +885,7 @@ impl Connection {
                                  conn.restart = enabled;
                                  conn.send_permission(Permission::Restart, enabled).await;
                              } else if &name == "recording" {
@@ -3744,7 +3792,7 @@ index 4b2eec8..52d1149 100644
                                  conn.recording = enabled;
                                  conn.send_permission(Permission::Recording, enabled).await;
                              } else if &name == "block_input" {
-@@ -910,6 +927,7 @@ impl Connection {
+@@ -910,6 +932,7 @@ impl Connection {
                                  conn.privacy_mode = enabled;
                                  conn.send_permission(Permission::PrivacyMode, enabled).await;
                              }
@@ -3752,7 +3800,7 @@ index 4b2eec8..52d1149 100644
                          }
                          ipc::Data::RawMessage(bytes) => {
                              allow_err!(conn.stream.send_raw(bytes).await);
-@@ -1079,7 +1097,10 @@ impl Connection {
+@@ -1079,7 +1102,10 @@ impl Connection {
                  Some((instant, value)) = rx_video.recv() => {
                      if !conn.video_ack_required {
                          if let Some(message::Union::VideoFrame(vf)) = &value.union {
@@ -3764,7 +3812,7 @@ index 4b2eec8..52d1149 100644
                          }
                      }
                      if let Err(err) = conn.stream.send(&value as &Message).await {
-@@ -1158,6 +1179,11 @@ impl Connection {
+@@ -1158,6 +1184,11 @@ impl Connection {
                              conn.on_close("privacy mode", false).await;
                              break;
                          }
@@ -3776,7 +3824,7 @@ index 4b2eec8..52d1149 100644
                          #[cfg(all(target_os = "windows", feature = "flutter"))]
                          ipc::Data::PrinterData(data) => {
                              if Self::permission(keys::OPTION_ENABLE_REMOTE_PRINTER, &conn.control_permissions) {
-@@ -1260,10 +1286,31 @@ impl Connection {
+@@ -1260,10 +1291,31 @@ impl Connection {
          }
          #[cfg(target_os = "macos")]
          reset_input_ondisconn();
@@ -3808,7 +3856,7 @@ index 4b2eec8..52d1149 100644
                          handle_mouse(
                              &mouse_input.msg,
                              mouse_input.conn_id,
-@@ -1274,6 +1321,9 @@ impl Connection {
+@@ -1274,6 +1326,9 @@ impl Connection {
                          );
                      }
                      MessageInput::Key((mut msg, press)) => {
@@ -3818,7 +3866,7 @@ index 4b2eec8..52d1149 100644
                          // Set the press state to false, use `down` only in `handle_key()`.
                          msg.press = false;
                          if press {
-@@ -1508,6 +1558,17 @@ impl Connection {
+@@ -1508,6 +1563,17 @@ impl Connection {
          if !self.check_whitelist(&addr).await {
              return false;
          }
@@ -3836,7 +3884,51 @@ index 4b2eec8..52d1149 100644
          #[cfg(not(any(target_os = "android", target_os = "ios")))]
          if crate::is_server() && Config::get_option("allow-only-conn-window-open") == "Y" {
              if !crate::check_process("", !crate::platform::is_root()) {
-@@ -1783,6 +1844,12 @@ impl Connection {
+@@ -1624,6 +1690,43 @@ impl Connection {
+         });
+     }
+ 
++    /// Tether: a technician's health agent request (`crate::ui::agent`): only from a logged-in
++    /// remote session with control, one at a time; answered from a task so the session goes on.
++    #[cfg(feature = "tauri")]
++    fn tether_agent_request(&mut self, r: &TetherAgentRequest) {
++        use crate::ui::agent;
++        let mut inner = self.inner.clone();
++        let control = self.is_remote() && self.peer_keyboard_enabled();
++        let action = match agent::check(r, self.authorized, control) {
++            Ok(action) => action,
++            Err(None) => return,
++            Err(Some(refused)) => return inner.send(Arc::new(agent::answer_message(refused))),
++        };
++        let Some(running) = self.tether_agent.start() else {
++            let busy = agent::answer("busy", "another request of this session is running");
++            return inner.send(Arc::new(agent::answer_message(busy)));
++        };
++        log::info!("#{} health agent: {:?} asked in the session", self.inner.id(), action);
++        tokio::spawn(async move {
++            let answer = agent::host_answer(action, agent::handler(), agent::HOST_WAIT).await;
++            drop(running);
++            let info = agent::audit_info(action, &answer);
++            let conn_id = inner.id();
++            inner.send(Arc::new(agent::answer_message(answer)));
++            let Some(info) = info else { return };
++            let url = crate::get_audit_server(
++                Config::get_option("api-server"),
++                Config::get_option("custom-rendezvous-server"),
++                "alarm".to_owned(),
++            );
++            if !url.is_empty() {
++                let v = agent::audit_record(Config::get_id(), crate::encode64(hbb_common::get_uuid()), conn_id, &info);
++                // A relay without the route answers 4xx: logged, the session is not affected.
++                allow_err!(Self::post_audit_async(url, v).await);
++            }
++        });
++    }
++
+     fn post_alarm_audit(&self, typ: AlarmAuditType, info: Value) {
+         let url = crate::get_audit_server(
+             Config::get_option("api-server"),
+@@ -1783,6 +1886,12 @@ impl Connection {
          }
      }
  
@@ -3849,7 +3941,7 @@ index 4b2eec8..52d1149 100644
      pub(super) fn normalize_port_forward_target(pf: &mut PortForward) -> (String, bool) {
          let mut is_rdp = false;
          if pf.host == "RDP" && pf.port == 0 {
-@@ -1932,6 +1999,19 @@ impl Connection {
+@@ -1932,6 +2041,19 @@ impl Connection {
              self.tx_from_authed.clone(),
              self.lr.clone(),
          ));
@@ -3869,7 +3961,7 @@ index 4b2eec8..52d1149 100644
          self.session_last_recv_time = SESSIONS
              .lock()
              .unwrap()
-@@ -2212,6 +2292,9 @@ impl Connection {
+@@ -2212,6 +2334,9 @@ impl Connection {
                      dir
                  );
              }
@@ -3879,7 +3971,7 @@ index 4b2eec8..52d1149 100644
              let dir = if is_allowed_dir { &dir } else { "" };
              if !wait_session_id_confirm {
                  self.read_dir(dir, show_hidden);
-@@ -2233,9 +2316,49 @@ impl Connection {
+@@ -2233,9 +2358,49 @@ impl Connection {
                  self.try_sub_monitor_services();
              }
          }
@@ -3929,7 +4021,7 @@ index 4b2eec8..52d1149 100644
      fn try_sub_camera_displays(&mut self) {
          if let Some(s) = self.server.upgrade() {
              let mut s = s.write().unwrap();
-@@ -2890,6 +3013,11 @@ impl Connection {
+@@ -2890,6 +3055,11 @@ impl Connection {
              // Move the CloseReason forward, as this message needs to be received when unauthorized, especially for kcp.
              if let Some(misc::Union::CloseReason(s)) = &misc.union {
                  log::info!("receive close reason: {}", s);
@@ -3941,7 +4033,7 @@ index 4b2eec8..52d1149 100644
                  self.on_close("Peer close", true).await;
                  raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
                  return false;
-@@ -2970,6 +3098,11 @@ impl Connection {
+@@ -2970,6 +3140,11 @@ impl Connection {
                          sleep(1.).await;
                          return false;
                      }
@@ -3953,7 +4045,7 @@ index 4b2eec8..52d1149 100644
                      let (addr, _is_rdp) = Self::normalize_port_forward_target(&mut pf);
                      self.port_forward_address = addr;
                  }
-@@ -3040,7 +3173,21 @@ impl Connection {
+@@ -3040,7 +3215,21 @@ impl Connection {
                  crate::get_builtin_option(keys::OPTION_ALLOW_LOGON_SCREEN_PASSWORD) == "Y"
                      && is_logon();
  
@@ -3976,7 +4068,7 @@ index 4b2eec8..52d1149 100644
                  || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()
              {
                  #[cfg(not(any(target_os = "android", target_os = "ios")))]
-@@ -3198,6 +3345,10 @@ impl Connection {
+@@ -3198,6 +3387,10 @@ impl Connection {
                      if self.is_authed_view_camera_conn() {
                          return true;
                      }
@@ -3987,7 +4079,7 @@ index 4b2eec8..52d1149 100644
                      #[cfg(any(target_os = "android", target_os = "ios"))]
                      if let Err(e) = call_main_service_pointer_input("mouse", me.mask, me.x, me.y) {
                          log::debug!("call_main_service_pointer_input fail:{}", e);
-@@ -3334,6 +3485,11 @@ impl Connection {
+@@ -3334,6 +3527,11 @@ impl Connection {
                      if self.is_authed_view_camera_conn() {
                          return true;
                      }
@@ -3999,7 +4091,7 @@ index 4b2eec8..52d1149 100644
                      if self.peer_keyboard_enabled() {
                          if is_enter(&me) {
                              CLICK_TIME.store(get_time(), Ordering::SeqCst);
-@@ -3635,6 +3791,67 @@ impl Connection {
+@@ -3635,6 +3833,67 @@ impl Connection {
                                  }
                              }
                          }
@@ -4067,7 +4159,7 @@ index 4b2eec8..52d1149 100644
                          match fa.union {
                              Some(file_action::Union::ReadEmptyDirs(rd)) => {
                                  self.read_empty_dirs(&rd.path, rd.include_hidden);
-@@ -4028,10 +4245,21 @@ impl Connection {
+@@ -4028,10 +4287,21 @@ impl Connection {
                          .lock()
                          .unwrap()
                          .user_auto_adjust_fps(self.inner.id(), fps),
@@ -4093,7 +4185,19 @@ index 4b2eec8..52d1149 100644
                      #[cfg(windows)]
                      Some(misc::Union::SelectedSid(sid)) => {
                          if let Some(current_process_sid) =
-@@ -4689,6 +4917,10 @@ impl Connection {
+@@ -4081,6 +4351,11 @@ impl Connection {
+                             }
+                         }
+                     }
++                    // Tether: the technician asks about the health monitoring agent.
++                    #[cfg(feature = "tauri")]
++                    Some(misc::Union::TetherAgentRequest(r)) => {
++                        self.tether_agent_request(&r);
++                    }
+                     _ => {}
+                 },
+                 Some(message::Union::AudioFrame(frame)) => {
+@@ -4689,6 +4964,10 @@ impl Connection {
          let mut err;
          if !self.keyboard {
              err = "No permission".to_string();
@@ -4104,7 +4208,7 @@ index 4b2eec8..52d1149 100644
          } else {
              err = "No need to elevate".to_string();
              if !crate::platform::is_installed() && !portable_client::running() {
-@@ -5306,6 +5538,7 @@ impl Connection {
+@@ -5306,6 +5585,7 @@ impl Connection {
              return;
          }
          self.closed = true;
@@ -4112,7 +4216,7 @@ index 4b2eec8..52d1149 100644
          // If voice A,B -> C, and A,B has voice call
          // B disconnects, C will reset the voice call input.
          //
-@@ -5354,6 +5587,10 @@ impl Connection {
+@@ -5354,6 +5634,10 @@ impl Connection {
          msg_out.set_misc(misc);
          self.send(msg_out).await;
          raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
@@ -4123,7 +4227,7 @@ index 4b2eec8..52d1149 100644
      }
  
      async fn handle_read_job_init_result(
-@@ -5811,6 +6048,90 @@ impl Connection {
+@@ -5811,6 +6095,90 @@ impl Connection {
          }
      }
  
@@ -4214,7 +4318,15 @@ index 4b2eec8..52d1149 100644
      fn is_authed_remote_conn(&self) -> bool {
          if let Some(id) = self.authed_conn_id.as_ref() {
              return id.conn_type() == AuthConnType::Remote;
-@@ -7233,6 +7554,13 @@ mod test {
+@@ -6553,6 +6921,7 @@ pub enum AlarmAuditType {
+     TerminalOsLoginConcurrency = 8,
+     SessionScopeViolation = 9,
+     IdWhitelist = 10,
++    // Tether: 30 is the health agent's install or remove (`crate::ui::agent::AUDIT_TYP`).
+ }
+ 
+ pub enum FileAuditType {
+@@ -7233,6 +7602,13 @@ mod test {
      // test that admits connections holds this first; a poisoned lock is still a lock.
      static UNAUTHORIZED_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
  
@@ -4228,7 +4340,7 @@ index 4b2eec8..52d1149 100644
      fn unauthorized_count() -> usize {
          UNAUTHORIZED_CONNS.lock().unwrap().len()
      }
-@@ -7901,3 +8229,181 @@ mod test {
+@@ -7901,3 +8277,181 @@ mod test {
          assert!(!replaced_by(&conn(3, remote, key(7, "other")), 2, &mine));
      }
  }
@@ -6954,6 +7066,166 @@ index 50eb3e2..008ddf7 100644
          (CodecFormat::H264, 3),
          (CodecFormat::H265, 3),
      ] {
+diff --git a/src/tauri_ui/agent.rs b/src/tauri_ui/agent.rs
+new file mode 100644
+index 0000000..fa4dbb8
+--- /dev/null
++++ b/src/tauri_ui/agent.rs
+@@ -0,0 +1,154 @@
++//! Tether: the health monitoring agent through a session (`Misc` `TetherAgentRequest` and
++//! `TetherAgentAnswer`, message.proto).
++//!
++//! Host (`server/connection.rs`): a request carries only an action from a closed set; it is taken
++//! only from a logged-in remote session with the control permission, one at a time per
++//! connection, and handed to the app's [`Handler`] (set by the desktop app; TetherQS sets none, so
++//! it answers `not-supported`), which is waited for at most [`HOST_WAIT`]. Install and remove are
++//! posted to the session audit log as an alarm record naming only the action and the outcome.
++//!
++//! Viewer: [`Session::ask_agent`] sends the request; the answer arrives through
++//! `InvokeUiSession::tether_agent_answer`. A host without this message ignores it (an unknown
++//! `Misc` variant parses to none and is skipped), so the viewer bounds its own wait.
++
++use std::{
++    sync::{
++        atomic::{AtomicBool, Ordering},
++        Arc, OnceLock,
++    },
++    time::Duration,
++};
++
++pub use base::message_proto::{
++    message, misc, tether_agent_request::Action, Message, Misc, TetherAgentAnswer,
++    TetherAgentRequest,
++};
++use hbb_common::tokio::{self, sync::oneshot};
++use serde_json::{json, Value};
++
++use super::TauriHandler;
++use crate::{client::Interface, ui_session_interface::Session};
++
++/// The app's answer to an action (runs on a blocking thread; may take minutes).
++pub type Handler = fn(Action) -> TetherAgentAnswer;
++
++static HANDLER: OnceLock<Handler> = OnceLock::new();
++
++/// Host: how long a connection waits for the app's answer.
++pub const HOST_WAIT: Duration = Duration::from_secs(180);
++
++/// `typ` of the alarm audit record (`POST /api/audit/alarm`, docs/api.md). The relay takes 0-31;
++/// upstream's `AlarmAuditType` uses 0-10, so Tether's starts from the top.
++pub const AUDIT_TYP: i8 = 30;
++
++/// Set once by the app, in every process that may host a session.
++pub fn set_handler(f: Handler) {
++    HANDLER.set(f).ok();
++}
++
++pub(crate) fn handler() -> Option<Handler> {
++    HANDLER.get().copied()
++}
++
++pub fn answer(state: &str, detail: &str) -> TetherAgentAnswer {
++    TetherAgentAnswer { state: state.into(), detail: detail.into(), ..Default::default() }
++}
++
++/// Host: the action a connection may ask for. `Err(None)`: not logged in, no answer at all;
++/// `Err(Some(_))`: the refusal to send back.
++pub fn check(r: &TetherAgentRequest, authorized: bool, control: bool) -> Result<Action, Option<TetherAgentAnswer>> {
++    if !authorized {
++        return Err(None);
++    }
++    let Ok(action) = r.action.enum_value() else {
++        return Err(Some(answer("not-supported", "unknown request")));
++    };
++    if !control {
++        return Err(Some(answer("not-allowed", "needs the control permission in this session")));
++    }
++    Ok(action)
++}
++
++/// Host: at most one request per connection at a time.
++#[derive(Clone, Default)]
++pub struct InFlight(Arc<AtomicBool>);
++
++/// Frees its [`InFlight`] when dropped.
++pub struct InFlightGuard(Arc<AtomicBool>);
++
++impl InFlight {
++    pub fn start(&self) -> Option<InFlightGuard> {
++        (!self.0.swap(true, Ordering::AcqRel)).then(|| InFlightGuard(self.0.clone()))
++    }
++}
++
++impl Drop for InFlightGuard {
++    fn drop(&mut self) {
++        self.0.store(false, Ordering::Release);
++    }
++}
++
++/// Host: the app's answer, or a failure after `wait` (the app's action itself goes on; the app
++/// answers `busy` to the next request until it is done).
++pub async fn host_answer(action: Action, handler: Option<Handler>, wait: Duration) -> TetherAgentAnswer {
++    let Some(f) = handler else {
++        return answer("not-supported", "Tether on this computer does not manage the health monitoring agent");
++    };
++    match tokio::time::timeout(wait, tokio::task::spawn_blocking(move || f(action))).await {
++        Ok(Ok(a)) => a,
++        Ok(Err(_)) => answer("failed", "the action stopped unexpectedly"),
++        Err(_) => answer("failed", "no answer from Tether on this computer in time"),
++    }
++}
++
++/// Host: `info` of the audit record: the action and the resulting state, nothing else (no
++/// version, path or agent output). None for `status`, which changes nothing.
++pub fn audit_info(action: Action, a: &TetherAgentAnswer) -> Option<Value> {
++    let agent = match action {
++        Action::Status => return None,
++        Action::Install => "install",
++        Action::Remove => "remove",
++    };
++    Some(json!({ "agent": agent, "result": a.state }))
++}
++
++/// Host: the alarm record, the fields `Connection::post_alarm_audit` posts.
++pub fn audit_record(id: String, uuid: String, conn_id: i32, info: &Value) -> Value {
++    json!({
++        "id": id,
++        "uuid": uuid,
++        "typ": AUDIT_TYP,
++        "info": info.to_string(),
++        "conn_id": conn_id,
++        "nonce": uuid::Uuid::new_v4().to_string(),
++    })
++}
++
++fn misc_message(m: Misc) -> Message {
++    let mut msg = Message::new();
++    msg.set_misc(m);
++    msg
++}
++
++pub fn request_message(action: Action) -> Message {
++    let mut m = Misc::new();
++    m.set_tether_agent_request(TetherAgentRequest { action: action.into(), ..Default::default() });
++    misc_message(m)
++}
++
++pub fn answer_message(a: TetherAgentAnswer) -> Message {
++    let mut m = Misc::new();
++    m.set_tether_agent_answer(a);
++    misc_message(m)
++}
++
++impl Session<TauriHandler> {
++    /// Viewer: asks the host; the answer (if the host knows the message) arrives on the receiver.
++    /// A newer request replaces the waiter of an older one.
++    pub fn ask_agent(&self, action: Action) -> oneshot::Receiver<TetherAgentAnswer> {
++        let (tx, rx) = oneshot::channel();
++        *self.ui_handler.agent.lock().unwrap() = Some(tx);
++        self.send(crate::client::Data::Message(request_message(action)));
++        rx
++    }
++}
 diff --git a/src/tauri_ui/cm.rs b/src/tauri_ui/cm.rs
 new file mode 100644
 index 0000000..ba16801
@@ -7128,15 +7400,16 @@ index 0000000..8911df8
 +}
 diff --git a/src/tauri_ui/mod.rs b/src/tauri_ui/mod.rs
 new file mode 100644
-index 0000000..25a4fa0
+index 0000000..c634f32
 --- /dev/null
 +++ b/src/tauri_ui/mod.rs
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,477 @@
 +//! Tether (Tauri) UI bridge. Replaces the Sciter `ui` module when built with `--features tauri`.
 +//!
 +//! The embedding app installs a [`UiSink`]; every UI callback from the session layer, the
 +//! connection manager and the video path is forwarded to it as JSON events or binary frames.
 +
++pub mod agent;
 +pub mod cm;
 +pub mod files;
 +pub mod remote;
@@ -7610,10 +7883,10 @@ index 0000000..25a4fa0
 +}
 diff --git a/src/tauri_ui/remote.rs b/src/tauri_ui/remote.rs
 new file mode 100644
-index 0000000..1d50cc0
+index 0000000..d967907
 --- /dev/null
 +++ b/src/tauri_ui/remote.rs
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,435 @@
 +use std::{
 +    collections::HashMap,
 +    sync::{
@@ -7640,6 +7913,8 @@ index 0000000..1d50cc0
 +    pub passthrough: Arc<AtomicU8>,
 +    /// Passthrough frames never reach the core's video threads, so they are recorded here.
 +    rec: Arc<Mutex<PassthroughRecording>>,
++    /// Waiter for the host's answer about its health agent (`super::agent`).
++    pub(super) agent: Arc<Mutex<Option<hbb_common::tokio::sync::oneshot::Sender<TetherAgentAnswer>>>>,
 +}
 +
 +#[derive(Default)]
@@ -8013,6 +8288,13 @@ index 0000000..1d50cc0
 +    fn handle_screenshot_resp(&self, _sid: String, _msg: String) {}
 +
 +    fn handle_terminal_response(&self, _response: TerminalResponse) {}
++
++    fn tether_agent_answer(&self, answer: TetherAgentAnswer) {
++        // Only an asked question is answered; an unasked answer is dropped.
++        if let Some(tx) = self.agent.lock().unwrap().take() {
++            tx.send(answer).ok();
++        }
++    }
 +}
 +
 +/// Used by `client/file_trait.rs` on non-flutter builds.
@@ -8057,3 +8339,16 @@ index 64e1370..60651cb 100644
                                  Data::SwitchPermission { name, enabled } => {
                                      // Keep this branch scoped to privacy mode rollback.
                                      // Other CM permission toggles are updated optimistically by the UI itself.
+diff --git a/src/ui_session_interface.rs b/src/ui_session_interface.rs
+index d9146f2..945d681 100644
+--- a/src/ui_session_interface.rs
++++ b/src/ui_session_interface.rs
+@@ -1767,6 +1767,8 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
+     fn printer_request(&self, id: i32, path: String);
+     fn handle_screenshot_resp(&self, sid: String, msg: String);
+     fn handle_terminal_response(&self, response: TerminalResponse);
++    // Tether: the host's answer about its health monitoring agent (tauri_ui/agent.rs).
++    fn tether_agent_answer(&self, _answer: TetherAgentAnswer) {}
+ }
+ 
+ impl<T: InvokeUiSession> Deref for Session<T> {

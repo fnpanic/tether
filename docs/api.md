@@ -113,10 +113,17 @@ conn, connection closed:      {"action":"close","session_id":<u64>,…}
 file, files sent/received:    {"peer_id":"…","type":0,"path":"<folder or file>","is_file":false,
                                "info":"{\"ip\":\"…\",\"name\":\"<technician name>\",\"num\":12,\"files\":[[\"name\",size],…≤10]}",…}
 alarm (whitelist block, …):   {"typ":0,"info":"<JSON text ≤ 1024>",…}
+alarm, health agent:          {"typ":30,"info":"{\"agent\":\"install\",\"result\":\"installed\"}",…}
 ```
 `type` (conn): 0 remote, 1 file transfer, 2 port forward, 3 camera, 4 terminal. `type` (file):
 0 = the host sent files to the technician, 1 = the host received files. `primary_auth`: 1 click,
 2 one-time password, 3 permanent password, 4 switch sides. Optional `conn_audit_ref` (≤ 128).
+`typ` (alarm): 0-10 as upstream's `AlarmAuditType`; 30 = a technician installed or removed the
+health monitoring agent in a remote session (`TetherAgentRequest`, `src/tauri_ui/agent.rs`):
+`agent` is `install` or `remove`, `result` the host's answer state (`installed`, `removed-by-tether`,
+`failed`, `busy`, `not-allowed`, `needs-service`, `not-supported`, …); nothing else (no version,
+path or agent output). `conn_id` ties it to the session's `conn` records. A status request is not
+recorded. A relay that refuses the post only loses the record; the session goes on.
 
 Answers: `204` with an empty body when stored (also when the same `nonce` was stored in the last
 10 minutes: a client retry), `400` invalid (the client drops it), `413` too large, `429` more than
