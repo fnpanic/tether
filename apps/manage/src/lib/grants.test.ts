@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { afterRevoke, grantBadge, grantOf, needsGrant, noGrant, pendingText, revokeOutcome, toRenew, withGrant, AGENT, GRANT, type GrantInfo } from "./grants.ts";
+import { afterRevoke, grantBadge, grantOf, needsGrant, noGrant, pendingText, withoutHealth, revokeOutcome, toRenew, withGrant, AGENT, GRANT, type GrantInfo } from "./grants.ts";
 
 const NOW = 1_800_000_000;
 const g = (o: Partial<GrantInfo>): GrantInfo => ({ status: "valid", id: "abcdefghABCDEFGH", exp: NOW + 200 * 86400, customer: null, made_here: true, renew: false, why: null, ...o });
@@ -43,6 +43,17 @@ test("no grant: needed when health.agent needs one, a group uses its profile's g
   assert.deepEqual(noGrant({}, profile), { line: "no grant", badge: "Needed: health.agent is on-request" });
   assert.deepEqual(noGrant({ [AGENT]: { state: "on", value: "manual" } }, profile), { line: "no grant", badge: null });
   assert.deepEqual(noGrant({ [AGENT]: { state: "on", value: "install" } }, withGrant(profile, "tok")), { line: "no grant of its own: uses the profile's grant", badge: null });
+});
+
+test("no grant: a group whose own health.agent is off has none, even with the profile's grant", () => {
+  const profile = withGrant({ [AGENT]: { state: "on" as const, value: "install" } }, "tok");
+  assert.deepEqual(noGrant({ [AGENT]: { state: "off" } }, profile), { line: "no grant (switched off for this group)", badge: null });
+});
+
+test("a custom app's layer loses the two health features", () => {
+  const rule = { state: "on" as const, value: "x" };
+  assert.deepEqual(withoutHealth({ [AGENT]: rule, [GRANT]: rule, "customer.title": rule }), { layer: { "customer.title": rule }, removed: true });
+  assert.deepEqual(withoutHealth({ "customer.title": rule }), { layer: { "customer.title": rule }, removed: false });
 });
 
 test("pending lines and the revoke result name the grant and the relays", () => {

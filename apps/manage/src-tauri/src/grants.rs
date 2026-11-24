@@ -127,7 +127,7 @@ pub fn info(token: &str, keys: &[VerifyingKey], journal: &[Entry], now: u64) -> 
         Err(e) => (i.status, i.why) = ("invalid", Some(e)),
         Ok(p) if !p.tether_proof => (i.status, i.why) = ("invalid", Some("an ordinary enrolment token, not a grant for agents Tether installs".into())),
         Ok(_) if entry.is_some_and(|e| e.state == GrantState::Replaced && e.revoked_on.is_empty()) => i.status = "replaced",
-        Ok(_) if entry.is_some_and(|e| e.state != GrantState::Active) => i.status = "revoked",
+        Ok(_) if entry.is_some_and(|e| e.state != GrantState::Active || !e.revoked_on.is_empty()) => i.status = "revoked",
         Ok(p) => i.renew = p.exp - now < RENEW_DAYS * 86_400,
     }
     i
@@ -266,9 +266,16 @@ pub fn restore(journal: &mut Journal, b: &Bundle) -> bool {
     changed
 }
 
+/// A relay revoked `id`. An Active entry becomes Revoked: a draft save between computing the targets
+/// and this call may have made a replaced grant current again, and it is revoked on a relay now.
 pub fn mark_revoked_on(journal: &mut Journal, server: &str, id: &str) {
-    if let Some(e) = journal.iter_mut().find(|e| e.id == id && !e.revoked_on.iter().any(|s| s == server)) {
-        e.revoked_on.push(server.into());
+    if let Some(e) = journal.iter_mut().find(|e| e.id == id) {
+        if !e.revoked_on.iter().any(|s| s == server) {
+            e.revoked_on.push(server.into());
+        }
+        if e.state == GrantState::Active {
+            e.state = GrantState::Revoked;
+        }
     }
 }
 
@@ -437,14 +444,45 @@ mod tests {
         j.push(e);
         let (other, e) = create("profile:technician", "", &admin, NOW).unwrap();
         j.push(e);
+        // Another layer's grant that was renewed and still waits for all relays.
+        let (waiting_old, e) = create("profile:customer", "", &admin, NOW).unwrap();
+        j.push(e);
+        let (_, e) = create("profile:customer", "", &admin, NOW).unwrap();
+        retire(&mut j, &waiting_old, "profile:customer", GrantState::Replaced);
+        j.push(e);
+        let waiting_id = peek(&waiting_old).unwrap().id;
         // Revoke after a Renew: the new grant (draft) and the old one (live on the relays).
         assert!(revoke_layer(&mut j, &new, "group:monitored"));
-        assert_eq!(j.iter().map(|e| e.state).collect::<Vec<_>>(), [GrantState::Revoked, GrantState::Revoked, GrantState::Active]);
-        let served = vec![("a".to_owned(), Some(ids_in(&bundle(Some("install"), Some(&old))))), ("b".to_owned(), None)];
-        assert_eq!(targets(&mut j, &served, NOW).len(), 4);
+        assert_eq!(j.iter().map(|e| e.state).collect::<Vec<_>>(), [GrantState::Revoked, GrantState::Revoked, GrantState::Active, GrantState::Replaced, GrantState::Active]);
+        let served = vec![("a".to_owned(), Some(ids_in(&bundle(Some("install"), Some(&old))).into_iter().chain([waiting_id.clone()]).collect())), ("b".to_owned(), None)];
+        let t = targets(&mut j, &served, NOW);
+        assert_eq!(t.len(), 4);
+        assert!(t.iter().all(|t| t.1 != waiting_id), "the other layer's replaced grant waits for all relays");
+        assert_eq!(j[3].waiting, ["a", "b"]);
         assert_eq!(info(&old, &[admin.verifying_key()], &j, NOW).status, "revoked");
         assert_eq!(info(&other, &[admin.verifying_key()], &j, NOW).status, "valid");
         assert!(!revoke_layer(&mut Journal::new(), "junk", "group:monitored"));
+    }
+
+    #[test]
+    fn a_revoke_landing_after_a_draft_save_made_the_grant_current_again_leaves_it_revoked() {
+        let admin = tether_trust::generate_key();
+        let keys = [admin.verifying_key()];
+        let (old, e) = create("group:monitored", "", &admin, NOW).unwrap();
+        let mut j = vec![e];
+        let (_new, e) = create("group:monitored", "", &admin, NOW).unwrap();
+        retire(&mut j, &old, "group:monitored", GrantState::Replaced);
+        j.push(e);
+        let id = peek(&old).unwrap().id;
+        // Targets computed; then a draft save with the old grant makes it Active again; then the revoke lands.
+        assert!(restore(&mut j, &bundle(Some("install"), Some(&old))));
+        mark_revoked_on(&mut j, "a", &id);
+        assert_eq!((j[0].state, j[0].revoked_on.as_slice()), (GrantState::Revoked, ["a".to_owned()].as_slice()));
+        assert_eq!(info(&old, &keys, &j, NOW).status, "revoked");
+        assert!(check(&bundle(Some("install"), Some(&old)), &keys, &j, NOW).unwrap_err().contains("was revoked"));
+        // An Active entry that already has a revocation (a journal written before this fix) is revoked too.
+        j[0].state = GrantState::Active;
+        assert_eq!(info(&old, &keys, &j, NOW).status, "revoked");
     }
 
     #[test]

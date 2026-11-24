@@ -582,12 +582,19 @@ fn policy_save_draft(app: State<App>, bundle: Bundle) -> R<()> {
 }
 
 /// The draft, and in the grant journal: a replaced grant the draft carries again while it is revoked
-/// nowhere is current again (a Renew whose draft was discarded). A damaged journal does not stop the save.
+/// nowhere is current again (a Renew whose draft was discarded), and the grants of a group the draft
+/// no longer has are revoked (sent to every relay with the next publish). A damaged journal does not
+/// stop the save.
 fn save_draft(app: &App, b: &Bundle) -> R<()> {
+    let before = fs::read(app.path("policy/draft.json")).ok().and_then(|raw| serde_json::from_slice::<Bundle>(&raw).ok());
     app.write("policy/draft.json", &serde_json::to_vec_pretty(b).unwrap())?;
     let _g = grants::LOCK.lock().unwrap();
     if let Ok(mut j) = grant_journal(app) {
-        if grants::restore(&mut j, b) {
+        let mut changed = grants::restore(&mut j, b);
+        for (name, g) in before.iter().flat_map(|d| &d.groups).filter(|(n, _)| !b.groups.contains_key(*n)) {
+            changed |= grants::revoke_layer(&mut j, grants::grant_in(&g.overrides).unwrap_or(""), &format!("group:{name}"));
+        }
+        if changed {
             app.write(grants::JOURNAL, &serde_json::to_vec_pretty(&j).unwrap())?;
         }
     }
@@ -3492,6 +3499,21 @@ mod tests {
         save_draft(&app, &with_grant(&old)).unwrap();
         let j = grant_journal(&app).unwrap();
         assert_eq!((j[0].state, j[1].state), (grants::GrantState::Active, grants::GrantState::Replaced));
+    }
+
+    #[test]
+    fn deleting_a_group_revokes_its_grants_for_the_next_publish() {
+        let app = with_relays("group-gone", &[&"http://127.0.0.1:9".to_owned()]);
+        let token = grant_new(&app, "group:monitored", "", None).unwrap();
+        grant_new(&app, "profile:technician", "", None).unwrap();
+        save_draft(&app, &with_grant(&token)).unwrap();
+        assert_eq!(grant_journal(&app).unwrap().iter().map(|e| e.state).collect::<Vec<_>>(), [grants::GrantState::Active, grants::GrantState::Active]);
+        // The group leaves the draft: its grant is revoked (pending on every relay), the profile's one is not.
+        save_draft(&app, &Bundle::default()).unwrap();
+        let j = grant_journal(&app).unwrap();
+        assert_eq!(j.iter().map(|e| e.state).collect::<Vec<_>>(), [grants::GrantState::Revoked, grants::GrantState::Active]);
+        let p = grants::pending(&j, &app.servers(), api::now());
+        assert_eq!((p.len(), p[0]["id"].as_str(), p[0]["layer"].as_str()), (1, Some(grants::peek(&token).unwrap().id.as_str()), Some("group:monitored")));
     }
 
     #[test]

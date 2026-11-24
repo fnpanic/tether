@@ -75,9 +75,17 @@ export function grantBadge(g: GrantInfo, now: number): { text: string; tone: "ok
   return { text, tone: "danger" };
 }
 
+/** A custom app's layer without the two health features (older versions could save them; the page
+ * cannot show them and the backend refuses them); `removed` says whether it had any. */
+export function withoutHealth(layer: Layer): { layer: Layer; removed: boolean } {
+  const { [AGENT]: a, [GRANT]: g, ...rest } = layer;
+  return { layer: rest, removed: !!(a || g) };
+}
+
 /** A layer without its own grant: the line and badge it shows. A group uses its profile's grant
  * when it has none itself (clients resolve per feature, group over profile). */
 export function noGrant(layer: Layer, profile?: Layer): { line: string; badge: string | null } {
+  if (layer[AGENT]?.state === "off") return { line: "no grant (switched off for this group)", badge: null };
   if (profile && grantOf(profile)) return { line: "no grant of its own: uses the profile's grant", badge: null };
   const needs = needsGrant(layer) ?? (profile && !layer[AGENT] ? needsGrant(profile) : null);
   return { line: "no grant", badge: needs ? `Needed: health.agent is ${needs}` : null };
