@@ -7,13 +7,15 @@
 //! document in an `envelope`, and with an `oidc` part also a signed [`Config`] a relay serves to
 //! anyone). A relay that has accepted a signed document refuses plain rosters from then on.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 
 use crate::envelope::{self, Signed};
 use crate::key_from_b64;
 use crate::status::valid_customer;
 use ed25519_dalek::VerifyingKey;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Members of a signed team document.
@@ -171,14 +173,6 @@ fn check_patterns(what: &str, customers: &[String]) -> Result<(), String> {
     }
 }
 
-fn yes() -> bool {
-    true
-}
-
-fn every_customer() -> Vec<String> {
-    vec!["*".into()]
-}
-
 /// The admin-signed team document (`PUT /api/admin/team`, docs/api.md).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -188,13 +182,14 @@ pub struct TeamDoc {
     /// The OpenID Connect provider staff sign in with (none: no sign-in).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc: Option<Oidc>,
-    /// App role value → what it grants (the grants of a person's roles add up).
-    #[serde(default)]
+    /// App role value → what it grants (the grants of a person's roles add up). A role named
+    /// twice makes the document invalid.
+    #[serde(default, deserialize_with = "unique_roles")]
     pub roles: BTreeMap<String, Grants>,
     /// Object ids of people refused a sign-in session.
     #[serde(default)]
     pub deny: Vec<String>,
-    /// Member keys work only for entries with `service`; people sign in.
+    /// Member keys work only for entries with `service`; people sign in. Needs `oidc`.
     #[serde(default)]
     pub oidc_only: bool,
     pub members: Vec<TeamMember>,
@@ -226,7 +221,9 @@ pub struct Grants {
     pub customers: Vec<String>,
 }
 
-/// A key entry of the signed document. Fields missing read as a plain roster entry's rights.
+/// A key entry of the signed document. `sbom`, `agent` and `customers` are required (an entry
+/// without them must not get everything, as a plain roster entry does); `write`, `audit` and
+/// `service` default to false.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TeamMember {
@@ -237,15 +234,47 @@ pub struct TeamMember {
     pub write: bool,
     #[serde(default)]
     pub audit: bool,
-    #[serde(default = "yes")]
     pub sbom: bool,
-    #[serde(default = "yes")]
     pub agent: bool,
-    #[serde(default = "every_customer")]
     pub customers: Vec<String>,
     /// A service identity (the bridge, a script): keeps working with `oidc_only`.
     #[serde(default)]
     pub service: bool,
+}
+
+/// The fields every [`TeamMember`] must name.
+const REQUIRED: [&str; 3] = ["sbom", "agent", "customers"];
+
+/// `roles` as a map in which no role is named twice (serde would keep the last one silently).
+fn unique_roles<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Grants>, D::Error> {
+    struct Roles;
+    impl<'de> Visitor<'de> for Roles {
+        type Value = BTreeMap<String, Grants>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a map of app roles")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((k, v)) = m.next_entry::<String, Grants>()? {
+                if out.contains_key(&k) {
+                    return Err(de::Error::custom(format!("role {k:?} is listed twice")));
+                }
+                out.insert(k, v);
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(Roles)
+}
+
+/// The first member entry that lacks a [`REQUIRED`] field, by name (serde's message names neither
+/// the member nor, for the reader, why).
+fn missing_member_field(payload: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    v.get("members")?.as_array()?.iter().find_map(|m| {
+        let f = REQUIRED.into_iter().find(|f| m.get(f).is_none())?;
+        Some(format!("member {}: {f} is required in a signed team document", m.get("name").and_then(|n| n.as_str()).unwrap_or("?")))
+    })
 }
 
 impl TeamMember {
@@ -297,6 +326,9 @@ impl TeamDoc {
         if self.members.len() > MAX_MEMBERS {
             return Err(format!("at most {MAX_MEMBERS} members"));
         }
+        if self.oidc_only && self.oidc.is_none() {
+            return Err("oidc_only needs the oidc part (people sign in with it)".into());
+        }
         if let Some(o) = &self.oidc {
             for (what, v) in [("oidc.issuer", &o.issuer), ("oidc.tenant", &o.tenant), ("oidc.audience", &o.audience), ("oidc.client_id", &o.client_id), ("oidc.scope", &o.scope)] {
                 text_ok(what, v, 512)?;
@@ -311,10 +343,20 @@ impl TeamDoc {
         if let Some(d) = self.deny.iter().find(|d| !(1..=128).contains(&d.len()) || !d.bytes().all(|b| b.is_ascii_graphic())) {
             return Err(format!("deny {d:?}: 1-128 printable ASCII characters"));
         }
+        let mut names = HashSet::new();
         for m in &self.members {
             check_patterns(&format!("member {}", m.name), &m.customers)?;
+            if !names.insert(m.name.as_str()) {
+                return Err(format!("member name {:?} is listed twice", m.name));
+            }
         }
-        member_keys(self.members.iter().map(|m| (m.name.as_str(), m.key.as_str())))
+        let keys = member_keys(self.members.iter().map(|m| (m.name.as_str(), m.key.as_str())))?;
+        // `kid` names one key: two keys with the same id would leave the second reachable only without it.
+        let mut kids = HashSet::new();
+        if let Some((m, k)) = self.members.iter().zip(&keys).find(|(_, k)| !kids.insert(key_id(k))) {
+            return Err(format!("member {}: key id {} is another member's too", m.name, key_id(k)));
+        }
+        Ok(keys)
     }
 }
 
@@ -331,7 +373,7 @@ pub fn open(raw: &[u8], trusted: &[VerifyingKey]) -> Result<(TeamDoc, Vec<Verify
     if payload.len() > MAX_DOC {
         return Err(bad(format!("a team document is at most {} KiB", MAX_DOC >> 10)));
     }
-    let doc: TeamDoc = serde_json::from_slice(&payload).map_err(|e| bad(e.to_string()))?;
+    let doc: TeamDoc = serde_json::from_slice(&payload).map_err(|e| bad(missing_member_field(&payload).unwrap_or_else(|| e.to_string())))?;
     let keys = doc.validate().map_err(bad)?;
     match (&doc.oidc, &up.config) {
         (None, None) => {}
@@ -428,12 +470,21 @@ mod tests {
     fn signed_document_opens_only_with_a_trusted_key() {
         let (admin, other) = (generate_key(), generate_key());
         let a = key_to_b64(&generate_key().verifying_key());
-        let members = serde_json::json!([{"name": "Anna", "key": a, "write": true, "audit": false}]);
+        let members = serde_json::json!([{"name": "Anna", "key": a, "write": true, "audit": false, "sbom": true, "agent": false, "customers": ["*"]}]);
         let raw = upload(&doc_json(3, members.clone(), serde_json::json!({})), None, &admin);
         let (doc, keys) = open(&raw, &[other.verifying_key(), admin.verifying_key()]).unwrap();
         assert_eq!((doc.serial, keys.len(), doc.oidc.is_none(), doc.oidc_only), (3, 1, true, false));
-        // Fields missing on an entry read as today's rights.
-        assert_eq!(doc.members[0].permissions(), Permissions { write: true, audit: false, sbom: true, agent: true, customers: vec!["*".into()] });
+        assert_eq!(doc.members[0].permissions(), Permissions { write: true, audit: false, sbom: true, agent: false, customers: vec!["*".into()] });
+        // `sbom`, `agent` and `customers` are required in a signed document (a plain roster's
+        // defaults would give everything): refused, naming the member and the field.
+        for f in REQUIRED {
+            let mut m = members.clone();
+            m[0].as_object_mut().unwrap().remove(f);
+            match open(&upload(&doc_json(3, m, serde_json::json!({})), None, &admin), &[admin.verifying_key()]) {
+                Err(OpenError::Bad(e)) => assert_eq!(e, format!("member Anna: {f} is required in a signed team document")),
+                r => panic!("{f}: {r:?}"),
+            }
+        }
         assert!(matches!(open(&raw, &[other.verifying_key()]), Err(OpenError::Untrusted(_))));
         // A tampered payload, a config signed by an untrusted key.
         let mut u: Upload = serde_json::from_slice(&raw).unwrap();
@@ -465,16 +516,20 @@ mod tests {
         let a = key_to_b64(&generate_key().verifying_key());
         let ok = |d: Vec<u8>| open(&upload(&d, None, &admin), &[admin.verifying_key()]).map(|(d, _)| d);
         let m = |extra: serde_json::Value| {
-            let mut e = serde_json::json!({"name": "Anna", "key": a, "write": false, "audit": false});
+            let mut e = serde_json::json!({"name": "Anna", "key": a, "write": false, "audit": false, "sbom": true, "agent": true, "customers": ["*"]});
             for (k, v) in extra.as_object().unwrap() {
                 e[k] = v.clone();
             }
             serde_json::json!([e])
         };
         let full = serde_json::json!({"sbom": false, "agent": false, "customers": ["4711", "47*"], "service": true});
-        let d = ok(doc_json(1, m(full), serde_json::json!({"deny": ["0f3c-oid"], "oidc_only": true, "roles": {"Tether.Software": {"sbom": true}, "Tether.Customer.4711": {"customers": ["4711"]}}}))).unwrap();
+        let d = ok(doc_json(1, m(full), serde_json::json!({"deny": ["0f3c-oid"], "roles": {"Tether.Software": {"sbom": true}, "Tether.Customer.4711": {"customers": ["4711"]}}}))).unwrap();
         assert_eq!(d.members[0].permissions(), Permissions { write: false, audit: false, sbom: false, agent: false, customers: vec!["4711".into(), "47*".into()] });
-        assert!(d.members[0].service && d.oidc_only && d.deny == ["0f3c-oid"]);
+        assert!(d.members[0].service && !d.oidc_only && d.deny == ["0f3c-oid"]);
+        // oidc_only needs the oidc part; with it (and its config) it is a valid document.
+        let only = doc_json(1, m(serde_json::json!({})), serde_json::json!({"oidc_only": true, "oidc": oidc()}));
+        let cfg = serde_json::to_vec(&Config { serial: 1, oidc: oidc() }).unwrap();
+        assert!(open(&upload(&only, Some(&cfg), &admin), &[admin.verifying_key()]).unwrap().0.oidc_only);
         assert_eq!(d.roles["Tether.Software"], Grants { sbom: true, ..Default::default() });
         for (bad, why) in [
             (doc_json(0, m(serde_json::json!({})), serde_json::json!({})), "serial 0"),
@@ -489,12 +544,15 @@ mod tests {
             (doc_json(1, m(serde_json::json!({})), serde_json::json!({"roles": {"": {}}})), "empty role"),
             (doc_json(1, m(serde_json::json!({})), serde_json::json!({"roles": {"R": {"customers": ["a*b"]}}})), "role pattern"),
             (doc_json(1, m(serde_json::json!({})), serde_json::json!({"roles": {"R": {"admin": true}}})), "unknown grant"),
-            (doc_json(1, serde_json::json!([{"name": "A", "key": a}, {"name": "B", "key": a}]), serde_json::json!({})), "key twice"),
-            (doc_json(1, serde_json::json!([{"name": " A", "key": a}]), serde_json::json!({})), "name"),
+            (doc_json(1, serde_json::json!([{"name": "A", "key": a, "sbom": true, "agent": true, "customers": []}, {"name": "B", "key": a, "sbom": true, "agent": true, "customers": []}]), serde_json::json!({})), "key twice"),
+            (doc_json(1, serde_json::json!([{"name": " A", "key": a, "sbom": true, "agent": true, "customers": []}]), serde_json::json!({})), "name"),
+            (doc_json(1, m(serde_json::json!({})), serde_json::json!({"oidc_only": true})), "oidc_only without oidc"),
+            (doc_json(1, serde_json::json!([{"name": "A", "key": a, "sbom": true, "agent": true, "customers": []}, {"name": "A", "key": key_to_b64(&generate_key().verifying_key()), "sbom": true, "agent": true, "customers": []}]), serde_json::json!({})), "name twice"),
+            (br#"{"serial":1,"members":[],"roles":{"R":{},"R":{"sbom":true}}}"#.to_vec(), "role twice"),
         ] {
             assert!(ok(bad).is_err(), "{why}");
         }
-        let many: Vec<serde_json::Value> = (0..=MAX_MEMBERS).map(|i| serde_json::json!({"name": format!("m{i}"), "key": key_to_b64(&generate_key().verifying_key())})).collect();
+        let many: Vec<serde_json::Value> = (0..=MAX_MEMBERS).map(|i| serde_json::json!({"name": format!("m{i}"), "key": key_to_b64(&generate_key().verifying_key()), "sbom": true, "agent": true, "customers": ["*"]})).collect();
         assert!(ok(doc_json(1, serde_json::json!(many[..MAX_MEMBERS]), serde_json::json!({}))).is_ok(), "2000 fit in 256 KiB");
         assert!(ok(doc_json(1, serde_json::json!(many), serde_json::json!({}))).is_err());
     }

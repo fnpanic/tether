@@ -75,6 +75,10 @@ fn short(s: &str, max: usize) -> bool {
 /// An enrollment token for `label`, valid until `exp` (unix seconds), with a new random id; with
 /// `tether_id`, issued for that one Tether ID; with `customer`, setting it on the device; with
 /// `tether_proof`, enrolling only with a Tether proof (no `tether_id`). Answers `(token, id)`.
+/// A `tether_proof` token (a grant): the policy feature `health.enrol-grant` that carries it holds at
+/// most this many characters.
+pub const GRANT_MAX: usize = 1024;
+
 pub fn make_token(label: &str, exp: u64, tether_id: Option<&str>, customer: Option<&str>, tether_proof: bool, admin: &SigningKey) -> Result<(String, String), String> {
     if tether_proof && tether_id.is_some() {
         return Err(PROOF_AND_ID.into());
@@ -93,7 +97,20 @@ pub fn make_token(label: &str, exp: u64, tether_id: Option<&str>, customer: Opti
     let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
     let p = TokenPayload { purpose: TOKEN_PURPOSE.into(), exp, label: label.into(), id: id.clone(), tether_id: tether_id.map(Into::into), customer: customer.map(Into::into), tether_proof };
     let doc = envelope::sign(&serde_json::to_vec(&p).map_err(|e| e.to_string())?, admin);
-    Ok((B64URL.encode(serde_json::to_vec(&doc).map_err(|e| e.to_string())?), id))
+    let token = B64URL.encode(serde_json::to_vec(&doc).map_err(|e| e.to_string())?);
+    if tether_proof {
+        grant_fits(&token)?;
+    }
+    Ok((token, id))
+}
+
+/// A grant travels in the policy feature `health.enrol-grant`: at most [`GRANT_MAX`] characters.
+/// (The largest `make_token` makes today, with 64 four-byte characters of label, is 982.)
+fn grant_fits(token: &str) -> Result<(), String> {
+    if token.len() > GRANT_MAX {
+        return Err(format!("a tether_proof token is at most {GRANT_MAX} characters (this one: {}); use a shorter label", token.len()));
+    }
+    Ok(())
 }
 
 /// The payload of a token signed by one of the `admin` keys and not expired at `now`.
@@ -158,7 +175,12 @@ pub fn sign_agent_link(seed: &[u8; 32], tether_id: &str, uuid: &str, pubkey: &st
 
 /// Check a Tether proof against `pk_b64`, the key hbbs holds for `tether_id` (standard base64).
 /// Strict: a weak key or a non-canonical signature never verifies.
+/// `tether_id`, `uuid` and `pubkey` must be a valid Tether ID, a valid uuid and a key in exactly its
+/// canonical encoding (no whitespace): no two different triples give the same signed message.
 pub fn verify_agent_link(pk_b64: &str, sig_b64: &str, tether_id: &str, uuid: &str, pubkey: &str) -> Result<(), String> {
+    if !valid_tether_id(tether_id) || !valid_uuid(uuid) || crate::key_from_b64(pubkey).map(|k| crate::key_to_b64(&k)).as_deref() != Ok(pubkey) {
+        return Err("bad tether_id, uuid or pubkey".into());
+    }
     let key = crate::key_from_b64(pk_b64)?;
     let sig = crate::b64().decode(sig_b64.trim()).map_err(|_| "bad signature encoding".to_owned())?;
     let sig = ed25519_dalek::Signature::from_slice(&sig).map_err(|_| "bad signature".to_owned())?;
@@ -478,6 +500,11 @@ mod tests {
         // The largest grant fits the policy feature that carries it.
         let (big, _) = make_token(&"x".repeat(64), u64::MAX, None, Some(&"c".repeat(32)), true, &admin).unwrap();
         assert!(big.len() <= 1024, "{}", big.len());
+        // Also with a label of 64 four-byte characters; one character more than the feature holds is refused.
+        let (wide, _) = make_token(&"\u{1F600}".repeat(64), u64::MAX, None, Some(&"c".repeat(32)), true, &admin).unwrap();
+        assert!(wide.len() <= GRANT_MAX, "{}", wide.len());
+        assert!(grant_fits(&"A".repeat(GRANT_MAX)).is_ok());
+        assert!(grant_fits(&"A".repeat(GRANT_MAX + 1)).unwrap_err().contains("at most 1024 characters"));
     }
 
     #[test]
@@ -527,6 +554,14 @@ mod tests {
             assert!(verify_agent_link(&pk, &sig, id, uuid, key).is_err(), "{id} {uuid} {key}");
         }
         assert!(verify_agent_link(&other, &sig, "123456789", "dev-0001", &agent).is_err(), "another Tether key");
+        // Inputs that are not a Tether ID, a uuid, or a key in its canonical encoding are refused
+        // before any check, also when signed as given (the message would be ambiguous).
+        let padded = format!("{agent}\n");
+        let unpadded = agent.trim_end_matches('=');
+        for (id, uuid, key) in [("1234\n56789", "dev-0001", agent.as_str()), ("123456789", "dev\n0001", agent.as_str()), ("123456789", "dev-0001", padded.as_str()), ("123456789", "dev-0001", unpadded), ("123456789", "dev-0001", " AAAA"), ("", "dev-0001", agent.as_str())] {
+            let sig = sign_agent_link(&seed, id, uuid, key);
+            assert_eq!(verify_agent_link(&pk, &sig, id, uuid, key).unwrap_err(), "bad tether_id, uuid or pubkey", "{id:?} {uuid:?} {key:?}");
+        }
         let mut flipped = STANDARD.decode(&sig).unwrap();
         flipped[10] ^= 1;
         assert!(verify_agent_link(&pk, &STANDARD.encode(&flipped), "123456789", "dev-0001", &agent).is_err());
