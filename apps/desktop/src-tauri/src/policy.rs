@@ -698,8 +698,18 @@ mod tests {
             "" => {
                 assert_eq!(MACHINE_POLICY_KEY, "SOFTWARE\\Policies\\Tether");
                 assert_eq!(managed_preferences_domain(), "net.tether.app");
+                // The generated docs/policy.md text is today's, byte for byte.
+                assert!(render_doc().contains(
+                    "(`HKLM\\SOFTWARE\\Policies\\Tether` REG_SZ `PolicyJson`, or \
+                     `/Library/Managed Preferences/net.tether.app.plist` key `PolicyJson`,"
+                ));
             }
-            i => assert_eq!(managed_preferences_domain(), format!("net.tether.app.{i}")),
+            i => {
+                assert_eq!(managed_preferences_domain(), format!("net.tether.app.{i}"));
+                let doc = render_doc();
+                assert!(doc.contains(&format!("`HKLM\\SOFTWARE\\Policies\\Tether-{i}` REG_SZ")));
+                assert!(doc.contains(&format!("`/Library/Managed Preferences/net.tether.app.{i}.plist`")));
+            }
         }
     }
 
@@ -861,7 +871,10 @@ mod tests {
              `/Library/Managed Preferences/net.tether.app.plist` key `PolicyJson`, both a `Layer` JSON such as \
              `{\"connect.outgoing\":{\"state\":\"off\"}}`). Core options in `FLOOR` (TLS, encryption, 443-only \
              networking, no silent recording) can never be set by policy.\n\n",
-        );
+        )
+        // An instance build (TETHER_INSTANCE) reads its own key and domain.
+        .replace("HKLM\\SOFTWARE\\Policies\\Tether", &format!("HKLM\\{MACHINE_POLICY_KEY}"))
+        .replace("net.tether.app.plist", &format!("{}.plist", managed_preferences_domain()));
         s.push_str("| Feature | Area | Description | Default | Profiles | Core option |\n| --- | --- | --- | --- | --- | --- |\n");
         for f in FEATURES {
             let def = if f.default.is_empty() { "–".to_owned() } else { format!("`{}`", f.default) };

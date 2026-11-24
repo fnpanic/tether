@@ -26,8 +26,15 @@ fn main() {
     if !instance::valid_instance(&inst) {
         panic!("TETHER_INSTANCE must be empty or 1 to 16 characters a-z, 0-9 (got {inst:?})");
     }
-    let name = if inst.is_empty() { "Tether".to_owned() } else { format!("Tether-{inst}") };
-    println!("cargo:rustc-env=TETHER_APP_NAME={name}");
+    // Debug builds (cargo test, tauri dev) are exempt; a release `cargo build` without the Tauri
+    // CLI has no TAURI_CONFIG, so only the default build passes there.
+    println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
+    if std::env::var("PROFILE").as_deref() == Ok("release") {
+        if let Err(e) = instance::check_product_name(&inst, std::env::var("TAURI_CONFIG").ok().as_deref()) {
+            panic!("{e}");
+        }
+    }
+    println!("cargo:rustc-env=TETHER_APP_NAME={}", instance::app_name(&inst));
     println!("cargo:rustc-env=TETHER_INSTANCE={inst}");
     link_clang_rt();
     tauri_build::build()

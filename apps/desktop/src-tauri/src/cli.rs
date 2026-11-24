@@ -9,7 +9,7 @@ use std::{
 
 use crate::{diag, policy, security, update};
 
-pub const HELP: &str = "\
+const HELP: &str = "\
 Usage: tether [command]
 
   (no command)                      start Tether
@@ -64,6 +64,12 @@ pub enum Cmd {
     DiagUpload(String),
     CheckUpdate,
     PolicyRefresh,
+}
+
+/// `--help`: an instance build names its own binary and link scheme (`tether-<i>`).
+pub fn help() -> String {
+    let bin = crate::APP_NAME.to_lowercase();
+    HELP.replace("Usage: tether ", &format!("Usage: {bin} ")).replace("  tether://", &format!("  {}", uri_prefix()))
 }
 
 /// `tether://`, `tether-<i>://` for an instance build (its deep-link scheme, scripts/instance-config.sh).
@@ -241,7 +247,7 @@ pub fn run(args: &[String]) -> Option<ExitCode> {
         Ok(c) => c,
         Err(e) => {
             console();
-            eprintln!("{e}\n\n{HELP}");
+            eprintln!("{e}\n\n{}", help());
             return Some(ExitCode::from(2));
         }
     };
@@ -249,7 +255,7 @@ pub fn run(args: &[String]) -> Option<ExitCode> {
         console();
     }
     let result: Result<String, String> = match cmd {
-        Cmd::Help => Ok(HELP.into()),
+        Cmd::Help => Ok(help()),
         Cmd::Version => Ok(update::VERSION.into()),
         Cmd::GetId => Ok(librustdesk::ipc::get_id()),
         Cmd::Diagnostics(out) => diag::export_to(&out).map(|_| format!("wrote {}", out.display())),
@@ -393,6 +399,12 @@ mod tests {
         assert_eq!(uri_prefix(), format!("{}://", crate::APP_NAME.to_lowercase()));
         if env!("TETHER_INSTANCE").is_empty() {
             assert_eq!(uri_prefix(), "tether://");
+            assert_eq!(help(), HELP);
+        } else {
+            let i = env!("TETHER_INSTANCE");
+            assert!(help().starts_with(&format!("Usage: tether-{i} [command]\n")));
+            assert!(help().contains(&format!("\n  tether-{i}://connect/<id>   ")));
+            assert!(!help().contains(" tether://"));
         }
     }
 
