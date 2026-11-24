@@ -686,11 +686,15 @@ fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
         })
     } else {
         read_request_body(app, &mut rq, data).map(|mut body| {
+            // A member signature is checked before the lock (up to 2000 keys without `kid`).
+            let verified = team::member_verify(app, &rq, &body);
             let (r, later, nonce) = {
                 let mut a = lock(app);
                 let held = Instant::now();
                 let used = a.nonces_used;
+                a.team.verified = verified;
                 let r = a.route(&mut rq, &mut body);
+                a.team.verified = None;
                 let out = (r, a.later.take(), a.nonces_used != used);
                 traced(|| format!("{} {}", rq.method(), rq.url().split('?').next().unwrap_or("")), held.elapsed());
                 out
@@ -1887,24 +1891,31 @@ pub(crate) fn hbbs_peer_pk(hosts: &[String], id: &str) -> Result<Option<String>,
     // On its own thread: a host name lookup has no timeout of its own. The thread holds the slot
     // until it ends, so threads stuck there are bounded too.
     std::thread::spawn(move || {
-        let mut r = Err(());
-        for (i, h) in hosts.iter().enumerate() {
-            // Each URL gets an equal share of the time left, so a hung or dropping one leaves the
-            // next its turn.
-            let left = deadline.saturating_duration_since(Instant::now());
-            match peer_pk_from(h, &id, Instant::now() + left / (hosts.len() - i) as u32) {
-                Ok(Some(k)) => {
-                    r = Ok(Some(k));
-                    break;
-                }
-                Ok(None) => r = Ok(None),
-                Err(()) => {}
-            }
-        }
+        let r = ask_in_turn(&hosts, deadline, |h, until| peer_pk_from(h, &id, until));
         drop(slot);
         let _ = tx.send(r);
     });
     rx.recv_timeout(HBBS_TIMEOUT).unwrap_or(Err(()))
+}
+
+/// `ask` each of `hosts` in order until one has the key, each an equal share of the time left
+/// until `deadline` (a hung or dropping one leaves the next its turn); none once it has passed.
+fn ask_in_turn(hosts: &[String], deadline: Instant, mut ask: impl FnMut(&str, Instant) -> Result<Option<String>, ()>) -> Result<Option<String>, ()> {
+    let mut r = Err(());
+    for (i, h) in hosts.iter().enumerate() {
+        // Time is up (a host name lookup has no timeout and may have outlasted it): no further
+        // host name is resolved, the caller has stopped waiting.
+        if Instant::now() >= deadline {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        match ask(h, Instant::now() + left / (hosts.len() - i) as u32) {
+            Ok(Some(k)) => return Ok(Some(k)),
+            Ok(None) => r = Ok(None),
+            Err(()) => {}
+        }
+    }
+    r
 }
 
 /// One `GET /peer-pk/<id>`: every step within `deadline`, at most [`HBBS_ANSWER_MAX`] bytes read,
@@ -2066,4 +2077,29 @@ fn main() {
     }
     lock(&app).flush_devices();
     status::flush_at_exit(&app);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hbbs_hosts_are_not_asked_once_the_time_is_up() {
+        let hosts = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let mut asked = Vec::new();
+        // The first one overruns (as a hung host name lookup does): the others are not asked.
+        let r = ask_in_turn(&hosts, Instant::now() + Duration::from_millis(50), |h, _| {
+            asked.push(h.to_owned());
+            std::thread::sleep(Duration::from_millis(80));
+            Ok(None)
+        });
+        assert_eq!((r, asked), (Ok(None), vec!["a".to_owned()]));
+        // In time: in order, until one has the key.
+        let mut asked = Vec::new();
+        let r = ask_in_turn(&hosts, Instant::now() + Duration::from_secs(5), |h, _| {
+            asked.push(h.to_owned());
+            if h == "b" { Ok(Some("k".into())) } else { Err(()) }
+        });
+        assert_eq!((r, asked), (Ok(Some("k".to_owned())), vec!["a".to_owned(), "b".to_owned()]));
+    }
 }

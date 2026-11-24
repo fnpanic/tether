@@ -316,9 +316,10 @@ fn team_doc(signer: &SigningKey, serial: u64, members: Value, extra: Value) -> V
     serde_json::to_vec(&up).unwrap()
 }
 
-/// A member entry: name, key and the fields in `extra`.
+/// A member entry: name, key, the required permissions as a plain roster entry has them
+/// (`sbom`, `agent`, every customer), and the fields in `extra` (which replace those).
 fn entry(name: &str, key: &SigningKey, extra: Value) -> Value {
-    let mut e = json!({"name": name, "key": key_to_b64(&key.verifying_key())});
+    let mut e = json!({"name": name, "key": key_to_b64(&key.verifying_key()), "sbom": true, "agent": true, "customers": ["*"]});
     for (k, v) in extra.as_object().unwrap() {
         e[k] = v.clone();
     }
@@ -353,7 +354,7 @@ fn a_signed_document_replaces_the_plain_roster_for_good() {
     assert_eq!(s.get(&admin, "/api/admin/team").body, doc, "served as published");
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(std::fs::metadata(s.dir.join("team/team.json")).unwrap().permissions().mode() & 0o777, 0o600);
-    // Missing fields read as today's rights; `me` names them all once a document is in force.
+    // `me` names every permission once a document is in force.
     assert_eq!(s.get(&anna, "/api/team/me").json(), json!({"name": "Anna", "write": true, "audit": false, "sbom": true, "agent": true, "customers": ["*"], "service": false}));
     assert_eq!(s.get(&ben, "/api/team/me").json(), json!({"name": "Ben", "write": false, "audit": false, "sbom": false, "agent": true, "customers": ["47*"], "service": false}));
 
@@ -440,14 +441,164 @@ fn kid_picks_one_key() {
     assert_eq!(s.me_kid(&anna, &kid(&anna).to_uppercase()).status, 401, "lower case only");
     assert_eq!(s.get(&anna, "/api/team/me").status, 200, "no kid: every key is tried");
 
-    // oidc_only: keys only for service entries, with kid or without; a removed member's kid.
-    let doc = team_doc(&admin, 1, json!([entry("Anna", &anna, json!({})), entry("Svc", &svc, json!({"service": true}))]), json!({"oidc_only": true}));
+    // With a signed document; a removed member's kid.
+    let doc = team_doc(&admin, 1, json!([entry("Anna", &anna, json!({})), entry("Svc", &svc, json!({"service": true}))]), json!({}));
     assert_eq!(s.publish(&admin, &doc).status, 204);
-    assert_eq!(s.me_kid(&anna, &kid(&anna)).status, 401);
-    assert_eq!(s.get(&anna, "/api/team/me").status, 401);
+    assert_eq!(s.me_kid(&anna, &kid(&anna)).json()["name"], "Anna");
     assert_eq!(s.me_kid(&svc, &kid(&svc)).json()["service"], true);
     assert_eq!(s.get(&svc, "/api/team/me").status, 200);
     assert_eq!(s.me_kid(&ben, &kid(&ben)).status, 401);
+}
+
+#[test]
+fn oidc_only_is_refused_until_this_relay_serves_sign_in() {
+    // Today it would lock out every person (only service keys stay): refused, and it needs oidc.
+    let admin = generate_key();
+    let s = start(&admin);
+    let (anna, svc) = (generate_key(), generate_key());
+    let members = json!([entry("Anna", &anna, json!({})), entry("Svc", &svc, json!({"service": true}))]);
+    let r = s.publish(&admin, &team_doc(&admin, 1, members.clone(), json!({"oidc_only": true})));
+    assert_eq!((r.status, r.text().contains("oidc_only needs the oidc part")), (400, true), "{}", r.text());
+    let oidc = json!({"issuer": "https://login.example.com/t/v2.0", "tenant": "t", "audience": "api://tether", "client_id": "c", "scope": "api://tether/access"});
+    let r = s.publish(&admin, &team_doc(&admin, 1, members.clone(), json!({"oidc_only": true, "oidc": oidc})));
+    assert_eq!((r.status, r.text()), (400, "oidc_only needs sign-in support on this relay".into()));
+    assert!(!s.dir.join("team/team.json").exists());
+    assert_eq!(s.publish(&admin, &team_doc(&admin, 1, members, json!({"oidc_only": false, "oidc": oidc}))).status, 204);
+    assert_eq!(s.get(&anna, "/api/team/me").status, 200);
+}
+
+#[test]
+fn signed_entries_name_every_permission_and_nothing_twice() {
+    let admin = generate_key();
+    let s = start(&admin);
+    let (anna, ben) = (generate_key(), generate_key());
+    // No defaults in a signed document: an entry without sbom, agent or customers is refused.
+    for f in ["sbom", "agent", "customers"] {
+        let mut a = entry("Anna", &anna, json!({}));
+        a.as_object_mut().unwrap().remove(f);
+        let r = s.publish(&admin, &team_doc(&admin, 1, json!([entry("Ben", &ben, json!({})), a]), json!({})));
+        assert_eq!((r.status, r.text()), (400, format!("member Anna: {f} is required in a signed team document")));
+    }
+    // A name or a key twice.
+    let r = s.publish(&admin, &team_doc(&admin, 1, json!([entry("Anna", &anna, json!({})), entry("Anna", &ben, json!({}))]), json!({})));
+    assert_eq!((r.status, r.text().contains("listed twice")), (400, true), "{}", r.text());
+    let r = s.publish(&admin, &team_doc(&admin, 1, json!([entry("Anna", &anna, json!({})), entry("Ben", &anna, json!({}))]), json!({})));
+    assert_eq!((r.status, r.text().contains("listed twice")), (400, true), "{}", r.text());
+    assert!(!s.dir.join("team/team.json").exists());
+    // The plain roster keeps its defaults (and its 0.6 fields only).
+    assert_eq!(s.roster(&admin, &[("Anna", &anna, false, false)]).status, 204);
+    assert_eq!(s.get(&anna, "/api/team/me").json(), json!({"name": "Anna", "write": false, "audit": false}));
+}
+
+#[test]
+fn a_malformed_signed_upload_gets_the_signed_parsers_answer() {
+    let admin = generate_key();
+    let s = start(&admin);
+    // An object with `team` is a signed upload: its error, not the plain roster's `unknown field team`.
+    for body in [json!({"team": {"payload": 1}}), json!({"team": {}, "config": null, "x": 1}), json!({"team": "x", "members": []})] {
+        let r = s.publish(&admin, body.to_string().as_bytes());
+        assert_eq!(r.status, 400, "{body}");
+        assert!(r.text().starts_with("not a signed team document") && !r.text().contains("unknown field `team`"), "{body}: {}", r.text());
+    }
+    // Anything else is a plain roster, with the plain roster's errors.
+    let r = s.publish(&admin, json!({"members": [], "x": 1}).to_string().as_bytes());
+    assert_eq!((r.status, r.text().contains("unknown field `x`")), (400, true), "{}", r.text());
+    assert_eq!(s.publish(&admin, b"[1]").status, 400);
+}
+
+/// A signed document of 2000 members: unnamed ones, then `named` at the end.
+fn big_doc(admin: &SigningKey, serial: u64, named: &[(&str, &SigningKey)]) -> Vec<u8> {
+    let mut members: Vec<Value> = (0..2000 - named.len()).map(|i| entry(&format!("m{i}"), &generate_key(), json!({}))).collect();
+    members.extend(named.iter().map(|(n, k)| entry(n, k, json!({}))));
+    team_doc(admin, serial, json!(members), json!({}))
+}
+
+#[test]
+fn a_signature_without_kid_is_checked_outside_the_state_lock() {
+    use std::time::{Duration, Instant};
+    let admin = generate_key();
+    let s = start(&admin);
+    let (svc, last, stranger) = (generate_key(), generate_key(), generate_key());
+    assert_eq!(s.publish(&admin, &big_doc(&admin, 1, &[("Svc", &svc), ("Last", &last)])).status, 204);
+    std::thread::scope(|sc| {
+        // Anyone can send a well-formed header with a signature no member made: all 2000 keys are
+        // tried (about 160 ms in a release build, many seconds in a debug one).
+        let junk = sc.spawn(|| {
+            let r = s.get(&stranger, "/api/team/me");
+            (r.status, Instant::now())
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        // Meanwhile a second request without kid is turned away at once, also a member's...
+        let t = Instant::now();
+        let r = s.get(&last, "/api/team/me");
+        assert_eq!((r.status, r.text(), r.header("Retry-After")), (429, "busy".into(), Some("1".into())));
+        assert!(t.elapsed() < Duration::from_millis(200), "{:?}", t.elapsed());
+        // ...while a device heartbeat and a request with kid are not held up.
+        let t = Instant::now();
+        assert_eq!(s.req("POST", "/api/heartbeat", &[("X-Forwarded-For", "203.0.113.9")], hb("dev-0001", "111222333").as_bytes()).status, 200);
+        let (hb_t, hb_done) = (t.elapsed(), Instant::now());
+        let t = Instant::now();
+        assert_eq!(s.me_kid(&svc, &kid(&svc)).json()["name"], "Svc");
+        let kid_t = t.elapsed();
+        let (status, junk_done) = junk.join().unwrap();
+        assert_eq!(status, 401);
+        eprintln!("during a no-kid check of 2000 keys: heartbeat {hb_t:?}, kid request {kid_t:?}");
+        assert!(hb_t < Duration::from_millis(200) && kid_t < Duration::from_millis(200), "heartbeat {hb_t:?}, kid {kid_t:?}");
+        assert!(hb_done < junk_done, "the heartbeat waited for the junk request");
+    });
+    // Free again: a member without kid gets in.
+    assert_eq!(s.get(&last, "/api/team/me").status, 200);
+}
+
+#[test]
+fn a_member_removed_while_its_signature_is_checked_is_refused() {
+    use std::time::{Duration, Instant};
+    let admin = generate_key();
+    let s = start(&admin);
+    let (last, other) = (generate_key(), generate_key());
+    assert_eq!(s.publish(&admin, &big_doc(&admin, 1, &[("Last", &last)])).status, 204);
+    std::thread::scope(|sc| {
+        // Last's own key is the last of 2000 tried without kid; a new document without Last is
+        // accepted while that runs.
+        let rq = sc.spawn(|| {
+            let r = s.get(&last, "/api/team/me");
+            (r.status, r.text(), Instant::now())
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(s.publish(&admin, &team_doc(&admin, 2, json!([entry("Other", &other, json!({}))]), json!({}))).status, 204);
+        let published = Instant::now();
+        let (status, body, done) = rq.join().unwrap();
+        assert!(published < done, "the document came too late to test anything");
+        assert_eq!((status, body), (401, "not a team member".into()));
+    });
+    assert_eq!(s.get(&other, "/api/team/me").status, 200);
+}
+
+#[test]
+fn restoring_an_older_team_json() {
+    // What a restored backup of the data folder does (docs/management.md).
+    let admin = generate_key();
+    let admin_env = key_to_b64(&admin.verifying_key());
+    let s = start(&admin);
+    let (anna, ben) = (generate_key(), generate_key());
+    assert_eq!(s.roster(&admin, &[("Anna", &anna, false, false)]).status, 204);
+    let plain = std::fs::read(s.dir.join("team/roster.json")).unwrap();
+    assert_eq!(s.publish(&admin, &team_doc(&admin, 1, json!([entry("Anna", &anna, json!({})), entry("Ben", &ben, json!({}))]), json!({}))).status, 204);
+    let first = std::fs::read(s.dir.join("team/team.json")).unwrap();
+    assert_eq!(s.publish(&admin, &team_doc(&admin, 2, json!([entry("Ben", &ben, json!({}))]), json!({}))).status, 204);
+    assert_eq!(s.get(&anna, "/api/team/me").status, 401);
+    // An older document: in force again, and the serial floor drops to its serial.
+    std::fs::write(s.dir.join("team/team.json"), &first).unwrap();
+    let s = restart(s, &admin_env);
+    assert_eq!(s.get(&anna, "/api/team/me").status, 200);
+    assert_eq!(s.publish(&admin, &team_doc(&admin, 2, json!([entry("Ben", &ben, json!({}))]), json!({}))).status, 204, "serial 2 again");
+    // A backup from before any document: the plain roster is back, and plain rosters are accepted.
+    std::fs::remove_file(s.dir.join("team/team.json")).unwrap();
+    std::fs::write(s.dir.join("team/roster.json"), &plain).unwrap();
+    let s = restart(s, &admin_env);
+    assert_eq!(s.get(&anna, "/api/team/me").json(), json!({"name": "Anna", "write": false, "audit": false}));
+    assert_eq!(s.get(&ben, "/api/team/me").status, 401);
+    assert_eq!(s.roster(&admin, &[("Ben", &ben, false, false)]).status, 204);
 }
 
 #[test]

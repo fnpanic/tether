@@ -2734,12 +2734,13 @@ fn the_hbbs_lookup_holds_no_lock_and_is_checked_again_after() {
 
 // ---- Permissions of a signed team document on the status routes (`sbom`, `customers`).
 
-/// Publishes a signed team document `serial` with `members` (name, key, extra fields).
+/// Publishes a signed team document `serial` with `members` (name, key, extra fields replacing
+/// the required `sbom`, `agent` true and `customers` `["*"]`).
 fn publish_doc(s: &Srv, admin: &SigningKey, serial: u64, members: &[(&str, &SigningKey, Value)]) {
     let m: Vec<Value> = members
         .iter()
         .map(|(n, k, extra)| {
-            let mut e = json!({"name": n, "key": key_to_b64(&k.verifying_key())});
+            let mut e = json!({"name": n, "key": key_to_b64(&k.verifying_key()), "sbom": true, "agent": true, "customers": ["*"]});
             for (f, v) in extra.as_object().unwrap() {
                 e[f] = v.clone();
             }
@@ -2831,6 +2832,96 @@ fn customers_limit_every_status_route_and_out_of_scope_is_unknown() {
     let r = team_get(&s, &all, "/api/team/status/dev-0002").json();
     assert_eq!((r["claimed_id"].as_str(), r["no_claim"].as_bool()), (Some("123456789"), Some(false)));
     assert_eq!(team_get(&s, &all, "/api/team/status/dev-0003").status, 200);
+}
+
+#[test]
+fn an_empty_customer_list_sees_nothing() {
+    let (s, admin) = scoped_server();
+    let (none, all) = (generate_key(), generate_key());
+    publish_doc(&s, &admin, 1, &[("None", &none, json!({"customers": [], "write": true, "audit": true})), ("All", &all, json!({"audit": true}))]);
+    assert_eq!(team_get(&s, &none, "/api/team/status").json()["hosts"], json!([]));
+    let link = br#"{"tether_id":"123456789"}"#;
+    for u in ["dev-0001", "dev-0002", "dev-0003"] {
+        for (method, p, body) in [("GET", "/api/team/status/{u}", &b""[..]), ("GET", "/api/team/status/{u}/sbom", b""), ("POST", "/api/team/status/{u}/link", link), ("DELETE", "/api/team/status/{u}/link", b""), ("POST", "/api/team/status/{u}/allow-claim", b""), ("DELETE", "/api/team/status/{u}", b"")] {
+            let out = member_req(&s, &none, method, &p.replace("{u}", u), None, body);
+            let unknown = member_req(&s, &none, method, &p.replace("{u}", "dev-9999"), None, body);
+            assert_eq!((out.status, &out.body), (unknown.status, &unknown.body), "{method} {p} {u}");
+            assert_eq!(out.status, 404, "{method} {p} {u}");
+        }
+    }
+    // The session audit too (also of a machine without a health agent).
+    assert_eq!(s.req("POST", "/api/audit/conn", &[("X-Forwarded-For", "203.0.113.50")], conn_new(1, "n-1", "444555666").as_bytes()).status, 204);
+    assert_eq!(team_get(&s, &all, "/api/team/audit?device=444555666").json().as_array().unwrap().len(), 1);
+    assert_eq!(team_get(&s, &none, "/api/team/audit?device=444555666").json(), json!([]));
+}
+
+#[test]
+fn a_software_list_out_of_scope_is_unknown_also_with_its_etag() {
+    let (s, admin) = scoped_server();
+    let (all, part) = (generate_key(), generate_key());
+    publish_doc(&s, &admin, 1, &[("All", &all, json!({})), ("Part", &part, json!({"customers": ["47*"]}))]);
+    let etag = team_get(&s, &all, "/api/team/status/dev-0002/sbom").header("ETag").unwrap();
+    assert_eq!(member_req(&s, &all, "GET", "/api/team/status/dev-0002/sbom", Some(&etag), b"").status, 304);
+    let out = member_req(&s, &part, "GET", "/api/team/status/dev-0002/sbom", Some(&etag), b"");
+    let unknown = member_req(&s, &part, "GET", "/api/team/status/dev-9999/sbom", Some(&etag), b"");
+    assert_eq!((out.status, &out.body), (404, &unknown.body));
+    assert_eq!(member_req(&s, &part, "GET", "/api/team/status/dev-0001/sbom", Some(&etag), b"").status, 304, "in scope");
+}
+
+/// A session audit `new` record of connection `conn` to Tether ID `id`.
+fn conn_new(conn: i64, nonce: &str, id: &str) -> String {
+    format!(r#"{{"action":"new","conn_id":{conn},"id":"{id}","ip":"198.51.100.20","nonce":"{nonce}","session_id":0,"uuid":"QUJDLTEyMw=="}}"#)
+}
+
+#[test]
+fn the_session_audit_follows_the_customer_scope() {
+    let (s, admin) = scoped_server();
+    let (all, part, other) = (generate_key(), generate_key(), generate_key());
+    publish_doc(&s, &admin, 1, &[("All", &all, json!({"audit": true, "write": true})), ("Part", &part, json!({"audit": true, "customers": ["47*"]})), ("Other", &other, json!({"audit": true, "customers": ["4812"]}))]);
+    // dev-0001 (4711) verified as 123456789; 444555666 has no health agent (no pin, no customer).
+    assert_eq!(member_req(&s, &all, "POST", "/api/team/status/dev-0001/link", None, br#"{"tether_id":"123456789"}"#).status, 204);
+    let ip = [("X-Forwarded-For", "203.0.113.50")];
+    for (i, id) in [(1, "123456789"), (2, "123456789"), (3, "444555666")] {
+        assert_eq!(s.req("POST", "/api/audit/conn", &ip, conn_new(i, &format!("n-{i}"), id).as_bytes()).status, 204);
+    }
+    let n = |m: &SigningKey, d: &str| team_get(&s, m, &format!("/api/team/audit?device={d}")).json().as_array().unwrap().len();
+    assert_eq!((n(&all, "123456789"), n(&all, "444555666")), (2, 1));
+    // In scope: by the Tether ID or by the device's uuid.
+    assert_eq!((n(&part, "123456789"), n(&part, "dev-0001")), (2, 2));
+    // Out of scope, or no pin at all: exactly as an unknown device.
+    for (m, d) in [(&part, "444555666"), (&other, "123456789"), (&other, "dev-0001"), (&other, "444555666"), (&part, "dev-0002")] {
+        let (out, unknown) = (team_get(&s, m, &format!("/api/team/audit?device={d}")), team_get(&s, m, "/api/team/audit?device=999999999"));
+        assert_eq!((out.status, &out.body, out.head.lines().count()), (unknown.status, &unknown.body, unknown.head.lines().count()), "{d}");
+        assert_eq!(out.body, b"[]", "{d}");
+    }
+}
+
+#[test]
+fn a_new_customer_leaves_the_old_scope_at_once() {
+    let (s, admin) = server();
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, Some("4711")).0).status, 200);
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "crit")).status, 200);
+    let p = generate_key();
+    publish_doc(&s, &admin, 1, &[("P", &p, json!({"customers": ["4711"]}))]);
+    assert_eq!(summary_hosts(&team_get(&s, &p, "/api/team/status")), ["dev-0001"]);
+    // Re-enrolled for another customer: not in 4711's cached summary any more, within its 30 s.
+    assert_eq!(enroll_signed(&s, &a, &a, "dev-0001", &customer_token(&admin, Some("0815")).0).status, 200);
+    assert_eq!(summary_hosts(&team_get(&s, &p, "/api/team/status")), Vec::<String>::new());
+}
+
+#[test]
+fn a_link_does_not_tell_of_a_holder_out_of_scope() {
+    // dev-0001 (4711) and dev-0002 (4812) both claim 123456789; dev-0002 is linked to it.
+    let (s, admin) = scoped_server();
+    let (all, part) = (generate_key(), generate_key());
+    publish_doc(&s, &admin, 1, &[("All", &all, json!({"write": true})), ("Part", &part, json!({"write": true, "customers": ["47*"]}))]);
+    let link = br#"{"tether_id":"123456789"}"#;
+    assert_eq!(member_req(&s, &all, "POST", "/api/team/status/dev-0002/link", None, link).status, 204);
+    let r = member_req(&s, &part, "POST", "/api/team/status/dev-0001/link", None, link);
+    assert_eq!((r.status, r.text()), (409, "tether_id is not the one this device claims".into()));
+    let r = member_req(&s, &all, "POST", "/api/team/status/dev-0001/link", None, link);
+    assert_eq!((r.status, r.text()), (409, "tether_id is pinned to another device".into()), "a holder in scope is named");
 }
 
 #[test]

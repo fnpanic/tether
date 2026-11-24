@@ -121,13 +121,15 @@ alarm, health agent:          {"typ":30,"info":"{\"agent\":\"install\",\"result\
 `typ` (alarm): 0-10 as upstream's `AlarmAuditType`; 30 = a technician installed or removed the
 health monitoring agent in a remote session (`TetherAgentRequest`, `src/tauri_ui/agent.rs`):
 `agent` is `install` or `remove`, `result` the host's answer state (`installed`, `removed-by-tether`,
-`failed`, `not-installed`, …, or `running`: still going on after the host's 3-minute wait, the
-outcome shows in a later status); nothing else (no version, path or agent output). `conn_id` ties
-it to the session's `conn` records. Only an action the host acted on is recorded: not a status
-request, nor one refused (`not-allowed`, `needs-service`, `not-supported`) or `busy`; a connection
-gets an install or remove through at most every 10 s, with one post in flight. The post is one
-attempt of at most 10 s (no retries); a relay that refuses it only loses the record; the session
-goes on.
+`failed`, `not-installed`, …, or `running`); nothing else (no version, path or agent output).
+`running`: the action had not ended when the host stopped waiting (3 minutes, `HOST_WAIT`) and
+answered the technician; it goes on, and when it ends one more record with the same `conn_id`
+holds its outcome (posted also when the session has ended by then; lost only if Tether stops
+first). `conn_id` ties it to the session's `conn` records. Only an action the host acted on is
+recorded: not a status request, nor one refused (`not-allowed`, `needs-service`, `not-supported`)
+or `busy`; a connection gets an install or remove through at most every 10 s, and one action runs
+on the computer at a time. Each post is one attempt of at most 10 s (no retries); a relay that
+refuses it only loses the record; the session goes on.
 
 Answers: `204` with an empty body when stored (also when the same `nonce` was stored in the last
 10 minutes: a client retry), `400` invalid (the client drops it), `413` too large, `429` more than
@@ -248,9 +250,14 @@ Limits: 120 requests/min per member key and 60 failed signatures/min per IP (IPv
 It is not signed; it only selects the key: the relay checks the signature against that one roster key
 and no other. A `kid` that names no key accepted here (unknown, removed, or not a service entry under
 `oidc_only`) or one that is not 16 lower-case hex digits: `401 not a team member`. Without `kid` the
-relay tries every key as before; that costs about 80 µs per key under the relay's state lock
-(measured: 160 ms for the last of 2000 keys in a release build, 11 ms per request with `kid`). Send
-`kid` only to relays of 0.7 or later: an older relay refuses the header as malformed (`401`).
+relay tries every key as before: about 80 µs per key (160 ms for the last of 2000 keys in a release
+build, 11 ms per request with `kid`). Signatures are checked before the relay's state lock is taken,
+on a snapshot of the member keys (replaced whole when a roster or document is accepted; a key removed
+meanwhile is refused, `401 not a team member`), so device heartbeats and reports never wait for them.
+One request without `kid` is checked at a time for the whole relay: a second one meanwhile gets
+`429 busy` with `Retry-After: 1` at once (not counted as a failed signature); requests with `kid` are
+not limited by this. Send `kid` only to relays of 0.7 or later: an older relay refuses the header as
+malformed (`401`).
 
 **The signed team document** (0.7) replaces the roster. Tether Manage publishes an upload
 (`tether_trust::team::Upload`, unknown fields rejected everywhere):
@@ -267,14 +274,19 @@ The document (payload ≤ 256 KiB):
  "members":[{"name":"Bridge","key":"<b64>","write":false,"audit":false,"sbom":true,"agent":false,"customers":["47*"],"service":true}]}
 ```
 `serial` at least 1 and above the relay's stored one; at most 2000 members (name and key as in the
-roster); `oidc`, `roles`, `deny`, `oidc_only` optional. `config` is there exactly when `oidc` is, signed
-by an admin key too, and says the same `serial` and `oidc`. Member fields that are missing read as a
-roster entry's rights: `write` and `audit` false, `sbom` and `agent` true, `customers` `["*"]`,
-`service` false. Customer patterns: `*` (every device, also those without a customer reference), a
+roster; no name, key or key id twice, no role twice: `400`); `oidc`, `roles`, `deny`, `oidc_only`
+optional. `config` is there exactly when `oidc` is, signed by an admin key too, and says the same
+`serial` and `oidc`. Every member entry must name `sbom`, `agent` and `customers` (`400 member <name>:
+<field> is required in a signed team document`): the plain roster's compatible defaults (`sbom` and
+`agent` true, `customers` `["*"]`) would give everything to an entry that forgot one, so they apply only
+to plain roster entries. `write`, `audit` and `service` default to false. Which parser answers is
+decided by the body's top level: a JSON object with a `team` field is a signed upload (and gets the
+signed upload's errors), anything else a plain roster. Customer patterns: `*` (every device, also those without a customer reference), a
 customer reference (1–32 of `A-Za-z0-9._-`, matched exactly, case-sensitive), or a customer reference
 followed by one `*` (every reference starting with it: `47*` covers `47`, `4711`, `47-B`); nothing else,
-at most 64 per member or role. With `oidc_only` true the relay accepts member keys only of entries with
-`service`. `roles` and `deny` are stored for sign-in sessions (not yet served by this relay); `deny`
+at most 64 per member or role. `oidc_only` true needs `oidc` (`400`) and is refused for now
+(`400 oidc_only needs sign-in support on this relay`): only `service` entries would keep their keys,
+and this relay does not yet serve sign-in sessions, so every person would be locked out. `roles` and `deny` are stored for sign-in sessions (not yet served by this relay); `deny`
 does not affect key members. Once a relay has accepted a signed document it refuses plain rosters
 (`409`) for as long as `team/team.json` exists, also after a restart; an unreadable `team.json`
 leaves nobody admitted (and plain rosters still refused) until a new document is published. The
@@ -286,8 +298,23 @@ key rotation; new documents need a key in `ADMIN_PUB_KEY`.
 `customers` limits the summary, the report and history, the software list and the device actions
 (link, unlink, allow a claim, remove) to devices whose customer reference a pattern covers (no
 reference: only `*`). A device outside a member's customers answers exactly as an unknown uuid
-(`404 not found`), on every route; the device list (`/api/team/devices`, from heartbeats), the tags
-and the session audit records stay fleet-wide. `agent` is enforced by the viewer's desktop, not here.
+(`404 not found`), on every route; `customers: []` sees no device at all. The session audit
+(`GET /api/team/audit`) follows the scope too: a member without `*` gets records only for a device
+whose pin is in its scope, named by the Tether ID the pin is verified for (a team link or a Tether
+proof) or by its uuid (the records of that Tether ID); anything else, also a machine without a health
+agent (no pin, so no customer: `*` only), answers exactly as an unknown device (`200 []`). Linking
+an ID that a device outside the member's scope holds answers `409 tether_id is not the one this device
+claims`, as for a wrong ID. Fleet-wide by design: the device list (`/api/team/devices`, from
+heartbeats, which carry no customer) and the shared tags (one document for the whole team). `agent`
+is enforced by the viewer's desktop, not here.
+
+**What the signature on the team document protects.** The document is signed with an admin key, not
+trusted because of the request that carries it: another relay, or a desktop or Manage reading
+`GET /api/admin/team` or `GET /api/team/config`, can check it against the admin key and cannot be given
+a forged one; and its serial cannot go back by a `PUT` (`409`). It does not protect a relay from
+whoever can write that relay's data folder (`/var/lib/tether-api`) or its `ADMIN_PUB_KEY`: they control
+that relay's members (they can put back an older `team.json`, delete it and write a plain roster, or
+trust another admin key). The relay is trusted to enforce the permissions it serves.
 
 | Method & path | Body | Result |
 | --- | --- | --- |
@@ -296,7 +323,7 @@ and the session audit records stay fleet-wide. `agent` is enforced by the viewer
 | `GET /api/team/devices` | – | `[{uuid,id,profile,version,os,last_seen}]` newest first, from the heartbeats (no IP, no serials) |
 | `GET /api/team/tags` | – | `{"rev":<u64>,"doc":<JSON or null>,"updated_by":"<name>","updated_at":<unix>}`; `rev` 0, `doc` null, `updated_by` "" and `updated_at` 0 when none was stored |
 | `PUT /api/team/tags` | a JSON object (≤ 512 KiB), header `If-Match: <rev>` (decimal, quotes tolerated) | `200 {"rev":<new>}`. Member without `write`: `403`. Missing or bad `If-Match`, body not a JSON object: `400`. `rev` is not the current one: `409` with the current `{"rev","doc","updated_by","updated_at"}`. Too large: `413`. Stored atomically as `team/tags.json` (0600) with `rev + 1`, `updated_by` = the member's roster name. The relay does not look inside the document. |
-| `GET /api/team/audit?device=<id or uuid>&since=<unix>&limit=<n>` | – | Session audit records of one device, same format as `GET /api/admin/audit`, newest first. Members with `audit` only (else `403`). `device` required (`400` without); `since` default 0; `limit` 1–500, default 200; unknown parameter `400`. |
+| `GET /api/team/audit?device=<id or uuid>&since=<unix>&limit=<n>` | – | Session audit records of one device, same format as `GET /api/admin/audit`, newest first. Members with `audit` only (else `403`); a member without `*` only of devices in its scope (above). `device` required (`400` without); `since` default 0; `limit` 1–500, default 200; unknown parameter `400`. |
 | `GET /api/team/status` | – | The health summary of every host that has a full report (below). Any member; `ETag`, `304` on `If-None-Match`. |
 | `GET /api/team/status/<uuid>` | – | One device's last report and its history (below). Any member. `404` for an invalid or unenrolled uuid. |
 | `POST /api/team/status/<uuid>/link` | `{"tether_id":"…"}` (must equal the device's claim) | `204`: the claim is confirmed, the device's Tether ID is now that one, with the member's roster name and the time as `linked_by` and `linked_at`; the same link again is `204`. Members with `write` only (else `403`). `400` bad body or Tether ID; `404` unknown uuid; `409 tether_id is not the one this device claims`, `409 tether_id is pinned to another device`. Journal line `status: <uuid> linked to <id> by team member <name>`. |

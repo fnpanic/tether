@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,15 +23,21 @@ use tether_trust::team::{self, OpenError, Permissions, Roster, Upload};
 use tether_trust::{reqauth, VerifyingKey};
 use tiny_http::Request;
 
-use crate::{audit, empty, hdr, header, json, load_json, mkdirs, now, rate_ok, text, App, Body, Resp, LIMIT_SMALL};
+use crate::{audit, empty, hdr, header, json, load_json, lock, mkdirs, now, rate_ok, text, App, Body, Resp, UploadSlot, LIMIT_SMALL};
 
 pub const LIMIT_ROSTER: u64 = 64 << 10;
 /// `PUT /api/admin/team`: a signed upload; a plain roster stays at `LIMIT_ROSTER`.
 pub const LIMIT_TEAM: u64 = team::MAX_UPLOAD as u64;
 const LIMIT_TAGS: u64 = 512 << 10;
 const KEY_PER_MIN: u32 = 120;
-/// Failed member signatures per IP and minute: each failure tries every roster key under the lock.
+/// Failed member signatures per IP and minute: a failure without `kid` tries every member key.
 const FAIL_PER_MIN: u32 = 60;
+/// Signatures without `kid` being checked (up to 2000 keys, about 160 ms each): one at a time for
+/// the whole relay, so they cannot keep many workers busy; `kid` requests are not limited by it.
+static NO_KID: AtomicUsize = AtomicUsize::new(0);
+/// `oidc_only` locks out every member key but the service ones: refused until this relay serves
+/// sign-in sessions (`POST /api/team/session`, a later task sets this).
+const OIDC_SESSIONS: bool = false;
 const AUDIT_DEFAULT: usize = 200;
 const AUDIT_MAX: usize = 500;
 
@@ -62,6 +70,32 @@ pub(crate) struct Who {
     service: bool,
 }
 
+/// The members whose keys are accepted, their keys and key ids (`kid`) in the same order. One
+/// immutable snapshot, replaced whole when the roster or document changes: signatures are checked
+/// on it without the state lock ([`member_verify`]).
+#[derive(Default)]
+pub(crate) struct Members {
+    who: Vec<Who>,
+    keys: Vec<VerifyingKey>,
+    kids: HashMap<String, usize>,
+}
+
+/// What [`member_verify`] found, before the state lock: the snapshot, the index of the key that
+/// signed and the nonce (still to be checked for replay), or why not.
+pub(crate) struct Verified {
+    r: Result<(Arc<Members>, usize, String), Refused>,
+    t: u64,
+}
+
+enum Refused {
+    /// Too many failed signatures from this IP.
+    Limited,
+    /// Another signature without `kid` is being checked.
+    Busy,
+    /// Not a member's valid signature (`401` with this text, counts as a failure).
+    Auth(String),
+}
+
 /// The signed team document in force.
 struct Doc {
     /// 0: `team.json` exists but could not be read (nobody is a member until a new one arrives).
@@ -74,10 +108,9 @@ struct Doc {
 pub struct Team {
     roster: Roster,
     doc: Option<Doc>,
-    /// Members whose keys are accepted, their keys and key ids (`kid`) in the same order.
-    members: Vec<Who>,
-    keys: Vec<VerifyingKey>,
-    kids: HashMap<String, usize>,
+    members: Arc<Members>,
+    /// This request's [`member_verify`] (set by `serve` around `route`).
+    pub(crate) verified: Option<Verified>,
     tags: Tags,
     key_hits: HashMap<String, (u64, u32)>,
     fail_hits: HashMap<String, (u64, u32)>,
@@ -110,9 +143,9 @@ impl Team {
         Ok(t)
     }
 
-    fn set_members(&mut self, members: Vec<Who>, keys: Vec<VerifyingKey>) {
-        self.kids = keys.iter().enumerate().map(|(i, k)| (team::key_id(k), i)).collect();
-        (self.members, self.keys) = (members, keys);
+    fn set_members(&mut self, who: Vec<Who>, keys: Vec<VerifyingKey>) {
+        let kids = keys.iter().enumerate().map(|(i, k)| (team::key_id(k), i)).collect();
+        self.members = Arc::new(Members { who, keys, kids });
     }
 
     fn set_roster(&mut self, roster: Roster, keys: Vec<VerifyingKey>) {
@@ -156,7 +189,9 @@ impl App {
     /// `PUT /api/admin/team` (already admin-authenticated): a signed upload, or a plain roster
     /// until the first signed one was accepted.
     pub(crate) fn put_team(&mut self, body: &[u8]) -> Result<Resp, Resp> {
-        if serde_json::from_slice::<Upload>(body).is_ok() {
+        // The shape decides which parser answers: an object with `team` is a signed upload (and
+        // gets its errors), anything else a plain roster.
+        if serde_json::from_slice::<HashMap<String, serde::de::IgnoredAny>>(body).is_ok_and(|m| m.contains_key("team")) {
             return self.put_team_doc(body);
         }
         if body.len() as u64 > LIMIT_ROSTER {
@@ -179,6 +214,9 @@ impl App {
             OpenError::Bad(e) => text(400, &e),
             OpenError::Untrusted(e) => text(401, &e),
         })?;
+        if d.oidc_only && !OIDC_SESSIONS {
+            return Err(text(400, "oidc_only needs sign-in support on this relay"));
+        }
         if self.team.doc.as_ref().is_some_and(|c| d.serial <= c.serial) {
             return Err(text(409, "serial must be greater than the current team document's"));
         }
@@ -191,7 +229,7 @@ impl App {
             }
         }
         self.team.set_doc(&d, keys, body);
-        eprintln!("team: signed team document {} accepted ({} members, {} with a key here)", d.serial, d.members.len(), self.team.members.len());
+        eprintln!("team: signed team document {} accepted ({} members, {} with a key here)", d.serial, d.members.len(), self.team.members.who.len());
         Ok(empty(204))
     }
 
@@ -217,21 +255,14 @@ impl App {
 
     /// `/api/team/<rest>`: size check, member signature, rate limit, then the handler.
     pub(crate) fn team_route(&mut self, rq: &Request, body: &Body, method: &str, url: &str, rest: &str) -> Result<Resp, Resp> {
-        let limit = match (method, rest) {
-            ("GET", "me" | "devices" | "tags" | "audit" | "status") => LIMIT_SMALL,
-            ("GET", r) if r.starts_with("status/") => LIMIT_SMALL,
-            ("POST", r) if r.starts_with("status/") && (r.ends_with("/link") || r.ends_with("/allow-claim")) => LIMIT_SMALL,
-            ("DELETE", r) if r.starts_with("status/") => LIMIT_SMALL,
-            ("PUT", "tags") => LIMIT_TAGS,
-            _ => return Err(crate::not_found()),
-        };
+        let limit = route_limit(method, rest).ok_or_else(crate::not_found)?;
         let body = body.bytes(limit)?;
-        let i = self.member_auth(rq, method, url, body)?;
+        let i = self.member_auth(rq)?;
         let t = now();
-        if !rate_ok(&mut self.team.key_hits, self.team.members[i].key.clone(), t, KEY_PER_MIN) {
+        if !rate_ok(&mut self.team.key_hits, self.team.members.who[i].key.clone(), t, KEY_PER_MIN) {
             return Err(text(429, "too many requests"));
         }
-        let Who { name, perms, service, .. } = self.team.members[i].clone();
+        let Who { name, perms, service, .. } = self.team.members.who[i].clone();
         let m = &perms;
         match (method, rest) {
             // The plain roster's answer stays as it was; with a signed document every permission.
@@ -296,46 +327,34 @@ impl App {
                 if !m.audit {
                     return Err(text(403, "this member may not read the session history"));
                 }
-                self.team_audit(url)
+                self.team_audit(url, m)
             }
         }
     }
 
-    /// Index of the roster member whose key signed the request. Same rules and nonce cache as
-    /// `App::auth`.
-    fn member_auth(&mut self, rq: &Request, method: &str, url: &str, body: &[u8]) -> Result<usize, Resp> {
+    /// Index (in the current members) of the member whose key signed the request, from this
+    /// request's [`member_verify`]: here, under the lock, only the replay check and whether that
+    /// key is still a member (a document may have replaced the snapshot it was checked on).
+    fn member_auth(&mut self, rq: &Request) -> Result<usize, Resp> {
         let ip = crate::rate_ip(rq);
-        let t = now();
-        if self.team.fail_hits.get(&ip).is_some_and(|h| t < h.0 + 60 && h.1 >= FAIL_PER_MIN) {
-            return Err(text(429, "too many failed requests"));
-        }
-        let r = (|| {
-            if self.team.keys.is_empty() {
-                return Err("team access disabled".to_owned());
-            }
-            let sig = header(rq, reqauth::HEADER).ok_or_else(|| "missing signature".to_owned())?;
-            let mut err = String::new();
-            // Once, not per roster key (up to 2000, under the state lock).
-            let digest = reqauth::body_digest(body);
-            // `kid=`: that key only (unknown: refused, no other key tried); without: every key.
-            let range = match reqauth::header_kid(&sig) {
-                Some(k) => {
-                    let i = *self.team.kids.get(k).ok_or_else(|| "not a team member".to_owned())?;
-                    i..i + 1
-                }
-                None => 0..self.team.keys.len(),
-            };
-            for (i, key) in self.team.keys.iter().enumerate().skip(range.start).take(range.len()) {
-                let nonces = &mut self.nonces;
-                let unused = |n: &str| !nonces.contains_key(n) && nonces.insert(n.to_owned(), t).is_none();
-                match reqauth::verify_request_for(&sig, key, crate::sig_relay(), method, url, &digest, t, unused) {
-                    Ok(()) => return Ok(i),
-                    Err(e) if err.is_empty() || e != "signature does not match" => err = e,
-                    Err(_) => {}
+        let Verified { r, t } = self.team.verified.take().ok_or_else(|| crate::internal("member signature not checked"))?;
+        let r = match r {
+            Err(Refused::Limited) => return Err(text(429, "too many failed requests")),
+            Err(Refused::Busy) => return Err(text(429, "busy").with_header(hdr("Retry-After", "1"))),
+            Err(Refused::Auth(e)) => Err(e),
+            Ok((snap, i, nonce)) => {
+                let cur = &self.team.members;
+                let i = if Arc::ptr_eq(&snap, cur) { Some(i) } else { cur.keys.iter().position(|k| *k == snap.keys[i]) };
+                match i {
+                    None => Err("not a team member".to_owned()),
+                    Some(_) if self.nonces.contains_key(&nonce) => Err("replayed request".to_owned()),
+                    Some(i) => {
+                        self.nonces.insert(nonce, t);
+                        Ok(i)
+                    }
                 }
             }
-            Err(if err == "signature does not match" { "not a team member".to_owned() } else { err })
-        })();
+        };
         match r {
             Ok(i) => {
                 self.nonce_used();
@@ -349,7 +368,7 @@ impl App {
     }
 
     /// `GET /api/team/audit?device=<id or uuid>&since=<unix>&limit=<1..500>`.
-    fn team_audit(&mut self, url: &str) -> Result<Resp, Resp> {
+    fn team_audit(&mut self, url: &str, scope: &Permissions) -> Result<Resp, Resp> {
         let (mut since, mut limit, mut device) = (0, AUDIT_DEFAULT, String::new());
         for kv in url.split_once('?').map_or("", |(_, q)| q).split('&').filter(|s| !s.is_empty()) {
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
@@ -364,7 +383,82 @@ impl App {
         if device.is_empty() {
             return Err(text(400, "device required"));
         }
+        // Not every customer (only `*` covers devices without one): only the records of a device
+        // in the scope, by the Tether ID its pin is verified for; any other answers as unknown.
+        if !scope.sees(None) {
+            match self.scoped_tether_id(&device, scope) {
+                Some(id) => device = id,
+                None => return Ok(audit::answer(Vec::new(), false)),
+            }
+        }
         let dir = self.audit.dir.clone();
         self.defer(move |_| Ok(audit::response(&dir, since, limit, &device)))
     }
+}
+
+/// The body limit of a member route; `None`: not one (`404`).
+fn route_limit(method: &str, rest: &str) -> Option<u64> {
+    match (method, rest) {
+        ("GET", "me" | "devices" | "tags" | "audit" | "status") => Some(LIMIT_SMALL),
+        ("GET", r) if r.starts_with("status/") => Some(LIMIT_SMALL),
+        ("POST", r) if r.starts_with("status/") && (r.ends_with("/link") || r.ends_with("/allow-claim")) => Some(LIMIT_SMALL),
+        ("DELETE", r) if r.starts_with("status/") => Some(LIMIT_SMALL),
+        ("PUT", "tags") => Some(LIMIT_TAGS),
+        _ => None,
+    }
+}
+
+/// The member signature of a `/api/team/` request (not `config`), checked before `route` takes
+/// the state lock: the lock only to read the failure limit and take the members snapshot, then
+/// the signature on that snapshot (`kid`: that key only; without: every key, one such request
+/// at a time for the whole relay, a second one `429 busy`). `None`: not a member route, or a body
+/// over the route's limit (answered by `team_route` before any signature is looked at).
+pub(crate) fn member_verify(app: &Mutex<App>, rq: &Request, body: &Body) -> Option<Verified> {
+    let url = rq.url();
+    let method = rq.method().as_str();
+    let rest = url.split('?').next().unwrap_or("").strip_prefix("/api/team/")?;
+    let body = body.bytes(route_limit(method, rest)?).ok()?;
+    let (t, ip) = (now(), crate::rate_ip(rq));
+    let snap = {
+        let a = lock(app);
+        if a.team.fail_hits.get(&ip).is_some_and(|h| t < h.0 + 60 && h.1 >= FAIL_PER_MIN) {
+            return Some(Verified { r: Err(Refused::Limited), t });
+        }
+        a.team.members.clone()
+    };
+    let r = verify_on(&snap, rq, method, url, body, t).map(|(i, nonce)| (snap, i, nonce));
+    Some(Verified { r, t })
+}
+
+/// The index of the key in `m` that signed the request, and its nonce (not yet checked for replay).
+fn verify_on(m: &Members, rq: &Request, method: &str, url: &str, body: &[u8], t: u64) -> Result<(usize, String), Refused> {
+    let auth = |e: &str| Refused::Auth(e.to_owned());
+    if m.keys.is_empty() {
+        return Err(auth("team access disabled"));
+    }
+    let sig = header(rq, reqauth::HEADER).ok_or_else(|| auth("missing signature"))?;
+    // `kid=`: that key only (unknown: refused, no other key tried); without: every key.
+    let (range, _slot) = match reqauth::header_kid(&sig) {
+        Some(k) => {
+            let i = *m.kids.get(k).ok_or_else(|| auth("not a team member"))?;
+            (i..i + 1, None)
+        }
+        None => (0..m.keys.len(), Some(UploadSlot::take(&NO_KID, 1).ok_or(Refused::Busy)?)),
+    };
+    // Once, not per key.
+    let digest = reqauth::body_digest(body);
+    let mut err = String::new();
+    for i in range {
+        let mut nonce = String::new();
+        let seen = |n: &str| {
+            nonce = n.to_owned();
+            true
+        };
+        match reqauth::verify_request_for(&sig, &m.keys[i], crate::sig_relay(), method, url, &digest, t, seen) {
+            Ok(()) => return Ok((i, nonce)),
+            Err(e) if err.is_empty() || e != "signature does not match" => err = e,
+            Err(_) => {}
+        }
+    }
+    Err(auth(if err == "signature does not match" { "not a team member" } else { &err }))
 }

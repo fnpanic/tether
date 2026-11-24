@@ -457,7 +457,21 @@ the customers whose devices the member sees (`customers`, e.g. `47*`), service e
 sign-in settings. Once a relay has accepted one it refuses the plain roster this page publishes
 today (`409`), also after a restart. Publishing the signed document from Tether Manage comes with
 its sign-in release; until then this page and the plain roster work as described above. Wire format
-and rules: [api.md](api.md), "The signed team document".
+and rules: [api.md](api.md), "The signed team document". Every entry names all its permissions
+(nothing is assumed for a signed entry). A member limited to some customers also sees session
+history only of their devices; the device list and the shared tags stay the whole team's.
+
+What the admin signature does: other relays, technician apps and Tether Manage can check the
+document against the admin key, so nobody can hand them a forged one, and a relay never goes back
+to a lower serial by a publish. What it does not do: whoever can write a relay's data folder or its
+`ADMIN_PUB_KEY` decides who is a member on that relay; the relay itself enforces the permissions,
+so it must be trusted.
+
+Restoring a backup of a relay's data folder (`team/` in `/var/lib/tether-api`): an older
+`team.json` is in force again after the restart, and its serial becomes the floor (a document with a
+serial between the restored one and the newest is accepted again), so publish the current document
+afterwards. A backup from before any signed document (a `roster.json`, no `team.json`) brings that
+plain roster back, and plain rosters are accepted again until the next signed document.
 
 ## Releases
 

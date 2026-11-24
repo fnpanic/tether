@@ -343,6 +343,11 @@ pub fn read(dir: &Path, since: u64, limit: usize, device: &str) -> (Vec<String>,
 /// The response of a `read`: the JSON array of the records, `X-Audit-Truncated: 1` if it was cut.
 pub fn response(dir: &Path, since: u64, limit: usize, device: &str) -> crate::Resp {
     let (lines, cut) = read(dir, since, limit, device);
+    answer(lines, cut)
+}
+
+/// The JSON array of `lines` (records), `X-Audit-Truncated: 1` if `cut`.
+pub fn answer(lines: Vec<String>, cut: bool) -> crate::Resp {
     let r = tiny_http::Response::from_data(format!("[{}]", lines.join(","))).with_header(crate::hdr("Content-Type", "application/json"));
     // Content-Length, not chunks: the size is known.
     if cut { r.with_header(crate::hdr("X-Audit-Truncated", "1")) } else { r }.with_chunked_threshold(usize::MAX).boxed()

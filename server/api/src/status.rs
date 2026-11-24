@@ -779,10 +779,10 @@ impl Status {
         let _ = fs::remove_file(self.data.join("status").join(s.file));
     }
 
-    /// The least recently used summaries go while all together are above `SUMMARY_CACHE_BYTES`
+    /// The least recently used summaries go while all together are above `max` (`SUMMARY_CACHE_BYTES`)
     /// (the most recently used one stays, whatever its size).
-    fn summary_trim(&mut self) {
-        while self.summaries.len() > 1 && self.summaries.iter().map(|s| s.size).sum::<u64>() > SUMMARY_CACHE_BYTES {
+    fn summary_trim(&mut self, max: u64) {
+        while self.summaries.len() > 1 && self.summaries.iter().map(|s| s.size).sum::<u64>() > max {
             self.summary_drop(0);
         }
     }
@@ -1226,7 +1226,7 @@ fn summary_build(app: &Mutex<App>, key: &str, scope: &Permissions, tmp: PathBuf,
         Ok((etag, size)) => {
             let s = a.status.summary_slot(key);
             (s.built, s.size) = (Some((t, etag.clone())), size);
-            a.status.summary_trim();
+            a.status.summary_trim(SUMMARY_CACHE_BYTES);
             a.summary_file(&file, &etag, inm.as_deref())
         }
         Err(e) => {
@@ -1477,6 +1477,8 @@ impl App {
             if let (Some(o), Some(c)) = (&old, &pin.customer) {
                 if o.customer != pin.customer {
                     eprintln!("status: customer of {} set to {c} by token {}", req.uuid, tok.id);
+                    // The cached summaries of the old customer's scopes must not show it any more.
+                    self.summary_outdated();
                 }
             }
             self.status.put(&req.uuid, pin.clone());
@@ -1909,6 +1911,19 @@ impl App {
         Ok(log)
     }
 
+    /// `GET /api/team/audit` of a member that does not see every customer: the Tether ID whose
+    /// session records it may read for `device` (a Tether ID through its pin's verified link, or a
+    /// device uuid whose pin has one), when that pin is in `scope`. A machine without a pin (no
+    /// health agent, so no customer) is seen only with `*`.
+    pub(crate) fn scoped_tether_id(&self, device: &str, scope: &Permissions) -> Option<String> {
+        let s = &self.status;
+        let (uuid, id) = match s.by_tether.get(device) {
+            Some(u) => (u.as_str(), device.to_owned()),
+            None => (device, s.keys.get(device)?.tether_id.clone()?),
+        };
+        s.keys.get(uuid).filter(|p| scope.sees(p.customer.as_deref())).map(|_| id)
+    }
+
     /// The pin of `uuid` if `scope` sees its customer; else not found, as for an unknown uuid.
     fn scoped_pin(&self, uuid: &str, scope: &Permissions) -> Result<Pin, Resp> {
         st::valid_uuid(uuid).then(|| self.status.keys.get(uuid)).flatten().filter(|p| scope.sees(p.customer.as_deref())).cloned().ok_or_else(not_found)
@@ -1934,7 +1949,11 @@ impl App {
         if pin.claimed_id.as_ref() != Some(&id) {
             return Err(text(409, "tether_id is not the one this device claims"));
         }
-        if self.status.by_tether.get(&id).is_some_and(|u| u != uuid) {
+        if let Some(holder) = self.status.by_tether.get(&id).filter(|u| *u != uuid) {
+            // A holder outside the member's scope is not named, not even as "another device".
+            if !scope.sees(self.status.keys.get(holder).and_then(|p| p.customer.as_deref())) {
+                return Err(text(409, "tether_id is not the one this device claims"));
+            }
             return Err(text(409, "tether_id is pinned to another device"));
         }
         let t = now();
@@ -2640,6 +2659,32 @@ mod tests {
         fs::write(&tmp, b"{}").unwrap();
         append_then_rename(Some(&f), b"{\"at\":2}\n", &tmp, &dest).unwrap();
         assert_eq!((fs::read(&hist).unwrap(), fs::read(&dest).unwrap()), (b"{\"at\":1}\n{\"at\":2}\n".to_vec(), b"{}".to_vec()));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn summaries_are_trimmed_to_the_byte_bound_least_recently_used_first() {
+        let d = std::env::temp_dir().join(format!("tether-summary-trim-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("status")).unwrap();
+        let mut s = Status { data: d.clone(), ..Default::default() };
+        let mut files = Vec::new();
+        for k in ["sbom:a", "sbom:b", "sbom:c"] {
+            let e = s.summary_slot(k);
+            e.size = 40;
+            fs::write(d.join("status").join(&e.file), b"x").unwrap();
+            files.push(e.file.clone());
+        }
+        s.summary_slot("sbom:a"); // used again: b is now the least recently used
+        s.summary_trim(100);
+        let keys = |s: &Status| s.summaries.iter().map(|e| e.key.clone()).collect::<Vec<_>>();
+        assert_eq!(keys(&s), ["sbom:c", "sbom:a"]);
+        assert!(!d.join("status").join(&files[1]).exists(), "its file goes with it");
+        assert!(d.join("status").join(&files[0]).exists() && d.join("status").join(&files[2]).exists());
+        // The most recently used one stays, whatever its size.
+        s.summary_slot("sbom:a").size = 500;
+        s.summary_trim(100);
+        assert_eq!(keys(&s), ["sbom:a"]);
         let _ = fs::remove_dir_all(&d);
     }
 
