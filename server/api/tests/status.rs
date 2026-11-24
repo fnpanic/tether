@@ -1536,6 +1536,23 @@ fn old_key_lines_load_without_customer() {
 }
 
 #[test]
+fn customer_survives_link_unlink_and_allow_claim() {
+    let (s, admin) = server();
+    let (w, r) = writer_and_reader(&s, &admin);
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &customer_token(&admin, Some("4711")).0).status, 200);
+    let customer = || team_get(&s, &r, "/api/team/status/dev-0001").json()["customer"].clone();
+    assert_eq!(customer(), "4711");
+    assert_eq!(s.admin(&w, "POST", "/api/team/status/dev-0001/link", br#"{"tether_id":"123456789"}"#).status, 204);
+    assert_eq!(team_get(&s, &r, "/api/team/status/dev-0001").json()["tether_id"], "123456789");
+    assert_eq!(customer(), "4711", "after link");
+    assert_eq!(s.admin(&w, "DELETE", "/api/team/status/dev-0001/link", b"").status, 204);
+    assert_eq!(customer(), "4711", "after unlink");
+    assert_eq!(s.admin(&w, "POST", "/api/team/status/dev-0001/allow-claim", b"").status, 204);
+    assert_eq!(customer(), "4711", "after allow-claim");
+}
+
+#[test]
 fn customer_survives_restart() {
     let (s, admin) = server();
     let a = generate_key();

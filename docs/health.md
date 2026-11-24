@@ -328,8 +328,9 @@ one customer inside this deployment. Only an enrolment token sets it:
 
 - A device that enrols with a token naming a customer gets that customer. The relay keeps it with
   the pin in `keys.jsonl`.
-- **Changing it:** the same device (same uuid and key) enrolling again with a token that names
-  another customer gets the new one, and tether-api writes `status: customer of <uuid> set to
+- **Changing it:** the same device (same uuid and key) enrolling again with a token that names a
+  customer other than the one it has (or any customer, if it had none) gets the new one, and
+  tether-api writes `status: customer of <uuid> set to
   <customer> by token <id>` to its journal. The pin keeps the token it first enrolled with, so
   `monitor-publish devices --token` still lists it under that one; only the journal line names the
   token that changed it.

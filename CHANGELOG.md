@@ -71,7 +71,9 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   cannot name it. The team summary, the host detail and `GET /api/admin/status/devices` return
   it; the host list has a Customer column, the search term `customer:` and the field in both
   exports; `monitor-publish devices --customer` lists one customer's devices. A relay from before
-  this refuses a token with a customer: update tether-api first. It groups devices inside one
+  this refuses a token with a customer: update tether-api first. Once a token with a customer has
+  been used, an older tether-api can no longer read `status/keys.jsonl` and locks the status
+  routes (503). It groups devices inside one
   deployment and is not a security boundary
   ([docs/health.md](docs/health.md#customer-reference),
   [SECURITY.md](SECURITY.md#device-status-health-reports)). Separate organisations need separate
