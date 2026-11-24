@@ -261,6 +261,7 @@ async function run(name) {
   await rows().nth(1).click();
   const sec = p.getByTestId("health-section");
   check(tag("detail shows the Health section"), await until(() => sec.locator("li[data-check]").first().isVisible()));
+  check(tag("detail shows the customer reference"), /Customer 471[12]/.test(await sec.textContent()), (await sec.textContent()).slice(0, 120));
   // Every fault (all groups) and the setup items come before the first "checks passed" fold.
   const order = await sec.evaluate((s) => {
     const items = [...s.querySelectorAll("li[data-check]")];

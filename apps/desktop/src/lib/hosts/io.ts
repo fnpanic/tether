@@ -27,7 +27,7 @@ export function exportJson(store: Store, o: ExportOpts): string {
     if (e.added) out.added = e.added;
     if (o.notes && e.notes) out.notes = e.notes;
     const st = o.hosts?.get(id)?.status;
-    const health = st && { state: o.hosts!.get(id)!.health, counts: st.counts, products: st.products, agent: st.agent, reported: iso(st.last_seen), faults: st.faults };
+    const health = st && { state: o.hosts!.get(id)!.health, counts: st.counts, products: st.products, agent: st.agent, customer: st.customer ?? undefined, reported: iso(st.last_seen), faults: st.faults };
     if (Object.keys(out).length || o.ids) hosts[id] = health ? { ...out, health } as HostEntry : out;
   }
   return JSON.stringify({ format: "tether-hosts", v: STORE_VERSION, hosts, tags: store.tags, rules: store.rules, searches: store.searches }, null, 2);
@@ -40,7 +40,7 @@ function cell(s: string): string {
 }
 
 export function exportCsv(store: Store, o: ExportOpts): string {
-  const cols = ["id", "name", "tags", "pinned", ...(o.notes ? ["notes"] : []), ...(o.hosts ? ["health", "crit", "warn", "unknown", "setup", "products", "agent", "reported"] : [])];
+  const cols = ["id", "name", "tags", "pinned", ...(o.notes ? ["notes"] : []), ...(o.hosts ? ["health", "crit", "warn", "unknown", "setup", "products", "agent", "customer", "reported"] : [])];
   const rows = [cols.join(",")];
   for (const [id, e] of pick(store, o)) {
     const r = [id, e.name ?? "", (e.tags ?? []).join(" "), e.pinned ? "yes" : ""];
@@ -48,7 +48,7 @@ export function exportCsv(store: Store, o: ExportOpts): string {
     if (o.hosts) {
       const h = o.hosts.get(id);
       const st = h?.status;
-      r.push(h?.health ?? "", ...(st ? [st.counts.crit, st.counts.warn, st.counts.unknown, st.counts.setup].map(String) : ["", "", "", ""]), h ? products(h) : "", st?.agent ?? "", st ? iso(st.last_seen) : "");
+      r.push(h?.health ?? "", ...(st ? [st.counts.crit, st.counts.warn, st.counts.unknown, st.counts.setup].map(String) : ["", "", "", ""]), h ? products(h) : "", st?.agent ?? "", st?.customer ?? "", st ? iso(st.last_seen) : "");
     }
     rows.push(r.map(cell).join(","));
   }

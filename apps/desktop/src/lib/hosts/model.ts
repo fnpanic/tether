@@ -120,6 +120,8 @@ export interface StatusSummary {
   no_claim?: boolean;
   host: string;
   agent: string;
+  /** The customer reference the relay holds for this device (1 to 32 of A-Za-z0-9._-); a relay that predates it sends no field. */
+  customer?: string | null;
   overall: CheckState;
   counts: StatusCounts;
   products: StatusProduct[];
@@ -169,6 +171,7 @@ export interface StatusHostReply {
   last_seen: number | null;
   next: number | null;
   stale: boolean;
+  customer?: string | null;
   report:
     | (Omit<StatusSummary, "relay" | "last_seen" | "stale" | "tether_id" | "products"> & {
         tether_id?: string;

@@ -59,6 +59,7 @@ describe("health export", () => {
       tether_id: "111111111",
       host: "BER-WS-001",
       agent: "0.1.0",
+      customer: "4711",
       overall: "crit",
       counts: { ok: 9, warn: 1, crit: 1, unknown: 0, setup: 0 },
       products: [{ name: "Records Server", version: "26.3.2", role: "server" }, { name: "Imaging" }],
@@ -76,15 +77,15 @@ describe("health export", () => {
   const byId = new Map(buildHosts(s, [], [], null, NOW, status).map((h) => [h.id, h]));
   it("exports health fields and one row per failing check", () => {
     const csv = exportCsv(s, { notes: false, ids: ["111111111", "m:u9"], hosts: byId }).split("\r\n");
-    expect(csv[0]).toBe("id,name,tags,pinned,health,crit,warn,unknown,setup,products,agent,reported");
-    expect(csv[1]).toBe("111111111,Front desk,site:berlin,,crit,1,1,0,0,\"Records Server 26.3.2 (server); Imaging\",0.1.0,2027-01-15T08:00:00.000Z");
-    expect(csv[2]).toBe("m:u9,,,,stale,0,0,0,0,,0.1.0,2027-01-15T08:00:00.000Z");
+    expect(csv[0]).toBe("id,name,tags,pinned,health,crit,warn,unknown,setup,products,agent,customer,reported");
+    expect(csv[1]).toBe("111111111,Front desk,site:berlin,,crit,1,1,0,0,\"Records Server 26.3.2 (server); Imaging\",0.1.0,4711,2027-01-15T08:00:00.000Z");
+    expect(csv[2]).toBe("m:u9,,,,stale,0,0,0,0,,0.1.0,,2027-01-15T08:00:00.000Z");
     const faults = exportFaultsCsv([byId.get("111111111")!, byId.get("m:u9")!]).split("\r\n");
     expect(faults).toEqual(["id,name,uuid,check,state,since", `111111111,Front desk,u1,app/db-service,crit,${since}`, "111111111,Front desk,u1,'=backup/age,warn,", ""]);
   });
   it("JSON carries a health object per host, only with health data", () => {
     const j = JSON.parse(exportJson(s, { notes: false, ids: ["111111111"], hosts: byId }));
-    expect(j.hosts["111111111"].health).toEqual({ state: "crit", counts: { ok: 9, warn: 1, crit: 1, unknown: 0, setup: 0 }, products: status[0].products, agent: "0.1.0", reported: "2027-01-15T08:00:00.000Z", faults: status[0].faults });
+    expect(j.hosts["111111111"].health).toEqual({ state: "crit", counts: { ok: 9, warn: 1, crit: 1, unknown: 0, setup: 0 }, products: status[0].products, agent: "0.1.0", customer: "4711", reported: "2027-01-15T08:00:00.000Z", faults: status[0].faults });
     expect(JSON.parse(exportJson(s, { notes: false })).hosts["111111111"].health).toBeUndefined();
     // Health data never comes back in through an import.
     expect(parseImport(exportJson(s, { notes: false, ids: ["111111111"], hosts: byId })).hosts["111111111"]).toEqual({ name: "Front desk", tags: ["site:berlin"] });

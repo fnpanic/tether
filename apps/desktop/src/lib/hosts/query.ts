@@ -19,11 +19,11 @@ export interface Parsed {
 }
 
 /** The fields of a tag rule: those from before health data existed. In a rule, health:, product:,
- *  version:, role:, check:, agent: and since: stay plain words, as older desktops of a team read the
+ *  version:, role:, check:, agent:, customer: and since: stay plain words, as older desktops of a team read the
  *  same shared rule (docs/advanced.md). */
 const RULE_FIELDS = new Set(["id", "name", "host", "os", "ver", "user", "note", "tag", "is", "has", "seen", "src"]);
 /** The search box and saved searches also read the health summary. */
-const FIELDS = new Set([...RULE_FIELDS, "health", "product", "version", "role", "check", "agent", "since"]);
+const FIELDS = new Set([...RULE_FIELDS, "health", "product", "version", "role", "check", "agent", "customer", "since"]);
 
 type Tok = { t: "(" | ")" | "or" | "and" | "not" } | { t: "term"; v: string; quoted: boolean };
 
@@ -273,6 +273,8 @@ function field(h: Host, f: string, op: string, v: string, now: number): boolean 
       return !!h.status?.faults.some((f) => f.id.includes(v));
     case "agent":
       return v === "none" ? !h.status : !!h.status?.agent.startsWith(v);
+    case "customer":
+      return v === "none" ? !h.status : !!h.status?.customer?.toLowerCase().startsWith(v);
     case "since": {
       const s = age(v);
       const t = h.status && (h.health === "warn" || h.health === "crit") ? notSince(h.status) : null;

@@ -257,6 +257,7 @@ export function HealthSection({ h, reply, lang, nameOf, holderOf }: { h: Host; r
           reported {ago(s.last_seen, now)}, agent {clip(s.agent, 32)}
         </span>
       </div>
+      {s.customer && <div className="mt-0.5 text-right text-footnote text-muted">Customer {clip(s.customer, 32)}</div>}
       <div className="mt-1 flex items-center gap-1.5 text-caption">
         <HealthDot s={h.health} />
         <span className={h.health === "ok" || h.health === "setup" ? "text-ink-80" : "text-ink"}>{healthText(h, now)}</span>

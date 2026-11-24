@@ -11,7 +11,7 @@ import { ago, HealthDot, OnlineDot, TagChip } from "./bits";
 export const ROW = 36;
 const OVERSCAN = 8;
 
-export type SortKey = "smart" | "name" | "id" | "os" | "version" | "last" | "health" | "products" | "agent";
+export type SortKey = "smart" | "name" | "id" | "os" | "version" | "last" | "health" | "products" | "agent" | "customer";
 export interface Sort {
   key: SortKey;
   desc: boolean;
@@ -23,9 +23,9 @@ const COLS =
   "grid-cols-[32px_16px_minmax(120px,1fr)_112px] @min-[600px]:grid-cols-[32px_16px_minmax(150px,1.3fr)_112px_minmax(120px,1.7fr)] @min-[900px]:grid-cols-[32px_16px_minmax(170px,1.3fr)_112px_minmax(150px,1.7fr)_128px_72px_96px]";
 const WIDE = "hidden @min-[900px]:block";
 // With health data (deviations: no column chooser): Health from the start (icon only while narrow),
-// OS/version/last active from 1050px, Products and Agent from 1300px.
+// OS/version/last active from 1050px, Products, Agent and Customer from 1300px.
 const HCOLS =
-  "grid-cols-[32px_16px_minmax(120px,1fr)_112px_16px] @min-[600px]:grid-cols-[32px_16px_minmax(130px,1.3fr)_112px_minmax(80px,1.7fr)_150px] @min-[1050px]:grid-cols-[32px_16px_minmax(170px,1.3fr)_112px_minmax(150px,1.7fr)_150px_128px_72px_96px] @min-[1300px]:grid-cols-[32px_16px_minmax(170px,1.3fr)_112px_minmax(150px,1.7fr)_150px_minmax(140px,1.2fr)_64px_128px_72px_96px]";
+  "grid-cols-[32px_16px_minmax(120px,1fr)_112px_16px] @min-[600px]:grid-cols-[32px_16px_minmax(130px,1.3fr)_112px_minmax(80px,1.7fr)_150px] @min-[1050px]:grid-cols-[32px_16px_minmax(170px,1.3fr)_112px_minmax(150px,1.7fr)_150px_128px_72px_96px] @min-[1300px]:grid-cols-[32px_16px_minmax(170px,1.3fr)_112px_minmax(150px,1.7fr)_150px_minmax(140px,1.2fr)_64px_88px_128px_72px_96px]";
 const HWIDE = "hidden @min-[1050px]:block";
 const XWIDE = "hidden @min-[1300px]:block";
 
@@ -52,7 +52,9 @@ export function sortHosts(rows: Host[], s: Sort): Host[] {
                 ? productText(h).toLowerCase() || NONE
                 : k === "agent"
                   ? (h.status ? pad(h.status.agent) : NONE)
-                  : Math.max(h.last, h.seen);
+                  : k === "customer"
+                    ? h.status?.customer?.toLowerCase() || NONE
+                    : Math.max(h.last, h.seen);
   const d = s.desc ? -1 : 1;
   // Each row's key once, not per comparison (5,000 rows: ~60,000 comparisons).
   return rows
@@ -155,6 +157,9 @@ const Row = memo(function Row({
           </span>
           <span role="gridcell" className={`truncate font-mono text-footnote text-muted ${XWIDE}`}>
             {h.status?.agent || "—"}
+          </span>
+          <span role="gridcell" className={`truncate font-mono text-footnote text-muted ${XWIDE}`}>
+            {h.status?.customer || "—"}
           </span>
         </>
       )}
@@ -261,6 +266,7 @@ export function HostTable({
             {head("health", "Health", "hidden @min-[600px]:flex")}
             {head("products", "Products", "hidden @min-[1300px]:flex")}
             {head("agent", "Agent", "hidden @min-[1300px]:flex")}
+            {head("customer", "Customer", "hidden @min-[1300px]:flex")}
           </>
         )}
         {head("os", "OS", wide)}

@@ -146,6 +146,7 @@ function summary(k: number, uuid: string, tether_id: string | null, host: string
     tether_id,
     host,
     agent: k % 2 ? "0.1.1" : "0.1.0",
+    customer: k % 4 === 3 ? null : k % 4 === 2 ? "4712" : "4711",
     overall: st === "setup" ? "unknown" : st,
     counts: { ok: 12 - faults.length, warn: bad("warn"), crit: bad("crit"), unknown: bad("unknown"), setup: bad("unknown") },
     products,
@@ -177,16 +178,17 @@ function healthReport(status: Summary[], meta: Map<string, Meta>, uuid: string, 
     const at = now - (6 - i) * 2 * 86400;
     return { id, from, to, time: iso(at), at };
   });
-  const { last_seen, next, stale, tether_id, claimed_id: _c, no_claim: _n, ...rest } = s;
+  const { last_seen, next, stale, tether_id, claimed_id: _c, no_claim: _n, customer, ...rest } = s;
   // A report may leave out products, changes and body (the relay stores it as sent).
   if (uuid === "agent-only-3") {
     const { products: _p, ...bare } = rest;
-    return { uuid, tether_id, ...link, last_seen, next, stale, report: { v: 1, ...bare, next, seq: last_seen * 1000, time: iso(last_seen), packs: {} }, history: [] };
+    return { uuid, tether_id, ...link, customer, last_seen, next, stale, report: { v: 1, ...bare, next, seq: last_seen * 1000, time: iso(last_seen), packs: {} }, history: [] };
   }
   return {
     uuid,
     tether_id,
     ...link,
+    customer,
     last_seen,
     next,
     stale,

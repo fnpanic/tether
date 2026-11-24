@@ -50,12 +50,13 @@ const STATUS = [
     uuid: "u1",
     tether_id: "111111111",
     agent: "0.2.1",
+    customer: "4711",
     overall: "crit",
     counts: { ok: 3, warn: 0, crit: 1, unknown: 0, setup: 0 },
     faults: [{ id: "app/db-service", state: "crit", since: new Date((NOW - 4 * 86400) * 1000).toISOString() }],
     products: [{ name: "Records Server", version: "26.3.2", role: "server" }],
   }),
-  sum({ uuid: "u2", tether_id: "222222222", agent: "0.1.0" }),
+  sum({ uuid: "u2", tether_id: "222222222", agent: "0.1.0", customer: "0815" }),
   sum({ uuid: "u9", tether_id: null, host: "LAB-PC", agent: "0.2.0", stale: true }),
 ];
 const ids = (q: string, status: StatusSummary[] = []) =>
@@ -156,6 +157,11 @@ describe("health terms", () => {
     expect(hids("check:db-service")).toEqual(["111111111"]);
     expect(hids("agent:0.1")).toEqual(["222222222"]);
     expect(hids("agent:none")).toEqual(["333333333", "444444444", "555555555"]);
+    expect(hids("customer:47")).toEqual(["111111111"]);
+    expect(hids("customer:4711 | customer:0815")).toEqual(["111111111", "222222222"]);
+    expect(hids("customer:0815")).toEqual(["222222222"]);
+    expect(hids("customer:711")).toEqual([]); // starts with, not contains
+    expect(hids("customer:none")).toEqual(["333333333", "444444444", "555555555"]);
     expect(hids("since:3d")).toEqual(["111111111"]);
     expect(hids("since:5d")).toEqual([]);
     expect(hids("since:96h")).toEqual(["111111111"]);
@@ -178,6 +184,7 @@ describe("health terms", () => {
       { id: "a", tag: "srv", when: "role:server" },
       { id: "b", tag: "new", when: "version:26.3 | os:mac" },
       { id: "c", tag: "hot", when: "health:crit | records" },
+      { id: "d", tag: "cust", when: "customer:47" },
     ];
     const auto = (h: Host[]) => Object.fromEntries(h.filter((x) => x.auto.length).map((x) => [x.id, x.auto]));
     const [withHealth, without] = [hosts(STATUS), hosts()];
