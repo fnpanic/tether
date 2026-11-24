@@ -9,8 +9,8 @@ below.
 An instance build (`TETHER_INSTANCE=north`,
 [several-organisations.md](several-organisations.md#two-organisations-on-one-pc)) is
 `tether-north.exe` in `C:\Program Files\Tether-north` and takes the same commands; its links use
-the scheme `tether-north://` ([below](#tether-links)). Its `--help` text still says `tether` and
-`tether://`.
+the scheme `tether-north://` ([below](#tether-links)). Its `--help` text names them:
+`Usage: tether-north [command]` and `tether-north://connect/<id>`.
 
 ## Commands
 

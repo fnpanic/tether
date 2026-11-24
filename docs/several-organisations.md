@@ -75,9 +75,14 @@ read it; one Tether Manage serves several organisations through `TETHER_MANAGE_D
 The build needs `TETHER_INSTANCE` **and** the matching Tauri configuration from
 `scripts/instance-config.sh`, always together. The variable names what the program calls itself
 (`apps/desktop/src-tauri/build.rs`); the configuration names the product, the program file, the
-identifier and the link scheme. A build with only the variable produces a program that calls
-itself `Tether-north` inside an installer named `Tether`, which nothing checks. The `desktop`
-workflow and `scripts/build-macos.sh` pass both; a build by hand must too:
+identifier and the link scheme. A release build stops when the two do not match, in both
+directions (`instance::check_product_name`, run by `build.rs`): `TETHER_INSTANCE=north` without
+the configuration stops with `TETHER_INSTANCE="north" needs productName "Tether-north", but the
+Tauri config gives "Tether": build with --config "$(bash scripts/instance-config.sh north)"`, and
+north's configuration without the variable stops as well. A release `cargo build` without the
+Tauri CLI passes for the default build and stops for an instance. Debug builds (`cargo test`,
+`tauri dev`) are not checked. The `desktop` workflow and `scripts/build-macos.sh` pass both; a
+build by hand must too:
 
 ```bash
 export TETHER_INSTANCE=north     # with the four values of getting-started.md
@@ -116,8 +121,9 @@ npx tauri build --bundles nsis --config "$(bash ../../scripts/instance-config.sh
   the relay's release index offers under the shared file names. A default build published to an
   instance's relay would install a second app (`Tether`) on Windows and replace the instance app
   on macOS; the same holds the other way round.
-- **Some texts still say Tether:** the `--help` text (`Usage: tether`, `tether://connect/<id>`)
-  and the user agent of its HTTP requests.
+- **The user agent of its HTTP requests still says Tether** (`Tether/<version>`, and `Tether` for
+  the proxy lookup). `--help` names the instance (`Usage: tether-north`,
+  `tether-north://connect/<id>`).
 - **macOS permissions** (Screen Recording, Accessibility) are granted per bundle identifier: each
   instance needs its own, as a new app does.
 - CI skips `scripts/smoke-macos.sh` for an instance build (it checks `Tether.app` only).
@@ -130,6 +136,10 @@ npx tauri build --bundles nsis --config "$(bash ../../scripts/instance-config.sh
 - One Windows installer with `TETHER_INSTANCE=north`, built and inspected, **not installed**:
   `Tether-north_0.6.3_x64-setup.exe`, product name `Tether-north`, program `tether-north.exe`,
   identifier `app.tether.desktop.north`, link scheme `tether-north` in its registry entries.
+- The check of the configuration, with real installer builds, none installed:
+  `TETHER_INSTANCE=north` with its configuration built `Tether-north_0.6.3_x64-setup.exe`;
+  `TETHER_INSTANCE=north` without it stopped with the message above; an empty `TETHER_INSTANCE`
+  with north's configuration stopped too.
 
 Not tried: two builds installed side by side on one PC, the service and the firewall rule of an
 instance on a real machine, updating an instance build, and the macOS build of an instance.

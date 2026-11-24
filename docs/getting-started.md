@@ -106,7 +106,10 @@ with the same names and run the `desktop` workflow.
 
 ## 5. First session
 
-Install Tether on two PCs (or start a second instance on one PC with `TETHER_PROFILE=b`). Both
+Install Tether on two PCs (or, to test on one PC, start the same Tether a second time with the
+development profile `TETHER_PROFILE=b`, which gives it a second ID and settings folder; this is not
+an instance build for a second organisation,
+[several-organisations.md](several-organisations.md#two-organisations-on-one-pc)). Both
 should show **Ready**. Enter the other device's ID, then its one-time password or accept the
 request on its screen.
 
