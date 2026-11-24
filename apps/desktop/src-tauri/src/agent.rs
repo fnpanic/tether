@@ -148,8 +148,8 @@ pub(crate) struct Ran {
 /// Everything the manager does to the machine and the network: the process runner, the SCM and
 /// the agent's files and registry value, the folders, HTTP. Real on Windows, fakes in the tests.
 pub(crate) trait Sys {
-    /// This process runs as LocalSystem.
-    fn local_system(&self) -> bool;
+    /// This process is Tether's service `--server` running as LocalSystem ([`service_gate`]).
+    fn service_process(&self) -> bool;
     /// This host's ID and the 32-byte seed of the key this process registers with the rendezvous
     /// server (the link proof is signed with it).
     fn own_identity(&self) -> Option<(String, [u8; 32])>;
@@ -163,10 +163,16 @@ pub(crate) trait Sys {
     fn removed_at(&self) -> Option<u64>;
     /// Create `dir` for SYSTEM and Administrators only, or refuse it (junction, link, owner).
     fn secure_dir(&self, dir: &Path) -> Result<(), String>;
+    /// Read-only check of the state folder (no create, no ACL change): absent is fine; a junction
+    /// or link, or an owner other than SYSTEM or Administrators, is refused with a fixed sentence
+    /// and at most the owner's SID.
+    fn check_dir(&self, dir: &Path) -> Result<(), String>;
+    /// `path` is absent, or a plain file owned by SYSTEM or Administrators.
+    fn file_trusted(&self, path: &Path) -> bool;
     /// `(relay base, raw)` of `download/<channel>/monitor.json` from every relay that answered.
     fn fetch_index(&self, channel: &str) -> Vec<(String, Vec<u8>)>;
-    /// The candidate's verified bytes.
-    fn download(&self, c: &Candidate, key: &str) -> Result<Vec<u8>, String>;
+    /// The candidate's verified bytes, every source together within `within`.
+    fn download(&self, c: &Candidate, key: &str, within: Duration) -> Result<Vec<u8>, String>;
     /// The file's bytes, read through a handle that denies writing and deleting it while the
     /// returned guard lives (the file can still be executed).
     fn open_locked(&self, path: &Path) -> Result<(Vec<u8>, Box<dyn std::any::Any>), String>;
@@ -194,11 +200,110 @@ fn active(mode: &str) -> bool {
     matches!(mode, "on-request" | "install" | "remove")
 }
 
+/// The one place that decides whether the manager acts here: Tether's `--server` process (not the
+/// connection manager or the UI, which run the policy loop too) running as LocalSystem.
+fn service_gate(first_arg: Option<&str>, local_system: bool) -> bool {
+    first_arg == Some("--server") && local_system
+}
+
+/// The whole download, every source together: 2 minutes plus a second per 64 KiB of the signed
+/// size, at most 10 minutes (the manager answers `busy` meanwhile).
+fn download_time(size: u64) -> Duration {
+    Duration::from_secs((120 + size / 65_536).min(600))
+}
+
+/// What goes to a remote technician: control characters out; a path under a user profile cut
+/// from its word on; anything that could be a grant or a proof (a run of more than 64 base64
+/// characters) replaced; at most 300 characters.
+fn tidy(detail: &str) -> String {
+    let mut s: String = detail.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let low = s.to_ascii_lowercase();
+    if let Some(i) = ["\\users\\", "/users/"].iter().filter_map(|p| low.find(p)).min() {
+        let start = s[..i].char_indices().rev().find(|(_, c)| c.is_whitespace()).map_or(0, |(w, c)| w + c.len_utf8());
+        s.truncate(start);
+        s.push_str("[path removed]");
+    }
+    let b64 = |c: char| c.is_ascii_alphanumeric() || "+/=_-.".contains(c);
+    let (mut out, mut run) = (String::with_capacity(s.len()), String::new());
+    let flush = |run: &mut String, out: &mut String| {
+        out.push_str(if run.len() > 64 { "[removed]" } else { run });
+        run.clear();
+    };
+    for c in s.chars() {
+        if b64(c) {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out.trim().chars().take(300).collect()
+}
+
+fn tidied(a: AgentAnswer) -> AgentAnswer {
+    AgentAnswer { detail: tidy(&a.detail), ..a }
+}
+
+/// The action on the agent running in this process, by name. Set by [`Running::start`], cleared
+/// when the [`Running`] guard drops, also when the action panics.
+static RUNNING: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+fn running() -> std::sync::MutexGuard<'static, Option<&'static str>> {
+    RUNNING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+struct Running;
+
+impl Running {
+    /// `Err(name)`: that action runs.
+    fn start(what: &'static str) -> Result<Self, &'static str> {
+        let mut r = running();
+        match *r {
+            Some(other) => Err(other),
+            None => {
+                *r = Some(what);
+                Ok(Running)
+            }
+        }
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        *running() = None;
+    }
+}
+
+fn busy(what: &str) -> AgentAnswer {
+    AgentAnswer::only("busy", &format!("Tether is {what}; ask for the status later"))
+}
+
+/// Runs `work` as the one action `what`; answers within `wait` (what the session waits for): with
+/// its answer, or, when it takes longer, `running` (the core's state for that) while it goes on (a
+/// later `status` shows the outcome). Meanwhile every other action answers `busy` naming this one.
+fn in_background(what: &'static str, wait: Duration, work: impl FnOnce() -> AgentAnswer + Send + 'static) -> AgentAnswer {
+    let guard = match Running::start(what) {
+        Ok(g) => g,
+        Err(other) => return busy(other),
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let a = work();
+        drop(guard);
+        let _ = tx.send(a);
+    });
+    match rx.recv_timeout(wait) {
+        Ok(a) => a,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => AgentAnswer::only("running", &format!("{what} takes longer than this session waits; Tether goes on, ask for the status later")),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => AgentAnswer::only("failed", "the action stopped unexpectedly"),
+    }
+}
+
 fn line_of(r: &Ran) -> String {
     let pick = |s: &str| s.lines().map(str::trim).filter(|l| !l.is_empty()).last().map(str::to_owned);
     let l = if r.code != 0 { pick(&r.err).or_else(|| pick(&r.out)) } else { pick(&r.out).or_else(|| pick(&r.err)) };
-    let l = l.unwrap_or_else(|| format!("exit code {}", r.code));
-    l.chars().take(300).collect()
+    tidy(&l.unwrap_or_else(|| format!("exit code {}", r.code)))
 }
 
 /// `identity`'s line.
@@ -211,9 +316,11 @@ struct Identity {
 
 fn parse_identity(out: &str) -> Result<Identity, String> {
     let bad = || "the agent's identity is not what Tether expects".to_owned();
-    let line = out.lines().map(str::trim).find(|l| !l.is_empty()).ok_or_else(bad)?;
+    // One line of at most 512 bytes, the key exactly in its canonical encoding (it is signed as given).
+    let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
+    let line = lines.next().filter(|l| l.len() <= 512 && lines.next().is_none()).ok_or_else(bad)?;
     let i: Identity = serde_json::from_str(line).map_err(|_| bad())?;
-    if !status::valid_uuid(&i.uuid) || tether_trust::key_from_b64(&i.pubkey).is_err() {
+    if !status::valid_uuid(&i.uuid) || tether_trust::key_from_b64(&i.pubkey).map(|k| tether_trust::key_to_b64(&k)).ok().as_deref() != Some(i.pubkey.as_str()) {
         return Err(bad());
     }
     Ok(i)
@@ -226,7 +333,23 @@ pub(crate) struct Manager<'a> {
 
 impl Manager<'_> {
     fn load(&self) -> Option<State> {
-        std::fs::read(self.p.dir.join(STATE_FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+        let path = self.p.dir.join(STATE_FILE);
+        self.sys.file_trusted(&path).then(|| std::fs::read(&path).ok()).flatten().and_then(|b| serde_json::from_slice(&b).ok())
+    }
+
+    /// Files in the (secured) state folder that someone other than SYSTEM or Administrators owns
+    /// (put there before Tether reset the folder's ACL; their owner may still change their ACL)
+    /// are deleted, so they count as absent and the next write replaces them.
+    fn sweep(&self) -> Result<(), String> {
+        let ch = &self.p.channel;
+        for name in [STATE_FILE.to_owned(), format!("monitor-{ch}.json"), format!("monitor-{ch}.serial")] {
+            let path = self.p.dir.join(&name);
+            if !self.sys.file_trusted(&path) {
+                log::warn!("health agent: {name} is not owned by SYSTEM or Administrators: ignored and deleted");
+                std::fs::remove_file(&path).map_err(|e| format!("{name}: {e}"))?;
+            }
+        }
+        Ok(())
     }
 
     fn save(&self, old: &Option<State>, st: &State) -> Result<(), String> {
@@ -273,10 +396,11 @@ impl Manager<'_> {
         if !active(&self.p.mode) {
             return Ok(());
         }
-        if !self.sys.local_system() {
+        if !self.sys.service_process() {
             return Err(NEEDS_SERVICE.into());
         }
         self.sys.secure_dir(&self.p.dir)?;
+        self.sweep()?;
         let svc = self.sys.service_exists()?;
         let old = self.load();
         let mut st = old.clone().unwrap_or_default();
@@ -410,7 +534,7 @@ impl Manager<'_> {
         let key = self.p.updater_key.as_str();
         let dl = self.p.dir.join(DOWNLOAD_DIR);
         self.sys.secure_dir(&dl)?;
-        let bytes = self.sys.download(c, key)?;
+        let bytes = self.sys.download(c, key, download_time(c.size))?;
         c.verify(&bytes, key)?;
         let exe = dl.join(STAGED_EXE);
         let err = |e: std::io::Error| format!("{}: {e}", exe.display());
@@ -421,6 +545,9 @@ impl Manager<'_> {
         let written = std::fs::OpenOptions::new().write(true).create_new(true).open(&exe).and_then(|mut f| std::io::Write::write_all(&mut f, &bytes).and_then(|()| f.sync_all()));
         let r = written.map_err(err).and_then(|()| {
             let (back, lock) = self.sys.open_locked(&exe)?;
+            if !self.sys.file_trusted(&exe) {
+                return Err(format!("the downloaded agent ({STAGED_EXE}) has an owner that is not SYSTEM or Administrators: refused"));
+            }
             c.verify(&back, key).map_err(|e| format!("the downloaded agent changed before it ran: {e}"))?;
             let r = f(&exe);
             drop(lock);
@@ -433,6 +560,9 @@ impl Manager<'_> {
     /// `identity` of `exe`, the link statement signed, the line for `--from-tether -`.
     fn from_tether_line(&self, exe: &Path, token: &str) -> Result<String, String> {
         let (id, seed) = self.sys.own_identity().ok_or("this computer has no Tether ID yet")?;
+        if !status::valid_tether_id(&id) {
+            return Err("this computer's Tether ID is not one a relay accepts".into());
+        }
         let r = self.sys.run(exe, &["identity"], None, SHORT)?;
         if r.code != 0 {
             return Err(line_of(&r));
@@ -500,12 +630,20 @@ impl Manager<'_> {
     }
 
     /// What the host answers to `status` (reads only).
-    pub fn status(&self) -> AgentAnswer {
-        if !self.sys.local_system() {
+    pub fn status(&self, now: u64) -> AgentAnswer {
+        tidied(self.status_of(now))
+    }
+
+    fn status_of(&self, now: u64) -> AgentAnswer {
+        if !self.sys.service_process() {
             return AgentAnswer::only("needs-service", NEEDS_SERVICE);
         }
         if !active(&self.p.mode) {
             return AgentAnswer::only("not-allowed", "not allowed by this computer's policy");
+        }
+        // A folder a user created first (and owns) holds whatever that user wrote: not read.
+        if let Err(e) = self.sys.check_dir(&self.p.dir) {
+            return AgentAnswer::only("failed", &e);
         }
         let svc = match self.sys.service_exists() {
             Ok(s) => s,
@@ -522,7 +660,7 @@ impl Manager<'_> {
             };
         }
         if let Some(t) = self.sys.removed_at().filter(|_| st.hold != "removed-locally") {
-            return AgentAnswer { state: "removed-locally".into(), at: t, detail: "removed on this computer".into(), ..Default::default() };
+            return AgentAnswer { state: "removed-locally".into(), at: if t == 0 { now } else { t }, detail: "removed on this computer".into(), ..Default::default() };
         }
         match st.state.as_str() {
             _ if st.ours || st.hold == "removed-locally" => answer("removed-locally"),
@@ -533,17 +671,25 @@ impl Manager<'_> {
 
     /// A technician's request in a session: no rollout, no backoff; refused in `manual`.
     pub fn request(&self, action: Action, now: u64) -> AgentAnswer {
+        tidied(self.request_of(action, now))
+    }
+
+    fn request_of(&self, action: Action, now: u64) -> AgentAnswer {
         if action == Action::Status {
-            return self.status();
+            return self.status_of(now);
         }
-        if !self.sys.local_system() {
+        if !self.sys.service_process() {
             return AgentAnswer::only("needs-service", NEEDS_SERVICE);
         }
         if !active(&self.p.mode) {
             return AgentAnswer::only("not-allowed", "not allowed by this computer's policy");
         }
+        if let Err(e) = self.sys.check_dir(&self.p.dir) {
+            return AgentAnswer::only("failed", &e);
+        }
         let r = (|| {
             self.sys.secure_dir(&self.p.dir)?;
+            self.sweep()?;
             let svc = self.sys.service_exists()?;
             let old = self.load();
             let mut st = old.clone().unwrap_or_default();
@@ -574,11 +720,10 @@ impl Manager<'_> {
             done
         })();
         match r {
-            Ok(line) => AgentAnswer { detail: line, ..self.status() },
+            Ok(line) => AgentAnswer { detail: line, ..self.status_of(now) },
             Err(e) => {
                 log::warn!("health agent request: {e}");
-                let s = self.status();
-                AgentAnswer { detail: e, ..s }
+                AgentAnswer { detail: e, ..self.status_of(now) }
             }
         }
     }
@@ -586,14 +731,14 @@ impl Manager<'_> {
 
 // ----------------------------------------------------------------------------- entry points
 
-#[allow(dead_code)] // used by `request` (the session message, A6)
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// One action at a time (policy check and session requests).
+/// How long a request answers within: the session's own wait (the core's `HOST_WAIT`) less a
+/// margin, so the technician hears "still working" from here and not a timeout from the core.
 #[cfg(windows)]
-static BUSY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const CALLER_WAIT: Duration = librustdesk::ui::agent::HOST_WAIT.saturating_sub(Duration::from_secs(15));
 
 #[cfg(windows)]
 fn inputs(eff: &tether_trust::policy::Effective) -> Inputs {
@@ -617,7 +762,10 @@ pub fn tick(eff: &tether_trust::policy::Effective, now: u64) {
     if !active(eff.get("health.agent")) {
         return;
     }
-    let Ok(_busy) = BUSY.try_lock() else { return };
+    if !win::Real.service_process() {
+        return;
+    }
+    let Ok(_running) = Running::start("checking the policy for the agent") else { return };
     match (Manager { sys: &win::Real, p: inputs(eff) }).tick(now) {
         Err(e) if e == NEEDS_SERVICE => log::debug!("health agent: {e}"),
         Err(e) => log::info!("health agent: {e}"),
@@ -625,20 +773,31 @@ pub fn tick(eff: &tether_trust::policy::Effective, now: u64) {
     }
 }
 
-/// A technician's request in a session (waits at most for the action: up to about 3 minutes for
-/// an install, 10 for an upgrade never started from here).
+/// A technician's request in a session: answered within [`CALLER_WAIT`]; an install that takes
+/// longer goes on (see [`in_background`]).
 #[cfg(windows)]
-#[allow(dead_code)] // called by the session message (A6)
 pub fn request(action: Action) -> AgentAnswer {
-    let Ok(_busy) = BUSY.try_lock() else { return AgentAnswer::only("busy", "another action on the agent is running") };
-    (Manager { sys: &win::Real, p: inputs(&crate::policy::effective()) }).request(action, now())
+    let what = match action {
+        Action::Status => return status(),
+        Action::Install => "installing the agent",
+        Action::Remove => "removing the agent",
+    };
+    let p = inputs(&crate::policy::effective());
+    if !win::Real.service_process() {
+        return (Manager { sys: &win::Real, p }).request(action, now());
+    }
+    in_background(what, CALLER_WAIT, move || (Manager { sys: &win::Real, p }).request(action, now()))
 }
 
-/// What the host answers to `status`.
+/// What the host answers to `status`: `busy` while an action runs.
 #[cfg(windows)]
-#[allow(dead_code)] // called by the session message (A6)
 pub fn status() -> AgentAnswer {
-    (Manager { sys: &win::Real, p: inputs(&crate::policy::effective()) }).status()
+    if let Some(what) = *running() {
+        if win::Real.service_process() {
+            return busy(what);
+        }
+    }
+    (Manager { sys: &win::Real, p: inputs(&crate::policy::effective()) }).status(now())
 }
 
 #[cfg(not(windows))]
@@ -757,6 +916,32 @@ mod win {
         }
     }
 
+    /// [`Sys::check_dir`]: reads only.
+    pub(super) fn check_dir(dir: &Path) -> Result<(), String> {
+        const NAME: &str = "Tether's state folder";
+        match is_reparse(dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(format!("{NAME} cannot be read")),
+            Ok(true) => return Err(format!("{NAME} is a junction or link: refused")),
+            Ok(false) if !dir.is_dir() => return Err(format!("{NAME} is not a folder: refused")),
+            Ok(false) => {}
+        }
+        let owner = owner_sid(dir).map_err(|_| format!("the owner of {NAME} cannot be read"))?;
+        if !trusted_owner(&owner) {
+            return Err(format!("{NAME} is owned by {owner}, not SYSTEM or Administrators: refused"));
+        }
+        Ok(())
+    }
+
+    /// [`Sys::file_trusted`].
+    pub(super) fn file_trusted(p: &Path) -> bool {
+        use std::os::windows::fs::MetadataExt;
+        match std::fs::symlink_metadata(p) {
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            Ok(m) => m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 && owner_sid(p).is_ok_and(|s| trusted_owner(&s)),
+        }
+    }
+
     /// Read through a handle that shares reading only: nobody can write, rename or delete the
     /// file while the guard lives; the loader's own open (read and execute) is still allowed.
     pub(super) fn open_locked(path: &Path) -> Result<(Vec<u8>, Box<dyn std::any::Any>), String> {
@@ -779,8 +964,14 @@ mod win {
         Ok((bytes, Box::new(f)))
     }
 
-    /// CreateProcess on `exe` with a fixed argument list (never a shell), no window; stdout and
-    /// stderr kept up to 64 KiB each; killed after `timeout`.
+    /// What is kept of each of stdout and stderr: the last bytes, cut to whole lines.
+    const TAIL: usize = 4096;
+    /// After the child ended or was killed, how long its output may still take (a grandchild
+    /// holding the pipes would otherwise keep the manager busy for good).
+    const DRAIN_AFTER: Duration = Duration::from_secs(3);
+
+    /// CreateProcess on `exe` with a fixed argument list (never a shell), no window; the last
+    /// [`TAIL`] bytes of stdout and stderr kept; killed after `timeout`.
     pub(super) fn run(exe: &Path, args: &[&str], stdin: Option<&str>, timeout: Duration) -> Result<Ran, String> {
         use std::io::{Read, Write};
         use std::os::windows::process::CommandExt;
@@ -791,17 +982,38 @@ mod win {
             cmd.current_dir(d);
         }
         let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", exe.display()))?;
-        fn drain(r: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<String> {
-            std::thread::spawn(move || {
-                let mut v = Vec::new();
-                if let Some(mut r) = r {
-                    let _ = (&mut r).take(64 << 10).read_to_end(&mut v);
-                    let _ = std::io::copy(&mut r, &mut std::io::sink());
+        type Tail = std::sync::Arc<std::sync::Mutex<Vec<u8>>>;
+        fn drain(r: Option<impl Read + Send + 'static>) -> (Tail, std::thread::JoinHandle<()>) {
+            let tail = Tail::default();
+            let t = tail.clone();
+            let h = std::thread::spawn(move || {
+                let Some(mut r) = r else { return };
+                let mut buf = [0u8; 8192];
+                while let Ok(n @ 1..) = r.read(&mut buf) {
+                    let mut v = t.lock().unwrap_or_else(|e| e.into_inner());
+                    v.extend_from_slice(&buf[..n]);
+                    if v.len() > TAIL {
+                        let cut = v.len() - TAIL;
+                        v.drain(..cut);
+                    }
                 }
-                String::from_utf8_lossy(&v).into_owned()
-            })
+            });
+            (tail, h)
         }
-        let (out, err) = (drain(child.stdout.take()), drain(child.stderr.take()));
+        fn text(t: &Tail) -> String {
+            let v = t.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            // A cut tail starts in the middle of a line: drop that part.
+            let v = if v.len() >= TAIL { v.iter().position(|&b| b == b'\n').map_or(&v[..], |i| &v[i + 1..]).to_vec() } else { v };
+            String::from_utf8_lossy(&v).into_owned()
+        }
+        let ((out, out_h), (err, err_h)) = (drain(child.stdout.take()), drain(child.stderr.take()));
+        let finish = |out_h: std::thread::JoinHandle<()>, err_h: std::thread::JoinHandle<()>| {
+            // Past this the drains are abandoned (they end when the last holder of the pipe does).
+            let end = std::time::Instant::now() + DRAIN_AFTER;
+            while !(out_h.is_finished() && err_h.is_finished()) && std::time::Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
         if let (Some(line), Some(mut i)) = (stdin, child.stdin.take()) {
             let _ = i.write_all(format!("{line}\n").as_bytes());
         }
@@ -818,14 +1030,15 @@ mod win {
                 Err(e) => return Err(e.to_string()),
             }
         };
-        Ok(Ran { code: status.code().unwrap_or(-1), out: out.join().unwrap_or_default(), err: err.join().unwrap_or_default() })
+        finish(out_h, err_h);
+        Ok(Ran { code: status.code().unwrap_or(-1), out: text(&out), err: text(&err) })
     }
 
     pub struct Real;
 
     impl Sys for Real {
-        fn local_system(&self) -> bool {
-            librustdesk::platform::is_root()
+        fn service_process(&self) -> bool {
+            service_gate(std::env::args().nth(1).as_deref(), librustdesk::platform::is_root())
         }
 
         fn own_identity(&self) -> Option<(String, [u8; 32])> {
@@ -901,6 +1114,14 @@ mod win {
             secure_dir(dir)
         }
 
+        fn check_dir(&self, dir: &Path) -> Result<(), String> {
+            check_dir(dir)
+        }
+
+        fn file_trusted(&self, path: &Path) -> bool {
+            file_trusted(path)
+        }
+
         fn fetch_index(&self, channel: &str) -> Vec<(String, Vec<u8>)> {
             let path = format!("/download/{channel}/{}", release::MONITOR_INDEX_FILE);
             crate::policy::relay_bases()
@@ -916,8 +1137,8 @@ mod win {
                 .collect()
         }
 
-        fn download(&self, c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
-            crate::update::download(c, key)
+        fn download(&self, c: &Candidate, key: &str, within: Duration) -> Result<Vec<u8>, String> {
+            crate::update::download_within(c, key, Some(within))
         }
 
         fn open_locked(&self, path: &Path) -> Result<(Vec<u8>, Box<dyn std::any::Any>), String> {
@@ -974,16 +1195,20 @@ mod tests {
         halted: bool,
         minimum: &'static str,
         rollout: Vec<(u64, u8)>,
+        /// The minisign signature made with a key other than the updater key.
+        foreign_sig: bool,
     }
 
     fn agent(version: &'static str) -> Pub {
-        Pub { version, data: format!("agent {version}").into_bytes(), file: None, signed_file: None, sha: None, serial: 5, expires: NOW + 30 * 86_400, halted: false, minimum: "", rollout: vec![(0, 100)] }
+        Pub { version, data: format!("agent {version}").into_bytes(), file: None, signed_file: None, sha: None, serial: 5, expires: NOW + 30 * 86_400, halted: false, minimum: "", rollout: vec![(0, 100)], foreign_sig: false }
     }
 
     fn doc(k: &Keys, p: &Pub) -> Vec<u8> {
         let file = p.file.clone().unwrap_or_else(|| format!("tether-monitor-{}.exe", p.version));
         let trusted = format!("timestamp:1\tfile:{}\tversion:{}", p.signed_file.clone().unwrap_or_else(|| file.clone()), p.version);
-        let sig = minisign::sign(Some(&k.kp.pk), &k.kp.sk, std::io::Cursor::new(&p.data), Some(&trusted), Some("u")).unwrap();
+        let other = p.foreign_sig.then(|| minisign::KeyPair::generate_unencrypted_keypair().unwrap());
+        let kp = other.as_ref().unwrap_or(&k.kp);
+        let sig = minisign::sign(Some(&kp.pk), &kp.sk, std::io::Cursor::new(&p.data), Some(&trusted), Some("u")).unwrap();
         let e = Entry {
             version: p.version.into(),
             file,
@@ -1021,16 +1246,32 @@ mod tests {
         artifact: RefCell<Vec<u8>>,
         fetches: Cell<u32>,
         runs: RefCell<Vec<(String, Vec<String>, Option<String>)>>,
-        codes: RefCell<HashMap<&'static str, (i32, &'static str)>>,
+        codes: RefCell<HashMap<&'static str, (i32, String)>>,
         tamper: Cell<bool>,
+        /// Files a standard user owns: `(path, bytes)` (a rewrite by Tether is owned by it).
+        planted: RefCell<Vec<(PathBuf, Vec<u8>)>>,
+        /// `open_locked` finds the staged file owned by a user.
+        plant_staged: Cell<bool>,
+        /// What `identity` prints instead of the good line; this host's ID instead of [`ID`].
+        identity: RefCell<Option<String>>,
+        own_id: RefCell<Option<String>>,
+        within: RefCell<Vec<Duration>>,
+    }
+
+    impl Fake {
+        fn plant(&self, p: &Path, bytes: &[u8]) {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, bytes).unwrap();
+            self.planted.borrow_mut().push((p.to_owned(), bytes.to_owned()));
+        }
     }
 
     impl Sys for Fake {
-        fn local_system(&self) -> bool {
+        fn service_process(&self) -> bool {
             !self.user
         }
         fn own_identity(&self) -> Option<(String, [u8; 32])> {
-            Some((ID.into(), SEED))
+            Some((self.own_id.borrow().clone().unwrap_or_else(|| ID.into()), SEED))
         }
         fn service_exists(&self) -> Result<bool, String> {
             Ok(self.svc.get())
@@ -1050,16 +1291,27 @@ mod tests {
                 None => std::fs::create_dir_all(dir).map_err(|e| e.to_string()),
             }
         }
+        fn check_dir(&self, _dir: &Path) -> Result<(), String> {
+            self.refuse_dir.borrow().clone().map_or(Ok(()), Err)
+        }
+        fn file_trusted(&self, path: &Path) -> bool {
+            let now = std::fs::read(path).ok();
+            !self.planted.borrow().iter().any(|(p, b)| p == path && now.as_ref() == Some(b))
+        }
         fn fetch_index(&self, _channel: &str) -> Vec<(String, Vec<u8>)> {
             self.fetches.set(self.fetches.get() + 1);
             self.docs.borrow().iter().map(|d| ("https://relay.test".to_owned(), d.clone())).collect()
         }
-        fn download(&self, _c: &Candidate, _key: &str) -> Result<Vec<u8>, String> {
+        fn download(&self, _c: &Candidate, _key: &str, within: Duration) -> Result<Vec<u8>, String> {
+            self.within.borrow_mut().push(within);
             Ok(self.artifact.borrow().clone())
         }
         fn open_locked(&self, path: &Path) -> Result<(Vec<u8>, Box<dyn std::any::Any>), String> {
             if self.tamper.get() {
                 std::fs::write(path, b"planted").unwrap();
+            }
+            if self.plant_staged.get() {
+                self.planted.borrow_mut().push((path.to_owned(), std::fs::read(path).unwrap()));
             }
             Ok((std::fs::read(path).map_err(|e| e.to_string())?, Box::new(())))
         }
@@ -1069,9 +1321,9 @@ mod tests {
                 assert!(exe.exists(), "the staged file is there while it runs");
             }
             self.runs.borrow_mut().push((name, args.iter().map(|a| a.to_string()).collect(), stdin.map(str::to_owned)));
-            let (code, line) = self.codes.borrow().get(args[0]).copied().unwrap_or((0, "ok"));
+            let (code, line) = self.codes.borrow().get(args[0]).cloned().unwrap_or((0, "ok".into()));
             let out = match args[0] {
-                "identity" if code == 0 => format!("{{\"uuid\":\"{UUID}\",\"pubkey\":\"{}\"}}\n", agent_pubkey()),
+                "identity" if code == 0 => self.identity.borrow().clone().unwrap_or_else(|| format!("{{\"uuid\":\"{UUID}\",\"pubkey\":\"{}\"}}\n", agent_pubkey())),
                 _ => format!("{line}\n"),
             };
             if code == 0 {
@@ -1187,7 +1439,7 @@ mod tests {
             let t = String::from_utf8_lossy(&std::fs::read(&f).unwrap()).into_owned();
             assert!(!t.contains(&w.token) && !t.contains(line["proof"].as_str().unwrap()), "{}", f.display());
         }
-        let a = w.m().status();
+        let a = w.m().status(NOW);
         assert_eq!((a.state.as_str(), a.installed_by.as_str()), ("installed", "policy"));
         // the next tick does nothing more
         w.tick(NOW + 60).unwrap();
@@ -1197,7 +1449,7 @@ mod tests {
     #[test]
     fn a_failed_install_backs_off_1h_6h_24h_with_the_agents_line() {
         let w = world("backoff", "install");
-        w.fake.codes.borrow_mut().insert("install", (1, "enrolment failed: relay.test: 400 unknown field `tether_proof`"));
+        w.fake.codes.borrow_mut().insert("install", (1, "enrolment failed: relay.test: 400 unknown field `tether_proof`".into()));
         let mut t = NOW;
         for wait in [3600, 6 * 3600, 86_400, 86_400] {
             w.tick(t).unwrap();
@@ -1210,7 +1462,7 @@ mod tests {
             assert_eq!(w.runs().len(), n, "nothing before the backoff ends");
             t += wait;
         }
-        assert_eq!(w.m().status().state, "failed");
+        assert_eq!(w.m().status(NOW).state, "failed");
         // a technician in a session ignores the backoff
         w.fake.codes.borrow_mut().clear();
         let a = w.m().request(Action::Install, t - 10);
@@ -1231,7 +1483,7 @@ mod tests {
             w.tick(t).unwrap();
         }
         assert_eq!(w.runs().len(), n, "never installed again by policy");
-        assert_eq!(w.m().status().state, "removed-locally");
+        assert_eq!(w.m().status(NOW).state, "removed-locally");
         // RemovedAt: a hand-installed agent removed by the practice, and an unparseable value
         for (v, at) in [(Some(1_800_000_000), 1_800_000_000), (Some(0), NOW)] {
             let w = world("marker", "install");
@@ -1288,7 +1540,7 @@ mod tests {
             }
             assert!(w.runs().is_empty() && w.fake.fetches.get() == 0, "{mode}");
             assert!(w.state().is_none(), "no state written");
-            assert_eq!(w.m().status().state, "installed-by-hand");
+            assert_eq!(w.m().status(NOW).state, "installed-by-hand");
             assert_eq!(w.m().request(Action::Install, NOW).detail, "the agent is already installed");
             // a technician's explicit remove does reach it
             assert_eq!(w.m().request(Action::Remove, NOW).state, "removed-by-tether");
@@ -1338,7 +1590,7 @@ mod tests {
         w.tick(NOW).unwrap();
         *w.fake.versions.borrow_mut() = (Some("0.2.0".into()), Some("0.2.0".into()));
         w.publish(Pub { minimum: "0.3.0", serial: 6, ..agent("0.3.0") });
-        w.fake.codes.borrow_mut().insert("upgrade", (1, "a version is pending; nothing was changed"));
+        w.fake.codes.borrow_mut().insert("upgrade", (1, "a version is pending; nothing was changed".into()));
         w.tick(NOW + INDEX_EVERY).unwrap();
         w.tick(NOW + INDEX_EVERY + FLOOR_GRACE).unwrap();
         let st = w.state().unwrap();
@@ -1393,6 +1645,8 @@ mod tests {
             ("signed as file", Box::new(|w: &World| w.publish(Pub { signed_file: Some("other.exe".into()), ..agent("0.2.0") }))),
             ("unexpected file", Box::new(|w: &World| w.publish(Pub { file: Some("tether-monitor-0.2.0.exe.sig".into()), signed_file: Some("tether-monitor-0.2.0.exe.sig".into()), ..agent("0.2.0") }))),
             ("sha256", Box::new(|w: &World| w.publish(Pub { sha: Some("0".repeat(64)), ..agent("0.2.0") }))),
+            // index, size and SHA-256 fine; the minisign signature made with another key
+            ("signature", Box::new(|w: &World| w.publish(Pub { foreign_sig: true, ..agent("0.2.0") }))),
             ("no relay answered", Box::new(|w: &World| w.fake.docs.borrow_mut().clear())),
             ("changed before it ran", Box::new(|w: &World| w.fake.tamper.set(true))),
             ("junction", Box::new(|w: &World| *w.fake.refuse_dir.borrow_mut() = Some("health-agent is a junction or link: refused".into()))),
@@ -1428,7 +1682,9 @@ mod tests {
         // the state folder is fine, the download folder is not
         struct DlRefused<'a>(&'a Fake);
         impl Sys for DlRefused<'_> {
-            fn local_system(&self) -> bool { true }
+            fn service_process(&self) -> bool { true }
+            fn check_dir(&self, d: &Path) -> Result<(), String> { self.0.check_dir(d) }
+            fn file_trusted(&self, p: &Path) -> bool { self.0.file_trusted(p) }
             fn own_identity(&self) -> Option<(String, [u8; 32])> { self.0.own_identity() }
             fn service_exists(&self) -> Result<bool, String> { self.0.service_exists() }
             fn versions(&self) -> (Option<String>, Option<String>) { self.0.versions() }
@@ -1438,7 +1694,7 @@ mod tests {
                 if dir.ends_with(DOWNLOAD_DIR) { Err("health-agent is owned by S-1-5-21-1, not SYSTEM or Administrators: refused".into()) } else { self.0.secure_dir(dir) }
             }
             fn fetch_index(&self, c: &str) -> Vec<(String, Vec<u8>)> { self.0.fetch_index(c) }
-            fn download(&self, c: &Candidate, k: &str) -> Result<Vec<u8>, String> { self.0.download(c, k) }
+            fn download(&self, c: &Candidate, k: &str, w: Duration) -> Result<Vec<u8>, String> { self.0.download(c, k, w) }
             fn open_locked(&self, p: &Path) -> Result<(Vec<u8>, Box<dyn std::any::Any>), String> { self.0.open_locked(p) }
             fn run(&self, e: &Path, a: &[&str], s: Option<&str>, t: Duration) -> Result<Ran, String> { self.0.run(e, a, s, t) }
             fn installed_exe(&self) -> PathBuf { self.0.installed_exe() }
@@ -1491,6 +1747,144 @@ mod tests {
             assert_eq!(w.m().request(a, NOW).state, "needs-service");
         }
         assert!(w.runs().is_empty() && w.files().is_empty() && w.fake.fetches.get() == 0);
+    }
+
+    #[test]
+    fn a_refused_state_folder_shows_only_the_reason() {
+        let w = world("refusedstatus", "install");
+        std::fs::create_dir_all(&w.p.dir).unwrap();
+        std::fs::write(w.p.dir.join(STATE_FILE), br#"{"state":"removed-locally","hold":"removed-locally","detail":"call 0900 123"}"#).unwrap();
+        *w.fake.refuse_dir.borrow_mut() = Some("Tether's state folder is owned by S-1-5-21-9, not SYSTEM or Administrators: refused".into());
+        let a = w.m().status(NOW);
+        assert_eq!((a.state.as_str(), a.detail.as_str()), ("failed", "Tether's state folder is owned by S-1-5-21-9, not SYSTEM or Administrators: refused"));
+        // a request hears the same at once, before anything happens
+        for act in [Action::Install, Action::Remove] {
+            assert_eq!(w.m().request(act, NOW), a);
+        }
+        assert!(w.runs().is_empty() && w.fake.fetches.get() == 0);
+    }
+
+    #[test]
+    fn files_a_user_planted_in_the_state_folder_are_ignored_and_replaced() {
+        let w = world("plantedfiles", "install");
+        let key = tether_trust::key_to_b64(&w.k.admin.verifying_key());
+        let state = w.p.dir.join(STATE_FILE);
+        w.fake.plant(&state, br#"{"state":"removed-locally","hold":"removed-locally","detail":"planted"}"#);
+        w.fake.plant(&w.p.dir.join("monitor-stable.serial"), format!("9 {key}").as_bytes());
+        assert_eq!(w.m().status(NOW).state, "not-installed", "the planted state is not read");
+        w.tick(NOW).unwrap();
+        assert_eq!(w.state().unwrap().state, "installed", "neither the planted hold nor the planted floor counted");
+        assert!(w.fake.file_trusted(&state), "replaced by Tether's own file");
+        // a staged file a user owns is not run
+        let w = world("plantedstaged", "install");
+        w.fake.plant_staged.set(true);
+        w.tick(NOW).unwrap();
+        assert!(w.runs().is_empty(), "{:?}", w.runs());
+        let st = w.state().unwrap();
+        assert_eq!(st.state, "failed");
+        assert!(st.detail.contains("not SYSTEM or Administrators"), "{}", st.detail);
+    }
+
+    #[test]
+    fn only_a_canonical_identity_and_a_valid_id_are_signed() {
+        let pk = agent_pubkey();
+        let good = format!("{{\"uuid\":\"{UUID}\",\"pubkey\":\"{pk}\"}}");
+        for (out, id) in [
+            (format!("{{\"uuid\":\"{UUID}\",\"pubkey\":\"{pk} \"}}"), ID),
+            (format!("{good}\n{good}"), ID),
+            (format!("{{\"uuid\":{}\"{UUID}\",\"pubkey\":\"{pk}\"}}", " ".repeat(600)), ID),
+            (good.clone(), "bad id"),
+            (good.clone(), ""),
+        ] {
+            let w = world("identity", "install");
+            *w.fake.identity.borrow_mut() = Some(out.clone());
+            *w.fake.own_id.borrow_mut() = Some(id.into());
+            w.tick(NOW).unwrap();
+            assert!(!w.runs().iter().any(|r| r[0] == "install"), "{out:?} {id:?}: {:?}", w.runs());
+            assert_eq!(w.state().unwrap().state, "failed", "{out:?} {id:?}");
+        }
+    }
+
+    #[test]
+    fn an_unparseable_removal_time_is_now_in_the_status() {
+        let w = world("removedzero", "install");
+        w.fake.removed_at.set(Some(0));
+        let a = w.m().status(NOW);
+        assert_eq!((a.state.as_str(), a.at), ("removed-locally", NOW));
+    }
+
+    #[test]
+    fn only_the_services_server_process_manages_the_agent() {
+        assert!(service_gate(Some("--server"), true));
+        for (arg, system) in [(Some("--server"), false), (Some("--cm"), true), (None, true), (Some("--service"), true), (Some("--tray"), true)] {
+            assert!(!service_gate(arg, system), "{arg:?} {system}");
+        }
+    }
+
+    #[test]
+    fn the_download_has_a_total_deadline() {
+        let w = world("deadline", "install");
+        w.tick(NOW).unwrap();
+        assert_eq!(*w.fake.within.borrow(), [Duration::from_secs(120)]);
+        assert_eq!(download_time(5 << 20), Duration::from_secs(200));
+        assert_eq!(download_time(release::MAX_ARTIFACT), Duration::from_secs(600));
+        // the deadline covers every source: none is tried once it has passed
+        let c = Candidate { urls: vec!["https://127.0.0.1:9/a.exe".into(), "https://127.0.0.1:9/b.exe".into()], ..Default::default() };
+        let e = crate::update::download_within(&c, "k", Some(Duration::ZERO)).unwrap_err();
+        assert!(e.contains("did not finish within 0 s"), "{e}");
+    }
+
+    #[test]
+    fn the_answer_holds_no_grant_proof_or_profile_path() {
+        let w = world("tidy", "on-request");
+        let line = format!("\x1b[31mfailed\x07 with {} at C:\\Users\\Jane Doe\\AppData\\x.log {}", w.token, "x ".repeat(400));
+        w.fake.codes.borrow_mut().insert("install", (1, line));
+        let a = w.m().request(Action::Install, NOW);
+        assert_eq!(a.state, "failed");
+        for d in [&a.detail, &w.m().status(NOW).detail, &w.state().unwrap().detail] {
+            assert!(d.chars().count() <= 300 && !d.chars().any(char::is_control), "{d:?}");
+            assert!(d.contains("failed") && !d.contains(&w.token[..40]) && !d.contains("Jane") && !d.to_lowercase().contains("users"), "{d:?}");
+        }
+        assert_eq!(tidy(&format!("proof {} sha256 {}", "A+/".repeat(30), "0".repeat(64))), format!("proof [removed] sha256 {}", "0".repeat(64)));
+        assert_eq!(tidy(&"ä".repeat(400)).chars().count(), 300);
+    }
+
+    #[test]
+    fn a_long_action_goes_on_and_the_next_one_hears_busy() {
+        let a = in_background("installing the agent", Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(400));
+            AgentAnswer::only("installed", "done")
+        });
+        assert_eq!(a.state, "running");
+        assert!(a.detail.contains("installing the agent takes longer"), "{}", a.detail);
+        let b = in_background("removing the agent", Duration::from_secs(5), || AgentAnswer::only("removed-by-tether", ""));
+        assert_eq!((b.state.as_str(), b.detail.as_str()), ("busy", "Tether is installing the agent; ask for the status later"));
+        let t = std::time::Instant::now();
+        while running().is_some() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(in_background("removing the agent", Duration::from_secs(5), || AgentAnswer::only("removed-by-tether", "")).state, "removed-by-tether");
+        // a panic inside does not leave it busy
+        assert_eq!(in_background("installing the agent", Duration::from_secs(5), || panic!("boom")).state, "failed");
+        let t = std::time::Instant::now();
+        while running().is_some() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(Running::start("checking").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_keeps_the_last_output_and_does_not_wait_for_a_grandchild() {
+        let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
+        let r = win::run(cmd, &["/c", "for /L %i in (1,1,3000) do @echo line %i"], None, Duration::from_secs(60)).unwrap();
+        assert!(r.out.len() <= 4096, "{}", r.out.len());
+        assert_eq!(r.out.lines().last(), Some("line 3000"));
+        // a grandchild keeps the pipes open for 30 s after cmd exits
+        let t = std::time::Instant::now();
+        let r = win::run(cmd, &["/c", "start /b ping -n 30 127.0.0.1 & echo done"], None, Duration::from_secs(60)).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
+        assert!(r.out.contains("done"), "{r:?}");
     }
 
     #[cfg(not(windows))]
