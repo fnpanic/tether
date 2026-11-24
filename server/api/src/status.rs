@@ -10,7 +10,8 @@
 //! `pin` lines are read; appended and synced, compacted in the background), `revoked.json` (revoked
 //! token id → exp, written by the status writer; unreadable, it locks the store), `<uuid>.json` (the last full
 //! report, byte-exact as received), `<uuid>.history.jsonl` (one line per state change, appended),
-//! `seen.json` {uuid: last post}, `summary.json` (the team summary, rebuilt at most every 30 s),
+//! `seen.json` {uuid: last post}, `summary.json` (the team summary, rebuilt at most every 30 s;
+//! `summary-<16 hex>.json` for each other member scope of a signed team document),
 //! `<uuid>.sbom.json` (the device's software list with `STATUS_SBOM=on`, byte-exact as received;
 //! its record, time, size and hash, is kept with the device's entry in `seen.json`).
 //!
@@ -39,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tether_trust::status::{self as st, Answer, Change, Counts, Fault, Product, Report};
 use tether_trust::reqauth;
+use tether_trust::team::{self, Permissions};
 use tiny_http::Request;
 
 use crate::{empty, header, hdr, json, load_json, lock, mkdirs, not_found, now, rate_ok, text, App, Body, Resp, DAY};
@@ -46,6 +48,24 @@ use crate::{empty, header, hdr, json, load_json, lock, mkdirs, not_found, now, r
 pub const LIMIT_STATUS: u64 = st::REPORT_MAX as u64;
 /// The team summary is rebuilt at most this often (and not sooner after a failed build).
 const SUMMARY_SECS: u64 = 30;
+/// Team summaries kept, one per member scope (customers and `sbom`; a plain roster has one).
+const SUMMARY_SCOPES: usize = 32;
+/// And at most this many bytes of them on disk (the files are streamed, not held in memory; one
+/// of 20 000 hosts is about 10 MB, at most about 50 MB).
+const SUMMARY_CACHE_BYTES: u64 = 256 << 20;
+
+/// One scope's cached summary, in `status/<file>`: `summary.json` for the default scope (every
+/// customer, software lists: every member of a plain roster), else `summary-<16 hex>.json`.
+struct Summary {
+    /// `Permissions::scope_key`.
+    key: String,
+    file: String,
+    /// Time and ETag of the file (None: never built).
+    built: Option<(u64, String)>,
+    /// When a build last failed (the next one waits `SUMMARY_SECS`).
+    failed: u64,
+    size: u64,
+}
 /// `seen.json` is written at most this often (stale needs at least 900 s; a hard kill loses at
 /// most this much of last-seen data).
 const SEEN_SECS: u64 = 300;
@@ -579,8 +599,9 @@ pub struct Status {
     /// hand every pin to any token holder, or make revoked tokens valid again).
     locked: bool,
     locked_logged: u64,
-    /// Time and ETag of `summary.json` (None: never built), and whether a build is running.
-    built: Option<(u64, String)>,
+    /// The team summaries, one per member scope (`Permissions::scope_key`), least recently used
+    /// first; and whether a build is running (one at a time, whatever the scope).
+    summaries: Vec<Summary>,
     building: bool,
     /// uuids whose full report is being written (outside the lock), and whose history is being
     /// trimmed.
@@ -595,8 +616,6 @@ pub struct Status {
     last_daily: u64,
     /// Enrolment, link or removal answers waiting for their `keys.jsonl` sync.
     keys_pending: usize,
-    /// When a summary build last failed (the next one waits `SUMMARY_SECS`).
-    summary_failed: u64,
     /// When `seen.json` was last written (every `SEEN_SECS`).
     seen_flushed: u64,
     daily_running: bool,
@@ -724,7 +743,48 @@ impl Status {
             log.sync_data()?;
         }
         remove_files(data, &gone);
+        // The scoped summaries of the last run: rebuilt on demand, and a scope nobody has any more
+        // would never be dropped.
+        for e in fs::read_dir(&dir)?.flatten() {
+            if e.file_name().to_str().is_some_and(|n| n.starts_with("summary-") && n.ends_with(".json")) {
+                let _ = fs::remove_file(e.path());
+            }
+        }
         Ok(s)
+    }
+
+    /// The cache entry of scope `key`, created if new (beyond `SUMMARY_SCOPES` the least recently
+    /// used one goes, with its file), and now the most recently used.
+    fn summary_slot(&mut self, key: &str) -> &mut Summary {
+        match self.summaries.iter().position(|s| s.key == key) {
+            Some(i) => {
+                let s = self.summaries.remove(i);
+                self.summaries.push(s);
+            }
+            None => {
+                if self.summaries.len() >= SUMMARY_SCOPES {
+                    self.summary_drop(0);
+                }
+                // The plain roster's one summary keeps its name; the hash only names a file.
+                let file = if key == team::DEFAULT_SCOPE { "summary.json".to_owned() } else { format!("summary-{}.json", &reqauth::body_digest(key.as_bytes())[..16]) };
+                self.summaries.push(Summary { key: key.to_owned(), file, built: None, failed: 0, size: 0 });
+            }
+        }
+        let last = self.summaries.len() - 1;
+        &mut self.summaries[last]
+    }
+
+    fn summary_drop(&mut self, i: usize) {
+        let s = self.summaries.remove(i);
+        let _ = fs::remove_file(self.data.join("status").join(s.file));
+    }
+
+    /// The least recently used summaries go while all together are above `SUMMARY_CACHE_BYTES`
+    /// (the most recently used one stays, whatever its size).
+    fn summary_trim(&mut self) {
+        while self.summaries.len() > 1 && self.summaries.iter().map(|s| s.size).sum::<u64>() > SUMMARY_CACHE_BYTES {
+            self.summary_drop(0);
+        }
     }
 
     fn next_secs(&self) -> u64 {
@@ -1104,9 +1164,10 @@ where
     }
 }
 
-/// Writes the summary to `tmp` (no fsync: it is rebuilt after a restart) and returns its ETag:
-/// the first 16 hex characters of SHA-256 over the hosts array.
-fn build_summary(app: &Mutex<App>, tmp: &Path, t: u64) -> io::Result<String> {
+/// Writes the summary for `scope` to `tmp` (no fsync: it is rebuilt after a restart) and returns
+/// its ETag (the first 16 hex characters of SHA-256 over the hosts array) and size: the hosts of
+/// the scope's customers, with their software list only for a scope with `sbom`.
+fn build_summary(app: &Mutex<App>, tmp: &Path, t: u64, scope: &Permissions) -> io::Result<(String, u64)> {
     let f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(tmp)?;
     let mut w = io::BufWriter::new(&f);
     write!(w, "{{\"built\":{t},\"hosts\":")?;
@@ -1116,7 +1177,10 @@ fn build_summary(app: &Mutex<App>, tmp: &Path, t: u64) -> io::Result<String> {
     let copy = |a: &App, u: &Arc<str>, s: &Seen| {
         s.entry()?;
         let p = a.status.keys.get(&**u);
-        let sbom = s.sbom.as_ref().filter(|_| conf().sbom).map(|r| (r.at, r.sha.clone()));
+        if !scope.sees(p.and_then(|p| p.customer.as_deref())) {
+            return None;
+        }
+        let sbom = s.sbom.as_ref().filter(|_| conf().sbom && scope.sbom).map(|r| (r.at, r.sha.clone()));
         Some((u.clone(), p.and_then(|p| p.tether_id.clone()), p.and_then(|p| p.claimed_id.clone()), p.and_then(|p| p.linked_at), p.is_some_and(|p| p.no_claim), p.is_some_and(|p| p.linked_proof), p.and_then(|p| p.customer.clone()), s.last_seen, s.next, s.entry.clone()?, sbom))
     };
     chunks(app, dev_map, copy, |buf| {
@@ -1147,7 +1211,31 @@ fn build_summary(app: &Mutex<App>, tmp: &Path, t: u64) -> io::Result<String> {
     let mut w = h.w;
     w.write_all(b"}")?;
     w.flush()?;
-    Ok(format!("\"{}\"", digest.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>()))
+    drop(w);
+    Ok((format!("\"{}\"", digest.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>()), f.metadata()?.len()))
+}
+
+/// Builds scope `key`'s summary into `tmp` (the caller set `building`), renames it into place
+/// under the lock (a file opened under it always matches the ETag sent with it) and answers.
+fn summary_build(app: &Mutex<App>, key: &str, scope: &Permissions, tmp: PathBuf, t: u64, inm: Option<String>) -> Result<Resp, Resp> {
+    let built = build_summary(app, &tmp, t, scope);
+    let mut a = lock(app);
+    a.status.building = false;
+    let file = a.status.summary_slot(key).file.clone();
+    match built.and_then(|(etag, size)| fs::rename(&tmp, a.data.join("status").join(&file)).map(|()| (etag, size))) {
+        Ok((etag, size)) => {
+            let s = a.status.summary_slot(key);
+            (s.built, s.size) = (Some((t, etag.clone())), size);
+            a.status.summary_trim();
+            a.summary_file(&file, &etag, inm.as_deref())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            a.status.summary_slot(key).failed = now(); // no new attempt for SUMMARY_SECS
+            write_error(&file, &e);
+            Err(crate::internal(e))
+        }
+    }
 }
 
 /// `If-None-Match` names `etag` (weak or strong).
@@ -1639,7 +1727,7 @@ impl App {
         let raw = body.bytes(crate::LIMIT_SMALL)?;
         let (uuid, sig) = Self::device_header(rq)?;
         self.device_verify(rq, &sig, &uuid, "DELETE", url, raw)?;
-        self.admin_status_delete(&uuid, "the device", true)
+        self.admin_status_delete(&uuid, "the device", true, None)
     }
 
     /// The software-list routes but a device's DELETE: 503 as every status route, then 404 without
@@ -1721,9 +1809,11 @@ impl App {
 
     /// `GET /api/team/status/<uuid>/sbom`: the list as stored, its hash as the ETag. Opened under
     /// the lock: an upload renames a new file over it, this one stays readable and matches its tag.
-    pub(crate) fn team_status_sbom(&mut self, rq: &Request, uuid: &str) -> Result<Resp, Resp> {
+    /// Outside `scope`'s customers (a list without a pin has none): not found.
+    pub(crate) fn team_status_sbom(&mut self, rq: &Request, uuid: &str, scope: &Permissions) -> Result<Resp, Resp> {
         self.sbom_open()?;
-        let rec = st::valid_uuid(uuid).then(|| self.status.dev.get(uuid)).flatten().and_then(|s| s.sbom.as_ref()).ok_or_else(not_found)?;
+        let seen = scope.sees(self.status.keys.get(uuid).and_then(|p| p.customer.as_deref()));
+        let rec = (seen && st::valid_uuid(uuid)).then(|| self.status.dev.get(uuid)).flatten().and_then(|s| s.sbom.as_ref()).ok_or_else(not_found)?;
         let etag = format!("\"{}\"", rec.sha);
         if etag_matches(header(rq, "If-None-Match").as_deref(), &etag) {
             return Ok(empty(304).with_header(hdr("ETag", &etag)));
@@ -1746,12 +1836,14 @@ impl App {
     /// `by` names who, for the journal.
     /// `own`: the device itself; when its link was dismissed, its key is remembered (`dismissed`),
     /// so dropping its pin does not give it a new claim.
-    pub(crate) fn admin_status_delete(&mut self, uuid: &str, by: &str, own: bool) -> Result<Resp, Resp> {
+    /// `scope`: a member's permissions (a device outside its customers is not found), None for an
+    /// admin or the device.
+    pub(crate) fn admin_status_delete(&mut self, uuid: &str, by: &str, own: bool, scope: Option<&Permissions>) -> Result<Resp, Resp> {
         self.status_open()?;
         if !st::valid_uuid(uuid) {
             return Err(not_found());
         }
-        if !self.status.keys.contains_key(uuid) {
+        if !self.status.keys.get(uuid).is_some_and(|p| scope.is_none_or(|s| s.sees(p.customer.as_deref()))) {
             return Err(not_found());
         }
         self.check_space(st::ENROLL_MAX as u64)?;
@@ -1786,8 +1878,10 @@ impl App {
 
     /// The next summary request rebuilds it (a link changes what the team sees at once).
     fn summary_outdated(&mut self) {
-        if let Some((at, _)) = &mut self.status.built {
-            *at = 0;
+        for s in &mut self.status.summaries {
+            if let Some((at, _)) = &mut s.built {
+                *at = 0;
+            }
         }
     }
 
@@ -1815,16 +1909,21 @@ impl App {
         Ok(log)
     }
 
+    /// The pin of `uuid` if `scope` sees its customer; else not found, as for an unknown uuid.
+    fn scoped_pin(&self, uuid: &str, scope: &Permissions) -> Result<Pin, Resp> {
+        st::valid_uuid(uuid).then(|| self.status.keys.get(uuid)).flatten().filter(|p| scope.sees(p.customer.as_deref())).cloned().ok_or_else(not_found)
+    }
+
     /// `POST /api/team/status/<uuid>/link` `{"tether_id"}` from a member with `write` (checked by
     /// the caller): confirms the device's claim, which then is its Tether ID.
-    pub(crate) fn team_status_link(&mut self, uuid: &str, body: &[u8], member: &str) -> Result<Resp, Resp> {
+    pub(crate) fn team_status_link(&mut self, uuid: &str, body: &[u8], member: &str, scope: &Permissions) -> Result<Resp, Resp> {
         self.status_open()?;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Link {
             tether_id: String,
         }
-        let pin = st::valid_uuid(uuid).then(|| self.status.keys.get(uuid)).flatten().cloned().ok_or_else(not_found)?;
+        let pin = self.scoped_pin(uuid, scope)?;
         let id = serde_json::from_slice::<Link>(body).map_err(|e| text(400, &e.to_string()))?.tether_id;
         if !st::valid_tether_id(&id) || id.starts_with("m:") {
             return Err(text(400, "bad tether_id"));
@@ -1847,9 +1946,9 @@ impl App {
 
     /// `DELETE /api/team/status/<uuid>/link` (member with `write`): removes the link and the claim,
     /// and the device cannot claim an ID again (`no_claim`) until a member allows it.
-    pub(crate) fn team_status_unlink(&mut self, uuid: &str, member: &str) -> Result<Resp, Resp> {
+    pub(crate) fn team_status_unlink(&mut self, uuid: &str, member: &str, scope: &Permissions) -> Result<Resp, Resp> {
         self.status_open()?;
-        let pin = st::valid_uuid(uuid).then(|| self.status.keys.get(uuid)).flatten().cloned().ok_or_else(not_found)?;
+        let pin = self.scoped_pin(uuid, scope)?;
         if pin.no_claim && pin.tether_id.is_none() && pin.claimed_id.is_none() {
             return Ok(empty(204));
         }
@@ -1866,9 +1965,9 @@ impl App {
 
     /// `POST /api/team/status/<uuid>/allow-claim` (member with `write`): clears `no_claim`; the
     /// device's next enrolment or report names its claim again (still only a claim).
-    pub(crate) fn team_status_allow_claim(&mut self, uuid: &str, member: &str) -> Result<Resp, Resp> {
+    pub(crate) fn team_status_allow_claim(&mut self, uuid: &str, member: &str, scope: &Permissions) -> Result<Resp, Resp> {
         self.status_open()?;
-        let pin = st::valid_uuid(uuid).then(|| self.status.keys.get(uuid)).flatten().cloned().ok_or_else(not_found)?;
+        let pin = self.scoped_pin(uuid, scope)?;
         if !pin.no_claim {
             return Ok(empty(204));
         }
@@ -1973,68 +2072,69 @@ impl App {
         })
     }
 
-    /// `GET /api/team/status`: every host with a full report. `summary.json` is rebuilt at most
-    /// every 30 s (stale computed then) and sent from the file; the ETag hashes the hosts only,
-    /// so an unchanged summary keeps its tag.
+    /// `GET /api/team/status`: every host with a full report in the member's scope (its customers;
+    /// software lists with `sbom`). One summary file per scope (`Permissions::scope_key`, at most
+    /// `SUMMARY_SCOPES`), each rebuilt at most every 30 s (stale computed then) and sent from the
+    /// file; the ETag hashes the hosts only, so an unchanged summary keeps its tag.
     ///
-    /// Built from a snapshot after the lock is released, by one request at a time; requests
-    /// meanwhile get the previous file (the very first build makes them wait for it).
-    pub(crate) fn team_status_summary(&mut self, rq: &Request) -> Result<Resp, Resp> {
+    /// Built from a snapshot after the lock is released, by one request at a time (any scope);
+    /// requests meanwhile get the previous file of their scope (a scope's very first build makes
+    /// them wait for it).
+    pub(crate) fn team_status_summary(&mut self, rq: &Request, scope: &Permissions) -> Result<Resp, Resp> {
         self.status_open()?;
         let t = now();
         let inm = header(rq, "If-None-Match");
-        let failed_recently = t < self.status.summary_failed + SUMMARY_SECS;
-        match &self.status.built {
-            Some((at, etag)) if t < at + SUMMARY_SECS || self.status.building || failed_recently => return self.summary_file(&etag.clone(), inm.as_deref()),
-            None if failed_recently && !self.status.building => return Err(text(503, "status summary not ready").with_header(hdr("Retry-After", "30"))),
-            None if self.status.building => {
-                return self.defer(move |app| {
-                    for _ in 0..600 {
-                        {
-                            let a = lock(app);
-                            if let Some((_, etag)) = &a.status.built {
-                                return a.summary_file(etag, inm.as_deref());
-                            }
-                            if !a.status.building {
-                                break;
-                            }
-                        }
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    Err(text(503, "status summary not ready").with_header(hdr("Retry-After", "5")))
-                })
+        let key = scope.scope_key();
+        let building = self.status.building;
+        let s = self.status.summary_slot(&key);
+        let failed_recently = t < s.failed + SUMMARY_SECS;
+        match &s.built {
+            Some((at, etag)) if t < at + SUMMARY_SECS || building || failed_recently => {
+                let (file, etag) = (s.file.clone(), etag.clone());
+                return self.summary_file(&file, &etag, inm.as_deref());
             }
+            None if failed_recently => return Err(text(503, "status summary not ready").with_header(hdr("Retry-After", "30"))),
             _ => {}
         }
-        self.status.building = true;
-        let tmp = crate::tmp_path(&self.data);
+        let scope = scope.clone();
+        if !building {
+            self.status.building = true;
+            let tmp = crate::tmp_path(&self.data);
+            return self.defer(move |app| summary_build(app, &key, &scope, tmp, t, inm));
+        }
+        // No summary of this scope yet, and a build runs (of this scope or another): wait for it.
         self.defer(move |app| {
-            let built = build_summary(app, &tmp, t);
-            let mut a = lock(app);
-            a.status.building = false;
-            // Renamed under the lock: a file opened under it always matches the ETag sent with it.
-            match built.and_then(|etag| fs::rename(&tmp, a.data.join("status/summary.json")).map(|()| etag)) {
-                Ok(etag) => {
-                    a.status.built = Some((t, etag.clone()));
-                    a.summary_file(&etag, inm.as_deref())
+            for _ in 0..600 {
+                {
+                    let mut a = lock(app);
+                    let s = a.status.summary_slot(&key);
+                    let (built, file, failed) = (s.built.clone(), s.file.clone(), s.failed);
+                    if let Some((_, etag)) = built {
+                        return a.summary_file(&file, &etag, inm.as_deref());
+                    }
+                    if !a.status.building {
+                        if now() < failed + SUMMARY_SECS {
+                            break;
+                        }
+                        a.status.building = true;
+                        let tmp = crate::tmp_path(&a.data);
+                        drop(a);
+                        return summary_build(app, &key, &scope, tmp, now(), inm);
+                    }
                 }
-                Err(e) => {
-                    let _ = fs::remove_file(&tmp);
-                    a.status.summary_failed = now(); // no new attempt for SUMMARY_SECS
-                    write_error("summary.json", &e);
-                    Err(crate::internal(e))
-                }
+                std::thread::sleep(Duration::from_millis(50));
             }
+            Err(text(503, "status summary not ready").with_header(hdr("Retry-After", "5")))
         })
     }
 
     /// `summary.json` with its ETag, or 304. Opened under the lock: a rebuild renames a new file
     /// over it, this one stays readable.
-    fn summary_file(&self, etag: &str, inm: Option<&str>) -> Result<Resp, Resp> {
+    fn summary_file(&self, file: &str, etag: &str, inm: Option<&str>) -> Result<Resp, Resp> {
         if etag_matches(inm, etag) {
             return Ok(empty(304).with_header(hdr("ETag", etag)));
         }
-        let f = fs::File::open(self.data.join("status/summary.json")).map_err(crate::internal)?;
+        let f = fs::File::open(self.data.join("status").join(file)).map_err(crate::internal)?;
         Ok(tiny_http::Response::from_file(f)
             .with_header(hdr("Content-Type", "application/json"))
             .with_header(hdr("ETag", etag))
@@ -2044,12 +2144,9 @@ impl App {
 
     /// `GET /api/team/status/<uuid>`: the last report (raw bytes) and 90 days of history, read
     /// after the state lock is released.
-    pub(crate) fn team_status_host(&mut self, uuid: &str) -> Result<Resp, Resp> {
+    pub(crate) fn team_status_host(&mut self, uuid: &str, scope: &Permissions) -> Result<Resp, Resp> {
         self.status_open()?;
-        if !st::valid_uuid(uuid) {
-            return Err(not_found());
-        }
-        let pin = self.status.keys.get(uuid).ok_or_else(not_found)?;
+        let pin = self.scoped_pin(uuid, scope)?;
         let t = now();
         let s = self.status.dev.get(uuid).filter(|s| s.last_seen > 0); // 0: only a software list so far
         let mut head = serde_json::json!({

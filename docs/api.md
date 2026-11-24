@@ -121,9 +121,13 @@ alarm, health agent:          {"typ":30,"info":"{\"agent\":\"install\",\"result\
 `typ` (alarm): 0-10 as upstream's `AlarmAuditType`; 30 = a technician installed or removed the
 health monitoring agent in a remote session (`TetherAgentRequest`, `src/tauri_ui/agent.rs`):
 `agent` is `install` or `remove`, `result` the host's answer state (`installed`, `removed-by-tether`,
-`failed`, `busy`, `not-allowed`, `needs-service`, `not-supported`, …); nothing else (no version,
-path or agent output). `conn_id` ties it to the session's `conn` records. A status request is not
-recorded. A relay that refuses the post only loses the record; the session goes on.
+`failed`, `not-installed`, …, or `running`: still going on after the host's 3-minute wait, the
+outcome shows in a later status); nothing else (no version, path or agent output). `conn_id` ties
+it to the session's `conn` records. Only an action the host acted on is recorded: not a status
+request, nor one refused (`not-allowed`, `needs-service`, `not-supported`) or `busy`; a connection
+gets an install or remove through at most every 10 s, with one post in flight. The post is one
+attempt of at most 10 s (no retries); a relay that refuses it only loses the record; the session
+goes on.
 
 Answers: `204` with an empty body when stored (also when the same `nonce` was stored in the last
 10 minutes: a client retry), `400` invalid (the client drops it), `413` too large, `429` more than
@@ -213,8 +217,8 @@ keeps blocking replays in memory.
 | `POST /api/admin/status/revoke` | `{"id":"<token id>","exp":<the token's exp>}` | `204`, also when the id is revoked already (the later `exp` is kept). `400 exp has passed` when `exp` is not in the future (an expired token is refused anyway; nothing is stored). The relay refuses that token from then on (`401 token revoked`); devices that enrolled with it stay enrolled. Kept in `status/revoked.json` until `exp`. `400` for a bad id or body, `507 too many revoked tokens` with 10 000 kept (expired ones leave within a minute), `503` as above. |
 | `GET /api/admin/status/revoked` | – | `{"<token id>":<exp>,…}`, the revocations that have not expired. |
 | `GET /api/admin/status/devices[?token=<id>][&after=<uuid>]` | – | The pins, sorted by uuid: `{"devices":[{"uuid","token","label","tether_id","claimed_id","linked_by","linked_at","linked_token","no_claim","customer","host","enrolled","last_seen"}],"next":"<uuid>" \| null}`; `customer` is `null` when none. Each request looks at no more than 1000 pins: `token` keeps only the pins enrolled with that token among them, so a page can be short or empty while `next` is set. `next`: pass it as `after` for the next page; `null` when no pin follows. `host` (the last full report's) and `last_seen` are `null` before the first post; `token` is `null` for pins from before token ids. `400` for an unknown parameter or a bad value. |
-| `PUT /api/admin/team` | team roster (≤ 64 KiB, below) | `204`. Validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600). `{"members":[]}` turns team access off. |
-| `GET /api/admin/team` | – | the roster (`{"members":[]}` when none) |
+| `PUT /api/admin/team` | a signed team document upload (≤ 360 KiB) or a plain team roster (≤ 64 KiB, below) | `204`. A signed upload: verified against `ADMIN_PUB_KEY` (`401` when not signed by one of its keys or the signature does not match), validated (`400`), serial above the stored one (`409 serial must be greater than the current team document's`); stored atomically as `team/team.json` (0600) exactly as received, and `team/roster.json` is deleted. A plain roster: validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600); `{"members":[]}` turns team access off; refused with `409` once a signed document was accepted (below). |
+| `GET /api/admin/team` | – | the plain roster (`{"members":[]}` when none), or the signed upload exactly as published |
 
 The server refuses uploads that would leave less than 2 GiB free on the disk (`507`).
 
@@ -239,9 +243,56 @@ requests use. Unknown key, bad signature, no roster or an empty roster: `401` wi
 Limits: 120 requests/min per member key and 60 failed signatures/min per IP (IPv6: per /64; `429`). Unknown path:
 `404`.
 
+**`kid`.** A member header may end with ` kid=<16 hex>`: the key's fingerprint digits in lower case
+(`tether_trust::team::key_id`, `630dcd2966c43366` for the vector above; `reqauth::sign_request_for_kid`).
+It is not signed; it only selects the key: the relay checks the signature against that one roster key
+and no other. A `kid` that names no key accepted here (unknown, removed, or not a service entry under
+`oidc_only`) or one that is not 16 lower-case hex digits: `401 not a team member`. Without `kid` the
+relay tries every key as before; that costs about 80 µs per key under the relay's state lock
+(measured: 160 ms for the last of 2000 keys in a release build, 11 ms per request with `kid`). Send
+`kid` only to relays of 0.7 or later: an older relay refuses the header as malformed (`401`).
+
+**The signed team document** (0.7) replaces the roster. Tether Manage publishes an upload
+(`tether_trust::team::Upload`, unknown fields rejected everywhere):
+```json
+{"team":{"payload":"<b64 of the document>","sig":"…","key":"<admin key>"},
+ "config":{"payload":"<b64 of {\"serial\":7,\"oidc\":{…}}>","sig":"…","key":"<admin key>"}}
+```
+The document (payload ≤ 256 KiB):
+```json
+{"serial":7,
+ "oidc":{"issuer":"https://login.microsoftonline.com/<tenant id>/v2.0","tenant":"<tenant id>","audience":"api://tether","client_id":"<id>","scope":"api://tether/access"},
+ "roles":{"Tether.Software":{"sbom":true},"Tether.Customer.4711":{"customers":["4711"]}},
+ "deny":["<object id>"], "oidc_only":false,
+ "members":[{"name":"Bridge","key":"<b64>","write":false,"audit":false,"sbom":true,"agent":false,"customers":["47*"],"service":true}]}
+```
+`serial` at least 1 and above the relay's stored one; at most 2000 members (name and key as in the
+roster); `oidc`, `roles`, `deny`, `oidc_only` optional. `config` is there exactly when `oidc` is, signed
+by an admin key too, and says the same `serial` and `oidc`. Member fields that are missing read as a
+roster entry's rights: `write` and `audit` false, `sbom` and `agent` true, `customers` `["*"]`,
+`service` false. Customer patterns: `*` (every device, also those without a customer reference), a
+customer reference (1–32 of `A-Za-z0-9._-`, matched exactly, case-sensitive), or a customer reference
+followed by one `*` (every reference starting with it: `47*` covers `47`, `4711`, `47-B`); nothing else,
+at most 64 per member or role. With `oidc_only` true the relay accepts member keys only of entries with
+`service`. `roles` and `deny` are stored for sign-in sessions (not yet served by this relay); `deny`
+does not affect key members. Once a relay has accepted a signed document it refuses plain rosters
+(`409`) for as long as `team/team.json` exists, also after a restart; an unreadable `team.json`
+leaves nobody admitted (and plain rosters still refused) until a new document is published. The
+stored document is checked against the key it names at start, so it stays in force across an admin
+key rotation; new documents need a key in `ADMIN_PUB_KEY`.
+
+**Permissions** (relay-enforced): `write` as before; `audit` as before; `sbom` the software lists
+(`403 this member may not read software lists`; without it the summary has no `sbom` fields);
+`customers` limits the summary, the report and history, the software list and the device actions
+(link, unlink, allow a claim, remove) to devices whose customer reference a pattern covers (no
+reference: only `*`). A device outside a member's customers answers exactly as an unknown uuid
+(`404 not found`), on every route; the device list (`/api/team/devices`, from heartbeats), the tags
+and the session audit records stay fleet-wide. `agent` is enforced by the viewer's desktop, not here.
+
 | Method & path | Body | Result |
 | --- | --- | --- |
-| `GET /api/team/me` | – | `{"name":…, "write":bool, "audit":bool}` |
+| `GET /api/team/config` | no signature | The `config` envelope of the signed document as published (`{"payload","sig","key"}`, payload `{"serial","oidc"}`); verify it with the admin key, not the relay. `ETag: "<serial>"`, `304` on `If-None-Match`. `404 no sign-in configured` without a document with `oidc`. |
+| `GET /api/team/me` | – | `{"name":…, "write":bool, "audit":bool}`; with a signed document also `"sbom","agent":bool, "customers":[…], "service":bool` |
 | `GET /api/team/devices` | – | `[{uuid,id,profile,version,os,last_seen}]` newest first, from the heartbeats (no IP, no serials) |
 | `GET /api/team/tags` | – | `{"rev":<u64>,"doc":<JSON or null>,"updated_by":"<name>","updated_at":<unix>}`; `rev` 0, `doc` null, `updated_by` "" and `updated_at` 0 when none was stored |
 | `PUT /api/team/tags` | a JSON object (≤ 512 KiB), header `If-Match: <rev>` (decimal, quotes tolerated) | `200 {"rev":<new>}`. Member without `write`: `403`. Missing or bad `If-Match`, body not a JSON object: `400`. `rev` is not the current one: `409` with the current `{"rev","doc","updated_by","updated_at"}`. Too large: `413`. Stored atomically as `team/tags.json` (0600) with `rev + 1`, `updated_by` = the member's roster name. The relay does not look inside the document. |
@@ -532,6 +583,11 @@ proof made the link; `last_seen` and `built` are the relay's unix time. An entry
 summary is rebuilt at most every 30 s from a snapshot and sent from `status/summary.json`, so
 `stale` is as of that build. `ETag` is `"<16 hex>"`, the first 16 hex digits of the SHA-256 over
 the `hosts` array, so an unchanged summary keeps its tag and answers `304` to `If-None-Match`.
+With a signed team document each member scope (its customer patterns sorted without repeats, `*`
+alone when `*` is among them, and whether it has `sbom`) has its own summary file
+(`status/summary-<16 hex>.json`; the scope of every customer with `sbom` keeps `summary.json`), built
+only from that scope's hosts, with its own ETag; at most 32 scopes and 256 MiB of them, least
+recently used dropped first, one build at a time for all scopes.
 A host whose device has a software list (with `STATUS_SBOM=on`) also has `"sbom":{"at":<unix time>,"sha":"<16 hex>"}` (`at` is the modification time of the stored file, which is when it was uploaded), outside the 2 KiB entry; the list itself is
 `GET /api/team/status/<uuid>/sbom`.
 

@@ -448,6 +448,14 @@ technician removed from the roster is locked out at once on every relay that got
 relay that missed the publish still lets them in, so publish again until every relay has it. An
 empty roster turns team access off.
 
+**Signed team document (relays of 0.7).** A relay of 0.7 also takes an admin-signed team document
+in place of this plain roster: per member also software lists (`sbom`), the agent menu (`agent`),
+the customers whose devices the member sees (`customers`, e.g. `47*`), service entries, and the
+sign-in settings. Once a relay has accepted one it refuses the plain roster this page publishes
+today (`409`), also after a restart. Publishing the signed document from Tether Manage comes with
+its sign-in release; until then this page and the plain roster work as described above. Wire format
+and rules: [api.md](api.md), "The signed team document".
+
 ## Releases
 
 **Publish the latest builds** is the usual way to release: **Choose…** the build folder once

@@ -2731,3 +2731,156 @@ fn the_hbbs_lookup_holds_no_lock_and_is_checked_again_after() {
     assert_eq!((r.status, r.text()), (503, "tether proof unavailable".into()));
     assert!(t0.elapsed() < Duration::from_millis(2800), "{:?}", t0.elapsed());
 }
+
+// ---- Permissions of a signed team document on the status routes (`sbom`, `customers`).
+
+/// Publishes a signed team document `serial` with `members` (name, key, extra fields).
+fn publish_doc(s: &Srv, admin: &SigningKey, serial: u64, members: &[(&str, &SigningKey, Value)]) {
+    let m: Vec<Value> = members
+        .iter()
+        .map(|(n, k, extra)| {
+            let mut e = json!({"name": n, "key": key_to_b64(&k.verifying_key())});
+            for (f, v) in extra.as_object().unwrap() {
+                e[f] = v.clone();
+            }
+            e
+        })
+        .collect();
+    let doc = serde_json::to_vec(&json!({"serial": serial, "members": m})).unwrap();
+    let up = json!({"team": tether_trust::envelope::sign(&doc, admin)});
+    assert_eq!(s.admin(admin, "PUT", "/api/admin/team", up.to_string().as_bytes()).status, 204);
+}
+
+/// A member request with an optional `If-None-Match`.
+fn member_req(s: &Srv, m: &SigningKey, method: &str, path: &str, inm: Option<&str>, body: &[u8]) -> Reply {
+    let sig = reqauth::sign_request(m, method, path, body, now());
+    let mut h = vec![(reqauth::HEADER, sig.as_str())];
+    h.extend(inm.map(|e| ("If-None-Match", e)));
+    s.req(method, path, &h, body)
+}
+
+fn summary_hosts(r: &Reply) -> Vec<String> {
+    r.json()["hosts"].as_array().unwrap().iter().map(|h| h["uuid"].as_str().unwrap().to_owned()).collect()
+}
+
+/// dev-0001 (customer 4711), dev-0002 (4812), dev-0003 (none), each with a software list, the
+/// software list on.
+fn scoped_server() -> (Srv, SigningKey) {
+    let (s, admin, _) = sbom_server(3, &[], |dir| {
+        update_json(&dir.join("status/keys.json"), |m| {
+            m.get_mut("dev-0001").unwrap()["customer"] = "4711".into();
+            m.get_mut("dev-0002").unwrap()["customer"] = "4812".into();
+            // Claims (a legacy tether_id), so link and unlink have something to act on.
+            for u in ["dev-0001", "dev-0002"] {
+                m.get_mut(u).unwrap()["tether_id"] = "123456789".into();
+            }
+        });
+        for u in ["dev-0001", "dev-0002", "dev-0003"] {
+            prep_sbom(dir, u, br#"{"bomFormat":"CycloneDX"}"#, now() - 7200);
+        }
+    });
+    (s, admin)
+}
+
+#[test]
+fn customers_limit_every_status_route_and_out_of_scope_is_unknown() {
+    let (s, admin) = scoped_server();
+    let (all, part, nosbom, writer) = (generate_key(), generate_key(), generate_key(), generate_key());
+    publish_doc(&s, &admin, 1, &[("All", &all, json!({})), ("Part", &part, json!({"customers": ["47*"]})), ("NoSbom", &nosbom, json!({"sbom": false})), ("Writer", &writer, json!({"write": true, "customers": ["47*", "0815"]}))]);
+
+    let r = team_get(&s, &all, "/api/team/status");
+    assert_eq!(summary_hosts(&r), ["dev-0001", "dev-0002", "dev-0003"]);
+    assert!(r.json()["hosts"].as_array().unwrap().iter().all(|h| h["sbom"]["sha"].is_string()));
+    assert_eq!(summary_hosts(&team_get(&s, &part, "/api/team/status")), ["dev-0001"]);
+    // Without `sbom`: every host, no software list offered.
+    let r = team_get(&s, &nosbom, "/api/team/status");
+    assert_eq!(summary_hosts(&r), ["dev-0001", "dev-0002", "dev-0003"]);
+    assert!(r.json()["hosts"].as_array().unwrap().iter().all(|h| h.get("sbom").is_none()), "{}", r.text());
+    for u in ["dev-0001", "dev-9999"] {
+        let r = team_get(&s, &nosbom, &format!("/api/team/status/{u}/sbom"));
+        assert_eq!((r.status, r.text()), (403, "this member may not read software lists".into()));
+    }
+    assert_eq!(team_get(&s, &nosbom, "/api/team/status/dev-0003").status, 200, "reports stay readable");
+
+    // Report and history, software list: a device outside the scope answers as an unknown one.
+    assert_eq!(team_get(&s, &part, "/api/team/status/dev-0001").status, 200);
+    assert_eq!(team_get(&s, &part, "/api/team/status/dev-0001/sbom").status, 200);
+    for u in ["dev-0002", "dev-0003"] {
+        for p in ["/api/team/status/{u}", "/api/team/status/{u}/sbom"] {
+            let (out, unknown) = (team_get(&s, &part, &p.replace("{u}", u)), team_get(&s, &part, &p.replace("{u}", "dev-9999")));
+            assert_eq!((out.status, &out.body, out.head.lines().count()), (unknown.status, &unknown.body, unknown.head.lines().count()), "{p} {u}");
+            assert_eq!(out.status, 404);
+        }
+    }
+    // Device actions (with `write`): the same; inside the scope they work.
+    let link = br#"{"tether_id":"123456789"}"#;
+    for (method, p, body) in [("POST", "/api/team/status/{u}/link", &link[..]), ("DELETE", "/api/team/status/{u}/link", b""), ("POST", "/api/team/status/{u}/allow-claim", b""), ("DELETE", "/api/team/status/{u}", b"")] {
+        for u in ["dev-0002", "dev-0003"] {
+            let out = member_req(&s, &writer, method, &p.replace("{u}", u), None, body);
+            let unknown = member_req(&s, &writer, method, &p.replace("{u}", "dev-9999"), None, body);
+            assert_eq!((out.status, &out.body), (unknown.status, &unknown.body), "{method} {p} {u}");
+            assert_eq!(out.status, 404);
+        }
+    }
+    assert_eq!(member_req(&s, &writer, "POST", "/api/team/status/dev-0001/link", None, link).status, 204);
+    assert_eq!(member_req(&s, &writer, "DELETE", "/api/team/status/dev-0001/link", None, b"").status, 204);
+    assert_eq!(member_req(&s, &writer, "POST", "/api/team/status/dev-0001/allow-claim", None, b"").status, 204);
+    assert_eq!(member_req(&s, &part, "DELETE", "/api/team/status/dev-0001", None, b"").status, 403, "write stays what it is");
+    assert_eq!(member_req(&s, &writer, "DELETE", "/api/team/status/dev-0001", None, b"").status, 204);
+    // Nothing outside the scope was touched.
+    let r = team_get(&s, &all, "/api/team/status/dev-0002").json();
+    assert_eq!((r["claimed_id"].as_str(), r["no_claim"].as_bool()), (Some("123456789"), Some(false)));
+    assert_eq!(team_get(&s, &all, "/api/team/status/dev-0003").status, 200);
+}
+
+#[test]
+fn each_scope_gets_its_own_cached_summary() {
+    let (s, admin) = scoped_server();
+    let (a, b, c) = (generate_key(), generate_key(), generate_key());
+    // c's scope is a's, written another way: the same summary.
+    publish_doc(&s, &admin, 1, &[("A", &a, json!({"customers": ["47*"]})), ("B", &b, json!({})), ("C", &c, json!({"customers": ["4711", "47*", "47*"]}))]);
+    let summary = |m: &SigningKey, inm: Option<&str>| member_req(&s, m, "GET", "/api/team/status", inm, b"");
+    let ra = summary(&a, None);
+    let ea = ra.header("ETag").unwrap();
+    assert_eq!(summary_hosts(&ra), ["dev-0001"]);
+    let rb = summary(&b, None);
+    let eb = rb.header("ETag").unwrap();
+    assert_eq!(summary_hosts(&rb), ["dev-0001", "dev-0002", "dev-0003"]);
+    assert_ne!(ea, eb);
+    // Back to back, each gets its own; another scope's tag is no match.
+    let r = summary(&a, Some(&eb));
+    assert_eq!((r.status, summary_hosts(&r)), (200, vec!["dev-0001".to_owned()]));
+    assert_eq!(summary(&a, Some(&ea)).status, 304);
+    assert_eq!(summary(&b, Some(&eb)).status, 304);
+    assert_eq!(summary(&b, Some(&ea)).status, 200);
+    assert_eq!(summary(&c, Some(&ea)).status, 304);
+    // a's scope changes with a new document: the next answer is the new scope's.
+    publish_doc(&s, &admin, 2, &[("A", &a, json!({"customers": ["4812"]})), ("B", &b, json!({}))]);
+    let r = summary(&a, Some(&ea));
+    assert_eq!((r.status, summary_hosts(&r)), (200, vec!["dev-0002".to_owned()]));
+    assert_eq!(summary(&c, None).status, 401, "removed");
+
+    // At most 32 summaries are kept; the oldest scope's file goes.
+    let keys: Vec<SigningKey> = (0..33).map(|_| generate_key()).collect();
+    let names: Vec<String> = (0..33).map(|i| format!("S{i}")).collect();
+    let members: Vec<(&str, &SigningKey, Value)> = keys.iter().zip(&names).enumerate().map(|(i, (k, n))| (n.as_str(), k, json!({"customers": [format!("c{i}")]}))).collect();
+    publish_doc(&s, &admin, 3, &members);
+    for k in &keys {
+        assert_eq!(summary(k, None).json()["hosts"], json!([]));
+    }
+    let files = std::fs::read_dir(s.dir.join("status")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("summary")).count();
+    assert_eq!(files, 32);
+}
+
+#[test]
+fn a_plain_roster_member_gets_the_summary_of_before() {
+    // Same file, same bytes as before signed documents existed: summary.json, hosts with their
+    // software list, a member of the plain roster sees every device.
+    let (s, admin) = scoped_server();
+    let m = member(&s, &admin);
+    let r = team_get(&s, &m, "/api/team/status");
+    assert_eq!(summary_hosts(&r), ["dev-0001", "dev-0002", "dev-0003"]);
+    assert_eq!(r.body, std::fs::read(s.dir.join("status/summary.json")).unwrap());
+    assert!(r.json()["hosts"][2]["sbom"]["sha"].is_string());
+    assert_eq!(team_get(&s, &m, "/api/team/me").json(), json!({"name": "M", "write": false, "audit": false}));
+}
