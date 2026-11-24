@@ -6,6 +6,12 @@ list). Arguments Tether does not know are passed to the RustDesk core unchanged 
 `--cm`, `--service`, …); they are internal and not covered here, except the two service commands
 below.
 
+An instance build (`TETHER_INSTANCE=north`,
+[several-organisations.md](several-organisations.md#two-organisations-on-one-pc)) is
+`tether-north.exe` in `C:\Program Files\Tether-north` and takes the same commands; its links use
+the scheme `tether-north://` ([below](#tether-links)). Its `--help` text still says `tether` and
+`tether://`.
+
 ## Commands
 
 | Command | What it does | Output |
@@ -90,6 +96,11 @@ tether://connect/<id>/
 Nothing else is accepted: no query string, no password, no other actions, no extra command-line
 arguments. A link never carries a password, so a link in a ticket or e-mail cannot give anyone
 access by itself; the technician still enters the password or the remote user accepts.
+
+An instance build registers its own scheme instead: `tether-north://connect/<id>` for
+`TETHER_INSTANCE=north` (`apps/desktop/src-tauri/src/cli.rs`, `uri_prefix`). It refuses
+`tether://` links, and the default build refuses `tether-north://` ones, so a `tether://` link
+opens only the default build. On a PC with both, a link reaches the build whose scheme it uses.
 
 On Windows, opening a link starts `tether.exe tether://connect/<id>` and opens a session window.
 On macOS the running app receives the link. A link that fails the policy check or names this

@@ -83,6 +83,26 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   deployments: [docs/several-organisations.md](docs/several-organisations.md).
 - Checked and not checked: to be filled in at release.
 
+### Instances: two organisations' Tether on one PC (not in a numbered version yet)
+
+- **`TETHER_INSTANCE`**, an optional build value (1 to 16 characters `a-z 0-9`), builds a
+  technician app that installs beside the default one or beside another instance: with `north`
+  it is `Tether-north` (`tether-north.exe`, identifier `app.tether.desktop.north`, link scheme
+  `tether-north://`) with its own device ID, settings folder, Windows service, firewall rule,
+  machine policy key (`HKLM\SOFTWARE\Policies\Tether-north`, macOS `net.tether.app.north`) and
+  recording folder. Unset, the build is unchanged. It must be built together with the
+  `--config` that `scripts/instance-config.sh` prints; the `desktop` workflow (repository
+  variable `TETHER_INSTANCE`) and `scripts/build-macos.sh` do both and rename the files to the
+  usual `Tether_<version>_…` names. The installer hooks name the app through `${PRODUCTNAME}`
+  only (`scripts/check-hooks.sh` in CI). Limits: of two builds on one PC only the one started
+  first gets direct connections (both use TCP 21118 and UDP 21119), `tether://` links open only
+  the default build, an existing install cannot become an instance, and each organisation
+  publishes only its own build
+  ([docs/several-organisations.md](docs/several-organisations.md#two-organisations-on-one-pc)).
+  Checked: the unit tests with and without the value, refused values, one Windows installer built
+  and inspected. Not checked: installing it, two builds side by side, the service and firewall
+  rule on a real PC, updates, the macOS build.
+
 ### 0.6.3 (2026-11-23; files in dist/, ready to publish; frozen)
 
 Six files in `dist/` (Windows setup and TetherQS signed; Mac files universal, as built by the

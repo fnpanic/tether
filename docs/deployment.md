@@ -115,6 +115,10 @@ npx tauri build --bundles nsis           # apps/desktop (technician installer)
 # apps/quick: same env, `npx tauri build` -> TetherQS.exe (portable, no installer)
 ```
 
+A technician app for a second organisation that must install beside this one on the same PC is
+built with `TETHER_INSTANCE` and the `--config` of `scripts/instance-config.sh`
+([several-organisations.md](several-organisations.md#two-organisations-on-one-pc)).
+
 Release builds refuse to compile without the four values. They are stored as GitHub Actions
 secrets in `fnpanic/tether` for the macOS and Windows CI builds. After a server key rotation
 (phase 2 of [key-rotation.md](key-rotation.md)) set `TETHER_PUB_KEY` (secret and

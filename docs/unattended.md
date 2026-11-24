@@ -184,6 +184,22 @@ Logs in the VM: service/server `C:\Windows\ServiceProfiles\LocalService\AppData\
 settings import `…\log\import-config\`, installer CLI `C:\Users\<user>\AppData\Roaming\Tether\log\install-service\`,
 user app and CM `C:\Users\<user>\AppData\Roaming\Tether\log\` (`cm\`).
 
+## Instance builds
+
+An instance build (`TETHER_INSTANCE=north`,
+[several-organisations.md](several-organisations.md#two-organisations-on-one-pc)) installs its own
+service beside the default build's. Every name on this page follows the product name
+`Tether-north`, because the core takes them from the app name: the Windows service `Tether-north`
+(`sc create Tether-north`, `vendor/rustdesk/src/platform/windows.rs`), its settings and logs under
+`…\LocalService\AppData\Roaming\Tether-north\` and `%APPDATA%\Tether-north\`, and on macOS
+`/Library/LaunchDaemons/app.tether.Tether-north_service.plist`,
+`/Library/LaunchAgents/app.tether.Tether-north_server.plist` and
+`~/Library/Preferences/app.tether.Tether-north/` (`get_full_name`, `vendor/rustdesk/src/common.rs`),
+running `/Applications/Tether-north.app/Contents/MacOS/tether-north`. The installer's hooks use the
+product name too (`apps/desktop/src-tauri/windows/hooks.nsh`), so uninstalling one build leaves the
+other's service alone. None of this was tried on a real machine: no instance build has been
+installed yet.
+
 ## macOS
 
 From 0.6.3. Settings → Unattended access → *Install as service* → *Install* (shown while the

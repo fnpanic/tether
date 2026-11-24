@@ -23,6 +23,12 @@ signatures it accepts.
 | `TETHER_UPDATER_PUB_KEY` | Update signing public key | Tether Manage, step 2 |
 | `TETHER_PUB_KEY` | The relay's server public key | The relay, step 3 |
 
+A fifth value is optional: `TETHER_INSTANCE` (for example `north`) builds a technician app that
+installs beside another organisation's on the same PC. It needs a `--config` from
+`scripts/instance-config.sh` as well; see
+[several-organisations.md](several-organisations.md#two-organisations-on-one-pc). Leave it unset
+for a single organisation.
+
 ## 1. Get the sources and the build tools
 
 Windows: Rust (MSVC), Node 22+, LLVM (`LIBCLANG_PATH`), VS Build Tools, vcpkg (`VCPKG_ROOT`).
