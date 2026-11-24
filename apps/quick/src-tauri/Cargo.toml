@@ -39,7 +39,7 @@ librustdesk = { package = "rustdesk", path = "../../../vendor/rustdesk", default
 [target.'cfg(windows)'.dependencies]
 # VRAM (D3D11) zero-copy encoding exists on Windows only (hwcodec's ffmpeg_vram is D3D11 code).
 librustdesk = { package = "rustdesk", path = "../../../vendor/rustdesk", default-features = false, features = ["vram"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Threading", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Services", "Win32_System_Pipes", "Win32_System_IO"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

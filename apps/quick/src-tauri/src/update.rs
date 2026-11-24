@@ -30,7 +30,7 @@ use tether_trust::{
 
 use crate::policy;
 
-const PUBKEY: Option<&str> = option_env!("TETHER_UPDATER_PUB_KEY");
+pub(crate) const PUBKEY: Option<&str> = option_env!("TETHER_UPDATER_PUB_KEY");
 #[cfg(not(target_os = "macos"))]
 const PLATFORM: &str = "windows-x86_64";
 #[cfg(target_os = "macos")]
@@ -455,7 +455,7 @@ fn index_path(channel: &str) -> PathBuf {
 }
 
 /// The release index `name` of one relay (`Ok(None)`: none published there).
-fn get_index(client: &reqwest::blocking::Client, base: &str, channel: &str, name: &str) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn get_index(client: &reqwest::blocking::Client, base: &str, channel: &str, name: &str) -> Result<Option<Vec<u8>>, String> {
     let url = format!("{base}/download/{channel}/{name}");
     let etag = INDEX_ETAGS.lock().unwrap().as_ref().and_then(|m| m.get(&url)).map(|e| e.0.clone());
     let mut rq = client.get(&url);
@@ -651,8 +651,9 @@ pub fn install() -> Result<(), String> {
     r
 }
 
-/// Each source in turn (the packed copy first, https only), then the verified bytes.
-fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
+/// Each source in turn (the packed copy first, https only), then the verified bytes (also the
+/// health agent's, agent.rs).
+pub(crate) fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
     let mut last = String::from("no download URL");
     for (url, packed) in c.sources() {
         let url = &url;

@@ -275,6 +275,18 @@ fn elevate() -> R<()> {
     crate::relaunch(&exe, true)
 }
 
+/// The health agent's pre-dialog waiting for an answer, if any (spec 11.2).
+#[tauri::command]
+fn health_agent_consent_pending() -> Option<crate::agent_elevated::Dialog> {
+    crate::agent_elevated::pending()
+}
+
+/// The person's answer to pre-dialog `id` (remote input never reaches this window: own_ui_guard).
+#[tauri::command]
+fn health_agent_consent_answer(id: u64, yes: bool) -> bool {
+    crate::agent_elevated::answer(id, yes)
+}
+
 /// "Check for updates": the result text, or why the check failed.
 #[tauri::command]
 async fn update_check() -> R<String> {
@@ -384,6 +396,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         cm_permission,
         cm_record_consent,
         elevate,
+        health_agent_consent_pending,
+        health_agent_consent_answer,
         update_check,
         update_install,
         diagnostics,
