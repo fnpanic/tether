@@ -22,6 +22,8 @@ struct Srv {
     child: Child,
     addr: String,
     dir: PathBuf,
+    /// The relay's stderr (its journal), appended to across a restart.
+    err: PathBuf,
 }
 
 impl Drop for Srv {
@@ -29,6 +31,7 @@ impl Drop for Srv {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = std::fs::remove_file(&self.err);
     }
 }
 
@@ -70,18 +73,21 @@ fn spawn(dir: PathBuf, admin_env: &str) -> Srv {
 }
 
 fn spawn_env(dir: PathBuf, admin_env: &str, env: &[(&str, &str)]) -> Srv {
+    let err = dir.with_extension("err");
+    let errf = std::fs::OpenOptions::new().create(true).append(true).open(&err).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_tether-api"))
         .args(["--data", dir.to_str().unwrap(), "--listen", "127.0.0.1:0"])
         .env("ADMIN_PUB_KEY", admin_env)
         .env("RELAY_HOST", "relay.test")
         .envs(env.iter().copied())
         .stdout(Stdio::piped())
+        .stderr(errf)
         .spawn()
         .unwrap();
     let mut line = String::new();
     BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
     let addr = line.trim().strip_prefix("listening on ").expect("listen line").to_owned();
-    Srv { child, addr, dir }
+    Srv { child, addr, dir, err }
 }
 
 fn server() -> (Srv, SigningKey) {
@@ -1440,4 +1446,103 @@ fn the_monitor_index_expiry_is_a_metric() {
     assert_eq!(metric(&s, r#"tether_api_release_index_expires_timestamp{channel="stable"}"#), None, "the Tether series are not moved");
     let s = restart(s, &k);
     assert_eq!(metric(&s, r#"tether_api_release_index_expires_timestamp{channel="stable",index="monitor"}"#), Some(2_000_000_000.));
+}
+
+impl Srv {
+    /// What the relay wrote to stderr so far.
+    fn journal(&self) -> String {
+        std::fs::read_to_string(&self.err).unwrap()
+    }
+}
+
+/// A token that sets `customer` on the device it enrols.
+fn customer_token(admin: &SigningKey, customer: Option<&str>) -> (String, String) {
+    status::make_token("t", now() + 3600, None, customer, admin).unwrap()
+}
+
+#[test]
+fn enrol_sets_customer() {
+    let (s, admin) = server();
+    let (tok, _) = customer_token(&admin, Some("4711"));
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "crit")).status, 200);
+    let m = member(&s, &admin);
+    assert_eq!(team_get(&s, &m, "/api/team/status").json()["hosts"][0]["customer"], "4711");
+    assert_eq!(team_get(&s, &m, "/api/team/status/dev-0001").json()["customer"], "4711");
+    assert_eq!(s.admin(&admin, "GET", "/api/admin/status/devices", b"").json()["devices"][0]["customer"], "4711");
+}
+
+#[test]
+fn token_without_customer_changes_nothing() {
+    let (s, admin) = server();
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, Some("4711")).0).status, 200);
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, None).0).status, 200);
+    let m = member(&s, &admin);
+    assert_eq!(team_get(&s, &m, "/api/team/status/dev-0001").json()["customer"], "4711");
+    assert!(!s.journal().contains("customer of"), "{}", s.journal());
+}
+
+#[test]
+fn re_enrol_replaces_customer() {
+    let (s, admin) = server();
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, Some("4711")).0).status, 200);
+    let (tok, id) = customer_token(&admin, Some("0815"));
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
+    let m = member(&s, &admin);
+    assert_eq!(team_get(&s, &m, "/api/team/status/dev-0001").json()["customer"], "0815");
+    assert_eq!(s.admin(&admin, "GET", "/api/admin/status/devices", b"").json()["devices"][0]["customer"], "0815");
+    let line = format!("status: customer of dev-0001 set to 0815 by token {id}");
+    assert_eq!(s.journal().matches(&line).count(), 1, "{}", s.journal());
+    // The same token again changes nothing and logs nothing more.
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &tok).status, 200);
+    assert_eq!(s.journal().matches("customer of").count(), 1, "{}", s.journal());
+}
+
+#[test]
+fn a_device_cannot_name_its_customer() {
+    let (s, admin) = server();
+    let a = generate_key();
+    let tok = customer_token(&admin, None).0;
+    let mut b = json!({"uuid": "dev-0001", "pubkey": key_to_b64(&a.verifying_key()), "token": tok, "customer": "x"});
+    assert_eq!(s.req("POST", "/api/status/enroll", &[], b.to_string().as_bytes()).status, 400);
+    b.as_object_mut().unwrap().remove("customer");
+    assert_eq!(s.req("POST", "/api/status/enroll", &[], b.to_string().as_bytes()).status, 200);
+    let r = post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok").replacen(r#""v":1,"#, r#""v":1,"customer":"x","#, 1));
+    assert_eq!(r.status, 400, "{}", r.text());
+    let m = member(&s, &admin);
+    assert_eq!(team_get(&s, &m, "/api/team/status/dev-0001").json()["customer"], Value::Null);
+}
+
+#[test]
+fn old_key_lines_load_without_customer() {
+    let admin = generate_key();
+    let a = generate_key();
+    let dir = new_dir();
+    std::fs::create_dir_all(dir.join("status")).unwrap();
+    let line = json!({"op": "set", "uuid": "dev-0001", "key": key_to_b64(&a.verifying_key()), "tether_id": null, "label": "t", "enrolled": now()});
+    std::fs::write(dir.join("status/keys.jsonl"), format!("{line}\n")).unwrap();
+    let s = start_in(dir, &admin);
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok")).status, 200);
+    let m = member(&s, &admin);
+    let sum = team_get(&s, &m, "/api/team/status").json();
+    assert_eq!(sum["hosts"][0]["customer"], Value::Null);
+    assert!(sum["hosts"][0].as_object().unwrap().contains_key("customer"));
+    // A new pin without a customer writes no `customer` key.
+    assert_eq!(enroll(&s, &generate_key(), "dev-0002", None, &customer_token(&admin, None).0).status, 200);
+    assert!(!std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap().contains("customer"));
+}
+
+#[test]
+fn customer_survives_restart() {
+    let (s, admin) = server();
+    let a = generate_key();
+    assert_eq!(enroll(&s, &a, "dev-0001", None, &customer_token(&admin, Some("4711")).0).status, 200);
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok")).status, 200);
+    let s = restart(s, &admin);
+    let m = member(&s, &admin);
+    assert_eq!(team_get(&s, &m, "/api/team/status").json()["hosts"][0]["customer"], "4711");
+    assert!(std::fs::read_to_string(s.dir.join("status/keys.jsonl")).unwrap().contains(r#""customer":"4711""#));
 }

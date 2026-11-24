@@ -146,6 +146,9 @@ struct Pin {
     /// report) until a member allows a new claim.
     #[serde(default, skip_serializing_if = "is_false")]
     no_claim: bool,
+    /// The customer reference an enrolment token set (`valid_customer`); a device cannot name it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    customer: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -185,6 +188,8 @@ enum KeyLine {
         linked_token: Option<String>,
         #[serde(default, skip_serializing_if = "is_false")]
         no_claim: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        customer: Option<String>,
     },
     /// A token issued for one Tether ID enrolled `uuid`: it enrols no other device (also after that
     /// pin is removed) until `exp`.
@@ -208,7 +213,7 @@ enum KeyLine {
 impl KeyLine {
     fn set(uuid: &str, p: &Pin) -> Self {
         let p = p.clone();
-        KeyLine::Set { uuid: uuid.to_owned(), key: p.key, tether_id: p.tether_id, label: p.label, enrolled: p.enrolled, token: p.token, claimed_id: p.claimed_id, linked_by: p.linked_by, linked_at: p.linked_at, linked_token: p.linked_token, no_claim: p.no_claim }
+        KeyLine::Set { uuid: uuid.to_owned(), key: p.key, tether_id: p.tether_id, label: p.label, enrolled: p.enrolled, token: p.token, claimed_id: p.claimed_id, linked_by: p.linked_by, linked_at: p.linked_at, linked_token: p.linked_token, no_claim: p.no_claim, customer: p.customer }
     }
 }
 
@@ -245,8 +250,8 @@ fn replay_keys(b: &[u8]) -> Result<(BTreeMap<String, Pin>, Used, Dismissed, usiz
             KeyLine::Unpin { uuid } => {
                 keys.remove(&uuid);
             }
-            KeyLine::Set { uuid, key, tether_id, label, enrolled, token, claimed_id, linked_by, linked_at, linked_token, no_claim } => {
-                keys.insert(uuid, Pin { key, tether_id, label, enrolled, token, claimed_id, linked_by, linked_at, linked_token, no_claim });
+            KeyLine::Set { uuid, key, tether_id, label, enrolled, token, claimed_id, linked_by, linked_at, linked_token, no_claim, customer } => {
+                keys.insert(uuid, Pin { key, tether_id, label, enrolled, token, claimed_id, linked_by, linked_at, linked_token, no_claim, customer });
             }
             KeyLine::Used { token, uuid, exp } => {
                 used.insert(token, (uuid, exp));
@@ -902,12 +907,12 @@ fn build_summary(app: &Mutex<App>, tmp: &Path, t: u64) -> io::Result<String> {
     let copy = |a: &App, u: &Arc<str>, s: &Seen| {
         s.entry()?;
         let p = a.status.keys.get(&**u);
-        Some((u.clone(), p.and_then(|p| p.tether_id.clone()), p.and_then(|p| p.claimed_id.clone()), p.and_then(|p| p.linked_at), p.is_some_and(|p| p.no_claim), s.last_seen, s.next, s.entry.clone()?))
+        Some((u.clone(), p.and_then(|p| p.tether_id.clone()), p.and_then(|p| p.claimed_id.clone()), p.and_then(|p| p.linked_at), p.is_some_and(|p| p.no_claim), p.and_then(|p| p.customer.clone()), s.last_seen, s.next, s.entry.clone()?))
     };
     chunks(app, dev_map, copy, |buf| {
         // The head is outside the entry's byte cap (fixed fields only).
-        for (u, tid, claimed, linked_at, no_claim, last_seen, next, entry) in buf.drain(..) {
-            let head = serde_json::json!({"uuid": &*u, "tether_id": tid, "claimed_id": claimed, "linked_at": linked_at, "no_claim": no_claim, "last_seen": last_seen, "next": next, "stale": stale_at(last_seen, next, t)}).to_string();
+        for (u, tid, claimed, linked_at, no_claim, customer, last_seen, next, entry) in buf.drain(..) {
+            let head = serde_json::json!({"uuid": &*u, "tether_id": tid, "claimed_id": claimed, "linked_at": linked_at, "no_claim": no_claim, "customer": customer, "last_seen": last_seen, "next": next, "stale": stale_at(last_seen, next, t)}).to_string();
             if !first {
                 h.write_all(b",")?;
             }
@@ -1032,7 +1037,7 @@ impl App {
         if old.is_none() && self.status.keys.len() >= conf().max_devices {
             return Err(text(507, "too many devices (STATUS_MAX_DEVICES)"));
         }
-        let pin = match old.clone() {
+        let mut pin = match old.clone() {
             // The same key again: idempotent; a pin without a Tether ID gets the bound one, or the claim.
             Some(mut p) if p.tether_id.is_none() && tether_id.is_some() => {
                 (p.tether_id, p.claimed_id, p.linked_by, p.linked_at, p.linked_token, p.no_claim) = (tether_id.clone(), None, None, Some(t), Some(tok.id.clone()), false);
@@ -1066,8 +1071,13 @@ impl App {
                 token: Some(tok.id.clone()),
                 linked_by: None,
                 no_claim: false,
+                customer: None,
             },
         };
+        // A token without a customer changes nothing; one with it sets it, also on a pin that has one.
+        if tok.customer.is_some() {
+            pin.customer = tok.customer.clone();
+        }
         let changed = old.as_ref() != Some(&pin);
         // The record of a key that released its pin: carried into a new pin (`no_claim`), or ended
         // by a token issued for its ID.
@@ -1083,6 +1093,11 @@ impl App {
                 lines.insert(0, KeyLine::Used { token: tok.id.clone(), uuid: req.uuid.clone(), exp: tok.exp });
             }
             let log = self.status.keys_append(&lines).map_err(crate::internal)?;
+            if let (Some(o), Some(c)) = (&old, &pin.customer) {
+                if o.customer != pin.customer {
+                    eprintln!("status: customer of {} set to {c} by token {}", req.uuid, tok.id);
+                }
+            }
             self.status.put(&req.uuid, pin.clone());
             if forget {
                 self.status.dismissed.remove(&pin.key);
@@ -1544,7 +1559,7 @@ impl App {
                 .map(|(u, p, last_seen, entry)| {
                     let host = entry.as_deref().and_then(|e| serde_json::from_str::<Host>(e).ok()).map(|h| h.host);
                     serde_json::json!({"uuid": u, "token": p.token, "label": p.label, "tether_id": p.tether_id, "claimed_id": p.claimed_id,
-                        "linked_by": p.linked_by, "linked_at": p.linked_at, "linked_token": p.linked_token, "no_claim": p.no_claim,
+                        "linked_by": p.linked_by, "linked_at": p.linked_at, "linked_token": p.linked_token, "no_claim": p.no_claim, "customer": p.customer,
                         "host": host, "enrolled": p.enrolled, "last_seen": last_seen})
                 })
                 .collect();
@@ -1642,6 +1657,7 @@ impl App {
             "linked_at": pin.linked_at,
             "linked_token": pin.linked_token,
             "no_claim": pin.no_claim,
+            "customer": pin.customer,
             "last_seen": s.map(|s| s.last_seen),
             "next": s.map(|s| s.next),
             "stale": s.is_some_and(|s| stale(s, t)),
