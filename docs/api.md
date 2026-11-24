@@ -250,13 +250,14 @@ Limits: 120 requests/min per member key and 60 failed signatures/min per IP (IPv
 It is not signed; it only selects the key: the relay checks the signature against that one roster key
 and no other. A `kid` that names no key accepted here (unknown, removed, or not a service entry under
 `oidc_only`) or one that is not 16 lower-case hex digits: `401 not a team member`. Without `kid` the
-relay tries every key as before: about 80 µs per key (160 ms for the last of 2000 keys in a release
-build, 11 ms per request with `kid`). Signatures are checked before the relay's state lock is taken,
+relay tries every key as before: about 105 ms for the last of 2000 keys (release build on the test
+machine; a request with `kid` about 3 ms). Signatures are checked before the relay's state lock is taken,
 on a snapshot of the member keys (replaced whole when a roster or document is accepted; a key removed
 meanwhile is refused, `401 not a team member`), so device heartbeats and reports never wait for them.
-One request without `kid` is checked at a time for the whole relay: a second one meanwhile gets
-`429 busy` with `Retry-After: 1` at once (not counted as a failed signature); requests with `kid` are
-not limited by this. Send `kid` only to relays of 0.7 or later: an older relay refuses the header as
+At most two requests without `kid` are checked at a time for the whole relay, at most one per client
+address (as the per-IP limits count it); another one waits up to 1 s for a slot and then gets
+`429 busy` with `Retry-After: 1` (not counted as a failed signature); requests with `kid` are not
+limited by this. Send `kid` only to relays of 0.7 or later: an older relay refuses the header as
 malformed (`401`).
 
 **The signed team document** (0.7) replaces the roster. Tether Manage publishes an upload

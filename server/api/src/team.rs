@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,7 +23,7 @@ use tether_trust::team::{self, OpenError, Permissions, Roster, Upload};
 use tether_trust::{reqauth, VerifyingKey};
 use tiny_http::Request;
 
-use crate::{audit, empty, hdr, header, json, load_json, lock, mkdirs, now, rate_ok, text, App, Body, Resp, UploadSlot, LIMIT_SMALL};
+use crate::{audit, empty, hdr, header, json, load_json, lock, mkdirs, now, rate_ok, text, App, Body, Resp, LIMIT_SMALL};
 
 pub const LIMIT_ROSTER: u64 = 64 << 10;
 /// `PUT /api/admin/team`: a signed upload; a plain roster stays at `LIMIT_ROSTER`.
@@ -32,9 +32,51 @@ const LIMIT_TAGS: u64 = 512 << 10;
 const KEY_PER_MIN: u32 = 120;
 /// Failed member signatures per IP and minute: a failure without `kid` tries every member key.
 const FAIL_PER_MIN: u32 = 60;
-/// Signatures without `kid` being checked (up to 2000 keys, about 160 ms each): one at a time for
-/// the whole relay, so they cannot keep many workers busy; `kid` requests are not limited by it.
-static NO_KID: AtomicUsize = AtomicUsize::new(0);
+/// Signatures without `kid` being checked (up to 2000 keys, about 105 ms each in a release build):
+/// two at a time for the whole relay and one per source address, so they cannot keep many workers
+/// busy and one source cannot hold both; a request waits up to `NO_KID_WAIT` for a slot (outside
+/// the state lock). `kid` requests are not limited by it.
+static NO_KID: Slots = Slots::new(2);
+const NO_KID_WAIT: Duration = Duration::from_secs(1);
+
+/// A fixed number of slots, at most one per source.
+struct Slots {
+    held: Mutex<Vec<String>>,
+    freed: Condvar,
+    max: usize,
+}
+
+impl Slots {
+    const fn new(max: usize) -> Self {
+        Slots { held: Mutex::new(Vec::new()), freed: Condvar::new(), max }
+    }
+
+    /// A slot for `src`, waiting up to `wait` for one; `None` after that.
+    fn take(&'static self, src: &str, wait: Duration) -> Option<Slot> {
+        let end = Instant::now() + wait;
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if held.len() < self.max && !held.iter().any(|h| h == src) {
+                held.push(src.to_owned());
+                return Some(Slot(self, src.to_owned()));
+            }
+            let left = end.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
+            held = self.freed.wait_timeout(held, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+    }
+}
+
+struct Slot(&'static Slots, String);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut held = self.0.held.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = held.iter().position(|h| *h == self.1) {
+            held.swap_remove(i);
+        }
+        self.0.freed.notify_all();
+    }
+}
 /// `oidc_only` locks out every member key but the service ones: refused until this relay serves
 /// sign-in sessions (`POST /api/team/session`, a later task sets this).
 const OIDC_SESSIONS: bool = false;
@@ -410,8 +452,8 @@ fn route_limit(method: &str, rest: &str) -> Option<u64> {
 
 /// The member signature of a `/api/team/` request (not `config`), checked before `route` takes
 /// the state lock: the lock only to read the failure limit and take the members snapshot, then
-/// the signature on that snapshot (`kid`: that key only; without: every key, one such request
-/// at a time for the whole relay, a second one `429 busy`). `None`: not a member route, or a body
+/// the signature on that snapshot (`kid`: that key only; without: every key, in one of the
+/// `NO_KID` slots, `429 busy` when none came free within `NO_KID_WAIT`). `None`: not a member route, or a body
 /// over the route's limit (answered by `team_route` before any signature is looked at).
 pub(crate) fn member_verify(app: &Mutex<App>, rq: &Request, body: &Body) -> Option<Verified> {
     let url = rq.url();
@@ -443,7 +485,7 @@ fn verify_on(m: &Members, rq: &Request, method: &str, url: &str, body: &[u8], t:
             let i = *m.kids.get(k).ok_or_else(|| auth("not a team member"))?;
             (i..i + 1, None)
         }
-        None => (0..m.keys.len(), Some(UploadSlot::take(&NO_KID, 1).ok_or(Refused::Busy)?)),
+        None => (0..m.keys.len(), Some(NO_KID.take(&crate::rate_ip(rq), NO_KID_WAIT).ok_or(Refused::Busy)?)),
     };
     // Once, not per key.
     let digest = reqauth::body_digest(body);
@@ -461,4 +503,40 @@ fn verify_on(m: &Members, rq: &Request, method: &str, url: &str, body: &[u8], t:
         }
     }
     Err(auth(if err == "signature does not match" { "not a team member" } else { &err }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_kid_slots_are_two_and_one_per_source_and_waits_are_bounded() {
+        static P: Slots = Slots::new(2);
+        let wait = Duration::from_millis(300);
+        let (a, b) = (P.take("a", wait).unwrap(), P.take("b", Duration::ZERO).unwrap());
+        // Both held: a third source gets none, but only after the bound.
+        let t = Instant::now();
+        assert!(P.take("c", wait).is_none());
+        assert!(t.elapsed() >= wait, "{:?}", t.elapsed());
+        drop(b);
+        // A free slot, but not for the source that holds the other one: it waits for its own.
+        let t = Instant::now();
+        assert!(P.take("a", wait).is_none());
+        assert!(t.elapsed() >= wait);
+        std::thread::scope(|sc| {
+            let w = sc.spawn(|| {
+                let t = Instant::now();
+                let s = P.take("a", Duration::from_secs(5));
+                (s.is_some(), t.elapsed())
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            drop(a);
+            let (got, took) = w.join().unwrap();
+            // Woken when the slot is freed, not at the end of the wait.
+            assert!(got && took < Duration::from_secs(2), "{got} {took:?}");
+        });
+        assert_eq!(P.held.lock().unwrap().len(), 0);
+        let _c = P.take("c", Duration::ZERO).unwrap();
+        assert!(P.take("d", Duration::ZERO).is_some());
+    }
 }

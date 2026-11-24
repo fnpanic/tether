@@ -522,24 +522,28 @@ fn a_signature_without_kid_is_checked_outside_the_state_lock() {
     assert_eq!(s.publish(&admin, &big_doc(&admin, 1, &[("Svc", &svc), ("Last", &last)])).status, 204);
     std::thread::scope(|sc| {
         // Anyone can send a well-formed header with a signature no member made: all 2000 keys are
-        // tried (about 160 ms in a release build, many seconds in a debug one).
+        // tried (about 105 ms in a release build, many seconds in a debug one).
         let junk = sc.spawn(|| {
             let r = s.get(&stranger, "/api/team/me");
             (r.status, Instant::now())
         });
         std::thread::sleep(Duration::from_millis(30));
-        // Meanwhile a second request without kid is turned away at once, also a member's...
-        let t = Instant::now();
-        let r = s.get(&last, "/api/team/me");
-        assert_eq!((r.status, r.text(), r.header("Retry-After")), (429, "busy".into(), Some("1".into())));
-        assert!(t.elapsed() < Duration::from_millis(200), "{:?}", t.elapsed());
-        // ...while a device heartbeat and a request with kid are not held up.
+        // Meanwhile a device heartbeat and a request with kid are not held up.
         let t = Instant::now();
         assert_eq!(s.req("POST", "/api/heartbeat", &[("X-Forwarded-For", "203.0.113.9")], hb("dev-0001", "111222333").as_bytes()).status, 200);
         let (hb_t, hb_done) = (t.elapsed(), Instant::now());
         let t = Instant::now();
         assert_eq!(s.me_kid(&svc, &kid(&svc)).json()["name"], "Svc");
         let kid_t = t.elapsed();
+        // A second request without kid from the same address waits for that address's slot: in
+        // (release: the junk check ends first) or, after the bound of about 1 s, `429 busy`.
+        let t = Instant::now();
+        let r = s.get(&last, "/api/team/me");
+        match r.status {
+            200 => {}
+            429 => assert!((r.text(), r.header("Retry-After")) == ("busy".into(), Some("1".into())) && t.elapsed() >= Duration::from_millis(900), "{:?}", t.elapsed()),
+            c => panic!("{c} {}", r.text()),
+        }
         let (status, junk_done) = junk.join().unwrap();
         assert_eq!(status, 401);
         eprintln!("during a no-kid check of 2000 keys: heartbeat {hb_t:?}, kid request {kid_t:?}");
@@ -548,6 +552,71 @@ fn a_signature_without_kid_is_checked_outside_the_state_lock() {
     });
     // Free again: a member without kid gets in.
     assert_eq!(s.get(&last, "/api/team/me").status, 200);
+}
+
+#[test]
+fn no_kid_checks_have_two_slots_one_per_address_and_a_bounded_wait() {
+    use std::time::{Duration, Instant};
+    let admin = generate_key();
+    let s = start(&admin);
+    let (one, two, j1, j2) = (generate_key(), generate_key(), generate_key(), generate_key());
+    assert_eq!(s.publish(&admin, &big_doc(&admin, 1, &[("One", &one), ("Two", &two)])).status, 204);
+    let from = |k: &SigningKey, ip: &str| {
+        let r = s.signed(k, "GET", "/api/team/me", &[("X-Forwarded-For", ip)], b"");
+        (r, Instant::now())
+    };
+    // Two staff (two addresses) without kid at the same time: both get in.
+    let go = std::sync::Barrier::new(2);
+    std::thread::scope(|sc| {
+        let a = sc.spawn(|| {
+            go.wait();
+            from(&one, "198.51.100.1").0
+        });
+        go.wait();
+        let b = from(&two, "198.51.100.2").0;
+        let a = a.join().unwrap();
+        assert_eq!((a.status, a.json()["name"].clone(), b.status, b.json()["name"].clone()), (200, json!("One"), 200, json!("Two")), "{} {}", a.text(), b.text());
+    });
+    // Both slots held by junk from two addresses: a member from a third gets `429` only after the
+    // bound (debug build), or gets in once one of them is done (release: about 105 ms).
+    std::thread::scope(|sc| {
+        let junk: Vec<_> = [(&j1, "198.51.100.3"), (&j2, "198.51.100.4")].into_iter().map(|(k, ip)| sc.spawn(move || from(k, ip))).collect();
+        std::thread::sleep(Duration::from_millis(30));
+        let t = Instant::now();
+        let (r, done) = from(&one, "198.51.100.5");
+        let took = t.elapsed();
+        let junk_done: Vec<Instant> = junk.into_iter().map(|j| {
+            let (r, at) = j.join().unwrap();
+            assert_eq!(r.status, 401);
+            at
+        }).collect();
+        match r.status {
+            429 => assert!(r.header("Retry-After").as_deref() == Some("1") && took >= Duration::from_millis(900), "{took:?}"),
+            200 => assert!(junk_done.iter().any(|j| *j < done), "got in while both slots were held"),
+            c => panic!("{c} {}", r.text()),
+        }
+        eprintln!("no-kid request with both slots held by junk: {} after {took:?}", r.status);
+    });
+}
+
+#[test]
+fn reduced_rights_apply_on_the_next_request() {
+    let admin = generate_key();
+    let s = start(&admin);
+    let anna = generate_key();
+    assert_eq!(s.publish(&admin, &team_doc(&admin, 1, json!([entry("Anna", &anna, json!({"write": true, "audit": true}))]), json!({}))).status, 204);
+    let me = s.get(&anna, "/api/team/me").json();
+    assert_eq!((me["write"].clone(), me["audit"].clone(), me["sbom"].clone(), me["customers"].clone()), (json!(true), json!(true), json!(true), json!(["*"])));
+    assert_eq!(s.put_tags(&anna, "0", b"{}").status, 200);
+    // Same key, fewer rights.
+    assert_eq!(s.publish(&admin, &team_doc(&admin, 2, json!([entry("Anna", &anna, json!({"sbom": false, "customers": ["47*"]}))]), json!({}))).status, 204);
+    let me = s.get(&anna, "/api/team/me").json();
+    assert_eq!((me["write"].clone(), me["audit"].clone(), me["sbom"].clone(), me["customers"].clone()), (json!(false), json!(false), json!(false), json!(["47*"])));
+    assert_eq!(s.put_tags(&anna, "1", b"{}").status, 403);
+    assert_eq!(s.get(&anna, "/api/team/audit?device=123456789").status, 403);
+    assert_eq!(s.get(&anna, "/api/team/status/dev-0001/sbom").status, 403);
+    // Also with kid.
+    assert_eq!(s.me_kid(&anna, &kid(&anna)).json()["write"], false);
 }
 
 #[test]

@@ -272,7 +272,8 @@ fn unique_roles<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Gran
 fn missing_member_field(payload: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
     v.get("members")?.as_array()?.iter().find_map(|m| {
-        let f = REQUIRED.into_iter().find(|f| m.get(f).is_none())?;
+        // `null` is no value either (serde would refuse it naming only the type).
+        let f = REQUIRED.into_iter().find(|f| m.get(f).is_none_or(|v| v.is_null()))?;
         Some(format!("member {}: {f} is required in a signed team document", m.get("name").and_then(|n| n.as_str()).unwrap_or("?")))
     })
 }
@@ -477,11 +478,15 @@ mod tests {
         assert_eq!(doc.members[0].permissions(), Permissions { write: true, audit: false, sbom: true, agent: false, customers: vec!["*".into()] });
         // `sbom`, `agent` and `customers` are required in a signed document (a plain roster's
         // defaults would give everything): refused, naming the member and the field.
-        for f in REQUIRED {
+        for (f, null) in REQUIRED.into_iter().flat_map(|f| [(f, false), (f, true)]) {
             let mut m = members.clone();
-            m[0].as_object_mut().unwrap().remove(f);
+            if null {
+                m[0][f] = serde_json::Value::Null;
+            } else {
+                m[0].as_object_mut().unwrap().remove(f);
+            }
             match open(&upload(&doc_json(3, m, serde_json::json!({})), None, &admin), &[admin.verifying_key()]) {
-                Err(OpenError::Bad(e)) => assert_eq!(e, format!("member Anna: {f} is required in a signed team document")),
+                Err(OpenError::Bad(e)) => assert_eq!(e, format!("member Anna: {f} is required in a signed team document"), "null: {null}"),
                 r => panic!("{f}: {r:?}"),
             }
         }
