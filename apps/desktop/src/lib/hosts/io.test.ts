@@ -87,6 +87,8 @@ describe("health export", () => {
     const j = JSON.parse(exportJson(s, { notes: false, ids: ["111111111"], hosts: byId }));
     expect(j.hosts["111111111"].health).toEqual({ state: "crit", counts: { ok: 9, warn: 1, crit: 1, unknown: 0, setup: 0 }, products: status[0].products, agent: "0.1.0", customer: "4711", reported: "2027-01-15T08:00:00.000Z", faults: status[0].faults });
     expect(JSON.parse(exportJson(s, { notes: false })).hosts["111111111"].health).toBeUndefined();
+    // A summary without the field (older relay) exports no customer key.
+    expect(JSON.parse(exportJson(s, { notes: false, ids: ["m:u9"], hosts: byId })).hosts["m:u9"].health).not.toHaveProperty("customer");
     // Health data never comes back in through an import.
     expect(parseImport(exportJson(s, { notes: false, ids: ["111111111"], hosts: byId })).hosts["111111111"]).toEqual({ name: "Front desk", tags: ["site:berlin"] });
   });

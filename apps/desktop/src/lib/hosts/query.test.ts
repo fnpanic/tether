@@ -161,7 +161,7 @@ describe("health terms", () => {
     expect(hids("customer:4711 | customer:0815")).toEqual(["111111111", "222222222"]);
     expect(hids("customer:0815")).toEqual(["222222222"]);
     expect(hids("customer:711")).toEqual([]); // starts with, not contains
-    expect(hids("customer:none")).toEqual(["333333333", "444444444", "555555555"]);
+    expect(hids("customer:none")).toEqual(["m:u9"]); // reports health, has no customer; hosts without an agent are agent:none
     expect(hids("since:3d")).toEqual(["111111111"]);
     expect(hids("since:5d")).toEqual([]);
     expect(hids("since:96h")).toEqual(["111111111"]);

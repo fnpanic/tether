@@ -459,7 +459,7 @@ team, older ones included; the Rules dialog says so in one line.
 | `role:server` `client` `single` | A detected product role |
 | `check:backup` | A check whose id contains the text is not OK |
 | `agent:0.1` `agent:none` | Agent version starting with the text; `none` = no agent |
-| `customer:47` `customer:none` | A [customer reference](#customer-reference) starting with the text, in any case (`customer:47` finds `4711`, `customer:711` does not); `none` = no agent, as `agent:none`. A host whose agent has no customer matches neither. |
+| `customer:47` `customer:none` | A [customer reference](#customer-reference) starting with the text, in any case (`customer:47` finds `4711`, `customer:711` does not); `none` = a host that reports health but has no customer reference (hosts without an agent are `health:none` and `agent:none`). |
 | `since:3d` | Warning or critical for at least that long (earliest failing check), units `m h d w` |
 
 Examples: `health:crit -is:offline` (critical and online, so a connection is possible),

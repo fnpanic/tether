@@ -274,7 +274,7 @@ function field(h: Host, f: string, op: string, v: string, now: number): boolean 
     case "agent":
       return v === "none" ? !h.status : !!h.status?.agent.startsWith(v);
     case "customer":
-      return v === "none" ? !h.status : !!h.status?.customer?.toLowerCase().startsWith(v);
+      return v === "none" ? !!h.status && !h.status.customer : !!h.status?.customer?.toLowerCase().startsWith(v);
     case "since": {
       const s = age(v);
       const t = h.status && (h.health === "warn" || h.health === "crit") ? notSince(h.status) : null;
