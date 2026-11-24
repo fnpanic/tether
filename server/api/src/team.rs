@@ -9,6 +9,9 @@
 //! long as `team.json` exists (deleting it by hand, like deleting `policy.json`, starts over).
 //! It gives each member permissions (`sbom`, `customers`: enforced in status.rs) and may carry
 //! the `oidc` part, served signed as `GET /api/team/config`.
+//!
+//! Member requests that read or change a device's data leave a team audit record (`audited`,
+//! teamaudit.rs), and `POST /api/team/audit-event` takes the desktop's own events.
 
 use std::collections::HashMap;
 use std::fs;
@@ -23,6 +26,7 @@ use tether_trust::team::{self, OpenError, Permissions, Roster, Upload};
 use tether_trust::{reqauth, VerifyingKey};
 use tiny_http::Request;
 
+use crate::teamaudit::{self, Actor, Rec, Target};
 use crate::{audit, empty, hdr, header, json, load_json, lock, mkdirs, now, rate_ok, text, App, Body, Resp, LIMIT_SMALL};
 
 pub const LIMIT_ROSTER: u64 = 64 << 10;
@@ -156,6 +160,11 @@ pub struct Team {
     tags: Tags,
     key_hits: HashMap<String, (u64, u32)>,
     fail_hits: HashMap<String, (u64, u32)>,
+    /// `POST /api/team/audit-event` per member key.
+    posted_hits: HashMap<String, (u64, u32)>,
+    /// Per key id: when the last summary record was written, and the summary reads since then
+    /// not recorded (one record per member and hour).
+    summary_seen: HashMap<String, (u64, u64)>,
 }
 
 impl Team {
@@ -214,6 +223,7 @@ impl Team {
     pub fn maintain(&mut self, t: u64) {
         self.key_hits.retain(|_, (start, _)| t < *start + 60);
         self.fail_hits.retain(|_, (start, _)| t < *start + 60);
+        self.posted_hits.retain(|_, (start, _)| t < *start + 60);
     }
 }
 
@@ -304,9 +314,23 @@ impl App {
         if !rate_ok(&mut self.team.key_hits, self.team.members.who[i].key.clone(), t, KEY_PER_MIN) {
             return Err(text(429, "too many requests"));
         }
-        let Who { name, perms, service, .. } = self.team.members.who[i].clone();
+        let Who { name, perms, service, key } = self.team.members.who[i].clone();
         let m = &perms;
+        let actor = Actor { key_fingerprint: team::key_id(&self.team.members.keys[i]), name: name.clone() };
+        let ip = crate::client_ip(rq);
+        if let Some((event, target, detail)) = self.audited(method, rest, url, body, &actor.key_fingerprint, t) {
+            self.audit_pending = Some(Rec::new(event, Some(actor.clone()), Some(ip.clone()), target, detail));
+        }
         match (method, rest) {
+            // What the member's desktop did on its own (an export, a session): recorded as it says.
+            ("POST", "audit-event") => {
+                if !rate_ok(&mut self.team.posted_hits, key, t, teamaudit::POSTED_PER_MIN) {
+                    return Err(text(429, "too many requests"));
+                }
+                let (event, target, detail) = teamaudit::posted(body).map_err(|e| text(400, &e))?;
+                self.audit_pending = Some(Rec { self_reported: true, ..Rec::new(event, Some(actor), Some(ip), target, detail) });
+                Ok(empty(204))
+            }
             // The plain roster's answer stays as it was; with a signed document every permission.
             ("GET", "me") if self.team.doc.is_none() => Ok(json(&serde_json::json!({"name": name, "write": m.write, "audit": m.audit}))),
             ("GET", "me") => Ok(json(&serde_json::json!({"name": name, "write": m.write, "audit": m.audit, "sbom": m.sbom, "agent": m.agent, "customers": m.customers, "service": service}))),
@@ -409,6 +433,44 @@ impl App {
         }
     }
 
+    /// The team audit record a member request leaves, before its handler runs (a removed device's
+    /// pin is still there): event, target, detail. The summary: one record per member and hour,
+    /// with the reads since the one before (`{"reads": n}`, this one included).
+    fn audited(&mut self, method: &str, rest: &str, url: &str, body: &[u8], kid: &str, t: u64) -> Option<(&'static str, Target, Value)> {
+        let none = Value::Null;
+        let dev = |r: &str, suffix: &str| r.strip_prefix("status/")?.strip_suffix(suffix).map(str::to_owned);
+        Some(match (method, rest) {
+            ("GET", "status") => {
+                let (at, reads) = self.team.summary_seen.entry(kid.to_owned()).or_insert((0, 0));
+                *reads += 1;
+                if t < *at + 3600 {
+                    return None;
+                }
+                let n = std::mem::take(reads);
+                *at = t;
+                ("summary", Target::default(), serde_json::json!({"reads": n}))
+            }
+            ("GET", "audit") => ("session-audit-read", query_param(url, "device").map(|d| Target::asked(&d)).unwrap_or_default(), none),
+            ("GET", r) => match dev(r, "/sbom") {
+                Some(u) => ("software-list", self.audit_target(&u), none),
+                None => ("report", self.audit_target(&dev(r, "")?), none),
+            },
+            ("POST", r) => match (dev(r, "/link"), dev(r, "/allow-claim")) {
+                (Some(u), _) => {
+                    let id = serde_json::from_slice::<Value>(body).ok().and_then(|v| v["tether_id"].as_str().filter(|i| tether_trust::status::valid_tether_id(i)).map(str::to_owned));
+                    ("link", self.audit_target(&u), id.map_or(none, |i| serde_json::json!({"tether_id": i})))
+                }
+                (_, Some(u)) => ("allow-claim", self.audit_target(&u), none),
+                _ => return None,
+            },
+            ("DELETE", r) => match dev(r, "/link") {
+                Some(u) => ("unlink", self.audit_target(&u), none),
+                None => ("remove", self.audit_target(&dev(r, "")?), none),
+            },
+            _ => return None,
+        })
+    }
+
     /// `GET /api/team/audit?device=<id or uuid>&since=<unix>&limit=<1..500>`.
     fn team_audit(&mut self, url: &str, scope: &Permissions) -> Result<Resp, Resp> {
         let (mut since, mut limit, mut device) = (0, AUDIT_DEFAULT, String::new());
@@ -438,12 +500,18 @@ impl App {
     }
 }
 
+/// The value of `k` in `url`'s query, URL-decoded.
+pub(crate) fn query_param(url: &str, k: &str) -> Option<String> {
+    url.split_once('?')?.1.split('&').find_map(|kv| kv.strip_prefix(k)?.strip_prefix('=')).map(audit::unescape)
+}
+
 /// The body limit of a member route; `None`: not one (`404`).
 fn route_limit(method: &str, rest: &str) -> Option<u64> {
     match (method, rest) {
         ("GET", "me" | "devices" | "tags" | "audit" | "status") => Some(LIMIT_SMALL),
         ("GET", r) if r.starts_with("status/") => Some(LIMIT_SMALL),
         ("POST", r) if r.starts_with("status/") && (r.ends_with("/link") || r.ends_with("/allow-claim")) => Some(LIMIT_SMALL),
+        ("POST", "audit-event") => Some(LIMIT_SMALL),
         ("DELETE", r) if r.starts_with("status/") => Some(LIMIT_SMALL),
         ("PUT", "tags") => Some(LIMIT_TAGS),
         _ => None,

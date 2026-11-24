@@ -4,7 +4,8 @@
 //! list, docs/key-rotation.md), `devices.json`, `nonces.json`,
 //! `diag/tickets.json` + `diag/<ticket>.zip`, `custom/<id>.json` (custom TetherQS apps),
 //! `audit/<YYYY-MM-DD>.jsonl` (session audit log, `audit.rs`), `team/roster.json` + `team/tags.json`
-//! (technician access, `team.rs`), `download/…` (served by Caddy; `download/<channel>/releases.json`,
+//! (technician access, `team.rs`), `team-audit/<YYYY-MM-DD>.jsonl` + `team-audit/head` (what support
+//! staff read and changed, `teamaudit.rs`), `download/…` (served by Caddy; `download/<channel>/releases.json`,
 //! the signed release index, by this server with `ETag: "<serial>"`), `release-generation` (the
 //! release generation G, bumped on every index or manifest change, read by hbbs for its push hint;
 //! docs/update-design.md), `tmp/`.
@@ -15,6 +16,7 @@ mod metrics;
 mod prune;
 mod status;
 mod team;
+mod teamaudit;
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -349,6 +351,9 @@ struct App {
     policy_serial: Option<u64>,
     server_keys_serial: Option<u64>,
     team: team::Team,
+    /// The team audit log, and this request's record (submitted by `serve` with the answer's status).
+    team_audit: teamaudit::Log,
+    audit_pending: Option<teamaudit::Rec>,
     status: status::Status,
     /// Release generation G (`release-generation`).
     release_gen: u64,
@@ -538,18 +543,19 @@ pub(crate) fn sig_relay() -> reqauth::Relay<'static> {
 
 /// The admin signature of a request under any of `keys`. Needs no state, so a large body is
 /// checked before the state lock; the returned nonce still goes through `App::use_nonce`.
-fn verify_sig(keys: &[VerifyingKey], rq: &Request, method: &str, url: &str, body: &[u8], t: u64) -> Result<String, Resp> {
+/// The nonce and the index of the key that signed.
+fn verify_sig(keys: &[VerifyingKey], rq: &Request, method: &str, url: &str, body: &[u8], t: u64) -> Result<(String, usize), Resp> {
     let sig = header(rq, reqauth::HEADER).ok_or_else(|| text(401, "missing signature"))?;
     let mut err = String::new();
     // Once, not per key: the body may be a 200 MiB upload.
     let digest = reqauth::body_digest(body);
-    for key in keys {
+    for (i, key) in keys.iter().enumerate() {
         let mut nonce = String::new();
         match reqauth::verify_request_for(&sig, key, sig_relay(), method, url, &digest, t, |n| {
             nonce = n.to_owned();
             true
         }) {
-            Ok(()) => return Ok(nonce),
+            Ok(()) => return Ok((nonce, i)),
             // A mismatch under one key says nothing; keep the more specific reason.
             Err(e) if err.is_empty() || e != "signature does not match" => err = e,
             Err(_) => {}
@@ -601,7 +607,7 @@ fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<
     let t = now();
     let mut body = body_to_file(rq, data, limit, mode)?;
     if let (Some(keys), Body::File { path, nonce, .. }) = (keys, &mut body) {
-        *nonce = Some(with_mapped(path, |b| verify_sig(&keys, rq, "PUT", &url, b, t)).map_err(internal)??);
+        *nonce = Some(with_mapped(path, |b| verify_sig(&keys, rq, "PUT", &url, b, t).map(|(n, _)| n)).map_err(internal)??);
     }
     Ok(body)
 }
@@ -688,25 +694,31 @@ fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
         read_request_body(app, &mut rq, data).map(|mut body| {
             // A member signature is checked before the lock (up to 2000 keys without `kid`).
             let verified = team::member_verify(app, &rq, &body);
-            let (r, later, nonce) = {
+            let (r, later, nonce, pending) = {
                 let mut a = lock(app);
                 let held = Instant::now();
                 let used = a.nonces_used;
                 a.team.verified = verified;
                 let r = a.route(&mut rq, &mut body);
                 a.team.verified = None;
-                let out = (r, a.later.take(), a.nonces_used != used);
+                let pending = a.audit_pending.take().map(|rec| (a.team_audit.clone(), rec));
+                let out = (r, a.later.take(), a.nonces_used != used, pending);
                 traced(|| format!("{} {}", rq.method(), rq.url().split('?').next().unwrap_or("")), held.elapsed());
                 out
             };
             if nonce {
                 persist_nonces(app);
             }
-            match (r, later) {
+            let resp = match (r, later) {
                 (Ok(_), Some(f)) => f(app),
                 (r, _) => r,
             }
-            .unwrap_or_else(|e| e)
+            .unwrap_or_else(|e| e);
+            // Before the answer goes out: a later request sees it.
+            if let Some((log, rec)) = pending {
+                log.submit(rec.answered(resp.status_code().0));
+            }
+            resp
         })
     };
     // Err: refused before (all of) the body was read.
@@ -869,7 +881,7 @@ fn load_json<T: for<'de> Deserialize<'de> + Default>(p: &Path) -> T {
 }
 
 impl App {
-    fn open(data: PathBuf, keys: Vec<VerifyingKey>, audit_days: u64, audit_max: u64) -> io::Result<Self> {
+    fn open(data: PathBuf, keys: Vec<VerifyingKey>, audit_days: u64, audit_max: u64, team_audit: (u64, u64)) -> io::Result<Self> {
         mkdirs(&data, 0o750)?;
         mkdirs(&data.join("download"), 0o750)?;
         for d in ["policy-history", "diag", "custom", "audit", "tmp"] {
@@ -907,6 +919,8 @@ impl App {
             audit_dev_hits: HashMap::new(),
             audit: audit::Log::open(data.join("audit"), audit_days, audit_max)?,
             team: team::Team::open(&data)?,
+            team_audit: teamaudit::Log::start(data.join("team-audit"), team_audit.0, team_audit.1, true)?,
+            audit_pending: None,
             status: status::Status::open(&data),
             custom,
             later: None,
@@ -974,9 +988,11 @@ impl App {
         check_space(&self.data, incoming)
     }
 
-    fn auth(&mut self, rq: &Request, method: &str, url: &str, body: &[u8]) -> Result<(), Resp> {
-        let nonce = verify_sig(&self.keys, rq, method, url, body, now())?;
-        self.use_nonce(nonce, 0)
+    /// The admin signature; the index of the admin key that made it.
+    fn auth(&mut self, rq: &Request, method: &str, url: &str, body: &[u8]) -> Result<usize, Resp> {
+        let (nonce, i) = verify_sig(&self.keys, rq, method, url, body, now())?;
+        self.use_nonce(nonce, 0)?;
+        Ok(i)
     }
 
     /// Replay check of a verified signature's nonce, remembered `keep` s longer than
@@ -1173,6 +1189,42 @@ impl App {
         self.defer(move |_| Ok(audit::response(&dir, since, limit, &device)))
     }
 
+    /// The team audit record of an admin request that reads or changes a device's data.
+    fn audit_admin(&mut self, rq: &Request, key: usize, method: &str, url: &str, rest: &str, body: &[u8]) {
+        let (event, target, detail) = match (method, rest) {
+            ("DELETE", r) if r.starts_with("status/") => ("remove", self.audit_target(&r["status/".len()..]), serde_json::Value::Null),
+            ("POST", "status/revoke") => {
+                let id = serde_json::from_slice::<serde_json::Value>(body).ok().and_then(|v| v["id"].as_str().filter(|i| tether_trust::status::valid_token_id(i)).map(str::to_owned));
+                ("revoke", teamaudit::Target::default(), id.map_or(serde_json::Value::Null, |i| serde_json::json!({"token": i})))
+            }
+            ("GET", "audit") => ("session-audit-read", team::query_param(url, "device").map(|d| teamaudit::Target::asked(&d)).unwrap_or_default(), serde_json::Value::Null),
+            ("GET", "team-audit") => ("team-audit-read", teamaudit::Target::default(), teamaudit::Query::parse(url).map(|q| q.detail()).unwrap_or_default()),
+            _ => return,
+        };
+        let actor = teamaudit::Actor { key_fingerprint: tether_trust::team::key_id(&self.keys[key]), name: "admin".into() };
+        self.audit_pending = Some(teamaudit::Rec::new(event, Some(actor), Some(client_ip(rq)), target, detail));
+    }
+
+    /// `GET /api/admin/team-audit?since&until&actor&device&customer&event&limit&cursor` (teamaudit.rs
+    /// `read`): written into an unlinked temp file after the state lock is released, then sent.
+    fn team_audit_read(&mut self, url: &str) -> Result<Resp, Resp> {
+        let q = teamaudit::Query::parse(url).map_err(|e| text(400, &e))?;
+        let (log, data) = (self.team_audit.clone(), self.data.clone());
+        self.defer(move |_| {
+            // Everything submitted before this read is in the files.
+            log.flush(Duration::from_secs(2));
+            let head = log.head();
+            let tmp = tmp_path(&data);
+            let mut f = OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&tmp).map_err(internal)?;
+            let _ = fs::remove_file(&tmp);
+            let mut w = BufWriter::new(&f);
+            teamaudit::read(&log.dir, &q, &head, &mut w).and_then(|_| w.flush()).map_err(internal)?;
+            drop(w);
+            f.rewind().map_err(internal)?;
+            Ok(Response::from_file(f).with_header(hdr("Content-Type", "application/json")).with_chunked_threshold(usize::MAX).boxed())
+        })
+    }
+
     fn diag_upload(&mut self, body: &Body, ticket: &str) -> Result<Resp, Resp> {
         let t = now();
         let idx = self.open_ticket(ticket, t)?;
@@ -1209,7 +1261,7 @@ impl App {
             ("POST", "releases/prune") => prune::LIMIT_PRUNE,
             ("PUT", r) if r.starts_with("custom/") => LIMIT_CUSTOM,
             ("DELETE", r) if r.starts_with("custom/") => LIMIT_SMALL,
-            ("GET", "policy-history" | "devices" | "diag" | "releases" | "status" | "custom" | "audit" | "team") => LIMIT_SMALL,
+            ("GET", "policy-history" | "devices" | "diag" | "releases" | "status" | "custom" | "audit" | "team" | "team-audit") => LIMIT_SMALL,
             ("GET", r) if r.starts_with("diag/") || r.starts_with("policy-history/") => LIMIT_SMALL,
             ("POST", r) if r.starts_with("diag/") && r.ends_with("/close") => LIMIT_SMALL,
             ("DELETE", r) if r.starts_with("diag/") => LIMIT_SMALL,
@@ -1218,7 +1270,8 @@ impl App {
             _ => return Err(not_found()),
         };
         let body = body.bytes(limit)?;
-        self.auth(rq, method, url, body)?;
+        let key = self.auth(rq, method, url, body)?;
+        self.audit_admin(rq, key, method, url, rest, body);
         match (method, rest) {
             ("PUT", "policy") => self.put_policy(body),
             ("PUT", "server-keys") => self.put_server_keys(body),
@@ -1249,6 +1302,7 @@ impl App {
             ("GET", "status/revoked") => self.status_revoked(),
             ("GET", "status/devices") => self.status_devices(url),
             ("GET", "audit") => self.audit_read(url),
+            ("GET", "team-audit") => self.team_audit_read(url),
             ("GET", "releases") => self.list_releases(),
             ("GET", r) if r.starts_with("policy-history/") => {
                 // The signed document exactly as published, so another admin PC can restore it.
@@ -1663,6 +1717,7 @@ impl App {
             downloads: self.downloads.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             status_hosts: self.status_hosts(t),
             status_sbom: self.status_sbom(),
+            team_audit: [&self.team_audit.counters.written, &self.team_audit.counters.queue_full, &self.team_audit.counters.log_full].map(|c| c.load(Ordering::Relaxed)),
         })
     }
 
@@ -2009,6 +2064,8 @@ fn main() {
         _ => d,
     };
     let (audit_days, audit_max) = (env_num("AUDIT_RETENTION_DAYS", 90), env_num("AUDIT_MAX_MB", 50).saturating_mul(1 << 20));
+    // The team audit log (teamaudit.rs): TEAM_AUDIT_RETENTION_DAYS (90), TEAM_AUDIT_MAX_MB (2048).
+    let team_audit = (env_num("TEAM_AUDIT_RETENTION_DAYS", 90), env_num("TEAM_AUDIT_MAX_MB", 2048).saturating_mul(1 << 20));
     status::set_conf(status::Conf {
         off: std::env::var("STATUS").is_ok_and(|v| v.trim() == "off"),
         rps: env_num("STATUS_TARGET_RPS", 10).max(1),
@@ -2022,7 +2079,7 @@ fn main() {
             std::process::exit(1);
         }),
     });
-    let mut app = App::open(data.clone(), keys, audit_days, audit_max).unwrap_or_else(|e| {
+    let mut app = App::open(data.clone(), keys, audit_days, audit_max, team_audit).unwrap_or_else(|e| {
         eprintln!("data dir: {e}");
         std::process::exit(1);
     });
@@ -2077,6 +2134,8 @@ fn main() {
     }
     lock(&app).flush_devices();
     status::flush_at_exit(&app);
+    let log = lock(&app).team_audit.clone();
+    log.flush(Duration::from_secs(5));
 }
 
 #[cfg(test)]

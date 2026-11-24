@@ -1924,6 +1924,13 @@ impl App {
         s.keys.get(uuid).filter(|p| scope.sees(p.customer.as_deref())).map(|_| id)
     }
 
+    /// The team audit target of a request naming `uuid`: as asked, with the Tether ID and customer
+    /// of its pin (left out of the record when the request is refused, `teamaudit::Rec::answered`).
+    pub(crate) fn audit_target(&self, uuid: &str) -> crate::teamaudit::Target {
+        let p = st::valid_uuid(uuid).then(|| self.status.keys.get(uuid)).flatten();
+        crate::teamaudit::Target { uuid: Some(crate::teamaudit::text(uuid)), tether_id: p.and_then(|p| p.tether_id.clone()), customer: p.and_then(|p| p.customer.clone()) }
+    }
+
     /// The pin of `uuid` if `scope` sees its customer; else not found, as for an unknown uuid.
     fn scoped_pin(&self, uuid: &str, scope: &Permissions) -> Result<Pin, Resp> {
         st::valid_uuid(uuid).then(|| self.status.keys.get(uuid)).flatten().filter(|p| scope.sees(p.customer.as_deref())).cloned().ok_or_else(not_found)

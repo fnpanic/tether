@@ -2975,3 +2975,152 @@ fn a_plain_roster_member_gets_the_summary_of_before() {
     assert!(r.json()["hosts"][2]["sbom"]["sha"].is_string());
     assert_eq!(team_get(&s, &m, "/api/team/me").json(), json!({"name": "M", "write": false, "audit": false}));
 }
+
+/// The team audit log as the admin reads it (`?<q>`).
+fn team_audit(s: &Srv, admin: &SigningKey, q: &str) -> Value {
+    let r = s.admin(admin, "GET", &format!("/api/admin/team-audit{q}"), b"");
+    assert_eq!(r.status, 200, "{}", r.text());
+    r.json()
+}
+
+fn team_audit_files(s: &Srv) -> String {
+    let mut all = String::new();
+    for e in std::fs::read_dir(s.dir.join("team-audit")).unwrap().flatten() {
+        if e.path().extension().is_some_and(|x| x == "jsonl") {
+            all.push_str(&std::fs::read_to_string(e.path()).unwrap());
+        }
+    }
+    all
+}
+
+#[test]
+fn the_team_audit_log_records_every_access_and_nothing_it_returned() {
+    let (s, admin) = scoped_server();
+    let (all, part, nosbom) = (generate_key(), generate_key(), generate_key());
+    publish_doc(&s, &admin, 1, &[("All", &all, json!({"write": true, "audit": true})), ("Part", &part, json!({"customers": ["47*"], "write": true})), ("NoSbom", &nosbom, json!({"sbom": false}))]);
+    let kid = |k: &SigningKey| tether_trust::team::key_id(&k.verifying_key());
+    // (who, event, uuid asked, status): what each request must have left.
+    let mut want: Vec<(String, &str, Option<&str>, u16)> = Vec::new();
+    let mut go = |who: &str, k: &SigningKey, method: &str, path: &str, body: &[u8], event: &'static str, uuid: Option<&'static str>| {
+        let r = s.admin(k, method, path, body);
+        want.push((who.to_owned(), event, uuid, r.status));
+        r
+    };
+    // The summary: one record per member and hour, however often it is read.
+    assert_eq!(go("All", &all, "GET", "/api/team/status", b"", "summary", None).status, 200);
+    assert_eq!(team_get(&s, &all, "/api/team/status").status, 200);
+    assert_eq!(go("All", &all, "GET", "/api/team/status/dev-0001", b"", "report", Some("dev-0001")).status, 200);
+    assert_eq!(go("All", &all, "GET", "/api/team/status/dev-0001/sbom", b"", "software-list", Some("dev-0001")).status, 200);
+    go("All", &all, "POST", "/api/team/status/dev-0001/link", br#"{"tether_id":"123456789"}"#, "link", Some("dev-0001"));
+    assert_eq!(go("All", &all, "DELETE", "/api/team/status/dev-0002/link", b"", "unlink", Some("dev-0002")).status, 204);
+    assert_eq!(go("All", &all, "POST", "/api/team/status/dev-0002/allow-claim", b"", "allow-claim", Some("dev-0002")).status, 204);
+    assert_eq!(go("All", &all, "GET", "/api/team/audit?device=dev-0001", b"", "session-audit-read", Some("dev-0001")).status, 200);
+    // Refused: a missing permission (403) and a device outside the scope (404, as an unknown one).
+    assert_eq!(go("NoSbom", &nosbom, "GET", "/api/team/status/dev-0001/sbom", b"", "software-list", Some("dev-0001")).status, 403);
+    assert_eq!(go("Part", &part, "GET", "/api/team/status/dev-0002", b"", "report", Some("dev-0002")).status, 404);
+    assert_eq!(go("Part", &part, "GET", "/api/team/status/dev-9999", b"", "report", Some("dev-9999")).status, 404);
+    assert_eq!(go("Part", &part, "DELETE", "/api/team/status/dev-0002", b"", "remove", Some("dev-0002")).status, 404);
+    assert_eq!(go("All", &all, "DELETE", "/api/team/status/dev-0003", b"", "remove", Some("dev-0003")).status, 204);
+    // The admin's changes.
+    let (_, tok) = customer_token(&admin, None);
+    let body = json!({"id": tok, "exp": now() + 3600}).to_string();
+    assert_eq!(go("admin", &admin, "POST", "/api/admin/status/revoke", body.as_bytes(), "revoke", None).status, 204);
+    assert_eq!(go("admin", &admin, "DELETE", "/api/admin/status/dev-0002", b"", "remove", Some("dev-0002")).status, 204);
+    // Not recorded: what is not a device's data.
+    assert_eq!(team_get(&s, &all, "/api/team/me").status, 200);
+
+    let v = team_audit(&s, &admin, "");
+    assert_eq!(v["problems"], json!([]));
+    let head = v["head"].as_str().unwrap();
+    assert!(head.len() == 64 && head != "0".repeat(64));
+    let recs = v["records"].as_array().unwrap();
+    let got: Vec<(String, &str, Option<&str>, u16)> = recs.iter().map(|r| (r["actor"]["name"].as_str().unwrap().to_owned(), r["event"].as_str().unwrap(), r["target"]["uuid"].as_str(), r["result"].as_u64().unwrap() as u16)).collect();
+    assert_eq!(got, want);
+    for r in recs {
+        let keys: Vec<&str> = r.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert!(keys.iter().all(|k| ["ts", "event", "actor", "ip", "target", "detail", "result", "prev"].contains(k)), "{r}");
+        assert_eq!(r["actor"].as_object().unwrap().len(), 2, "{r}");
+        assert!(r["target"].as_object().is_none_or(|t| t.keys().all(|k| ["uuid", "tether_id", "customer"].contains(&k.as_str()))), "{r}");
+    }
+    // A read in scope names the device fully (its pin's Tether ID once linked); a refused one only what was asked.
+    assert_eq!(recs[1]["actor"], json!({"key_fingerprint": kid(&all), "name": "All"}));
+    assert_eq!((recs[1]["target"].clone(), recs[1]["ip"].clone(), recs[1].get("detail")), (json!({"uuid": "dev-0001", "customer": "4711"}), json!("127.0.0.1"), None));
+    assert_eq!((recs[3]["result"].as_u64(), recs[3]["detail"].clone()), (Some(204), json!({"tether_id": "123456789"})));
+    assert_eq!(recs[7]["result"].as_u64(), Some(403));
+    assert_eq!(recs[0]["detail"], json!({"reads": 1}));
+    for (i, u) in [(7, "dev-0001"), (8, "dev-0002"), (9, "dev-9999"), (10, "dev-0002")] {
+        assert_eq!(recs[i]["target"], json!({"uuid": u}), "{}", recs[i]);
+    }
+    assert_eq!(recs[12]["detail"], json!({"token": tok}));
+    assert_eq!(recs[12]["actor"], json!({"key_fingerprint": kid(&admin), "name": "admin"}));
+    // Never what was returned: no host name, product, check, software list or report content.
+    let log = team_audit_files(&s);
+    for secret in ["PC-1", "Example App", "app/db-service", "CycloneDX", "bomFormat", "zeta", "counts", "hosts"] {
+        assert!(!log.contains(secret), "{secret} in the team audit log");
+    }
+    // The read itself is recorded, with its filters; members cannot read the log.
+    let v = team_audit(&s, &admin, "?event=team-audit-read&actor=admin");
+    let reads = v["records"].as_array().unwrap();
+    assert_eq!((reads.len(), reads[0]["result"].as_u64(), reads[0].get("detail")), (1, Some(200), None));
+    let v = team_audit(&s, &admin, "?event=team-audit-read");
+    assert_eq!(v["records"][1]["detail"], json!({"actor": "admin", "event": "team-audit-read"}));
+    assert_eq!(team_get(&s, &all, "/api/admin/team-audit").status, 401);
+    // Filters by device, customer; pages.
+    assert_eq!(team_audit(&s, &admin, "?device=dev-0003")["records"].as_array().unwrap().len(), 1);
+    assert!(team_audit(&s, &admin, "?customer=4711")["records"].as_array().unwrap().iter().all(|r| r["target"]["uuid"] == "dev-0001"));
+    let p = team_audit(&s, &admin, "?limit=3");
+    assert_eq!(p["records"].as_array().unwrap().len(), 3);
+    let p2 = team_audit(&s, &admin, &format!("?limit=3&cursor={}", p["next"].as_str().unwrap()));
+    assert_eq!(p2["records"][0], recs[3]);
+    assert_eq!(s.admin(&admin, "GET", "/api/admin/team-audit?limit=0", b"").status, 400);
+    // Stored privately; every line also in the journal.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = s.dir.join("team-audit");
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+    for e in std::fs::read_dir(&dir).unwrap().flatten() {
+        assert_eq!(e.metadata().unwrap().permissions().mode() & 0o777, 0o600, "{:?}", e.path());
+    }
+    assert!(s.journal().contains(&format!("team-audit: {}", log.lines().next().unwrap())));
+}
+
+#[test]
+fn members_report_their_own_events_marked_as_self_reported() {
+    let (s, admin) = server();
+    // A plain roster (no signed document): events name the roster member.
+    let m = member(&s, &admin);
+    let post = |b: Value| s.admin(&m, "POST", "/api/team/audit-event", b.to_string().as_bytes());
+    assert_eq!(post(json!({"event": "export", "what": "hosts", "rows": 120})).status, 204);
+    assert_eq!(post(json!({"event": "session-start", "tether_id": "123456789"})).status, 204);
+    assert_eq!(post(json!({"event": "agent-request", "tether_id": "123456789", "action": "install", "outcome": "done"})).status, 204);
+    for bad in [json!({"event": "delete-everything"}), json!({"event": "export", "what": "hosts", "rows": 1, "names": ["PC-1"]})] {
+        assert_eq!(post(bad).status, 400);
+    }
+    assert_eq!(s.req("POST", "/api/team/audit-event", &[], br#"{"event":"export"}"#).status, 401);
+    assert_eq!(team_get(&s, &m, "/api/team/status").status, 200);
+    let v = team_audit(&s, &admin, "");
+    let recs = v["records"].as_array().unwrap();
+    let got: Vec<(&str, bool, &str)> = recs.iter().map(|r| (r["event"].as_str().unwrap(), r["self_reported"] == true, r["actor"]["name"].as_str().unwrap())).collect();
+    assert_eq!(got, [("export", true, "M"), ("session-start", true, "M"), ("agent-request", true, "M"), ("summary", false, "M")]);
+    assert_eq!((recs[0]["detail"].clone(), recs[0]["result"].as_u64()), (json!({"what": "hosts", "rows": 120}), Some(204)));
+    assert_eq!(recs[2]["target"], json!({"tether_id": "123456789"}));
+    assert!(!team_audit_files(&s).contains("PC-1"));
+    // 30 per minute and member key (5 used above, refused ones included).
+    let codes: Vec<u16> = (0..30).map(|_| post(json!({"event": "session-start", "tether_id": "123456789"})).status).collect();
+    assert_eq!((codes.iter().filter(|c| **c == 204).count(), codes.last().copied()), (25, Some(429)));
+}
+
+#[test]
+fn the_team_audit_chain_continues_across_a_restart() {
+    let (s, admin) = server();
+    let m = member(&s, &admin);
+    assert_eq!(team_get(&s, &m, "/api/team/status").status, 200);
+    let head = team_audit(&s, &admin, "")["head"].as_str().unwrap().to_owned();
+    let s = restart(s, &admin);
+    assert_eq!(s.admin(&m, "POST", "/api/team/audit-event", br#"{"event":"session-start","tether_id":"123456789"}"#).status, 204);
+    let v = team_audit(&s, &admin, "");
+    assert_eq!(v["problems"], json!([]));
+    let recs = v["records"].as_array().unwrap();
+    // The first read follows the head it returned (the summary); the event after the restart follows the read.
+    assert_eq!(recs.iter().map(|r| r["event"].as_str().unwrap()).collect::<Vec<_>>(), ["summary", "team-audit-read", "session-start"]);
+    assert_eq!(recs[1]["prev"], head);
+}

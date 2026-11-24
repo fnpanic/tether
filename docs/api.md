@@ -214,6 +214,7 @@ keeps blocking replays in memory.
 | `GET /api/admin/releases` | – | `[{channel,path,size,modified}]` |
 | `PUT /api/admin/download-page` | HTML (≤ 512 KiB) | `204`, stored as `download/index.html` |
 | `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>` | – | Session audit records (above), newest first. All optional: `since` (default 0), `limit` 1–5000 (default 1000), `device` matches `id` or `uuid` exactly (URL-encoded). Unknown parameter or bad value: `400`. One answer holds at most about 8 MiB of records; when older ones were left out for that, it carries the header `X-Audit-Truncated: 1` (the Sessions page of Tether Manage then names the relay). |
+| `GET /api/admin/team-audit?since&until&actor&device&customer&event&limit&cursor` | – | The team audit log, oldest first, with the current chain head and the chain problems found: see [Team audit log](#team-audit-log). |
 | `GET /api/admin/status` | – | `{version, disk_free, devices, policy_serial, server_keys_serial, release_generation, release_indexes: {<channel>: {serial, expires}}, uptime, last_prune: {time, files, bytes} \| null}` |
 | `DELETE /api/admin/status/<uuid>` | – | `204`: the device's pin (with its link or claim), last report and history are removed (journal line `status: pin of <uuid> removed by an admin`). `404` for an invalid or unknown uuid. `503` while `STATUS=off` or the status store is locked. See [Device status](#device-status-health-reports). |
 | `POST /api/admin/status/revoke` | `{"id":"<token id>","exp":<the token's exp>}` | `204`, also when the id is revoked already (the later `exp` is kept). `400 exp has passed` when `exp` is not in the future (an expired token is refused anyway; nothing is stored). The relay refuses that token from then on (`401 token revoked`); devices that enrolled with it stay enrolled. Kept in `status/revoked.json` until `exp`. `400` for a bad id or body, `507 too many revoked tokens` with 10 000 kept (expired ones leave within a minute), `503` as above. |
@@ -331,9 +332,88 @@ trust another admin key). The relay is trusted to enforce the permissions it ser
 | `DELETE /api/team/status/<uuid>/link` | – | `204`: the link and the claim are removed and the pin gets `no_claim`: the device claims nothing again (not by enrolling, also not with the token issued for that ID after its first use, not by reports, whose `tether_id` is then ignored) until a member allows it. When such a device then releases its own pin (`DELETE /api/status`), the relay keeps its key (a `dismissed` line, 180 days, at most 10 000): enrolling again with that key and a token not issued for a Tether ID gives a pin with `no_claim` and no claim, whatever uuid or claim it names. `write` only (`403`); `404` unknown uuid. Journal line `status: … of <uuid> dismissed by team member <name>`. A new key enrolled with a valid token can always claim: revoke the token to stop that. |
 | `POST /api/team/status/<uuid>/allow-claim` | – | `204`: clears `no_claim` on this pin; the device's next enrolment or report names its claim again (still only a claim), unless another pin of the same device key is still dismissed: then allow or remove those too. `write` only (`403`); `404` unknown uuid. Journal line. |
 | `DELETE /api/team/status/<uuid>` | – | `204`: as `DELETE /api/admin/status/<uuid>` (pin, link or claim, report, history), journal line `status: pin of <uuid> removed by team member <name>`. `write` only (`403`); `404` unknown uuid. |
+| `POST /api/team/audit-event` | `{"event", …}` (≤ 4 KiB, below) | `204`: the member's desktop reports what it did itself; written to the team audit log marked `self_reported`. Any member; 30 per minute and member key (`429`, refused ones count). `400` for an unknown event or field, a missing or bad value. |
 
 The roster is per relay: publish it to every relay (Tether Manage does). Tags are stored per relay
 too: a client should read and write them on one relay (the first that answers).
+
+## Team audit log
+
+Every request of a team member or an admin that reads or changes a device's data is recorded, with
+refused ones (`403` for a missing permission, `404` for an unknown or out-of-scope device), one JSON
+line per request in `/var/lib/tether-api/team-audit/<YYYY-MM-DD>.jsonl` (UTC day; folder `0700`,
+files `0600`), also with a plain roster. Fields, in this order (absent ones left out):
+
+`{"ts":<unix>,"event":"…","actor":{"key_fingerprint":"<16 hex>","name":"…"},"ip":"…","target":{"uuid","tether_id","customer"},"detail":{…},"result":<HTTP status>,"self_reported":true,"prev":"<64 hex>"}`
+
+- `actor`: the member's name in the roster or team document and the id of the key that signed
+  (`tether_trust::team::key_id`, the `kid`); the admin as `"name":"admin"` with its key's id. The
+  writer's own records (`dropped`, `chain-gap`) have none. `ip`: the client address (design 12.5).
+- `target`: the uuid as the request named it (at most 128 bytes); for an answer below `400` also
+  the pin's Tether ID and customer. A refused request keeps only what it named, so the record
+  confirms nothing about a device the member may not see.
+- Never in a record: report or history content, host names, software lists, summary content.
+- Not recorded: requests without a valid member or admin signature (no person to name) or refused
+  by a rate limit, and routes that are not a device's data (`me`, `tags`, the heartbeat device list).
+
+| Event | Route | `detail` |
+|---|---|---|
+| `summary` | `GET /api/team/status` | `{"reads":n}`: at most one record per member and hour; `n` the reads since the member's previous summary record, this one included |
+| `report` | `GET /api/team/status/<uuid>` (report and history) | – |
+| `software-list` | `GET /api/team/status/<uuid>/sbom` | – |
+| `link` | `POST /api/team/status/<uuid>/link` | `{"tether_id"}` asked for |
+| `unlink`, `allow-claim` | `DELETE …/link`, `POST …/allow-claim` | – |
+| `remove` | `DELETE /api/team/status/<uuid>`, `DELETE /api/admin/status/<uuid>` | – |
+| `revoke` | `POST /api/admin/status/revoke` | `{"token":"<id>"}` |
+| `session-audit-read` | `GET /api/team/audit`, `GET /api/admin/audit` | – (`target`: the `device` asked for; digits only: a Tether ID) |
+| `team-audit-read` | `GET /api/admin/team-audit` | the filters given |
+| `export`, `session-start`, `agent-request` | `POST /api/team/audit-event` (`self_reported`) | `{"what":"hosts"\|"failing"\|"sbom","rows":n}`; –; `{"action":"install"\|"remove","outcome"?}` |
+| `dropped` | the writer | `{"queue_full":n,"log_full":n}`: records lost since the last such record |
+| `chain-gap` | the writer at start | `{"expected","found"}`: the files no longer reach the head written before |
+
+Posted events: `{"event":"export","what":…,"rows":<≤ 10 000 000>,"uuid"?}`,
+`{"event":"session-start","tether_id","uuid"?}`, `{"event":"agent-request","tether_id","action","outcome"?,"uuid"?}`
+(`outcome` `[a-z-]{1,32}`); nothing else is accepted.
+
+**Writing.** One writer thread takes records from a queue of 10 000; a request never waits for it.
+When the queue is full, or today's file alone reaches `TEAM_AUDIT_MAX_MB`, records are dropped and
+counted (`tether_api_team_audit_dropped_total`, a journal line `team-audit: N records dropped` at
+most every 10 s) and a `dropped` record in the log says how many. Lines are synced every second;
+each is also written to the journal as `team-audit: <line>`, and the head as `team-audit: head <hash>`
+every 10 minutes. A record is about 280 bytes (measured); 50 000 records at once raised the
+memory by about 5 MB (the full queue), the rest was dropped and counted.
+
+**The chain.** `prev` is the SHA-256 (lower-case hex) of the line before (its bytes without the
+newline); the first line of a day names the last line of the day before, the first line ever 64
+zeros. After a restart the chain continues from the newest line; the head is also kept in
+`team-audit/head`, and when the files no longer reach it a `chain-gap` record is written. What it
+gives: an edited, removed or inserted line, a removed day or a cut file shows as a break to
+whoever reads the log, as long as the lines after the change were not all rewritten. What it does
+not give: whoever controls the relay can rewrite the log from any point on, or stop it; only a head
+kept elsewhere shows that. `GET /api/admin/team-audit` returns the current head: Tether Manage (or
+a script) should store it and check that the next read still reaches it; forwarding the journal to
+a separate SIEM keeps a copy of every line and head the relay cannot change afterwards.
+
+**Reading** (`GET /api/admin/team-audit`, admin-signed; members `401`):
+`?since=<unix>&until=<unix>&actor=<name or key id>&device=<uuid or Tether ID>&customer=<ref>&event=<event>&limit=<1–5000, default 1000>&cursor=<next>`,
+all optional, exact matches; unknown parameter or bad value `400`. Answer, oldest first:
+`{"head":"<hash>","records":[…],"next":"<cursor>"|null,"problems":[{"day","at":<byte offset>,"problem"}]}`.
+Read from the files line by line (never a whole day in memory), at most `limit` records and about
+8 MiB of records per answer and 256 MiB of log read; `next` continues there. Every line read is
+checked against the chain (`problems`, at most 100): `prev-mismatch` (the line before was changed or
+removed, or this one inserted), `unreadable`, `truncated`, `starts-after-removed-day` (the oldest
+line follows one no longer kept: retention or the size cap, not a break), `head-not-found` (the
+newest lines are not those last written). The read is itself recorded.
+
+| Setting (`/etc/tether/api.env`) | Default | |
+|---|---|---|
+| `TEAM_AUDIT_RETENTION_DAYS` | `90` | whole UTC days older than this are removed (checked hourly and at each new day) |
+| `TEAM_AUDIT_MAX_MB` | `2048` | all day files together; above it the oldest day goes, never today's; today's file alone at the cap: new records are dropped and counted |
+
+Backup: copy `team-audit/` with the rest of `/var/lib/tether-api`. A restored older copy is a
+shorter chain: a head stored elsewhere after the backup is no longer reached, so note the restore
+where the heads are kept. Retention and who may read the
+log (staff personal data) are for the organisation to agree on (works council, data protection).
 
 ## Device status (health reports)
 
@@ -659,6 +739,8 @@ moved away and tether-api is restarted; the rest of the relay is not affected. D
 | `STATUS_SBOM_MAX_KB` | `512` | largest software list in KiB; more is `413` |
 | `STATUS_SBOM_RPS` | `2` | software-list uploads taken per second, all devices (at least 1); more is `429 busy` |
 | `STATUS_SBOM_MAX_TOTAL_MB` | `2048` | sum of all stored lists in MiB; an upload that would exceed it is `507` |
+
+The team audit log's settings: [Team audit log](#team-audit-log).
 
 Metrics: `tether_api_status_hosts{state}`, `tether_api_status_write_errors`,
 `tether_api_status_sbom_files`, `tether_api_status_sbom_bytes`, and the request
