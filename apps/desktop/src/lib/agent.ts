@@ -76,9 +76,10 @@ export function agentView(a: AgentAnswer, did: AgentAction = "status"): AgentVie
     case "running":
       return view("Still running on the remote computer. Ask again in a moment to see the result.", ["again"]);
     case "busy":
-      return view("Tether on the remote computer is busy with the agent right now. Ask again in a moment.", ["again"]);
+      // The host's reason (what runs, or "ask again in N minutes") is the added line.
+      return view("Tether on the remote computer is busy with the agent right now. Ask again in a moment.", ["again"], true);
     case "not-allowed":
-      return view("Not allowed by the remote computer's policy. The person or administrator of that computer decides (machine policy).", [], false, true);
+      return view("Not allowed by the remote computer's policy. The person or administrator of that computer decides (machine policy).", [], true, true);
     case "needs-service":
       return view("Needs Tether's service on the remote computer (Tether installed as a service).", [], false, true);
     case "not-supported":

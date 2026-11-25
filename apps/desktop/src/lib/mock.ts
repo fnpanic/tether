@@ -190,7 +190,13 @@ export const mock = {
         if (a.action === "install") return { state: "installed", version: "0.2.0", installed_by: "session", detail: "installed 0.2.0, service running, linked to Tether ID 731204986 by proof", at: t } as T;
         if (a.action === "remove") return { state: "removed-by-tether", version: "", installed_by: "session", detail: "removed", at: t } as T;
         const st = want ?? "not-installed";
-        return { state: st, version: st.startsWith("installed") ? "0.2.0" : "", installed_by: st === "installed" ? "policy" : "", detail: st === "failed" ? "download refused: the file does not match the signed index" : "", at: st === "not-installed" ? 0 : t - 3 * 86400 } as T;
+        // The host's own reasons (agent_elevated.rs) for the states whose detail the dialog shows as its added line.
+        const detail: Record<string, string> = {
+          failed: "download refused: the file does not match the signed index",
+          "not-allowed": "Windows would not ask for confirmation on this computer; the person at the computer can install it there.",
+          busy: "The person at the computer said no a moment ago; ask again in 7 minutes.",
+        };
+        return { state: st, version: st.startsWith("installed") ? "0.2.0" : "", installed_by: st === "installed" ? "policy" : "", detail: Object.hasOwn(detail, st) ? detail[st] : "", at: st === "not-installed" ? 0 : t - 3 * 86400 } as T;
       }
       // `?agentcard=1`: the home view's Install card (policy install, Tether without its service);
       // Install… ends as if the person declined the prompt.

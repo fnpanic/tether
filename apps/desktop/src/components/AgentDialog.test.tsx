@@ -19,6 +19,11 @@ describe("session agent dialog", () => {
     expect(buttons(html({ a: ans("removed-locally", { at: 1_795_000_000 }), did: "status" }))).toEqual(["Install again…", "Close"]);
     expect(buttons(html({ a: ans("running"), did: "install" }))).toEqual(["Ask again", "Close"]);
     expect(buttons(html({ a: ans("not-allowed"), did: "status" }))).toEqual(["Close"]);
+    // the host's reason follows the state's own sentence
+    const na = html({ a: ans("not-allowed", { detail: "This computer's administrator has switched this off (machine policy)." }), did: "install" });
+    expect(na.indexOf("The remote computer says: “This computer&#x27;s administrator has switched this off (machine policy).”")).toBeGreaterThan(na.indexOf("Not allowed by the remote computer"));
+    expect(na.indexOf("Not allowed by the remote computer")).toBeGreaterThan(-1);
+    expect(html({ a: ans("busy", { detail: "Tether is installing the agent" }), did: "status" })).toContain("The remote computer says: “Tether is installing the agent”");
     expect(html({ a: ans("needs-service"), did: "status" })).toContain("Needs Tether&#x27;s service on the remote computer");
   });
   it("while asking: the progress line and no action buttons", () => {

@@ -43,8 +43,13 @@ describe("session dialog: one sentence and its buttons per state", () => {
     expect(v.text).toBe("The last action on the remote computer did not succeed.");
     expect(v.detail.length).toBe(300);
     expect(agentView(ans("installed", { version: "1".repeat(500) })).text.length).toBeLessThan(80);
-    // A refusal's own text (host wording, "this computer") is not shown: the sentence is the viewer's.
-    expect(agentView(ans("not-allowed", { detail: "not allowed by this computer's policy" })).detail).toBe("");
+    // A refusal's or a busy host's reason is the added line, after the viewer's own sentence.
+    const why = "Windows would not ask for confirmation on this computer; the person at the computer can install it there.";
+    const na = agentView(ans("not-allowed", { detail: `${why}‮` }));
+    expect([na.text, na.detail]).toEqual(["Not allowed by the remote computer's policy. The person or administrator of that computer decides (machine policy).", why]);
+    const busy = agentView(ans("busy", { detail: "The person at the computer said no a moment ago; ask again in 7 minutes." }), "install");
+    expect([busy.text, busy.detail, busy.problem]).toEqual(["Tether on the remote computer is busy with the agent right now. Ask again in a moment.", "The person at the computer said no a moment ago; ask again in 7 minutes.", false]);
+    expect(agentView(ans("busy", { detail: long })).detail.length).toBe(300);
     // The unknown state's name is not shown at all.
     expect(agentView(ans("<img src=x onerror=alert(1)>")).text).not.toContain("img");
     // Fields of the wrong type (a hostile or broken answer) read as empty.
