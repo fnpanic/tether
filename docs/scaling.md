@@ -248,9 +248,39 @@ from one address. The reference run is the same without members and junk (`MEMBE
   real server before relying on more than one run here.
 
 Not measured: TLS and Caddy in front, real networks, more than 15 minutes, 2 000 members, desktops
-signed in through an identity provider (sessions), software search (not built), uploads of software
+signed in through an identity provider (sessions), uploads of software
 lists during the member load, the fleet's real rate of health changes (which decides the 304 share
 of whole-fleet members).
+
+**Software search** (*measured*, 2026-11-25, same PC and build, `MemoryMax=64M`; raw output in
+`tools/load/results/status-search-2026-11-25-*.txt`). The run above with every one of the 20 000
+devices holding a stored list (60 KiB, 200 programs each, with install paths and a hardware serial),
+`SEARCH=1`: `STATUS_SOFTWARE_SEARCH=on`, the signed team document written before the start, no
+sidecar at the start (the scan builds them all), and one search every 10 s from the start of the
+warm-up (eight terms in turn: programs on most hosts, on a few, a version prefix, and terms nobody
+has). 600 s run, 60 s warm-up and baseline; the reference is the same run without the search.
+
+```
+API_BIN=~/ha-build/bin/tether-api DEVICES=20000 SECS=600 WARMUP=60 BASELINE=60 MEMORY_MAX=64M \
+  STATUS_SBOM=on SBOM_DEVICES=20000 SBOM_UPLOAD_RPS=0 CUSTOMERS=500 SELF_CHECK=1 STATUS_TRACE_LOCK=1 \
+  MEMBERS=1000 SCOPED=500 JUNK=32 SEARCH=1 SEARCH_S=10 tools/load/status-run.sh
+```
+
+- **Start-up scan**: 19 900 sidecars built (234 MB, about 12 KB each) in about 350 s, about 57 a
+  second, while the relay served the full load; searches meanwhile counted the rest as `pending`.
+- **Search time** over 19 900 sidecars once all were built: 2.1 to 4.3 s (p50 about 2.7 s); the
+  slowest are terms nobody has (every line of every sidecar is read). Cold and warm are the same
+  here: the 234 MB of sidecars do not fit in the page cache the scope's 64 MiB leaves, so every search
+  reads them from disk. Answers of 2 000 hosts were 176 to 206 KB.
+- **Memory**: peak RSS over the relay's life 46.5 MiB with the search (reached while the scan built
+  sidecars), 42.1 MiB without; RSS at the end 41.7 vs 40.2 MiB. A search itself moved RSS by less
+  than 1 MiB.
+- **Device requests**: heartbeat probe during the run p50 / p99 / p99.9 / max 0.45 / 3.29 / 16.7 /
+  41.2 ms with the search, 0.51 / 1.22 / 18.9 / 134.8 ms without; device posts p99 29.7 ms vs
+  13.8 ms. The p99 rise is the disk: reading 234 MB every 10 s inside the 64 MiB scope (91 420
+  `max` reclaim events against 4 797). No state-lock hold over 20 ms came from the search or the scan.
+  One search every 10 s is far above what technicians do; on a real server, the first thing to
+  check is the disk.
 
 Disk writes of the status store at 20 000 devices: `seen.json` (about 22 MB, *estimated* from the
 entry sizes) is rewritten at most every 5 minutes, about 6 GB a day; a hard kill loses at most 5

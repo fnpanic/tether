@@ -1,0 +1,160 @@
+tether-api pid 1692 on 127.0.0.1:42037; 20000 devices, warm-up 60 s, baseline 60 s, run 600 s
+  search t=   0 s q="chrome" v="": 200 in 182 ms, 2 hosts, more 0, pending 19898, partial false, 275 bytes; relay RSS 39.6 MiB, peak 40.2 MiB
+devices 20000 (100 enrolled through the API in 4.4 s), next 2000 s, posts about 10.0/s
+warm-up: 60 s of probes (not measured)
+  search t=  10 s q="example application 1234" v="": 200 in 110 ms, 17 hosts, more 0, pending 19590, partial false, 1818 bytes; relay RSS 40.2 MiB, peak 40.2 MiB
+  search t=  20 s q="firefox" v="11": 200 in 145 ms, 243 hosts, more 0, pending 18944, partial false, 23870 bytes; relay RSS 40.3 MiB, peak 40.6 MiB
+  search t=  30 s q="acrobat" v="": 200 in 235 ms, 1330 hosts, more 0, pending 18247, partial false, 136854 bytes; relay RSS 40.7 MiB, peak 40.8 MiB
+  search t=  40 s q="nobody-has-this" v="": 200 in 353 ms, 0 hosts, more 0, pending 17552, partial false, 84 bytes; relay RSS 40.7 MiB, peak 40.9 MiB
+  search t=  51 s q="7-zip" v="": 200 in 576 ms, 2000 hosts, more 242, pending 17114, partial false, 175753 bytes; relay RSS 41.2 MiB, peak 41.2 MiB
+  search t=  61 s q="microsoft edge" v="1": 200 in 494 ms, 2000 hosts, more 807, pending 16367, partial false, 193749 bytes; relay RSS 41.5 MiB, peak 43.3 MiB
+  self-check: a 1 ms sleep in the generator woke up to 1.2 ms late, 0 times more than 20 ms late
+tether-api RSS: 40.2 MiB after enrolment, 41.5 MiB after the warm-up (the reference)
+baseline: 60 s of probes alone
+  search t=  71 s q="example vendor 7" v="": 200 in 764 ms, 0 hosts, more 0, pending 15667, partial false, 84 bytes; relay RSS 41.4 MiB, peak 43.3 MiB
+  search t=  81 s q="chrome" v="": 200 in 593 ms, 2000 hosts, more 1767, pending 15152, partial false, 191758 bytes; relay RSS 41.8 MiB, peak 43.3 MiB
+  search t=  92 s q="example application 1234" v="": 200 in 857 ms, 318 hosts, more 0, pending 14645, partial false, 32551 bytes; relay RSS 41.7 MiB, peak 43.3 MiB
+  search t= 102 s q="firefox" v="11": 200 in 771 ms, 1621 hosts, more 0, pending 13878, partial false, 158691 bytes; relay RSS 41.9 MiB, peak 43.3 MiB
+  search t= 112 s q="acrobat" v="": 200 in 684 ms, 2000 hosts, more 3415, pending 13191, partial false, 205742 bytes; relay RSS 42.0 MiB, peak 43.3 MiB
+  search t= 122 s q="nobody-has-this" v="": 200 in 1146 ms, 0 hosts, more 0, pending 12442, partial false, 84 bytes; relay RSS 41.8 MiB, peak 43.3 MiB
+  self-check: a 1 ms sleep in the generator woke up to 13.9 ms late, 0 times more than 20 ms late
+run: 600 s, 5999 status posts scheduled, 600 new enrolments, summary every 30 s, metrics every 15 s
+members: 1000 (500 limited to one of 500 customers, 10 % without gzip), 4677 requests scheduled
+  search t= 132 s q="7-zip" v="": 200 in 966 ms, 2000 hosts, more 4468, pending 11883, partial false, 175754 bytes; relay RSS 42.2 MiB, peak 43.3 MiB
+  search t= 143 s q="microsoft edge" v="1": 200 in 1128 ms, 2000 hosts, more 4872, pending 11248, partial false, 193750 bytes; relay RSS 42.4 MiB, peak 43.3 MiB
+  search t= 155 s q="example vendor 7" v="": 200 in 2920 ms, 0 hosts, more 0, pending 10709, partial false, 84 bytes; relay RSS 42.5 MiB, peak 43.5 MiB
+  search t= 163 s q="chrome" v="": 200 in 1320 ms, 2000 hosts, more 5609, pending 10330, partial false, 191758 bytes; relay RSS 42.7 MiB, peak 43.5 MiB
+  search t= 174 s q="example application 1234" v="": 200 in 1963 ms, 640 hosts, more 0, pending 9905, partial false, 65475 bytes; relay RSS 42.5 MiB, peak 43.5 MiB
+  search t= 184 s q="firefox" v="11": 200 in 1858 ms, 2000 hosts, more 806, pending 9421, partial false, 195764 bytes; relay RSS 42.7 MiB, peak 43.5 MiB
+  search t= 194 s q="acrobat" v="": 200 in 1620 ms, 2000 hosts, more 6940, pending 8779, partial false, 205741 bytes; relay RSS 43.0 MiB, peak 43.5 MiB
+  search t= 204 s q="nobody-has-this" v="": 200 in 2039 ms, 0 hosts, more 0, pending 8039, partial false, 83 bytes; relay RSS 43.1 MiB, peak 43.8 MiB
+  search t= 214 s q="7-zip" v="": 200 in 1447 ms, 2000 hosts, more 7965, pending 7497, partial false, 175753 bytes; relay RSS 43.2 MiB, peak 44.2 MiB
+  search t= 224 s q="microsoft edge" v="1": 200 in 1648 ms, 2000 hosts, more 8496, pending 6760, partial false, 193749 bytes; relay RSS 43.3 MiB, peak 44.2 MiB
+  search t= 236 s q="example vendor 7" v="": 200 in 3526 ms, 0 hosts, more 0, pending 6030, partial false, 83 bytes; relay RSS 43.1 MiB, peak 44.2 MiB
+  search t= 245 s q="chrome" v="": 200 in 3050 ms, 2000 hosts, more 9460, pending 5540, partial false, 191757 bytes; relay RSS 43.6 MiB, peak 44.2 MiB
+  search t= 256 s q="example application 1234" v="": 200 in 3482 ms, 959 hosts, more 0, pending 5105, partial false, 98068 bytes; relay RSS 43.6 MiB, peak 44.2 MiB
+  search t= 265 s q="firefox" v="11": 200 in 2660 ms, 2000 hosts, more 2097, pending 4533, partial false, 195765 bytes; relay RSS 43.8 MiB, peak 44.4 MiB
+  search t= 276 s q="acrobat" v="": 200 in 3179 ms, 2000 hosts, more 10849, pending 3889, partial false, 205742 bytes; relay RSS 43.9 MiB, peak 44.6 MiB
+  search t= 285 s q="nobody-has-this" v="": 200 in 2655 ms, 0 hosts, more 0, pending 3153, partial false, 83 bytes; relay RSS 43.9 MiB, peak 44.6 MiB
+  search t= 295 s q="7-zip" v="": 200 in 2031 ms, 2000 hosts, more 11869, pending 2600, partial false, 175754 bytes; relay RSS 43.9 MiB, peak 44.6 MiB
+  search t= 305 s q="microsoft edge" v="1": 200 in 2264 ms, 2000 hosts, more 12306, pending 2036, partial false, 193750 bytes; relay RSS 44.1 MiB, peak 44.9 MiB
+  search t= 318 s q="example vendor 7" v="": 200 in 4569 ms, 0 hosts, more 0, pending 1330, partial false, 83 bytes; relay RSS 44.2 MiB, peak 45.0 MiB
+  search t= 327 s q="chrome" v="": 200 in 3504 ms, 2000 hosts, more 13141, pending 938, partial false, 191757 bytes; relay RSS 44.3 MiB, peak 45.4 MiB
+  search t= 337 s q="example application 1234" v="": 200 in 4109 ms, 1248 hosts, more 0, pending 489, partial false, 127585 bytes; relay RSS 44.4 MiB, peak 45.4 MiB
+  search t= 347 s q="firefox" v="11": 200 in 3384 ms, 2000 hosts, more 3312, pending 0, partial false, 195762 bytes; relay RSS 40.1 MiB, peak 45.4 MiB
+  search t= 356 s q="acrobat" v="": 200 in 2392 ms, 2000 hosts, more 13920, pending 0, partial false, 205739 bytes; relay RSS 40.5 MiB, peak 45.4 MiB
+  search t= 368 s q="nobody-has-this" v="": 200 in 4271 ms, 0 hosts, more 0, pending 0, partial false, 80 bytes; relay RSS 40.5 MiB, peak 45.4 MiB
+  search t= 377 s q="7-zip" v="": 200 in 2816 ms, 2000 hosts, more 13920, pending 0, partial false, 175751 bytes; relay RSS 40.5 MiB, peak 45.4 MiB
+  search t= 387 s q="microsoft edge" v="1": 200 in 2902 ms, 2000 hosts, more 13920, pending 0, partial false, 193747 bytes; relay RSS 40.6 MiB, peak 45.4 MiB
+  search t= 398 s q="example vendor 7" v="": 200 in 4293 ms, 0 hosts, more 0, pending 0, partial false, 80 bytes; relay RSS 40.8 MiB, peak 45.4 MiB
+  search t= 407 s q="chrome" v="": 200 in 2623 ms, 2000 hosts, more 13920, pending 0, partial false, 191755 bytes; relay RSS 40.5 MiB, peak 45.4 MiB
+  search t= 417 s q="example application 1234" v="": 200 in 3065 ms, 1277 hosts, more 0, pending 0, partial false, 130549 bytes; relay RSS 41.0 MiB, peak 45.4 MiB
+  search t= 427 s q="firefox" v="11": 200 in 2599 ms, 2000 hosts, more 3312, pending 0, partial false, 195762 bytes; relay RSS 41.1 MiB, peak 45.4 MiB
+  search t= 437 s q="acrobat" v="": 200 in 2436 ms, 2000 hosts, more 13920, pending 0, partial false, 205739 bytes; relay RSS 41.1 MiB, peak 45.4 MiB
+  search t= 447 s q="nobody-has-this" v="": 200 in 3083 ms, 0 hosts, more 0, pending 0, partial false, 80 bytes; relay RSS 41.1 MiB, peak 45.4 MiB
+  search t= 457 s q="7-zip" v="": 200 in 2308 ms, 2000 hosts, more 13920, pending 0, partial false, 175751 bytes; relay RSS 41.2 MiB, peak 45.4 MiB
+  search t= 467 s q="microsoft edge" v="1": 200 in 2445 ms, 2000 hosts, more 13920, pending 0, partial false, 193747 bytes; relay RSS 41.2 MiB, peak 45.4 MiB
+  search t= 478 s q="example vendor 7" v="": 200 in 3895 ms, 0 hosts, more 0, pending 0, partial false, 80 bytes; relay RSS 41.2 MiB, peak 45.4 MiB
+  search t= 487 s q="chrome" v="": 200 in 2795 ms, 2000 hosts, more 13920, pending 0, partial false, 191755 bytes; relay RSS 41.2 MiB, peak 45.4 MiB
+  search t= 499 s q="example application 1234" v="": 200 in 3963 ms, 1277 hosts, more 0, pending 0, partial false, 130549 bytes; relay RSS 41.4 MiB, peak 45.4 MiB
+  search t= 508 s q="firefox" v="11": 200 in 2837 ms, 2000 hosts, more 3312, pending 0, partial false, 195762 bytes; relay RSS 41.3 MiB, peak 45.4 MiB
+  search t= 517 s q="acrobat" v="": 200 in 2531 ms, 2000 hosts, more 13920, pending 0, partial false, 205739 bytes; relay RSS 41.3 MiB, peak 45.4 MiB
+  search t= 528 s q="nobody-has-this" v="": 200 in 3314 ms, 0 hosts, more 0, pending 0, partial false, 80 bytes; relay RSS 41.1 MiB, peak 45.4 MiB
+  search t= 538 s q="7-zip" v="": 200 in 2430 ms, 2000 hosts, more 13920, pending 0, partial false, 175751 bytes; relay RSS 41.3 MiB, peak 45.4 MiB
+  search t= 548 s q="microsoft edge" v="1": 200 in 2411 ms, 2000 hosts, more 13920, pending 0, partial false, 193747 bytes; relay RSS 41.3 MiB, peak 45.4 MiB
+  search t= 559 s q="example vendor 7" v="": 200 in 4069 ms, 0 hosts, more 0, pending 0, partial false, 80 bytes; relay RSS 41.9 MiB, peak 45.4 MiB
+  search t= 568 s q="chrome" v="": 200 in 2617 ms, 2000 hosts, more 13920, pending 0, partial false, 191755 bytes; relay RSS 41.4 MiB, peak 45.4 MiB
+  search t= 579 s q="example application 1234" v="": 200 in 3769 ms, 1277 hosts, more 0, pending 0, partial false, 130549 bytes; relay RSS 41.1 MiB, peak 45.4 MiB
+  search t= 589 s q="firefox" v="11": 200 in 3078 ms, 2000 hosts, more 3312, pending 0, partial false, 195762 bytes; relay RSS 41.3 MiB, peak 45.4 MiB
+  search t= 598 s q="acrobat" v="": 200 in 2257 ms, 2000 hosts, more 13920, pending 0, partial false, 205739 bytes; relay RSS 41.6 MiB, peak 45.4 MiB
+  search t= 609 s q="nobody-has-this" v="": 200 in 3442 ms, 0 hosts, more 0, pending 0, partial false, 80 bytes; relay RSS 41.5 MiB, peak 45.4 MiB
+  search t= 619 s q="7-zip" v="": 200 in 3105 ms, 2000 hosts, more 13920, pending 0, partial false, 175751 bytes; relay RSS 41.6 MiB, peak 45.4 MiB
+  search t= 628 s q="microsoft edge" v="1": 200 in 2314 ms, 2000 hosts, more 13920, pending 0, partial false, 193747 bytes; relay RSS 41.6 MiB, peak 45.4 MiB
+  search t= 639 s q="example vendor 7" v="": 200 in 3055 ms, 0 hosts, more 0, pending 0, partial false, 80 bytes; relay RSS 41.3 MiB, peak 45.4 MiB
+  search t= 649 s q="chrome" v="": 200 in 2639 ms, 2000 hosts, more 13920, pending 0, partial false, 191755 bytes; relay RSS 41.5 MiB, peak 45.4 MiB
+  search t= 660 s q="example application 1234" v="": 200 in 3676 ms, 1277 hosts, more 0, pending 0, partial false, 130549 bytes; relay RSS 41.6 MiB, peak 45.4 MiB
+  search t= 669 s q="firefox" v="11": 200 in 2749 ms, 2000 hosts, more 3312, pending 0, partial false, 195762 bytes; relay RSS 41.6 MiB, peak 45.4 MiB
+  search t= 679 s q="acrobat" v="": 200 in 2224 ms, 2000 hosts, more 13920, pending 0, partial false, 205739 bytes; relay RSS 41.6 MiB, peak 45.4 MiB
+  search t= 690 s q="nobody-has-this" v="": 200 in 3252 ms, 0 hosts, more 0, pending 0, partial false, 80 bytes; relay RSS 41.3 MiB, peak 45.4 MiB
+  search t= 699 s q="7-zip" v="": 200 in 2549 ms, 2000 hosts, more 13920, pending 0, partial false, 175751 bytes; relay RSS 41.4 MiB, peak 45.4 MiB
+  search t= 709 s q="microsoft edge" v="1": 200 in 2092 ms, 2000 hosts, more 13920, pending 0, partial false, 193747 bytes; relay RSS 41.7 MiB, peak 45.4 MiB
+  search t= 719 s q="example vendor 7" v="": 200 in 2635 ms, 0 hosts, more 0, pending 0, partial false, 80 bytes; relay RSS 41.7 MiB, peak 45.4 MiB
+  self-check: a 1 ms sleep in the generator woke up to 33.5 ms late, 3 times more than 20 ms late
+
+heartbeat baseline       n=1200   p50=   0.47  p99=   0.86  p99.9=   6.47  max=    7.76 ms  codes={200: 1200}
+heartbeat during run     n=12000  p50=   0.45  p99=   3.29  p99.9=  16.67  max=   41.17 ms  codes={200: 12000}
+policy baseline          n=1200   p50=   0.47  p99=   0.92  p99.9=   6.51  max=    7.71 ms  codes={200: 1200}
+policy during run        n=12000  p50=   0.49  p99=   3.28  p99.9=  17.15  max=   41.17 ms  codes={200: 12000}
+status posts             n=5999   p50=   0.54  p99=  29.67  p99.9=  65.59  max=  101.39 ms  codes={200: 5999}
+new enrolments           n=600    p50=   6.73  p99=  73.03  p99.9= 103.83  max=  103.83 ms  codes={200: 600}
+team summary             n=20     p50=  77.07  p99= 575.64  p99.9= 575.64  max=  575.64 ms  codes={200: 20}
+metrics scrapes          n=40     p50= 384.18  p99= 835.62  p99.9= 835.62  max=  835.62 ms  codes={200: 40}
+member summary           n=2000   p50=  12.58  p99=1645.79  p99.9=3099.42  max= 3142.76 ms  codes={200: 1500, 304: 491, 503: 9}
+  3.33 requests/s, 6483672 bytes/s out
+member host open         n=2000   p50=   7.15  p99= 150.82  p99.9=1419.98  max= 1987.68 ms  codes={200: 1996, 404: 4}
+  3.33 requests/s, 1159 bytes/s out
+member software list     n=677    p50=   7.61  p99= 298.73  p99.9=1895.94  max= 1895.94 ms  codes={200: 677}
+  1.13 requests/s, 69037 bytes/s out
+summary answers: 1350 200 gzip (1315990 bytes avg), 150 200 plain (14090774 bytes avg), 491 304: 304 share 24.7 %
+junk without kid         n=19200  p50=   1.39  p99= 119.69  p99.9= 174.46  max=  189.65 ms  codes={401: 652, 429: 18526, 503: 22}
+software searches        n=72     p50=2549.38  p99=4568.62  p99.9=4568.62  max= 4568.62 ms  codes={200: 72}
+full summary: 21125065 bytes plain, 1979240 bytes gzip (10.7 x), 19924 hosts
+  metrics: tether_api_busy_rejected_total 22
+  metrics: tether_api_status_summary_builds_total 989
+  metrics: tether_api_status_summary_build_seconds_total 35.54264
+  metrics: tether_api_status_summary_build_seconds_max 3.098697
+  metrics: tether_api_status_software_searches_total 72
+  metrics: tether_api_status_software_search_seconds_total 168.247775
+  metrics: tether_api_status_software_search_seconds_max 4.553908
+  metrics: tether_api_team_audit_records_total 3760
+  metrics: tether_api_team_audit_dropped_total 0
+  metrics: tether_api_team_audit_write_failed_total 0
+  metrics: requests endpoint="admin",code="204": 2
+  metrics: requests endpoint="heartbeat",code="200": 14400
+  metrics: requests endpoint="policy",code="200": 14400
+  metrics: requests endpoint="status",code="200": 6700
+  metrics: requests endpoint="team",code="200": 4267
+  metrics: requests endpoint="team",code="304": 491
+  metrics: requests endpoint="team",code="401": 652
+  metrics: requests endpoint="team",code="404": 4
+  metrics: requests endpoint="team",code="429": 18526
+  metrics: requests endpoint="team",code="503": 9
+tether-api RSS: reference 41.5 MiB, end 41.7 MiB, peak 45.3 MiB
+tether-api RSS each minute of the run (MiB): 41.8 42.8 43.6 44.2 40.8 40.9 41.3 41.3 41.5 41.6
+
+FAIL heartbeat p99 3.29 ms <= 1.2 x 0.86 + 2 ms
+FAIL heartbeat p99.9 16.67 ms <= 1.5 x 6.47 + 5 ms
+ok   heartbeat slowest 41.17 ms <= 50 ms
+FAIL policy p99 3.28 ms <= 1.2 x 0.92 + 2 ms
+FAIL policy p99.9 17.15 ms <= 1.5 x 6.51 + 5 ms
+ok   policy slowest 41.17 ms <= 50 ms
+ok   no 5xx (also no 503 busy) and no connection errors on any route
+ok   status 429: 0 of 5999 posts <= 0.1 %
+ok   every status post accepted or 429
+ok   every probe, enrolment, summary and scrape answered 200
+ok   every software list upload accepted (204) or 429
+FAIL every member request answered 200 or 304 (no 429, no 5xx, no connection error)
+ok   every software search answered 200
+ok   peak RSS 45.3 MiB < 48 MiB
+ok   RSS at the end within 10 % of the reference (41.7 vs 41.5 MiB)
+FAIL
+cgroup: memory.max 67108864, memory.peak 67112960 bytes (page cache included), events: low 0 high 0 max 91420 oom 0 oom_kill 0 oom_group_kill 0; file 6230016, anon 41046016
+team audit log: 3760 lines, 1000K
+tether-api peak RSS over its life (VmHWM): 46488 kB
+sidecars: 19900 files, 234.4 MB; scan: status: software search on status: software search sidecars: 19900 built, 0 removed 
+tether-api: team: signed team document 2 accepted (1002 members, 1002 with a key here)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+state-lock holds over 20 ms: 4
+  lock held 54 ms: PUT /api/admin/policy
+  lock held 40 ms: maintain
+  lock held 33 ms: PUT /api/admin/team
+  lock held 23 ms: maintain

@@ -289,10 +289,10 @@ fn search_loop(addr: &str, member: &SigningKey, second: &SigningKey, every_s: u6
         let hwm = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default().lines().find_map(|l| l.strip_prefix("VmHWM:")?.split_whitespace().next()?.parse::<u64>().ok()).unwrap_or(0);
         match &r {
             Ok(r) => {
-                let v: Value = serde_json::from_str(&r.body).unwrap_or(Value::Null);
+                let a: Value = serde_json::from_str(&r.body).unwrap_or(Value::Null);
                 println!(
                     "  search t={:>4} s q={q:?} v={v:?}: {} in {:.0} ms, {} hosts, more {}, pending {}, partial {}, {} bytes; relay RSS {:.1} MiB, peak {:.1} MiB",
-                    start.elapsed().as_secs(), r.status, r.took.as_secs_f64() * 1000., v["hosts"].as_array().map_or(0, Vec::len), v["more"], v["pending"], v["partial"], r.bytes, rss_kib(pid) as f64 / 1024., hwm as f64 / 1024.
+                    start.elapsed().as_secs(), r.status, r.took.as_secs_f64() * 1000., a["hosts"].as_array().map_or(0, Vec::len), a["more"], a["pending"], a["partial"], r.bytes, rss_kib(pid) as f64 / 1024., hwm as f64 / 1024.
                 );
             }
             Err(e) => println!("  search t={} s: {e}", start.elapsed().as_secs()),
