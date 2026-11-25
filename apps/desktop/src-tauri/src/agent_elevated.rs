@@ -235,12 +235,14 @@ pub enum Kind {
 }
 
 /// Who asks, for what. `viewer`: the name the technician's Tether gave (None: the person at this
-/// computer clicked); `org`: `customer.title` or the product name; `relays`: host names it reports to.
+/// computer clicked); `org`: the product name; `support_org`: the support organisation's name from
+/// the signed policy or custom app (empty: none known); `relays`: host names it reports to.
 #[derive(Debug, Clone)]
 pub struct Ask {
     pub kind: Kind,
     pub viewer: Option<String>,
     pub org: String,
+    pub support_org: String,
     pub relays: Vec<String>,
     /// Windows will show its prompt (false only for the local person's own click: [`Uac::silent`]).
     pub prompt: bool,
@@ -290,7 +292,8 @@ pub fn dialog(id: u64, a: &Ask) -> Dialog {
         Kind::Install => ("Install the health monitoring program?", format!("{who} asks to install Tether Monitor."), "Install", "Don't install"),
         Kind::Remove => ("Remove the health monitoring program?", format!("{who} asks to remove Tether Monitor from this computer. It stops sending information."), "Remove", "Don't remove"),
     };
-    let mut paragraphs: Vec<String> = std::iter::once(ask).chain(named).collect();
+    let org_line = Some(shown_name(&a.support_org)).filter(|n| !n.is_empty()).map(|n| format!("Your support organisation: {n}"));
+    let mut paragraphs: Vec<String> = std::iter::once(ask).chain(org_line).chain(named).collect();
     if a.kind == Kind::Install {
         paragraphs.push(format!("It runs in the background as a Windows service, {stays}, and sends information about the computer's state and installed software to {to}."));
         paragraphs.push("What it sends is listed in Tether's privacy policy (PRIVACY.md in Tether's documentation, rows “Health report” and “Software list”).".into());
@@ -499,8 +502,21 @@ pub struct Inputs {
     pub elevate: bool,
     /// This program's Tether ID and the 32-byte seed of the key it registers with hbbs.
     pub identity: Option<(String, [u8; 32])>,
+    /// The product name; `support_org`: see [`Ask`].
     pub org: String,
+    pub support_org: String,
     pub relays: Vec<String>,
+    /// The machine policy (GPO) sets `health.agent` to `manual` ([`machine_manual`]).
+    pub machine_off: bool,
+}
+
+/// Whether a machine policy `PolicyJson` (a policy layer) sets `health.agent` to `manual`. Only that
+/// one rule is read; anything unreadable is no rule (as the desktop's machine layer ignores it).
+pub fn machine_manual(raw: Option<&str>) -> bool {
+    use tether_trust::policy::{resolve, Layer, Rule, PROFILE_CUSTOMER};
+    let rule = raw.and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok()).and_then(|v| v.get("health.agent").cloned()).and_then(|r| serde_json::from_value::<Rule>(r).ok());
+    // resolved like any machine rule (`off` means manual too); absent: the default, not the machine's word
+    rule.is_some_and(|r| resolve(None, PROFILE_CUSTOMER, "", Some(&Layer::from([("health.agent".to_owned(), r)]))).get("health.agent") == "manual")
 }
 
 /// `health-agent.json` in the per-user folder: what this program did (never the grant or the proof).
@@ -554,6 +570,7 @@ fn busy() -> AgentAnswer {
 }
 
 const NOT_ALLOWED: &str = "not allowed by this computer's policy";
+const MACHINE_OFF: &str = "This computer's administrator has switched this off (machine policy).";
 const NO_ELEVATE: &str = "not allowed: this computer's policy does not allow administrator prompts";
 const DECLINED: &str = "Administrator approval was not given (declined, or no administrator's name and password).";
 const MAY_STILL_RUN: &str = "the agent Tether started may still be running; ask for the status again in a few minutes";
@@ -600,6 +617,9 @@ impl Host<'_> {
 
     /// `not-allowed` with its reason, before any dialog.
     fn refused(&self) -> Option<AgentAnswer> {
+        if self.p.machine_off {
+            return Some(AgentAnswer::only("not-allowed", MACHINE_OFF));
+        }
         if !active(&self.p.mode) {
             return Some(AgentAnswer::only("not-allowed", NOT_ALLOWED));
         }
@@ -718,7 +738,7 @@ impl Host<'_> {
     }
 
     fn ask(&self, kind: Kind, viewer: Option<&str>, prompt: bool, now: u64) -> Result<(), String> {
-        let d = dialog(next_id(), &Ask { kind, viewer: viewer.map(str::to_owned), org: self.p.org.clone(), relays: self.p.relays.clone(), prompt });
+        let d = dialog(next_id(), &Ask { kind, viewer: viewer.map(str::to_owned), org: self.p.org.clone(), support_org: self.p.support_org.clone(), relays: self.p.relays.clone(), prompt });
         let why = match self.m.consent(&d) {
             Consent::Yes => return Ok(()),
             Consent::No => "The person at the computer declined.",
@@ -961,6 +981,23 @@ pub mod win {
         let mut size = std::mem::size_of_val(&buf) as u32;
         let r = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, null_mut(), buf.as_mut_ptr().cast(), &mut size) };
         (r == 0).then(|| String::from_utf16_lossy(&buf[..(size as usize / 2).min(buf.len())]).trim_end_matches('\0').trim().to_owned())
+    }
+
+    /// `PolicyJson` (REG_SZ) under `HKLM\<key>`, 64-bit view, read only, at most 1 MiB.
+    pub fn machine_policy(key: &str) -> Option<String> {
+        use windows_sys::Win32::System::Registry::RRF_RT_REG_SZ;
+        let (key, name) = (wide(std::ffi::OsStr::new(key)), wide(std::ffi::OsStr::new("PolicyJson")));
+        let get = |buf: *mut std::ffi::c_void, size: &mut u32| unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, null_mut(), buf, size) };
+        let mut size = 0u32;
+        if get(null_mut(), &mut size) != 0 || size == 0 || size > 1 << 20 {
+            return None;
+        }
+        let mut buf = vec![0u16; size as usize / 2];
+        if get(buf.as_mut_ptr().cast(), &mut size) != 0 {
+            return None;
+        }
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..len]))
     }
 
     fn hklm_dword(key: &str, value: &str) -> Option<u32> {
@@ -1597,7 +1634,7 @@ mod tests {
             owner_at_launch: Cell::new(None),
         };
         DECLINED_AT.store(0, Ordering::Relaxed);
-        let p = Inputs { mode: mode.into(), grant: token.clone(), channel: "stable".into(), admin: vec![k.admin.verifying_key()], updater_key: k.public.clone(), elevate: true, identity: Some((ID.into(), SEED)), org: "Example Support".into(), relays: vec!["relay.test".into()] };
+        let p = Inputs { mode: mode.into(), grant: token.clone(), channel: "stable".into(), admin: vec![k.admin.verifying_key()], updater_key: k.public.clone(), elevate: true, identity: Some((ID.into(), SEED)), org: "Example Support".into(), relays: vec!["relay.test".into()], ..Default::default() };
         World { k, fake, p, token, _one: one }
     }
 
@@ -1798,7 +1835,7 @@ mod tests {
 
     #[test]
     fn the_window_answers_only_the_dialog_it_was_shown() {
-        let d = dialog(next_id(), &Ask { kind: Kind::Install, viewer: None, org: "".into(), relays: vec![], prompt: true });
+        let d = dialog(next_id(), &Ask { kind: Kind::Install, viewer: None, org: "".into(), support_org: "".into(), relays: vec![], prompt: true });
         assert_eq!(d.paragraphs[0], "Your organisation asks to install Tether Monitor.");
         let id = d.id;
         let t = std::thread::spawn(move || ask_window(d, || true, Duration::from_secs(5)));
@@ -1812,7 +1849,7 @@ mod tests {
         assert_eq!(t.join().unwrap(), Consent::No);
         assert!(pending().is_none());
         // no answer in time
-        let d = dialog(next_id(), &Ask { kind: Kind::Remove, viewer: Some("\u{202e}evil\u{0007}".into()), org: "Org".into(), relays: vec![], prompt: true });
+        let d = dialog(next_id(), &Ask { kind: Kind::Remove, viewer: Some("\u{202e}evil\u{0007}".into()), org: "Org".into(), support_org: "".into(), relays: vec![], prompt: true });
         assert_eq!(d.paragraphs[1], "Name given by the technician (not verified): evil", "{d:?}");
         assert_eq!(ask_window(d, || true, Duration::from_millis(50)), Consent::NoAnswer);
         assert!(pending().is_none());
@@ -1889,8 +1926,48 @@ mod tests {
     }
 
     #[test]
+    fn the_support_organisation_stands_on_its_own_line_when_known() {
+        let ask = |org: &str, viewer: Option<&str>| dialog(1, &Ask { kind: Kind::Install, viewer: viewer.map(Into::into), org: "TetherQS".into(), support_org: org.into(), relays: vec![], prompt: true });
+        let d = ask("Example Practice IT\u{202e}\u{0007}", Some("Sam"));
+        assert_eq!(d.paragraphs[0], "A technician (support of TetherQS) asks to install Tether Monitor.");
+        assert_eq!(d.paragraphs[1], "Your support organisation: Example Practice IT");
+        assert_eq!(d.paragraphs[2], "Name given by the technician (not verified): Sam");
+        assert_eq!(ask(&"y".repeat(500), None).paragraphs[1], format!("Your support organisation: {}", "y".repeat(64)));
+        // none known (the desktop's policy has none): no line, the product name stays in the sentence
+        for none in ["", " \u{2060} "] {
+            assert!(!ask(none, Some("Sam")).paragraphs.iter().any(|p| p.contains("support organisation")));
+        }
+    }
+
+    #[test]
+    fn a_machine_policy_manual_refuses_everything_before_any_dialog() {
+        for (raw, manual) in [
+            (r#"{"health.agent":{"state":"locked","value":"manual"}}"#, true),
+            (r#"{"health.agent":{"state":"on","value":"manual"}}"#, true),
+            (r#"{"health.agent":{"state":"off"}}"#, true),
+            (r#"{"health.agent":{"state":"locked","value":"install"}}"#, false),
+            // other rules, even unknown or broken ones, do not matter; only this one is read
+            (r#"{"connect.chat":{"state":"off"},"x.unknown":{"bad":1},"health.agent":{"state":"locked","value":"manual"}}"#, true),
+            (r#"{"connect.chat":{"state":"off"}}"#, false),
+            (r#"{"health.agent":{"state":"locked","value":"manual","extra":1}}"#, false),
+            ("not json", false),
+            ("", false),
+        ] {
+            assert_eq!(machine_manual(Some(raw)), manual, "{raw}");
+        }
+        assert!(!machine_manual(None));
+        let mut w = world("machineoff", "install");
+        w.p.machine_off = true;
+        for (action, viewer) in [(Action::Install, Some("x")), (Action::Remove, Some("x")), (Action::Status, Some("x")), (Action::Install, None)] {
+            let a = w.host().request(action, viewer, NOW);
+            assert_eq!((a.state.as_str(), a.detail.as_str()), ("not-allowed", "This computer's administrator has switched this off (machine policy)."), "{action:?} {viewer:?}");
+        }
+        assert!(w.fake.dialogs.borrow().is_empty() && w.fake.fetches.get() == 0 && w.fake.launched.borrow().is_empty());
+    }
+
+    #[test]
     fn the_name_stands_on_its_own_line_cleaned_and_bounded() {
-        let ask = |viewer: &str| dialog(1, &Ask { kind: Kind::Install, viewer: Some(viewer.into()), org: "Org\u{2066}".into(), relays: vec!["relay\u{2028}.test".into()], prompt: true });
+        let ask = |viewer: &str| dialog(1, &Ask { kind: Kind::Install, viewer: Some(viewer.into()), org: "Org\u{2066}".into(), support_org: "".into(), relays: vec!["relay\u{2028}.test".into()], prompt: true });
         let d = ask("Sam\u{061c}\u{2028}\u{2029}\u{2060}\u{2061}\u{2064}\u{200b} says: approve");
         assert_eq!(d.paragraphs[1], "Name given by the technician (not verified): Sam says: approve");
         assert!(d.paragraphs[0].starts_with("A technician (support of Org)") && !d.paragraphs[0].contains("Sam"), "{d:?}");
@@ -1900,7 +1977,7 @@ mod tests {
         // a name of only hidden characters: no name line
         assert!(!ask("\u{2060}\u{202e}").paragraphs.iter().any(|p| p.starts_with("Name given")));
         // the person here: no technician, no "after this session"
-        let d = dialog(2, &Ask { kind: Kind::Install, viewer: None, org: "Org".into(), relays: vec![], prompt: true });
+        let d = dialog(2, &Ask { kind: Kind::Install, viewer: None, org: "Org".into(), support_org: "".into(), relays: vec![], prompt: true });
         assert_eq!(d.paragraphs[0], "Your organisation (Org) asks to install Tether Monitor.");
         assert!(d.paragraphs[1].contains("stays on this computer,") && !d.paragraphs.iter().any(|p| p.contains("after this session")), "{d:?}");
         assert_eq!(tidy("a\u{2028}b\u{061c}c\u{2063}d"), "abcd");

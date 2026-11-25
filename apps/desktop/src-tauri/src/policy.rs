@@ -385,7 +385,7 @@ fn machine_layer() -> Option<Layer> {
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-const MACHINE_POLICY_KEY: &str = concat!("SOFTWARE\\Policies\\", env!("TETHER_APP_NAME"));
+pub(crate) const MACHINE_POLICY_KEY: &str = concat!("SOFTWARE\\Policies\\", env!("TETHER_APP_NAME"));
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn managed_preferences_domain() -> String {

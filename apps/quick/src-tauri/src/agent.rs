@@ -2,7 +2,7 @@
 //! pre-dialog for the shared elevated path (`agent_elevated.rs`, the desktop's file). TetherQS has no
 //! service and never runs the service's manager: the agent is installed only through the elevation
 //! prompt, after the person here said yes, and linked to TetherQS's own ID with TetherQS's own key.
-//! `customer.elevate` off refuses before any dialog.
+//! `customer.elevate` off, or the machine policy's `health.agent` = `manual`, refuses before any dialog.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use librustdesk::ui::agent::{Action as CoreAction, TetherAgentAnswer};
@@ -13,10 +13,16 @@ fn wire(a: AgentAnswer) -> TetherAgentAnswer {
     TetherAgentAnswer { state: a.state, version: a.version, installed_by: a.installed_by, detail: a.detail, at: a.at, ..Default::default() }
 }
 
-/// What the customer profile and this build say.
-fn inputs(e: &tether_trust::policy::Effective) -> el::Inputs {
+/// The installed Tether's machine policy key (the default build's `HKLM\SOFTWARE\Policies\Tether`):
+/// TetherQS reads only its `health.agent` rule, nothing else of that layer.
+const MACHINE_POLICY_KEY: &str = r"SOFTWARE\Policies\Tether";
+
+/// What the customer profile, the machine policy's `PolicyJson` (`machine`) and this build say.
+fn inputs(e: &tether_trust::policy::Effective, machine: Option<&str>) -> el::Inputs {
     let ch = e.get("update.channel");
+    // From the signed policy or the signed custom app; the feature's default names no organisation.
     let title = e.get("customer.title");
+    let default = tether_trust::policy::feature("customer.title").map_or("", |f| f.default);
     el::Inputs {
         mode: e.get("health.agent").to_owned(),
         grant: e.get("health.enrol-grant").to_owned(),
@@ -25,8 +31,10 @@ fn inputs(e: &tether_trust::policy::Effective) -> el::Inputs {
         updater_key: crate::update::PUBKEY.unwrap_or_default().to_owned(),
         elevate: e.on("customer.elevate"),
         identity: el::own_identity(),
-        org: if title.trim().is_empty() { "TetherQS".into() } else { title.to_owned() },
+        org: "TetherQS".into(),
+        support_org: if title.trim() == default { String::new() } else { title.to_owned() },
         relays: crate::policy::base_urls().iter().map(|b| b.trim_start_matches("https://").trim_start_matches("http://").to_owned()).collect(),
+        machine_off: el::machine_manual(machine),
     }
 }
 
@@ -43,7 +51,8 @@ pub fn host_agent(action: CoreAction, viewer: &str) -> TetherAgentAnswer {
 #[cfg(windows)]
 fn answer(action: Action, viewer: &str) -> AgentAnswer {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    el::Host { m: &win::QsMachine, p: inputs(&crate::policy::current()) }.request(action, Some(viewer), now)
+    let machine = el::win::machine_policy(MACHINE_POLICY_KEY);
+    el::Host { m: &win::QsMachine, p: inputs(&crate::policy::current(), machine.as_deref()) }.request(action, Some(viewer), now)
 }
 
 #[cfg(not(windows))]
@@ -138,13 +147,22 @@ mod tests {
 
     #[test]
     fn the_customer_profile_decides_and_customer_elevate_off_refuses() {
-        let i = inputs(&eff(r#""health.agent":{"state":"locked","value":"on-request"},"customer.elevate":{"state":"locked","value":"N"},"customer.title":{"state":"locked","value":"Example Practice IT"}"#));
-        assert_eq!((i.mode.as_str(), i.elevate, i.org.as_str(), i.channel.as_str()), ("on-request", false, "Example Practice IT", "stable"));
+        let i = inputs(&eff(r#""health.agent":{"state":"locked","value":"on-request"},"customer.elevate":{"state":"locked","value":"N"},"customer.title":{"state":"locked","value":"Example Practice IT"}"#), None);
+        assert_eq!((i.mode.as_str(), i.elevate, i.org.as_str(), i.support_org.as_str(), i.channel.as_str(), i.machine_off), ("on-request", false, "TetherQS", "Example Practice IT", "stable", false));
         // the shared host refuses before any dialog (agent_elevated's tests cover the rest)
         let a = host_agent(CoreAction::Install, "Sam");
         assert!(matches!(a.state.as_str(), "not-allowed" | "not-supported"), "{}", a.state);
-        let i = inputs(&eff(r#""health.agent":{"state":"locked","value":"install"}"#));
-        // default: allowed, and the default title names the organisation
-        assert!(i.elevate && !i.org.trim().is_empty(), "{}", i.org);
+        let i = inputs(&eff(r#""health.agent":{"state":"locked","value":"install"}"#), None);
+        // default: allowed; the default title names no organisation, so none is shown
+        assert!(i.elevate && i.org == "TetherQS" && i.support_org.is_empty(), "{}", i.support_org);
+    }
+
+    #[test]
+    fn the_machine_policy_manual_switches_it_off_whatever_the_customer_profile_says() {
+        let e = eff(r#""health.agent":{"state":"locked","value":"install"}"#);
+        assert!(inputs(&e, Some(r#"{"health.agent":{"state":"locked","value":"manual"}}"#)).machine_off);
+        assert!(!inputs(&e, Some(r#"{"health.agent":{"state":"locked","value":"on-request"}}"#)).machine_off);
+        assert!(!inputs(&e, Some(r#"{"connect.chat":{"state":"off"}}"#)).machine_off);
+        assert!(!inputs(&e, None).machine_off);
     }
 }

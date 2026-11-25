@@ -552,10 +552,17 @@ impl Manager<'_> {
         });
         st.pending_install = None;
         let r = r?;
+        let mut detail = line_of(&r);
         if r.code != 0 {
-            return Err(line_of(&r));
+            // A failure after the agent made its service (its worker did not come up in time): that
+            // agent is Tether's all the same, so re-enrolment, the version floor and removal apply.
+            if !self.sys.service_exists().unwrap_or(false) {
+                return Err(detail);
+            }
+            log::warn!("health agent: the install failed after its service was made: {detail}");
+            detail = format!("installed, but the agent's install reported a failure: {detail}");
         }
-        Self::succeeded(st, "installed", by, line_of(&r), now);
+        Self::succeeded(st, "installed", by, detail, now);
         st.version = c.version.clone();
         st.grant_id = grant_id;
         st.ours = true;
@@ -753,7 +760,10 @@ fn without_service() -> bool {
 fn elevated(eff: &tether_trust::policy::Effective) -> crate::agent_elevated::Host<'static> {
     let i = inputs(eff);
     let relays = crate::policy::relay_bases().into_iter().map(|(host, _)| host).collect();
-    let p = crate::agent_elevated::Inputs { mode: i.mode, grant: i.grant, channel: i.channel, admin: i.admin, updater_key: i.updater_key, elevate: true, identity: win::Real.own_identity(), org: crate::APP_NAME.to_owned(), relays };
+    use crate::agent_elevated::{machine_manual, win::machine_policy};
+    // The technician profile names no support organisation (`customer.title` is TetherQS's): none is shown.
+    let machine_off = machine_manual(machine_policy(crate::policy::MACHINE_POLICY_KEY).as_deref());
+    let p = crate::agent_elevated::Inputs { mode: i.mode, grant: i.grant, channel: i.channel, admin: i.admin, updater_key: i.updater_key, elevate: true, identity: win::Real.own_identity(), org: crate::APP_NAME.to_owned(), support_org: String::new(), relays, machine_off };
     crate::agent_elevated::Host { m: &win::UserMachine, p }
 }
 
@@ -1326,6 +1336,8 @@ mod tests {
         /// The clock (0: the time the test passes in); the download moves it on by `download_takes`.
         clock: Cell<u64>,
         download_takes: Cell<u64>,
+        /// A failing `install` has made the agent's service first.
+        svc_on_failure: Cell<bool>,
     }
 
     impl Fake {
@@ -1410,6 +1422,9 @@ mod tests {
                 "identity" if code == 0 => self.identity.borrow().clone().unwrap_or_else(|| format!("{{\"uuid\":\"{UUID}\",\"pubkey\":\"{}\"}}\n", agent_pubkey())),
                 _ => format!("{line}\n"),
             };
+            if code != 0 && args[0] == "install" && self.svc_on_failure.get() {
+                self.svc.set(true);
+            }
             if code == 0 {
                 match args[0] {
                     "install" => self.svc.set(true),
@@ -1609,6 +1624,42 @@ mod tests {
             Manager { sys: &w.fake, p }.tick(NOW + 10).unwrap();
             assert_eq!(w.state().unwrap().state, "installed");
         }
+    }
+
+    #[test]
+    fn an_install_that_fails_after_making_its_service_is_tethers_and_maintained() {
+        const WHY: &str = "the worker did not come up within 60 s";
+        let w = world("failsvc", "install");
+        w.fake.svc_on_failure.set(true);
+        w.fake.codes.borrow_mut().insert("install", (1, WHY.into()));
+        w.tick(NOW).unwrap();
+        let st = w.state().unwrap();
+        assert_eq!((st.state.as_str(), st.by.as_str(), st.version.as_str(), st.ours, st.next_try), ("installed", "policy", "0.2.0", true, 0), "{st:?}");
+        assert!(st.detail.contains(WHY), "{}", st.detail);
+        let a = w.m().status(NOW + 1);
+        assert_eq!((a.state.as_str(), a.installed_by.as_str()), ("installed", "policy"));
+        // maintained: re-enrolment when the relays forgot it
+        w.fake.not_enrolled.set(true);
+        w.tick(NOW + ENROL_EVERY).unwrap();
+        assert_eq!(w.runs().last().unwrap()[0], "enrol", "{:?}", w.runs());
+        // and removed by policy
+        let m = Manager { sys: &w.fake, p: Inputs { mode: "remove".into(), ..w.p.clone() } };
+        m.tick(NOW + ENROL_EVERY + 1).unwrap();
+        assert_eq!((w.state().unwrap().state.as_str(), w.runs().last().unwrap()[0].as_str()), ("removed-by-tether", "uninstall"));
+        // a technician's install the same way: installed by the session, with the agent's line
+        let w = world("failsvcsession", "on-request");
+        w.fake.svc_on_failure.set(true);
+        w.fake.codes.borrow_mut().insert("install", (1, WHY.into()));
+        let a = w.m().request(Action::Install, NOW);
+        assert_eq!((a.state.as_str(), a.installed_by.as_str()), ("installed", "session"), "{a:?}");
+        assert!(a.detail.contains(WHY), "{}", a.detail);
+        assert!(w.state().unwrap().ours);
+        // no service made: failed, as before
+        let w = world("failnosvc", "on-request");
+        w.fake.codes.borrow_mut().insert("install", (1, WHY.into()));
+        let a = w.m().request(Action::Install, NOW);
+        assert_eq!(a.state, "failed");
+        assert!(!w.state().unwrap().ours);
     }
 
     #[test]
