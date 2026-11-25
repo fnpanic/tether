@@ -17,22 +17,28 @@ export interface AgentConsent {
   no: string;
 }
 
+/** Control, bidi, line-separator and zero-width characters out (the backend's `invisible` set in
+ *  agent_elevated.rs): they could reorder or hide what the person reads. */
+export function plainText(s: string): string {
+  return s.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "");
+}
+
 /** The pre-dialog's content: the decline first and focused (a key typed as it appears must not install). */
 export function AgentConsentBody({ d, onAnswer }: { d: AgentConsent; onAnswer: (yes: boolean) => void }) {
   return (
     <>
-      <h2 className="text-headline font-semibold">{d.title}</h2>
+      <h2 className="text-headline font-semibold">{plainText(d.title)}</h2>
       <div className="mt-3 flex flex-col gap-2 text-callout text-ink-80">
         {d.paragraphs.map((p, i) => (
-          <p key={i}>{p}</p>
+          <p key={i}>{plainText(p)}</p>
         ))}
       </div>
       <div className="mt-6 flex justify-end gap-2">
         <Button data-autofocus onClick={() => onAnswer(false)}>
-          {d.no}
+          {plainText(d.no)}
         </Button>
         <Button variant="primary" onClick={() => onAnswer(true)}>
-          {d.yes}
+          {plainText(d.yes)}
         </Button>
       </div>
     </>

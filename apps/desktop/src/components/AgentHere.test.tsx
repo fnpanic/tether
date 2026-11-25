@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AgentCardBody, AgentConsentBody, CARD_TEXT } from "./AgentHere";
+import { AgentCardBody, AgentConsentBody, CARD_TEXT, plainText } from "./AgentHere";
 
 const buttons = (s: string) => [...s.matchAll(/<button[^>]*>([^<]*)<\/button>/g)].map((m) => m[1]);
 const d = { id: 3, title: "Install the health monitoring program?", paragraphs: ["“Sam” (support of Example) asks to install Tether Monitor.", "It runs in the background <b>x</b>."], yes: "Install", no: "Don't install" };
@@ -13,6 +13,13 @@ describe("this computer: the health agent through the elevation prompt", () => {
     expect(s).not.toContain("<b>");
     expect(buttons(s)).toEqual(["Don&#x27;t install", "Install"]);
     expect(s).toContain("data-autofocus");
+  });
+  it("hidden and reordering characters never reach the dialog", () => {
+    const hidden = "\u0007\u061c\u200b\u200f\u2028\u2029\u202e\u2060\u2061\u2064\u2066\u2069\ufeff";
+    expect(plainText(`Sam${hidden} at the desk`)).toBe("Sam at the desk");
+    const s = renderToStaticMarkup(<AgentConsentBody d={{ ...d, paragraphs: [`Name given by the technician (not verified): Sam\u202eksed\u2028x`] }} onAnswer={() => {}} />);
+    expect(s).toContain("Name given by the technician (not verified): Samksedx");
+    expect(s).not.toMatch(/[\u202e\u2028]/);
   });
   it("the home view's card (spec 7.2): Install… and Not now", () => {
     const s = renderToStaticMarkup(<AgentCardBody busy={false} result="" onInstall={() => {}} onLater={() => {}} />);
