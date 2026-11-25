@@ -56,6 +56,18 @@ const SUMMARY_SCOPES: usize = team::MAX_MEMBERS + 1;
 /// And at most this many bytes of them on disk, gzip copies included (the files are streamed, not
 /// held in memory; one of 20 000 hosts is about 20 MB plain and 1.7 MB gzip, measured).
 const SUMMARY_CACHE_BYTES: u64 = 256 << 20;
+/// Requests that wait for their scope's build (relay-wide): each holds a worker, so beyond these a
+/// request is answered `503 status summary not ready` at once; a waiter waits at most
+/// `SUMMARY_WAIT_TRIES` x 50 ms.
+const SUMMARY_WAITERS: usize = 4;
+const SUMMARY_WAIT_TRIES: u32 = 100;
+
+/// `SUMMARY_CACHE_BYTES`, or `TETHER_TEST_SUMMARY_CACHE_BYTES` (tests only: scopes that evict
+/// each other without 20 000 devices).
+fn summary_cache_bytes() -> u64 {
+    static B: OnceLock<u64> = OnceLock::new();
+    *B.get_or_init(|| std::env::var("TETHER_TEST_SUMMARY_CACHE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(SUMMARY_CACHE_BYTES))
+}
 
 /// One scope's cached summary, in `status/<file>`: `summary.json` for the default scope (every
 /// customer, software lists: every member of a plain roster), else `summary-<16 hex>.json`.
@@ -607,6 +619,8 @@ pub struct Status {
     /// first; and whether a build is running (one at a time, whatever the scope).
     summaries: Vec<Summary>,
     building: bool,
+    /// Requests waiting for a scope's build (at most `SUMMARY_WAITERS`).
+    summary_waiters: usize,
     /// uuids whose full report is being written (outside the lock), and whose history is being
     /// trimmed.
     writing: HashSet<String>,
@@ -1263,11 +1277,23 @@ fn summary_build(app: &Mutex<App>, key: &str, scope: &Permissions, tmp: PathBuf,
     let file = a.status.summary_slot(key).file.clone();
     let dir = a.data.join("status");
     // Both renamed under the lock: whichever file a request opens matches the tag sent with it.
-    match built.and_then(|(etag, size)| fs::rename(&tmp_gz, dir.join(gz_name(&file))).and_then(|()| fs::rename(&tmp, dir.join(&file))).map(|()| (etag, size))) {
+    // The gzip copy goes first: if the plain file then cannot be renamed, the new copy is removed
+    // and the scope has no summary (never a new copy under the old tag).
+    let renamed = built.and_then(|(etag, size)| {
+        fs::rename(&tmp_gz, dir.join(gz_name(&file)))?;
+        if let Err(e) = fs::rename(&tmp, dir.join(&file)) {
+            let _ = fs::remove_file(dir.join(gz_name(&file)));
+            let s = a.status.summary_slot(key);
+            (s.built, s.size) = (None, 0);
+            return Err(e);
+        }
+        Ok((etag, size))
+    });
+    match renamed {
         Ok((etag, size)) => {
             let s = a.status.summary_slot(key);
             (s.built, s.size) = (Some((t, etag.clone())), size);
-            a.status.summary_trim(SUMMARY_CACHE_BYTES);
+            a.status.summary_trim(summary_cache_bytes());
             a.summary_file(&file, &etag, inm.as_deref(), gzip)
         }
         Err(e) => {
@@ -1280,9 +1306,10 @@ fn summary_build(app: &Mutex<App>, key: &str, scope: &Permissions, tmp: PathBuf,
     }
 }
 
-/// `If-None-Match` names `etag` (weak comparison: `W/` ignored on both sides).
+/// `If-None-Match` names `etag` (weak comparison: `W/` ignored on both sides), or is `*` (any
+/// current representation: the caller has one).
 fn etag_matches(inm: Option<&str>, etag: &str) -> bool {
-    inm.is_some_and(|inm| inm.split(',').any(|x| x.trim().trim_start_matches("W/") == etag.trim_start_matches("W/")))
+    inm.is_some_and(|inm| inm.split(',').any(|x| x.trim() == "*" || x.trim().trim_start_matches("W/") == etag.trim_start_matches("W/")))
 }
 
 /// `Accept-Encoding` lists `gzip` (or `x-gzip`) with a weight above 0.
@@ -2154,12 +2181,16 @@ impl App {
 
     /// `GET /api/team/status`: every host with a full report in the member's scope (its customers;
     /// software lists with `sbom`). One summary file per scope (`Permissions::scope_key`, at most
-    /// `SUMMARY_SCOPES`), each rebuilt at most every 30 s (stale computed then) and sent from the
-    /// file; the ETag hashes the hosts only, so an unchanged summary keeps its tag.
+    /// `SUMMARY_SCOPES` and `SUMMARY_CACHE_BYTES`), each rebuilt at most every 30 s (stale computed
+    /// then) and sent from the file; the weak ETag hashes what a technician sees (entries without
+    /// `last_seen` and `next`) and the window of the stale threshold ([`build_summary`]), so
+    /// heartbeats keep it.
     ///
     /// Built from a snapshot after the lock is released, by one request at a time (any scope);
-    /// requests meanwhile get the previous file of their scope (a scope's very first build makes
-    /// them wait for it).
+    /// requests meanwhile get the previous file of their scope. A scope without a file (its first
+    /// build, or evicted by the byte bound) makes the request wait for a build: at most
+    /// `SUMMARY_WAITERS` wait at once, each up to 5 s; any other gets `503 status summary not
+    /// ready` (`Retry-After: 5`) at once.
     pub(crate) fn team_status_summary(&mut self, rq: &Request, scope: &Permissions) -> Result<Resp, Resp> {
         self.status_open()?;
         let t = now();
@@ -2183,9 +2214,22 @@ impl App {
             let tmp = crate::tmp_path(&self.data);
             return self.defer(move |app| summary_build(app, &key, &scope, tmp, t, inm, gzip));
         }
-        // No summary of this scope yet, and a build runs (of this scope or another): wait for it.
+        // No summary of this scope yet, and a build runs (of this scope or another): wait for it,
+        // if a waiter's place is free.
+        let not_ready = || text(503, "status summary not ready").with_header(hdr("Retry-After", "5"));
+        if self.status.summary_waiters >= SUMMARY_WAITERS {
+            return Err(not_ready());
+        }
+        self.status.summary_waiters += 1;
+        struct Waiter<'a>(&'a Mutex<App>);
+        impl Drop for Waiter<'_> {
+            fn drop(&mut self) {
+                lock(self.0).status.summary_waiters -= 1;
+            }
+        }
         self.defer(move |app| {
-            for _ in 0..600 {
+            let waiter = Waiter(app);
+            for _ in 0..SUMMARY_WAIT_TRIES {
                 {
                     let mut a = lock(app);
                     let s = a.status.summary_slot(&key);
@@ -2200,12 +2244,13 @@ impl App {
                         a.status.building = true;
                         let tmp = crate::tmp_path(&a.data);
                         drop(a);
+                        drop(waiter); // builds now, no longer waits
                         return summary_build(app, &key, &scope, tmp, now(), inm, gzip);
                     }
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(text(503, "status summary not ready").with_header(hdr("Retry-After", "5")))
+            Err(not_ready())
         })
     }
 

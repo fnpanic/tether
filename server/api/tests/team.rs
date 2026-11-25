@@ -732,3 +732,47 @@ fn member_lookup_cost_with_2000_keys() {
     eprintln!("member lookup over 2000 keys: {loop_t:?} per request without kid, {kid_t:?} with kid");
     assert!(kid_t < loop_t);
 }
+
+/// `429 busy` answers of the no-`kid` slots are not failed signatures: several old desktops behind
+/// one address (refused while another check runs) never lock that address out, `kid` requests
+/// from it included.
+#[test]
+fn busy_no_kid_answers_do_not_lock_out_the_address() {
+    use std::time::Duration;
+    let admin = generate_key();
+    let s = start(&admin);
+    let member = generate_key();
+    assert_eq!(s.publish(&admin, &big_doc(&admin, 1, &[("Member", &member)])).status, 204);
+    let nat = [("X-Forwarded-For", "198.51.100.30")];
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        // Junk checks from the address keep its slot (every key tried) and its waiter's place busy.
+        let junk: Vec<_> = (0..2)
+            .map(|_| {
+                sc.spawn(|| {
+                    let mut n = 0;
+                    while !stop.load(Ordering::SeqCst) && n < 15 {
+                        s.signed(&generate_key(), "GET", "/api/team/me", &nat, b"");
+                        n += 1;
+                    }
+                })
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(20));
+        let mut busy = 0;
+        for _ in 0..2000 {
+            if busy == 70 {
+                break;
+            }
+            busy += usize::from(s.signed(&member, "GET", "/api/team/me", &nat, b"").status == 429);
+        }
+        stop.store(true, Ordering::SeqCst);
+        for j in junk {
+            j.join().unwrap();
+        }
+        assert_eq!(busy, 70, "refused busy");
+        let h = format!("{} kid={}", reqauth::sign_request(&member, "GET", "/api/team/me", b"", now()), kid(&member));
+        let r = s.req("GET", "/api/team/me", &[(reqauth::HEADER, &h), nat[0]], b"");
+        assert_eq!(r.status, 200, "a kid request from the address after {busy} busy answers: {}", String::from_utf8_lossy(&r.body));
+    });
+}

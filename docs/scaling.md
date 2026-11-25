@@ -207,7 +207,9 @@ from one address. The reference run is the same without members and junk (`MEMBE
   again on nearly every poll. Rounding `last_seen` per entry, as the design proposed, would not
   have given `304` either: with 20 000 devices about 3 per second cross such a rounding boundary.
   The tag therefore leaves `last_seen` (and `next`) out and hashes the window of the stale threshold
-  instead ([api.md](api.md#get-apiteamstatus-member-signed)). The next step for whole-fleet members
+  instead ([api.md](api.md#get-apiteamstatus-member-signed)). At 20 000 devices that window is 90
+  minutes (3 × `next` of 2 000 s, rounded down to 15 minutes): while `304`s come, a desktop's
+  "reported N ago" can be up to that old; the `stale` flag is not affected (it is part of the tag). The next step for whole-fleet members
   is a delta route, as the design says; not built.
 - **Rebuilds**: 1 497 summary builds in 900 s took 21.7 s together; a whole-fleet build takes about
   1 s (31 builds took 31.9 s in the reference run, the longest 2.9 s), so the ~1 470 one-customer
@@ -215,9 +217,13 @@ from one address. The reference run is the same without members and junk (`MEMBE
   rebuilds its scope (its file is older than 30 s), walking the whole fleet in chunks of 1 000 under
   the lock, but copying only its own hosts: cheap at this rate, so it was left so. With the
   former limit of 32 cached scopes, a one-customer request that came while a whole-fleet build ran
-  found no file of its own and waited up to 3 s holding a worker: in that run 2 heartbeats, 3 posts
-  and a host report got `503 busy`. Every scope now keeps its file (up to 2 001, one per possible
-  member; the 256 MiB bound decides), and waits only for its very first build.
+  found no file of its own and waited for the build holding a worker (the code then allowed up to
+  30 s): in that run 2 heartbeats, 3 posts and a host report got `503 busy`. Every scope now keeps
+  its file (up to 2 001, one per possible member) as long as all files together stay under the
+  256 MiB bound; at 20 000 devices one broad scope is about 22 MB (plain and gzip), so 12 or more
+  broad scopes evict each other. A request whose scope has no file waits for a build, but at most 4
+  requests wait at once relay-wide, each at most 5 s; any other gets `503 status summary not ready`
+  with `Retry-After: 5` at once, so waiting requests can hold at most 4 of the 32 workers.
 - **Memory**: RSS 35.9 MiB after the warm-up, 40.3 MiB at the peak (reference run: 38.7 MiB). The
   scope's `memory.peak` was 64 MiB, its limit, in every run: the page cache of the files the relay
   writes (summaries, `seen.json`, reports) counts against `MemoryMax`, and the kernel reclaimed it
@@ -228,7 +234,11 @@ from one address. The reference run is the same without members and junk (`MEMBE
 - **Audit log**: 5 017 records in 15 minutes (1.4 MB), none dropped, no failed write; the
   summary is one record per member and hour, every report and software-list read one record.
 - **Refused**: no `429` for any member or device; `503 busy` for 10 requests in 900 s (1 device
-  post, 9 junk): 32 junk connections a second at once fill all 32 workers for a moment.
+  post, 9 junk): 32 junk connections a second at once fill all 32 workers for a moment. The run's
+  own checks printed FAIL three times, for these: "no 5xx and no connection errors" (the 10
+  `503 busy`), "every status post accepted or 429" (the one device post with `503`) and "every
+  member request answered 200 or 304" (11 host reports `404`: devices enrolled during the run had no
+  report yet).
   `STATUS_TRACE_LOCK=1`: 3 state-lock holds over 20 ms, all `maintain` (28 ms at most).
 - **One run stalled**: a repeat of the run (the same code) had a pause of about 10 s in which
   every route waited (heartbeat max 9.5 s, 1 196 `503 busy`, among them 275 heartbeat probes and 167

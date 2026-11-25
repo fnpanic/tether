@@ -3238,3 +3238,134 @@ fn heartbeats_keep_the_summary_tag_and_a_host_turning_stale_changes_it() {
     assert_ne!(r.header("ETag"), Some(e2));
     assert_eq!((r.json()["hosts"][0]["stale"].clone(), r.json()["hosts"][1]["stale"].clone()), (json!(false), json!(true)));
 }
+
+// ---- Review fixes: waiting for a scope's build, the summary's files and tag.
+
+/// `n` pinned devices (customer `c<i % customers>`) with a summary entry, written in bulk (the
+/// earlier keys.json format), before the relay starts.
+fn prep_many(dir: &Path, n: usize, customers: usize) {
+    let st = dir.join("status");
+    std::fs::create_dir_all(&st).unwrap();
+    let (mut keys, mut seen) = (serde_json::Map::new(), serde_json::Map::new());
+    let key = key_to_b64(&generate_key().verifying_key());
+    let entry = json!({"host": "PC-1", "agent": "0.1.0", "overall": "ok", "counts": {"ok":31,"warn":0,"crit":0,"unknown":0,"setup":0}, "products": [], "faults": []}).to_string();
+    for i in 0..n {
+        let u = format!("dev-{i:06}");
+        keys.insert(u.clone(), json!({"key": key, "tether_id": null, "label": "t", "enrolled": now() - 60, "customer": format!("c{}", i % customers)}));
+        seen.insert(u, json!({"last_seen": now() - 60, "seq": 1, "next": 300, "entry": entry}));
+    }
+    std::fs::write(st.join("keys.json"), serde_json::to_vec(&keys).unwrap()).unwrap();
+    std::fs::write(st.join("seen.json"), serde_json::to_vec(&seen).unwrap()).unwrap();
+}
+
+/// Scopes that evict each other (a byte bound of 1: only the newest file stays) and poll at once:
+/// one builds, at most 4 wait for it, the others get `503 status summary not ready` at once, and a
+/// heartbeat meanwhile is answered at once (before the waiters).
+#[test]
+fn at_most_four_requests_wait_for_a_summary_build() {
+    let (admin, dir) = (generate_key(), new_dir());
+    prep_many(&dir, 6000, 16);
+    let s = spawn_env(dir, &key_to_b64(&admin.verifying_key()), &[("TETHER_TEST_SUMMARY_CACHE_BYTES", "1")]);
+    let keys: Vec<SigningKey> = (0..16).map(|_| generate_key()).collect();
+    let names: Vec<String> = (0..16).map(|i| format!("M{i}")).collect();
+    let members: Vec<(&str, &SigningKey, Value)> = (0..16).map(|i| (names[i].as_str(), &keys[i], json!({"customers": [format!("c{i}")]}))).collect();
+    publish_doc(&s, &admin, 1, &members);
+    for round in 0..2 {
+        let go = std::sync::Barrier::new(17);
+        std::thread::scope(|sc| {
+            let polls: Vec<_> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| {
+                    let go = &go;
+                    let s = &s;
+                    sc.spawn(move || {
+                        let sig = reqauth::sign_request_for_kid(k, RELAY, "GET", "/api/team/status", b"", now());
+                        let from = format!("198.51.100.{}", 10 + i);
+                        go.wait();
+                        let t = Instant::now();
+                        let r = s.req("GET", "/api/team/status", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", &from)], b"");
+                        (r.status, r.text(), r.header("Retry-After"), t.elapsed(), Instant::now())
+                    })
+                })
+                .collect();
+            go.wait();
+            std::thread::sleep(Duration::from_millis(20));
+            let t = Instant::now();
+            let hb = format!(r#"{{"uuid":"hb-0000{round}","id":"11122233{round}","profile":"technician","version":"0.5.21","os":"windows 10.0.26300","serial":3}}"#);
+            let hb_status = s.req("POST", "/api/heartbeat", &[], hb.as_bytes()).status;
+            let (hb_t, hb_done) = (t.elapsed(), Instant::now());
+            let got: Vec<_> = polls.into_iter().map(|p| p.join().unwrap()).collect();
+            let refused = got.iter().filter(|g| (g.0, g.1.as_str(), g.2.as_deref()) == (503, "status summary not ready", Some("5")) && g.3 < Duration::from_millis(500)).count();
+            let waited = got.iter().filter(|g| g.0 == 200).count();
+            eprintln!("round {round}: heartbeat {hb_status} after {hb_t:?}; {waited} answered 200, {refused} refused at once; {:?}", got.iter().map(|g| (g.0, g.3)).collect::<Vec<_>>());
+            assert_eq!(hb_status, 200);
+            assert!(hb_t < Duration::from_millis(200), "heartbeat {hb_t:?}");
+            assert!(got.iter().filter(|g| g.0 == 200 && g.3 > Duration::from_millis(100)).all(|g| hb_done < g.4), "the heartbeat waited for a summary");
+            // The builder, at most 4 waiters and (round 1) the one scope whose file the byte bound
+            // kept get a summary; every other one is refused at once.
+            assert!(waited <= 5 + round, "{waited} answered");
+            assert_eq!(waited + refused, 16, "{got:?}");
+        });
+    }
+}
+
+/// `If-None-Match: *` matches a summary that exists; a gzip copy whose plain file could not be
+/// renamed is removed, so it is never served under the earlier tag.
+#[test]
+fn summary_star_tag_and_a_failed_rename() {
+    let (s, admin) = server();
+    let m = member(&s, &admin);
+    let r = summary_with(&s, &m, &[]);
+    assert_eq!(r.status, 200);
+    let r = summary_with(&s, &m, &[("If-None-Match", "*")]);
+    assert_eq!((r.status, r.header("ETag").is_some()), (304, true));
+    // The plain file's place taken by a folder: its rename fails at the next build (a link
+    // outdates the summary at once).
+    let a = generate_key();
+    let w = generate_key();
+    let roster = json!({"members": [{"name": "M", "key": key_to_b64(&m.verifying_key()), "write": true, "audit": false}, {"name": "W", "key": key_to_b64(&w.verifying_key()), "write": true, "audit": false}]});
+    assert_eq!(s.admin(&admin, "PUT", "/api/admin/team", roster.to_string().as_bytes()).status, 204);
+    let tok = status::make_token("t", now() + 3600, None, None, false, &admin).unwrap().0;
+    assert_eq!(enroll(&s, &a, "dev-0001", Some("123456789"), &tok).status, 200);
+    assert_eq!(post(&s, &a, "dev-0001", &full("dev-0001", 1, "ok")).status, 200);
+    let old = summary_with(&s, &m, &[]).header("ETag");
+    let plain = s.dir.join("status/summary.json");
+    std::fs::remove_file(&plain).unwrap();
+    std::fs::create_dir_all(plain.join("x")).unwrap();
+    assert_eq!(s.admin(&w, "POST", "/api/team/status/dev-0001/link", br#"{"tether_id":"123456789"}"#).status, 204);
+    let r = summary_with(&s, &m, &[("Accept-Encoding", "gzip")]);
+    assert_eq!(r.status, 500, "{}", r.text());
+    assert!(!s.dir.join("status/summary.json.gz").exists(), "the new gzip copy was left in place");
+    let r = summary_with(&s, &m, &[("Accept-Encoding", "gzip")]);
+    assert!(!(r.status == 200 && r.header("ETag") == old), "a gzip answer under the old tag");
+}
+
+/// The `signature-limit` records are capped relay-wide (60 a minute; the rest counted for the
+/// next record), and the `kid` a source sent is written only in the key-id form (else null).
+#[test]
+fn signature_limit_records_are_capped_and_carry_only_a_well_formed_kid() {
+    let (s, admin) = server();
+    let _m = member(&s, &admin);
+    let stranger = generate_key();
+    let kid = tether_trust::team::key_id(&stranger.verifying_key());
+    let fail_from = |ip: &str, kid_text: &str| {
+        for _ in 0..61 {
+            let sig = reqauth::sign_request_for_kid(&stranger, RELAY, "GET", "/api/team/me", b"", now()).replace(&kid, kid_text);
+            s.req("GET", "/api/team/me", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", ip)], b"");
+        }
+    };
+    fail_from("198.51.100.250", "EVIL<b>x;rm");
+    for i in 0..62 {
+        fail_from(&format!("198.51.{}.{}", 101 + i / 200, i % 200), &kid);
+    }
+    let v = team_audit(&s, &admin, "?event=signature-limit&limit=5000");
+    let recs = v["records"].as_array().unwrap();
+    assert_eq!(recs.len(), 60, "relay-wide cap");
+    assert_eq!((recs[0]["ip"].as_str(), recs[0]["detail"].clone()), (Some("198.51.100.250"), json!({"kid": null, "unverified": true})));
+    assert_eq!(recs[1]["detail"], json!({"kid": kid, "unverified": true}));
+    let j = s.journal();
+    assert_eq!(j.matches("team: failed member signatures from").count(), 60);
+    assert!(!j.contains("EVIL"), "attacker text in the journal");
+    assert!(j.lines().filter(|l| l.contains("team: failed member signatures from")).all(|l| l.contains("unverified")));
+}

@@ -188,6 +188,18 @@ pub struct Team {
     pub(crate) reads: teamaudit::Folded,
     /// Sources refused by `FAIL_PER_MIN`: when their last `signature-limit` record was written.
     limit_noted: HashMap<String, u64>,
+    /// `signature-limit` records relay-wide: (minute start, written in it, not written since the last one).
+    limit_records: (u64, u32, u64),
+}
+
+/// `signature-limit` records (and journal lines) per minute, relay-wide: many source addresses
+/// (IPv6) must not fill the audit log and the journal; the rest is counted (`more` of the next).
+const LIMIT_RECORDS_PER_MIN: u32 = 60;
+
+/// A `kid` as a source sent it, if it has the key-id form (16 lower-case hex); anything else is
+/// the sender's own text and is not written anywhere.
+fn kid_form(k: &str) -> Option<&str> {
+    (k.len() == 16 && k.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))).then_some(k)
 }
 
 impl Team {
@@ -248,6 +260,21 @@ impl Team {
         self.fail_hits.retain(|_, (start, _)| t < *start + 60);
         self.posted_hits.retain(|_, (start, _)| t < *start + 60);
         self.limit_noted.retain(|_, at| t < *at + 60);
+    }
+
+    /// Whether a `signature-limit` record may be written at `t` (relay-wide cap), and how many were
+    /// left out since the last one written.
+    fn limit_record(&mut self, t: u64) -> Option<u64> {
+        let (start, n, more) = &mut self.limit_records;
+        if t >= *start + 60 {
+            (*start, *n) = (t, 0);
+        }
+        if *n >= LIMIT_RECORDS_PER_MIN {
+            *more += 1;
+            return None;
+        }
+        *n += 1;
+        Some(std::mem::take(more))
     }
 }
 
@@ -432,12 +459,9 @@ impl App {
         let Verified { r, t } = self.team.verified.take().ok_or_else(|| crate::internal("member signature not checked"))?;
         let r = match r {
             Err(Refused::Limited) => return Err(text(429, "too many failed requests")),
-            // Counted as a failure: a source sending many at once reaches FAIL_PER_MIN and is then
-            // refused before any signature check.
-            Err(Refused::Busy) => {
-                rate_ok(&mut self.team.fail_hits, ip, t, u32::MAX);
-                return Err(text(429, "busy").with_header(hdr("Retry-After", "1")));
-            }
+            // Not a failed signature (none was checked): several old desktops behind one address
+            // must not lock it out. The waiter bound of `NO_KID` limits what they hold.
+            Err(Refused::Busy) => return Err(text(429, "busy").with_header(hdr("Retry-After", "1"))),
             Err(Refused::Auth(e)) => Err(e),
             Ok((snap, i, nonce)) => {
                 let cur = &self.team.members;
@@ -557,9 +581,15 @@ pub(crate) fn member_verify(app: &Mutex<App>, rq: &Request, body: &Body) -> Opti
             // the `kid` it tried (no actor: no signature verified).
             if a.team.limit_noted.get(&ip).is_none_or(|at| t >= at + 60) {
                 a.team.limit_noted.insert(ip.clone(), t);
-                let kid = header(rq, reqauth::HEADER).and_then(|s| reqauth::header_kid(&s).map(teamaudit::text));
-                eprintln!("team: failed member signatures from {ip} reached {FAIL_PER_MIN} per minute (kid {})", kid.as_deref().unwrap_or("none"));
-                a.team_audit.submit(Rec::new("signature-limit", None, Some(crate::client_ip(rq)), Target::default(), serde_json::json!({"kid": kid, "unverified": true})).answered(429));
+                if let Some(more) = a.team.limit_record(t) {
+                    let kid = header(rq, reqauth::HEADER).and_then(|s| reqauth::header_kid(&s).and_then(kid_form).map(str::to_owned));
+                    eprintln!("team: failed member signatures from {ip} reached {FAIL_PER_MIN} per minute (kid {}, unverified)", kid.as_deref().unwrap_or("none"));
+                    let mut detail = serde_json::json!({"kid": kid, "unverified": true});
+                    if more > 0 {
+                        detail["more"] = more.into();
+                    }
+                    a.team_audit.submit(Rec::new("signature-limit", None, Some(crate::client_ip(rq)), Target::default(), detail).answered(429));
+                }
             }
             return Some(Verified { r: Err(Refused::Limited), t });
         }
@@ -605,6 +635,16 @@ fn verify_on(m: &Members, rq: &Request, method: &str, url: &str, body: &[u8], t:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signature_limit_records_are_capped_per_minute_and_carry_the_rest() {
+        let mut t = Team::default();
+        assert!((0..60).all(|_| t.limit_record(1000) == Some(0)));
+        assert_eq!((t.limit_record(1001), t.limit_record(1059)), (None, None));
+        assert_eq!(t.limit_record(1060), Some(2), "the next minute's first record carries the two left out");
+        assert_eq!(t.limit_record(1061), Some(0));
+        assert_eq!((kid_form("0123456789abcdef"), kid_form("0123456789ABCDEF"), kid_form("x;rm -rf"), kid_form("0123456789abcdef0")), (Some("0123456789abcdef"), None, None, None));
+    }
 
     #[test]
     fn no_kid_slots_are_two_and_one_per_source_and_waits_are_bounded() {

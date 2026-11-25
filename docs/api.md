@@ -265,9 +265,9 @@ meanwhile is refused, `401 not a team member`), so device heartbeats and reports
 At most two requests without `kid` are checked at a time for the whole relay, at most one per client
 address (as the per-IP limits count it); at most two more wait for a slot (at most one per address),
 up to 1 s, and then get `429 busy` with `Retry-After: 1`; any request beyond that gets the same `429`
-at once, so a burst from one address holds at most two of the relay's 32 workers. Each `429 busy`
-counts as a failed signature for the address (60 a minute lead to `429 too many failed requests`
-before any check). Requests with `kid` are not limited by this. Send `kid` only to relays of 0.7 or later: an older relay refuses the header as
+at once, so a burst from one address holds at most two of the relay's 32 workers. A `429 busy` is
+not a failed signature (none was checked): several old desktops behind one address never lock it
+out. Requests with `kid` are not limited by this. Send `kid` only to relays of 0.7 or later: an older relay refuses the header as
 malformed (`401`).
 
 **The signed team document** (0.7) replaces the roster. Tether Manage publishes an upload
@@ -373,9 +373,9 @@ files `0600`), also with a plain roster. Fields, in this order (absent ones left
 
 | Event | Route | `detail` |
 |---|---|---|
-| `summary` | `GET /api/team/status` | `{"reads":n}`: one record for the first read of an hour, with `n` the reads since the member's previous summary record, this one included; reads after it are written by the relay's hourly maintenance (and at a clean stop) as a record without `result`. A hard kill loses at most an hour of such counts |
+| `summary` | `GET /api/team/status` | `{"reads":n}`: one record for the first read of an hour, with `n` the reads since the member's previous summary record, this one included; reads after it are written by the relay's hourly maintenance (and at a clean stop) as a record without `result`, whose `ip` is the address of the last of those reads only. A hard kill loses at most an hour of such counts |
 | `device-list`, `status-device-list` | `GET /api/team/devices`, `GET /api/admin/status/devices` | `{"reads":n}`, folded per reader and hour as `summary` |
-| `signature-limit` | any member route | `{"kid":"<16 hex>"\|null,"unverified":true}`, no `actor`, `result` `429`: an address reached 60 failed member signatures a minute; at most one record (and one journal line `team: failed member signatures from <ip> …`) per address and minute; `kid` the one the refused request named (not verified) |
+| `signature-limit` | any member route | `{"kid":"<16 hex>"\|null,"unverified":true}`, no `actor`, `result` `429`: an address reached 60 failed member signatures a minute; at most one record (and one journal line `team: failed member signatures from <ip> …`) per address and minute, and at most 60 such records (and lines) a minute for the whole relay: the ones left out are counted and the next record carries their number as `"more":n`; `kid` the one the refused request named (not verified), only when it has the key-id form (16 lower-case hex), else `null`; the journal line ends `(kid …, unverified)` |
 | `report` | `GET /api/team/status/<uuid>` (report and history) | – |
 | `software-list` | `GET /api/team/status/<uuid>/sbom` | – |
 | `link` | `POST /api/team/status/<uuid>/link` | `{"tether_id"}` asked for |
@@ -750,7 +750,11 @@ With a signed team document each member scope (its customer patterns sorted with
 alone when `*` is among them, and whether it has `sbom`) has its own summary file
 (`status/summary-<16 hex>.json`; the scope of every customer with `sbom` keeps `summary.json`), built
 only from that scope's hosts, with its own ETag; at most 2 001 scopes (one per possible member) and 256 MiB of them (plain files
-and gzip copies), least recently used dropped first, one build at a time for all scopes.
+and gzip copies), least recently used dropped first, one build at a time for all scopes. A request
+whose scope has no file (its first build, or dropped by the 256 MiB bound) waits for a build; at
+most 4 such requests wait at once for the whole relay, each at most 5 s; any other, and a waiter
+whose 5 s are over, gets `503 status summary not ready` with `Retry-After: 5`. `If-None-Match: *`
+answers `304` when the scope has a summary.
 A host whose device has a software list (with `STATUS_SBOM=on`) also has `"sbom":{"at":<unix time>,"sha":"<16 hex>"}` (`at` is the modification time of the stored file, which is when it was uploaded), outside the 2 KiB entry; the list itself is
 `GET /api/team/status/<uuid>/sbom`.
 
