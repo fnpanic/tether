@@ -28,6 +28,8 @@ interface S {
   saveError?: string;
   /** Health summaries of all relays, merged (one per uuid). */
   status: StatusSummary[];
+  /** The relays the summary was asked from (the software search asks the same). */
+  statusRelays: string[];
   /** Why no health data could be read (e.g. reporting switched off on the server). */
   statusError?: string;
 }
@@ -38,6 +40,7 @@ export const useHosts = create<S>(() => ({
   peers: [],
   org: [],
   status: [],
+  statusRelays: [],
   online: null,
   onlineState: "idle",
   team: {},
@@ -201,7 +204,7 @@ export const actions = {
     } catch (e) {
       team.me = null;
       team.error = errorText(e).replace(/^(not-member|unsupported): /, "");
-      set({ team, org: [], status: [], statusError: undefined });
+      set({ team, org: [], status: [], statusRelays: [], statusError: undefined });
       return;
     }
     set({ team });
@@ -210,9 +213,9 @@ export const actions = {
       if (org) set({ org });
       try {
         const r = await invoke<Parameters<typeof mergeStatus>[0]>("team_status");
-        set({ status: mergeStatus(r), statusError: statusNote(r) });
+        set({ status: mergeStatus(r), statusRelays: (r ?? []).map((x) => x.relay), statusError: statusNote(r) });
       } catch (e) {
-        set({ status: [], statusError: statusNote([{ relay: "", error: errorText(e) }]) });
+        set({ status: [], statusRelays: [], statusError: statusNote([{ relay: "", error: errorText(e) }]) });
       }
     }
     await teamSync();

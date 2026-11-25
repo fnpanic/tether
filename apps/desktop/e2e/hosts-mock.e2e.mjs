@@ -250,6 +250,56 @@ async function run(name) {
   await setQuery("check:db-service");
   const db = await shown();
   check(tag("check:db-service finds hosts with that failing check"), db > 0 && db <= navCount, `${db}`);
+  const notes = p.getByTestId("search-notes");
+  check(tag("a check: term names the hosts with more failing checks than the summary holds"), /\d+ computers? (has|have) more failing checks than the summary holds; open (it|them) to see all/.test(await notes.textContent()));
+  await setQuery("check:db-service=warn");
+  check(tag("check:<text>=warn matches only that state"), (await shown()) === 0);
+  await setQuery("check:backup=warn");
+  check(tag("check:backup=warn finds the hosts with the backup check in warning"), (await shown()) > 0);
+
+  // ---- software: search terms (spec 10.4), answered by the mock relays.
+  const swCalls = async () => (await calls("team_status_software")).length;
+  await clearCalls();
+  await setQuery("software:g");
+  await sleep(1000);
+  check(tag("software: under 2 characters is not sent and says so"), (await swCalls()) === 0 && /needs at least 2 characters/.test(await notes.textContent()) && (await shown()) === (await total()));
+  await setQuery("software:garnet");
+  await sleep(300);
+  check(tag("software: waits for a pause in typing"), (await swCalls()) === 0);
+  check(tag("while it searches, the list shows the other terms' result and says so"), /Searching installed software on 2 servers/.test(await notes.textContent()) && (await shown()) === (await total()));
+  check(tag("software: is searched after 800 ms, once per relay"), await until(async () => (await swCalls()) === 2, 3000), `${await swCalls()}`);
+  check(tag("software:garnet finds the host whose list has it (an unknown uuid ignored)"), await until(async () => (await shown()) === 1 && (await rows().first().textContent()).includes("LAB-ANALYZER-01")));
+  check(tag("the result says it is as of the last upload and that searches are audited"), /Installed software “garnet”: 1 computer \(lists as of each computer's last upload; [\d,]+ computers without a list\)/.test(await notes.textContent()) && /recorded in the team's audit log/.test(await notes.textContent()));
+  await setQuery("-software:garnet");
+  check(tag("-software: only the hosts with a list without a match, from the cache"), (await until(async () => (await shown()) === 2)) && (await swCalls()) === 2, `${await shown()}`);
+  await setQuery('software:"garnet browser"@126 health:crit');
+  await search.press("Enter");
+  check(tag("Enter searches at once; quotes and @version"), (await until(async () => (await swCalls()) === 4, 600)) && (await calls("team_status_software")).at(-1).q === "garnet browser" && (await calls("team_status_software")).at(-1).v === "126");
+  const swState = async (states, q) => {
+    await p.evaluate((s) => (window.__mockSoftware = s), states);
+    await setQuery(q);
+    await search.press("Enter");
+    await until(async () => !/Searching installed software/.test(await notes.textContent()), 3000);
+    return notes.textContent();
+  };
+  check(tag("an old relay: named, the other relay's result shown"), /relay2\.example\.com does not support software search \(needs tether-api 0\.7\.0\)/.test(await swState({ "relay2.example.com": "unsupported" }, "software:aster")) && /Results from relay\.example\.com only\./.test(await notes.textContent()));
+  check(tag("switched off"), /software search is switched off on relay2\.example\.com/.test(await swState({ "relay2.example.com": "off" }, "software:birch")));
+  check(tag("no permission: the reason, not an error dialog"), /your team membership does not allow software search on relay\.example\.com/.test(await swState({ "relay.example.com": "forbidden", "relay2.example.com": "forbidden" }, "software:cobalt")) && !(await p.getByRole("alertdialog").isVisible()));
+  check(tag("too many searches"), /too many software searches on relay\.example\.com: try again in 5 s/.test(await swState({ "relay.example.com": "busy" }, "software:dunmore")));
+  check(tag("more than 2000"), /more than 2000 computers match on relay\.example\.com: refine the search/.test(await swState({ "relay.example.com": "more" }, "software:elm")));
+  check(tag("still indexing"), /relay\.example\.com is still indexing 3,400 lists/.test(await swState({ "relay.example.com": "pending" }, "software:fenwick")));
+  check(tag("incomplete"), /stopped before it searched every list: the result is incomplete/.test(await swState({ "relay.example.com": "partial" }, "software:hollin")));
+  check(tag("not reachable"), /relay2\.example\.com could not be reached/.test(await swState({ "relay2.example.com": "offline" }, "software:iron")));
+  await p.evaluate(() => (window.__mockSoftware = {}));
+  // A saved search with a software: term searches again when opened.
+  await setQuery("software:juniper");
+  await p.getByRole("button", { name: "Save this search" }).click();
+  await p.getByRole("dialog").getByRole("textbox", { name: "Search name" }).fill("Juniper mail");
+  await p.keyboard.press("Enter");
+  await setQuery("");
+  await nav.getByRole("button", { name: /^Juniper mail/ }).click();
+  // At once (well before the 800 ms of typing), from the relays or their cached answer.
+  check(tag("a saved software search runs when opened"), await until(async () => /Installed software “juniper”: 1 computer/.test(await notes.textContent()), 700));
   await setQuery("");
   await p.getByRole("columnheader", { name: "Health" }).click();
   check(tag("sorting by Health puts the link conflict, then a critical row first"), (await dotsOf())[0] === "Health: Link conflict" && (await dotsOf())[1] === "Health: Critical", (await dotsOf()).slice(0, 2).join());

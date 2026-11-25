@@ -128,6 +128,8 @@ export interface StatusSummary {
   counts: StatusCounts;
   products: StatusProduct[];
   faults: StatusFault[];
+  /** Failing checks left out of `faults` (the summary holds at most 10); the report has them all. */
+  more_faults?: number;
   last_seen: number;
   next: number;
   stale: boolean;

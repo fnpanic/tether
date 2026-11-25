@@ -23,6 +23,9 @@ const _: () = assert!(STATUS_MAX >= 2048 * 20_000);
 const REPORT_MAX: usize = 1 << 20;
 /// A software list (SBOM): the relay keeps at most 512 KiB by default; more than 1 MiB is not shown.
 const SBOM_MAX: usize = 1 << 20;
+/// A software search answer: at most 2000 hosts of uuid (64), name (128) and version (64), about
+/// 600 KB at the worst with JSON escapes; more is refused.
+const SOFTWARE_MAX: usize = 1 << 20;
 /// The relay refuses larger tag documents (docs/api.md, team endpoints).
 pub const TAGS_PUT_MAX: usize = 512 * 1024;
 
@@ -136,6 +139,11 @@ fn status_error(code: u16, body: &str) -> String {
 /// One signed request to the first reachable relay, or to the first reachable of `hosts`.
 /// `path` includes the query string (it is part of the signature). Answers status, ETag, body.
 fn call_via(hosts: Option<&[String]>, method: &str, path: &str, body: Option<&[u8]>, headers: &[(&str, String)], limit: usize) -> R<(u16, Option<String>, Vec<u8>)> {
+    call_for(hosts, method, path, body, headers, limit, "ETag")
+}
+
+/// [`call_via`] answering the header `want` instead of the ETag.
+fn call_for(hosts: Option<&[String]>, method: &str, path: &str, body: Option<&[u8]>, headers: &[(&str, String)], limit: usize, want: &str) -> R<(u16, Option<String>, Vec<u8>)> {
     let k = key()?;
     let body = body.unwrap_or_default().to_vec();
     let build = |c: &reqwest::blocking::Client, base: &str| {
@@ -151,16 +159,16 @@ fn call_via(hosts: Option<&[String]>, method: &str, path: &str, body: Option<&[u
         Some(h) => crate::policy::api_via(h, build),
         None => crate::policy::api(build),
     }?;
-    answer(r, limit)
+    answer(r, limit, want)
 }
 
-/// Status, ETag and body of `r`, at most `limit` bytes after decoding. The relay API clients
+/// Status, the header `want` (the ETag) and body of `r`, at most `limit` bytes after decoding. The relay API clients
 /// (`policy::api_via`) keep reqwest's `gzip` feature on: every request says `Accept-Encoding: gzip`
 /// and a gzip answer (the health summary) is decoded while it is read, so `limit` bounds the
 /// decoded size; a relay that ignores the header answers plain and is read the same way.
-fn answer(r: reqwest::blocking::Response, limit: usize) -> R<(u16, Option<String>, Vec<u8>)> {
+fn answer(r: reqwest::blocking::Response, limit: usize, want: &str) -> R<(u16, Option<String>, Vec<u8>)> {
     let code = r.status().as_u16();
-    let etag = r.headers().get("ETag").and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let etag = r.headers().get(want).and_then(|v| v.to_str().ok()).map(str::to_owned);
     let raw = tether_trust::read_limited(r, limit)?;
     Ok((code, etag, raw))
 }
@@ -328,6 +336,73 @@ fn sbom_text(code: u16, raw: Vec<u8>) -> R<String> {
         404 => Err("none: No software list on the server.".into()),
         _ => Err(status_error(code, &String::from_utf8_lossy(&raw))),
     }
+}
+
+/// Which hosts of `relay` have a program whose name or publisher contains `q` (any case), with a
+/// version starting with `v` (empty: any), in their last uploaded software list (spec 10.4). The
+/// webview asks every relay itself and keeps answers 60 s; the relay audits each search.
+pub fn status_software(relay: &str, q: &str, v: &str) -> R<Value> {
+    // The relay's own rule (docs/api.md): q 2 to 64 characters, v at most 32, no control characters.
+    let n = |s: &str| s.chars().count();
+    if !(2..=64).contains(&n(q)) || n(v) > 32 || q.chars().chain(v.chars()).any(char::is_control) {
+        return Err("invalid search".into());
+    }
+    if !crate::policy::relay_bases().iter().any(|(h, _)| h == relay) {
+        return Err("unknown server".into());
+    }
+    let (c, retry, b) = call_for(Some(&[relay.to_owned()]), "GET", &software_path(q, v), None, &[], SOFTWARE_MAX, "Retry-After")?;
+    software_answer(c, retry.as_deref(), &b)
+}
+
+fn software_path(q: &str, v: &str) -> String {
+    let enc = |s: &str| s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
+    if v.is_empty() { format!("/api/team/status/software?q={}", enc(q)) } else { format!("/api/team/status/software?q={}&v={}", enc(q), enc(v)) }
+}
+
+/// The relay's answer as the webview may use it: unknown fields dropped, at most 2000 hosts with a
+/// valid uuid, names and versions plain text cut to the sidecar's bounds (128, 64). Refusals carry a
+/// prefix the webview tells apart: `unsupported:` (an older relay), `forbidden:`, `busy:<s>:`.
+fn software_answer(code: u16, retry: Option<&str>, raw: &[u8]) -> R<Value> {
+    #[derive(serde::Deserialize)]
+    struct Hit {
+        uuid: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        version: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Found {
+        sbom: bool,
+        #[serde(default)]
+        built: Option<u64>,
+        #[serde(default)]
+        hosts: Vec<Hit>,
+        #[serde(default)]
+        more: u64,
+        #[serde(default)]
+        pending: u64,
+        // A relay whose time budget ended before it read every list.
+        #[serde(default)]
+        partial: bool,
+    }
+    match code {
+        200 => {}
+        404 => return Err("unsupported: This server does not offer software search.".into()),
+        403 => return Err("forbidden: Your team membership does not allow software search.".into()),
+        429 => {
+            let s = retry.and_then(|r| r.trim().parse::<u64>().ok()).map(|s| format!(":{}", s.min(3600))).unwrap_or_default();
+            return Err(format!("busy{s}: Too many software searches."));
+        }
+        _ => return Err(status_error(code, &String::from_utf8_lossy(raw))),
+    }
+    let f: Found = serde_json::from_slice(raw).map_err(|e| format!("bad answer from the server: {e}"))?;
+    if !f.sbom {
+        return Ok(serde_json::json!({ "sbom": false, "hosts": [] }));
+    }
+    let text = |s: Option<String>, max: usize| s.unwrap_or_default().chars().filter(|c| !c.is_control()).take(max).collect::<String>();
+    let hosts: Vec<Value> = f.hosts.into_iter().filter(|h| tether_trust::status::valid_uuid(&h.uuid)).take(2000).map(|h| serde_json::json!({ "uuid": h.uuid, "name": text(h.name, 128), "version": text(h.version, 64) })).collect();
+    Ok(serde_json::json!({ "sbom": true, "built": f.built, "hosts": hosts, "more": f.more, "pending": f.pending, "partial": f.partial }))
 }
 
 /// Changes one health device on every relay of this build: pins (and so links) are kept per relay,
@@ -573,7 +648,7 @@ mod tests {
         let (url, heads) = stand_in(vec![reply("Content-Encoding: gzip\r\n", &gz(&plain)), reply("", &plain), reply("Content-Encoding: gzip\r\n", &bomb)]);
         // The relay API clients' settings that matter here (policy::api_via): reqwest's defaults.
         let c = reqwest::blocking::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build().unwrap();
-        let get = || answer(c.get(&url).header("If-None-Match", "W/\"0123456789abcdef\"").send().unwrap(), STATUS_MAX);
+        let get = || answer(c.get(&url).header("If-None-Match", "W/\"0123456789abcdef\"").send().unwrap(), STATUS_MAX, "ETag");
         let (code, etag, raw) = get().unwrap();
         assert_eq!((code, etag.as_deref(), raw == plain), (200, Some("W/\"0123456789abcdef\""), true));
         let head = heads.recv().unwrap();
@@ -603,6 +678,43 @@ mod tests {
         // Host and relay are checked before anything is sent.
         assert_eq!(status_sbom("relay.example", "../x").unwrap_err(), "invalid host id");
         assert_eq!(status_sbom("relay.example", "0123456789abcdef0123456789abcdef").unwrap_err(), "unknown server");
+    }
+
+    #[test]
+    fn software_search_inputs_are_checked_before_any_request() {
+        for (q, v) in [("x", ""), (&*"x".repeat(65), ""), ("ab\u{7}", ""), ("ab", &*"1".repeat(33)), ("ab", "1\n")] {
+            assert_eq!(status_software("relay.example", q, v).unwrap_err(), "invalid search", "{q:?} {v:?}");
+        }
+        assert_eq!(status_software("relay.example", "chrome", "").unwrap_err(), "unknown server");
+        // Characters, not bytes: 64 two-byte letters are allowed.
+        assert_eq!(status_software("relay.example", &"ü".repeat(64), "").unwrap_err(), "unknown server");
+        assert_eq!(software_path("google chrome", ""), "/api/team/status/software?q=google%20chrome");
+        assert_eq!(software_path("a&v=1#", "120"), "/api/team/status/software?q=a%26v%3D1%23&v=120");
+    }
+
+    #[test]
+    fn software_search_answers() {
+        let ok = |raw: &str| software_answer(200, None, raw.as_bytes()).unwrap();
+        let v = ok(r#"{"sbom":true,"built":7,"hosts":[{"uuid":"dev-0001","name":"Garnet\u0007 Browser","version":"126.0.2","extra":1},{"uuid":"../x","name":"n","version":"1"},{"uuid":"dev-0002"}],"more":3,"pending":4,"new_field":{"a":1}}"#);
+        assert_eq!(v, serde_json::json!({"sbom": true, "built": 7, "hosts": [{"uuid": "dev-0001", "name": "Garnet Browser", "version": "126.0.2"}, {"uuid": "dev-0002", "name": "", "version": ""}], "more": 3, "pending": 4, "partial": false}));
+        // Cut to the sidecar's bounds; at most 2000 hosts.
+        let long = format!(r#"{{"sbom":true,"hosts":[{{"uuid":"dev-0001","name":"{}","version":"{}"}}]}}"#, "n".repeat(500), "1".repeat(500));
+        let v = ok(&long);
+        assert_eq!((v["hosts"][0]["name"].as_str().unwrap().len(), v["hosts"][0]["version"].as_str().unwrap().len()), (128, 64));
+        let many = format!(r#"{{"sbom":true,"hosts":[{}],"partial":true}}"#, vec![r#"{"uuid":"dev-0001"}"#; 2500].join(","));
+        let v = ok(&many);
+        assert_eq!((v["hosts"].as_array().unwrap().len(), &v["partial"]), (2000, &Value::from(true)));
+        // Switched off on that relay.
+        assert_eq!(ok(r#"{"sbom":false,"hosts":[]}"#), serde_json::json!({"sbom": false, "hosts": []}));
+        // Every refusal in a form the webview tells apart.
+        assert!(software_answer(404, None, b"not found").unwrap_err().starts_with("unsupported: "));
+        assert!(software_answer(403, None, b"").unwrap_err().starts_with("forbidden: "));
+        assert!(software_answer(429, Some("5"), b"busy").unwrap_err().starts_with("busy:5: "));
+        assert!(software_answer(429, Some("junk"), b"").unwrap_err().starts_with("busy: "));
+        assert!(software_answer(429, Some("999999"), b"").unwrap_err().starts_with("busy:3600: "));
+        assert!(software_answer(500, None, b"oops").unwrap_err().contains("500"));
+        assert!(software_answer(200, None, b"{not json").unwrap_err().starts_with("bad answer"));
+        assert!(software_answer(200, None, br#"{"sbom":true,"hosts":"x"}"#).unwrap_err().starts_with("bad answer"));
     }
 
     #[test]

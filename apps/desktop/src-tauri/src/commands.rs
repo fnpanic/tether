@@ -868,6 +868,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         team_status,
         team_status_host,
         team_status_sbom,
+        team_status_software,
         team_status_find,
         team_status_link,
         team_status_unlink,
@@ -982,6 +983,12 @@ async fn team_status_host(relay: String, uuid: String) -> R<Value> {
 #[tauri::command]
 async fn team_status_sbom(relay: String, uuid: String) -> R<String> {
     blocking(move || team::status_sbom(&relay, &uuid)).await?
+}
+
+/// The software search of one relay (`software:` in the host list); the webview asks each relay.
+#[tauri::command]
+async fn team_status_software(relay: String, q: String, v: String) -> R<Value> {
+    blocking(move || team::status_software(&relay, &q, &v)).await?
 }
 
 #[tauri::command]

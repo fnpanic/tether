@@ -9,7 +9,12 @@ export type Node =
   | { k: "not"; c: Node }
   | { k: "word"; v: string }
   | { k: "tag"; v: string; prefix: boolean }
-  | { k: "field"; f: string; op: string; v: string };
+  | { k: "field"; f: string; op: string; v: string; at?: string };
+/** `software:<v>[@<at>]`: answered by the relays (software.ts), not by the summary. */
+type FieldNode = Extract<Node, { k: "field" }>;
+export type SoftwareField = FieldNode;
+/** Whether a host's software list has a match: null = cannot say (no list, its relay did not answer). */
+export type SoftwareLookup = (n: SoftwareField, h: Host) => boolean | null;
 
 export interface Parsed {
   node: Node | null;
@@ -19,13 +24,14 @@ export interface Parsed {
 }
 
 /** The fields of a tag rule: those from before health data existed. In a rule, health:, product:,
- *  version:, role:, check:, agent:, customer: and since: stay plain words, as older desktops of a team read the
+ *  version:, role:, check:, agent:, customer:, since: and software: stay plain words, as older desktops of a team read the
  *  same shared rule (docs/advanced.md). */
 const RULE_FIELDS = new Set(["id", "name", "host", "os", "ver", "user", "note", "tag", "is", "has", "seen", "src"]);
 /** The search box and saved searches also read the health summary. */
-const FIELDS = new Set([...RULE_FIELDS, "health", "product", "version", "role", "check", "agent", "customer", "since"]);
+const FIELDS = new Set([...RULE_FIELDS, "health", "product", "version", "role", "check", "agent", "customer", "since", "software"]);
 
-type Tok = { t: "(" | ")" | "or" | "and" | "not" } | { t: "term"; v: string; quoted: boolean };
+/** `at`: where the last `@` outside quotes is in `v` (-1: none), for `software:<name>@<version>`. */
+type Tok = { t: "(" | ")" | "or" | "and" | "not" } | { t: "term"; v: string; quoted: boolean; at: number };
 
 function tokenize(q: string): Tok[] {
   const out: Tok[] = [];
@@ -50,24 +56,28 @@ function tokenize(q: string): Tok[] {
       // A term; a quoted part (also after `field:`) may contain spaces.
       let v = "";
       let quoted = false;
+      let at = -1;
       while (i < q.length && !/[\s()|]/.test(q[i])) {
         if (q[i] === '"') {
           quoted = true;
           const end = q.indexOf('"', i + 1);
           v += q.slice(i + 1, end < 0 ? q.length : end);
           i = end < 0 ? q.length : end + 1;
-        } else v += q[i++];
+        } else {
+          if (q[i] === "@") at = v.length;
+          v += q[i++];
+        }
       }
       if (!quoted && v === "OR") out.push({ t: "or" });
       else if (!quoted && v === "AND") out.push({ t: "and" });
       else if (!quoted && v === "NOT") out.push({ t: "not" });
-      else if (v) out.push({ t: "term", v, quoted });
+      else if (v) out.push({ t: "term", v, quoted, at });
     }
   }
   return out;
 }
 
-function term(v: string, quoted: boolean, fields: Set<string>): Node {
+function term(v: string, quoted: boolean, at: number, fields: Set<string>): Node {
   if (!quoted || !v.includes(" ") || v.includes(":")) {
     if (v.startsWith("#") && v.length > 1) {
       const prefix = v.endsWith("*");
@@ -79,6 +89,12 @@ function term(v: string, quoted: boolean, fields: Set<string>): Node {
       if (f === "tag") {
         const prefix = m[3].endsWith("*");
         return { k: "tag", v: m[3].slice(0, prefix ? -1 : undefined).toLowerCase(), prefix };
+      }
+      if (f === "software") {
+        // The name may hold an @ inside quotes; the version follows the last @ outside them.
+        const start = v.length - m[3].length;
+        const ver = at >= start ? v.slice(at + 1).toLowerCase() : "";
+        return { k: "field", f, op: "", v: (at >= start ? v.slice(start, at) : m[3]).toLowerCase(), ...(ver ? { at: ver } : {}) };
       }
       return { k: "field", f, op: m[2] ?? "", v: m[3].toLowerCase() };
     }
@@ -151,7 +167,7 @@ export function parse(q: string, rule = false): Parsed {
     }
     pos++;
     if (t?.t !== "term") return null;
-    const n = term(t.v, t.quoted, fields);
+    const n = term(t.v, t.quoted, t.at, fields);
     if (n.k === "word") words.push(n.v);
     return n;
   };
@@ -269,8 +285,11 @@ function field(h: Host, f: string, op: string, v: string, now: number): boolean 
       return !!h.status?.products.some((p) => p.version?.toLowerCase().startsWith(v));
     case "role":
       return !!h.status?.products.some((p) => p.role === v);
-    case "check":
-      return !!h.status?.faults.some((f) => f.id.includes(v));
+    case "check": {
+      // `check:backup=crit`: that check in that state.
+      const m = /^(.+)=(crit|warn)$/.exec(v);
+      return !!h.status?.faults.some((f) => f.id.includes(m ? m[1] : v) && (!m || f.state === m[2]));
+    }
     case "agent":
       return v === "none" ? !h.status : !!h.status?.agent.startsWith(v);
     case "customer":
@@ -284,42 +303,86 @@ function field(h: Host, f: string, op: string, v: string, now: number): boolean 
   return false;
 }
 
-/** `rule`: words match the text a rule read before health data existed (`Host.rhay`). */
-export function matches(n: Node, h: Host, now: number, rule = false): boolean {
+/** `rule`: words match the text a rule read before health data existed (`Host.rhay`). `sw`: the
+ *  software search's answers; without it a `software:` term matches nothing. */
+export function matches(n: Node, h: Host, now: number, rule = false, sw?: SoftwareLookup): boolean {
+  return m3(n, h, now, rule, sw) === true;
+}
+
+/** Three-valued: null where a software term cannot say (a host without a list), so that neither
+ *  `software:x` nor `-software:x` matches it, while `software:x | is:online` still can. */
+function m3(n: Node, h: Host, now: number, rule: boolean, sw: SoftwareLookup | undefined): boolean | null {
   switch (n.k) {
     case "and": {
+      let rest = n.c;
       // `product:x version:26.3`: one product must match both (spec 10.3, "combine with product:").
-      const pv = n.c.filter((c): c is Extract<Node, { k: "field" }> => c.k === "field" && (c.f === "product" || c.f === "version"));
+      const pv = n.c.filter((c): c is FieldNode => c.k === "field" && (c.f === "product" || c.f === "version"));
       if (pv.some((c) => c.f === "product") && pv.some((c) => c.f === "version")) {
         const one = (p: StatusProduct, c: (typeof pv)[number]) => (c.f === "product" ? p.name.toLowerCase().includes(c.v) : !!p.version?.toLowerCase().startsWith(c.v));
         if (!h.status?.products.some((p) => pv.every((c) => one(p, c)))) return false;
-        return n.c.every((c) => (pv as Node[]).includes(c) || matches(c, h, now, rule));
+        rest = n.c.filter((c) => !(pv as Node[]).includes(c));
       }
-      return n.c.every((c) => matches(c, h, now, rule));
+      let unknown = false;
+      for (const c of rest) {
+        const r = m3(c, h, now, rule, sw);
+        if (r === false) return false;
+        if (r === null) unknown = true;
+      }
+      return unknown ? null : true;
     }
-    case "or":
-      return n.c.some((c) => matches(c, h, now, rule));
-    case "not":
-      return !matches(n.c, h, now, rule);
+    case "or": {
+      let unknown = false;
+      for (const c of n.c) {
+        const r = m3(c, h, now, rule, sw);
+        if (r === true) return true;
+        if (r === null) unknown = true;
+      }
+      return unknown ? null : false;
+    }
+    case "not": {
+      const r = m3(n.c, h, now, rule, sw);
+      return r === null ? null : !r;
+    }
     case "word":
       return fuzzy(rule ? (h.rhay ?? h.hay) : h.hay, n.v) > 0;
     case "tag":
       return hasTag(h, n.v, n.prefix);
     case "field":
-      return field(h, n.f, n.op, n.v, now);
+      return n.f === "software" ? (sw?.(n, h) ?? null) : field(h, n.f, n.op, n.v, now);
+  }
+}
+
+/** `n` without the `software:` terms `keep` refuses (default: all of them): what the list shows
+ *  while the software search has not answered yet. Null when nothing is left. */
+export function withoutSoftware(n: Node | null, keep: (f: SoftwareField) => boolean = () => false): Node | null {
+  if (!n) return null;
+  switch (n.k) {
+    case "and":
+    case "or": {
+      const c = n.c.map((x) => withoutSoftware(x, keep)).filter((x): x is Node => !!x);
+      return c.length === 0 ? null : c.length === 1 ? c[0] : { k: n.k, c };
+    }
+    case "not": {
+      const c = withoutSoftware(n.c, keep);
+      return c ? { k: "not", c } : null;
+    }
+    case "field":
+      return n.f === "software" && !keep(n) ? null : n;
+    default:
+      return n;
   }
 }
 
 /** Hosts matching `q`; with free-text words, best match first (else input order). `rule`: as a tag
  *  rule reads `q` (the Rules dialog's count). */
-export function search(hosts: Host[], q: string | Parsed, now = Date.now() / 1000, rule = false): Host[] {
+export function search(hosts: Host[], q: string | Parsed, now = Date.now() / 1000, rule = false, sw?: SoftwareLookup): Host[] {
   const p = typeof q === "string" ? parse(q, rule) : q;
   if (!p.node) return hosts;
   const node = p.node;
-  if (!p.words.length) return hosts.filter((h) => matches(node, h, now, rule));
+  if (!p.words.length) return hosts.filter((h) => matches(node, h, now, rule, sw));
   const scored: { h: Host; s: number }[] = [];
   for (const h of hosts) {
-    if (!matches(node, h, now, rule)) continue;
+    if (!matches(node, h, now, rule, sw)) continue;
     let s = 0;
     for (const w of p.words) s += fuzzy(h.hay, w);
     scored.push({ h, s: s + (h.pinned ? 50 : 0) + (h.online === "on" ? 20 : 0) });

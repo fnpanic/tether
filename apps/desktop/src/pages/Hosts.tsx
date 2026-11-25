@@ -38,7 +38,8 @@ import { buildHosts, label, type Host } from "../lib/hosts/model";
 import { linkHolder } from "../lib/hosts/health";
 import { healthAlerts, type Sent } from "../lib/hosts/notify";
 import { applyRules } from "../lib/hosts/rules";
-import { parse, search } from "../lib/hosts/query";
+import { parse, search, withoutSoftware } from "../lib/hosts/query";
+import { chipLines, faultsHint, lookupFor, runnable, searcher, softwareTerms, termsKey, type Results } from "../lib/hosts/software";
 import { actions, flush, useHosts, useReadOnly } from "../lib/hosts/store";
 import { HostTable, smartOrder, sortHosts, type Sort } from "../components/hosts/HostTable";
 import { Detail } from "../components/hosts/Detail";
@@ -147,15 +148,38 @@ export function Hosts() {
   const known = useMemo(() => [...tree.count.keys()].sort(), [tree]);
   const parsed = useMemo(() => parse(q), [q]);
 
+  // software: terms ask the relays (spec 10.4): on Enter or after 800 ms without typing. Until the
+  // answer for exactly these terms is in, the list shows what the other terms match.
+  const [sw, setSw] = useState<{ key: string; results: Results | null }>({ key: "", results: null });
+  const finder = useMemo(() => searcher((c, a) => invoke(c, a), () => useHosts.getState().statusRelays, setSw), []);
+  useEffect(() => () => finder.dispose(), [finder]);
+  useEffect(() => finder.typed(q), [finder, q]);
+  /** A query chosen, not typed (saved search, library, palette): searched at once. */
+  const openQuery = useCallback((x: string) => (setQ(x), finder.enter(x)), [finder]);
+  const swTerms = useMemo(() => softwareTerms(parsed.node), [parsed]);
+  const swReady = runnable(swTerms);
+  const swApplied = swReady.length > 0 && sw.key === termsKey(swReady) ? sw.results : null;
+  const swRetry = !!swApplied && [...swApplied.values()].some((m) => [...m.values()].some((a) => !a.ok && (a.why === "busy" || a.why === "offline" || a.why === "error")));
+  const swLines = useMemo(() => {
+    if (!swTerms.length) return [];
+    const bad = chipLines(swTerms.filter((t) => !runnable([t]).length), new Map(), hosts, st.statusRelays);
+    if (swApplied) return chipLines(swTerms, swApplied, hosts, st.statusRelays);
+    const n = st.statusRelays.length;
+    return swReady.length ? [`Searching installed software on ${n} ${n === 1 ? "server" : "servers"}… Until then the list shows what the other search terms match.`, ...bad] : bad;
+  }, [swTerms, swApplied, swReady.length, hosts, st.statusRelays]);
+  const checkHint = useMemo(() => faultsHint(parsed.node, hosts), [parsed, hosts]);
+
   const rows = useMemo(() => {
     const t0 = performance.now();
-    const found = search(hosts, parsed);
+    // A software term not answered yet (or not sendable) is left out rather than matching nothing.
+    const node = withoutSoftware(parsed.node, (f) => !!swApplied && runnable(softwareTerms(f)).length > 0);
+    const found = search(hosts, { ...parsed, node }, Date.now() / 1000, false, swApplied ? lookupFor(swApplied) : undefined);
     const r = sort.key === "smart" ? (parsed.words.length ? found : smartOrder(found)) : sortHosts(found, sort);
     perf.last = performance.now() - t0;
     perf.samples.push(perf.last);
     if (perf.samples.length > 500) perf.samples.shift();
     return r;
-  }, [hosts, parsed, sort]);
+  }, [hosts, parsed, sort, swApplied]);
 
   const counts = useMemo(
     () => ({
@@ -168,7 +192,8 @@ export function Hosts() {
     }),
     [hosts],
   );
-  const searchCounts = useMemo(() => new Map(st.store.searches.map((s) => [s.id, search(hosts, s.query).length])), [hosts, st.store.searches]);
+  // A saved search with a software: term has no count until it is opened (the relays answer it).
+  const searchCounts = useMemo(() => new Map(st.store.searches.map((s) => [s.id, softwareTerms(parse(s.query).node).length ? undefined : search(hosts, s.query).length])), [hosts, st.store.searches]);
 
   // The cursor stays on a shown row.
   const cur = cursor && rows.some((h) => h.id === cursor) ? cursor : (rows[0]?.id ?? null);
@@ -282,6 +307,11 @@ export function Hosts() {
           e.preventDefault();
           return move(curIdx - page, e.shiftKey);
         case "Enter":
+          // In the search box Enter first searches installed software (again after a passing failure).
+          if (inSearch && swReady.length && (!swApplied || swRetry)) {
+            e.preventDefault();
+            return finder.enter(q);
+          }
           if (!cur) return;
           e.preventDefault();
           return connect(cur, e.shiftKey ? "file-transfer" : e.altKey ? "view-only" : "default");
@@ -361,7 +391,7 @@ export function Hosts() {
     { id: "online", title: "Refresh online status", icon: <Circle size={14} />, run: () => void actions.refreshOnline() },
     { id: "selall", title: "Select all shown", keys: "Ctrl A", run: () => setSelected(new Set(rows.map((h) => h.id))) },
     { id: "help", title: "Keyboard shortcuts and search syntax", keys: "?", icon: <HelpCircle size={14} />, run: () => setDlg("help") },
-    ...st.store.searches.map((s) => ({ id: `s${s.id}`, title: `Saved search: ${s.name}`, hint: s.query, icon: <Star size={14} />, run: () => setQ(s.query) })),
+    ...st.store.searches.map((s) => ({ id: `s${s.id}`, title: `Saved search: ${s.name}`, hint: s.query, icon: <Star size={14} />, run: () => openQuery(s.query) })),
   ];
 
   const lib: [string, string, number, React.ReactNode][] = [
@@ -486,7 +516,7 @@ export function Hosts() {
                 s.name,
                 searchCounts.get(s.id),
                 q === s.query,
-                () => setQ(s.query),
+                () => openQuery(s.query),
                 <Star size={14} />,
                 !ro && <button
                   aria-label={`Delete saved search ${s.name}`}
@@ -544,6 +574,14 @@ export function Hosts() {
             </Button>
           </div>
 
+          {/* Always in the page (empty: hidden), so a screen reader announces each change. */}
+          <div role="status" data-testid="search-notes" className="mx-4 mb-2 shrink-0 rounded-xl bg-parchment px-3 py-2 text-caption text-ink empty:hidden">
+            {swLines.map((l) => (
+              <div key={l}>{l}</div>
+            ))}
+            {checkHint && <div>{checkHint}</div>}
+            {swTerms.length > 0 && <div className="text-footnote text-muted">Each software search is sent to the servers and recorded in the team's audit log with its text.</div>}
+          </div>
           {st.saveError && (
             <div role="alert" className="mx-4 mb-2 shrink-0 rounded-xl bg-danger/10 px-3 py-2 text-caption text-danger">
               {st.saveError}

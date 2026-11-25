@@ -161,7 +161,7 @@ export function Rules({ hosts, store, onClose }: { hosts: Host[]; store: Store; 
           <Plus size={15} /> Add rule
         </Button>
       </form>
-      <div className="mt-2 text-footnote text-muted">Health terms (health:, product:, role: …) are not available in rules: there they are plain words. Use them in the search box or a saved search.</div>
+      <div className="mt-2 text-footnote text-muted">Health and software terms (health:, product:, check:, software: …) are not available in rules: there they are plain words. Use them in the search box or a saved search.</div>
       <div className="mt-4 flex justify-end">
         <Button variant="pearl" onClick={onClose}>
           Close
@@ -605,7 +605,8 @@ const SYNTAX: [string, string][] = [
   ["has:notes  has:tags  has:name", "Has a value"],
   ["health:crit  health:stale  health:none", "Health: crit, warn, stale, setup, ok, none (no monitor agent), conflict (two devices linked to one host)"],
   ["product:records  version:26.3  role:server", "Detected products, version prefix, role (server, client, single)"],
-  ["check:backup", "A check whose id contains the text is not OK"],
+  ["check:backup  check:backup=crit", "A check whose id contains the text is not OK; =crit or =warn: in that state"],
+  ["software:garnet  software:\"garnet browser\"@126", "An installed program (name or publisher contains the text, @ a version prefix), as of each computer's last upload; Enter searches the servers"],
   ["agent:0.1  agent:none", "Monitor agent version"],
   ["since:3d", "Not OK for at least that long (m, h, d, w). Health terms are plain words in tag rules"],
 ];

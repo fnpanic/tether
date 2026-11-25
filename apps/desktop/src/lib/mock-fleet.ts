@@ -83,6 +83,7 @@ export function fleet() {
     second,
     report: (uuid: string) => healthReport(all(), meta, uuid, now),
     sbom: (uuid: string) => sbomText(find(uuid).uuid, find(uuid).sbom?.at ?? now),
+    software: (relay: string, q: string, v: string) => softwareSearch(relay, q, v, now),
     link(uuid: string, id: string) {
       const s = find(uuid);
       if (s.claimed_id !== id) fail("Refused by the server: tether_id is not the one this device claims");
@@ -155,6 +156,8 @@ function summary(k: number, uuid: string, tether_id: string | null, host: string
     counts: { ok: 12 - faults.length, warn: bad("warn"), crit: bad("crit"), unknown: bad("unknown"), setup: bad("unknown") },
     products,
     faults,
+    // Some critical hosts have more failing checks than a summary holds.
+    ...(st === "crit" && k % 12 === 3 ? { more_faults: 3 } : {}),
     last_seen: stale ? now - 4 * 3600 : now - (k % 5) * 60,
     next: 300,
     stale,
@@ -179,6 +182,23 @@ const PROGRAMS: [string, string, string][] = [
   ["Underhill Archive Manager", "1.12", "Underhill Tools"], ["Vale Calendar", "4.4.0", "Vale Software"], ["Wrenfield Scanner Service", "8.1.0", "Wrenfield Devices"], ["Yarrow Font Library", "2.2", "Yarrow Type"],
   ["Zephyr Screenshot Tool", "6.0.3", "Zephyr Utilities"],
 ];
+// The software search (team_status_software): agent-only-1's programs match by name or publisher on
+// the first relay. Tests set `window.__mockSoftware = { "<relay>": state }` for the other answers:
+// unsupported, forbidden, busy, offline, off, more, pending, partial.
+async function softwareSearch(relay: string, q: string, v: string, now: number) {
+  await new Promise((r) => setTimeout(r, 300));
+  const mode = (globalThis as { __mockSoftware?: Record<string, string> }).__mockSoftware?.[relay] ?? "";
+  if (mode === "unsupported") fail("unsupported: This server does not offer software search.");
+  if (mode === "forbidden") fail("forbidden: Your team membership does not allow software search.");
+  if (mode === "busy") fail("busy:5: Too many software searches.");
+  if (mode === "offline") fail("offline: connection timed out");
+  if (mode === "off") return { sbom: false, hosts: [] };
+  const p = relay === "relay.example.com" ? PROGRAMS.find(([name, version, publisher]) => (name.toLowerCase().includes(q) || publisher.toLowerCase().includes(q)) && version.startsWith(v)) : undefined;
+  // The second entry is a uuid the summary does not have: the desktop ignores it.
+  const hosts = p ? ["agent-only-1", "not-in-the-summary-1"].map((uuid) => ({ uuid, name: p[0], version: p[1] })) : [];
+  return { sbom: true, built: now, hosts, more: mode === "more" ? 140 : 0, pending: mode === "pending" ? 3400 : 0, ...(mode === "partial" ? { partial: true } : {}) };
+}
+
 function sbomText(uuid: string, at: number): string {
   if (uuid === "agent-only-2") return fail("none: No software list on the server.");
   if (uuid === "agent-only-3") return JSON.stringify({ hello: "world", components: "none" });

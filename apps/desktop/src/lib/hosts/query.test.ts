@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildHosts, emptyStore, normTag, type Host, type StatusSummary } from "./model";
-import { cmpVersion, fuzzy, parse, search } from "./query";
+import { cmpVersion, fuzzy, parse, search, withoutSoftware } from "./query";
 import { applyRules } from "./rules";
 
 const NOW = 1_800_000_000;
@@ -195,6 +195,58 @@ describe("health terms", () => {
     // The search box keeps the health fields, and product names as free text.
     expect(ids("role:server", STATUS)).toEqual(["111111111"]);
     expect(ids("records", STATUS)).toContain("111111111");
+  });
+});
+
+describe("software and failure terms", () => {
+  const sw = (q: string, at?: string) => ({ k: "field", f: "software", op: "", v: q, ...(at ? { at } : {}) });
+  it("parses software:<name>[@<version>], quoted names, negation, OR and brackets", () => {
+    expect(parse("software:Chrome").node).toEqual(sw("chrome"));
+    expect(parse('software:"Google Chrome"@120').node).toEqual(sw("google chrome", "120"));
+    expect(parse("software:7-zip@19").node).toEqual(sw("7-zip", "19"));
+    expect(parse('software:"name@home"').node).toEqual(sw("name@home")); // an @ inside the quotes is part of the name
+    expect(parse("software:x@").node).toEqual(sw("x"));
+    expect(parse("-software:x").node).toEqual({ k: "not", c: sw("x") });
+    expect(parse("software:a | software:b").node).toEqual({ k: "or", c: [sw("a"), sw("b")] });
+    expect(parse("(software:a | is:online) customer:47").node).toEqual({ k: "and", c: [{ k: "or", c: [sw("a"), { k: "field", f: "is", op: "", v: "online" }] }, { k: "field", f: "customer", op: "", v: "47" }] });
+    expect(parse("software:chrome").words).toEqual([]);
+  });
+  it("a tag rule reads software: as a plain word, as the other health terms", () => {
+    expect(parse("software:chrome", true).node).toEqual({ k: "word", v: "software:chrome" });
+    const h = hosts(STATUS);
+    applyRules(h, [{ id: "s", tag: "sw", when: "software:chrome" }], NOW);
+    expect(h.filter((x) => x.auto.includes("sw"))).toEqual([]);
+  });
+  it("matches through the lookup; hosts without a list never match, in either form", () => {
+    const st = STATUS.map((s) => (s.uuid === "u9" ? s : { ...s, sbom: { at: NOW - 60, sha: "00" } }));
+    const look = (n: { v: string }, h: Host) => (h.status?.sbom ? h.status.uuid === "u1" && n.v === "chrome" : null);
+    const hit = (q: string) =>
+      search(hosts(st), q, NOW, false, look)
+        .map((h) => h.id)
+        .sort();
+    expect(hit("software:chrome")).toEqual(["111111111"]);
+    expect(hit("-software:chrome")).toEqual(["222222222"]); // has a list without a match; m:u9 and hosts without an agent have none
+    expect(hit("software:chrome | is:offline")).toEqual(["111111111", "222222222"]);
+    expect(hit("-(software:chrome | software:x)")).toEqual(["222222222"]);
+    expect(hit("software:chrome customer:0815")).toEqual([]);
+    expect(hit("-software:chrome | health:stale")).toEqual(["222222222", "m:u9"]);
+    // Without a lookup (not searched yet) the term matches nothing, either way.
+    expect(ids("software:chrome", st)).toEqual([]);
+    expect(ids("-software:chrome", st)).toEqual([]);
+  });
+  it("withoutSoftware drops the software terms the lookup cannot answer yet", () => {
+    expect(withoutSoftware(parse("software:a customer:47").node)).toEqual({ k: "field", f: "customer", op: "", v: "47" });
+    expect(withoutSoftware(parse("software:a").node)).toBeNull();
+    expect(withoutSoftware(parse("-software:a | (software:b is:online)").node)).toEqual({ k: "field", f: "is", op: "", v: "online" });
+    expect(withoutSoftware(parse("software:a software:b").node, (n) => n.v === "b")).toEqual(sw("b"));
+  });
+  it("check:<text>=crit or =warn matches only that state", () => {
+    const st = [sum({ uuid: "u1", tether_id: "111111111", faults: [{ id: "backup/age", state: "warn" }] }), sum({ uuid: "u2", tether_id: "222222222", faults: [{ id: "backup/age", state: "crit" }, { id: "sys/disk", state: "warn" }] })];
+    expect(ids("check:backup=crit", st)).toEqual(["222222222"]);
+    expect(ids("check:backup=warn", st)).toEqual(["111111111"]);
+    expect(ids("check:backup", st)).toEqual(["111111111", "222222222"]);
+    expect(ids("check:disk=crit", st)).toEqual([]);
+    expect(ids("check:=crit", st)).toEqual([]); // no check id contains "=crit"
   });
 });
 

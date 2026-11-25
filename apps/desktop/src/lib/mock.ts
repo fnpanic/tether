@@ -149,6 +149,8 @@ export const mock = {
         return (await fleet()).report(String(a.uuid)) as T;
       case "team_status_sbom":
         return (await fleet()).sbom(String(a.uuid)) as T;
+      case "team_status_software":
+        return (await fleet()).software(String(a.relay), String(a.q), String(a.v ?? "")) as T;
       case "team_status_find": {
         const f = await fleet();
         const all = [...f.status.map((s) => ({ ...s, relay: "relay.example.com" })), ...f.second.map((s) => ({ ...s, relay: "relay2.example.com" }))];
