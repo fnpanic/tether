@@ -365,6 +365,32 @@ it needs the admin key's passphrase. `tether_api_release_index_expires_timestamp
 shows the expiry ([monitoring.md](monitoring.md)). What an agent does with an expired index is
 defined by the agent, not by the relay or this tool.
 
+**Tether reads `monitor.json` too** (from 0.7.0, Windows only), never as a Tether update: to install
+the agent and to keep an agent it installed at the minimum version, when the policy feature
+`health.agent` asks for it ([health.md](health.md#installing-the-agent-through-tether)). It fetches
+`download/<channel>/monitor.json` (its `update.channel`; the agent has `stable` and `test`) from its
+relays and opens it with the same code as its own index (`release::choose_for` with the two monitor
+apps only, admin signature, serial floor `monitor-<channel>.serial` beside its state). For this it
+is stricter than for its own updates: it refuses an **expired** index (so a relay cannot have an
+agent version from an old index installed), a halted entry and an unexpected file name, and the
+artifact is checked for size, SHA-256, minisign signature with the compiled-in updater key and the
+trusted comment (file and version), then checked again right before it runs. The staged rollout
+applies to installs by policy, not to a technician's install in a session.
+
+**The minimum version and `upgrade`.** `monitor-publish index … --min-version <v>` sets the entry's
+`minimumVersion` (the wrapper `scripts/monitor-publish.sh` does not pass it; call the tool). Tether's
+service reads the index at most every 6 hours; when the agent it installed (service program or
+worker) has been below that version for 48 hours, it downloads the entry's version and runs that
+program's `upgrade`, which keeps the agent's data, key, enrolment and switches. It never installs a
+version that is not above the installed one. To move every machine: publish the new version with
+`--min-version` set to it. The agent's own updater keeps working as before; Tether only enforces the
+floor. Agents installed by hand, and machines without Tether's service, are never upgraded by
+Tether.
+
+**What must be published first.** Tether installs only what `monitor.json` offers, so the version
+published there must be 0.2.0 or later (the first that knows the commands Tether uses) before a
+policy says `install`. Agents 0.1.x installed by hand keep working and update themselves.
+
 Deploy order, on every relay, before the first monitor publish: the new tether-api binary first,
 then the proxy configuration (the Caddyfile or nginx.conf route below, which sends `monitor.json`
 to tether-api). An older tether-api stores an uploaded `monitor.json` like any file, without
@@ -395,10 +421,20 @@ and, unless issued for one Tether ID, reusable until they expire or are revoked.
   the route too: `^/download/[a-z0-9-]+/(releases(-v2)?|monitor)\.json$` (Caddyfile and
   nginx.conf in the repo). Without it Caddy serves `monitor.json` as a plain file: still
   verifiable, but without the serial ETag. A `monitor.json` upload does not move the release
-  generation G (Tether clients do not read it); its serials, summed over all channels, are the
-  `releases` hint of status answers.
+  generation G (Tether clients never take it as a Tether update; only Tether's agent manager reads
+  it, above); its serials, summed over all channels, are the `releases` hint of status answers.
 - Order: tether-api (+ Caddyfile) first, then hbbs; clients and Manage after. Each step works
   without the next ones; old clients ignore `ReleaseHint` and the heartbeat body.
+- **Release order for the agent through Tether (0.7.0):** relays first (tether-api and hbbs 0.7.0,
+  with `HBBS_PEER_URL` and `PEER_LOOKUP_FROM` where they run apart,
+  [deployment.md](deployment.md#update-the-agent-through-tether-070)), then the agent 0.2.0 or later to
+  `monitor.json`, then Tether Manage and the apps 0.7.0, **the policy with `health.agent` last**. An
+  old relay refuses to store that policy (`400 unknown feature "health.agent"`), refuses the grant
+  (`401 enrollment token: not an enrollment token`) and an enrolment with a proof (`400`); an old hbbs
+  answers `404` to every lookup, so the relay answers `409 tether id unknown to this relay`. An old
+  Tether skips the two features (logged as rules not applied) and does nothing; a technician asking it
+  in a session gets "Tether on the remote computer is too old (needs 0.7.0)." An old viewer has no
+  menu item and shows a proof link as linked by the token issued for the host.
 
 ## End-to-end test
 

@@ -10,7 +10,11 @@ who wants to write an agent. The wire details are in [api.md](api.md#device-stat
 
 - A store on the relay for the last report, the recent changes and the last contact of each
   enrolled device, and a health view in the technician app that reads it.
-- Read-only. Nothing in this feature runs a command on a device, changes a device's settings or
+- Read-only towards the device, with one exception: on Windows, Tether on that computer can
+  install, update and remove the agent itself when the organisation's signed policy or a
+  technician in a session asks for it ([Installing the agent through
+  Tether](#installing-the-agent-through-tether)); it runs nothing but the organisation's signed
+  agent. Nothing else in this feature runs a command on a device, changes a device's settings or
   opens a connection to it. A device never listens: the agent only sends reports to the relay,
   over the same outgoing TLS connection (TCP 443) the other Tether apps use.
 - Not part of the remote session. Seeing a host's health needs no session, and a session needs no
@@ -22,7 +26,9 @@ who wants to write an agent. The wire details are in [api.md](api.md#device-stat
   ([Notifications](#notifications)).
 
 The agent is not part of this repository. Any program can be an agent: the enrolment and the
-report format below are open and checked by the relay, which does not interpret the checks.
+report format below are open and checked by the relay, which does not interpret the checks. The
+install through Tether expects the commands of the organisation's agent (0.2.0 or later), which
+this page names but does not define.
 
 ## How it fits together
 
@@ -37,17 +43,22 @@ report format below are open and checked by the relay, which does not interpret 
         │ agent and check-pack updates:  download/<channel>/monitor.json (signed index)
 ```
 
-1. An administrator creates an **enrolment token** (valid 1 to 30 days) and gives it to the
-   agent's installer.
+1. The agent gets an **enrolment token** in one of two ways. Through Tether: the administrator
+   puts a **grant** (a token for agents Tether installs, made by Tether Manage, valid 365 days)
+   into the signed policy, and Tether on the machine hands it to the agent it installs together
+   with a **Tether proof**, a signature by Tether's identity key that names this agent
+   ([Installing the agent through Tether](#installing-the-agent-through-tether)). By hand: an
+   administrator creates an enrolment token (valid 1 to 30 days) and gives it to the agent's
+   installer ([Without Tether: the manual path](#without-tether-the-manual-path)).
 2. The agent generates its own Ed25519 key and enrols: `POST /api/status/enroll` with the token,
    its uuid, its public key and, when Tether is installed, its Tether ID, signed with that key
    (the `Tether-Sig: device-v1` header of a status post; every enrolment needs it). The relay
    checks the token and the signature, pins the key to the uuid and answers how long to wait
    before the next post. The Tether
-   ID the agent names is only a **claim**: it becomes the device's Tether ID when the token was
-   issued for that ID, when a grant comes with a Tether proof from Tether on that machine
-   (checked against hbbs, [api.md](api.md#post-apistatusenroll-token-and-device-signature)), or
-   when a team member confirms it ([Linking an agent to its
+   ID the agent names is only a **claim**: it becomes the device's Tether ID when a grant comes
+   with a Tether proof from Tether on that machine (each relay checks the proof against the key
+   hbbs holds for that ID, [api.md](api.md#post-apistatusenroll-token-and-device-signature)), when
+   the token was issued for that ID, or when a team member confirms it ([Linking an agent to its
    host](#linking-an-agent-to-its-host)).
 3. The agent posts a **full report** (everything) and, between changes, **heartbeats** (the state
    in a few fields). Each post is signed with the device key. The relay sets the pace.
@@ -56,10 +67,274 @@ report format below are open and checked by the relay, which does not interpret 
    summary into the host list by the verified Tether ID only. A machine with an agent but without
    Tether, or whose claim nobody confirmed yet, appears as a row of its own without a connect action.
 5. Agent and check-pack updates come through a second signed release index per channel,
-   `monitor.json`. Installed Tether clients never read it.
+   `monitor.json`. The agent updates itself from it. Tether never takes a Tether update from it;
+   on Windows Tether reads it only to install the agent and to raise an agent it installed to the
+   index's minimum version ([What Tether's service does by
+   itself](#what-tethers-service-does-by-itself)).
 
 Status is stored per relay. An agent should enrol on every relay of its list and post to one at a
 time. The technician app asks every relay and shows the newest answer for each device.
+
+## Installing the agent through Tether
+
+On Windows, Tether can install the health monitoring agent, keep it at the published minimum
+version and remove it, when the organisation's signed policy or a technician in a session asks for
+it. Nobody carries a token, copies a file, types at a console or links the host afterwards: the
+agent is linked to its host by a **Tether proof**, a signature by the identity key of Tether on that
+computer over the statement "this agent (uuid and key) belongs to this Tether ID", which each relay
+checks against the key hbbs holds for that ID. The host's Health section then says "Health linked
+by Tether on that computer".
+
+There are two ways, and Tether picks the one that fits the computer:
+
+- **With Tether's service** (Tether installed with unattended access, [unattended.md](unattended.md)):
+  the service's `--server` process, running as LocalSystem, does everything itself, by policy or on
+  a technician's request in a session, without asking anyone at the computer.
+- **Without the service** (an installed Tether without unattended access, and TetherQS): only when
+  someone asks, a technician in a session or the person at the computer, and then through the
+  Windows elevation prompt that the person at the computer answers. A policy alone never starts a
+  prompt.
+
+On macOS the two policy features are ignored and a Mac host answers "not supported"; a Mac viewer
+can use the session menu on Windows hosts. Agents installed by hand ([the manual
+path](#without-tether-the-manual-path)) stay as they are: Tether touches them only for the policy
+value `remove` and a technician's explicit **Remove…**.
+
+Nothing of this has been run on a real Windows machine yet: see [What was checked](#what-was-checked).
+
+### Setting it up (administrator)
+
+1. **Relays first.** tether-api and hbbs 0.7.0 on every relay: tether-api checks the proof, hbbs
+   answers its key lookup (`/peer-pk`). On a relay where both run on one server nothing else is
+   needed; otherwise set `HBBS_PEER_URL` and `PEER_LOOKUP_FROM` ([For the relay
+   operator](#enabling-and-switching-off), [kubernetes.md](kubernetes.md)). A relay before 0.7.0
+   refuses a policy that uses the new features (`400 unknown feature "health.agent"`; Tether Manage
+   says "This relay runs an older tether-api that does not know a feature of this policy. Update
+   the relay first, then publish again."), refuses the grant (`401 enrollment token: not an
+   enrollment token`) and an enrolment with a proof (`400`, unknown field). So: update every relay,
+   then publish the policy.
+2. **The agent in `monitor.json`.** Publish the agent, version 0.2.0 or later (the first that
+   knows the commands Tether uses), as before ([Publishing an agent or a check-pack
+   update](#publishing-an-agent-or-a-check-pack-update)). Tether installs only what is published
+   there, on its `update.channel` (`stable` or `test`; any other channel installs nothing).
+3. **The policy.** In Tether Manage › Policy, for the technician profile (every installed Tether),
+   the customer profile (TetherQS) or a group, set `health.agent` and create the layer's grant
+   (`health.enrol-grant`) in the Health monitoring area
+   ([management.md](management.md#health-monitoring-agent)); publish. For a group, assign the
+   machines under **Devices** and publish again. Tether's service sees a machine's group only after
+   a user has opened Tether on it once ([unattended.md](unattended.md#policy-in-the-service));
+   before that the profile and the machine policy apply.
+
+| `health.agent` | What happens |
+|---|---|
+| `manual` (default) | Nothing, exactly as before: Tether does not touch the agent, and a technician's request is refused. |
+| `on-request` | Nothing by itself. A technician in a session can install or remove the agent. Tether's service keeps an agent it installed at the minimum version. |
+| `install` | Tether's service installs the agent at its next policy check (every `policy.refresh-minutes`, default 15; every minute with `policy.fast-apply`), following the staged rollout of the published version, keeps it at the minimum version and enrols it again when the relays forgot it. A Tether without its service shows the person at the computer an **Install…** card. A technician can install or remove it. |
+| `remove` | Tether's service runs the agent's uninstall, also of an agent installed by hand. A technician can remove it, not install it. |
+
+Switching from `install` to `manual` or `on-request` removes nothing.
+
+**The grant.** A grant is an enrolment token with the flag `tether_proof`, made by Tether Manage for
+one layer with the vault's admin key: label `policy:<layer>`, valid 365 days, with an optional
+customer reference that the relay sets on every agent enrolled with it. It travels in the policy,
+which anyone who reaches the relay can read: it is public by design. Alone it enrols nothing: a
+relay accepts it only together with a proof signed by the identity key hbbs holds for the Tether ID
+named, so it links each agent only to the machine whose Tether signed for it, and it is not
+single-use. Its states in Manage: **Valid**; "Expires in N days: renew" (fewer than 60 days left;
+Manage reminds you after unlocking); "Replaced by a newer grant (not published)"; **Expired**;
+**Revoked**; "Does not verify with this app's admin key: renew" (another or an older admin key made
+it); "Not valid". Manage refuses to publish a profile, or a group over its profile, whose
+`health.agent` is `on-request` or `install` without a valid grant. **Renew** puts a new grant into
+the draft; after you publish, the old one is revoked on every relay once all of them serve a policy
+without it. **Revoke** revokes it on every relay at once: new installs and re-enrolments with it
+stop (`401 token revoked`), installed agents keep reporting, and the draft sets that layer's
+`health.agent` to `manual`, which you then publish. With an expired grant new installs and
+re-enrolments fail the same way (`401 enrollment token: expired`) until you renew and publish.
+
+### What Tether's service does by itself
+
+Only the service's `--server` process running as LocalSystem acts, after each policy check; a
+user-mode `--server`, the window, macOS and TetherQS never run this part. With `manual` it does
+nothing at all: no file, no request, no process.
+
+- **Install** (`install`, the agent's service `TetherMonitor` absent, no removal that sticks, see
+  below): it reads `download/<channel>/monitor.json` from its relays and opens it as it opens its
+  own release index (admin signature, channel, serial floor `monitor-<channel>.serial`); it refuses
+  an expired or halted index, an entry for another file name, and a computer the entry's staged
+  rollout has not reached yet. It downloads the `monitor/windows-x86_64` artifact and verifies its
+  size, SHA-256, minisign signature (the compiled-in updater key) and trusted comment (file and
+  version) into `%ProgramData%\Tether\health-agent\` (`%ProgramData%\Tether-<instance>\…` for an
+  instance build), a folder only SYSTEM and Administrators can write (owner checked, no junction).
+  It opens the file with a handle that denies writing and deleting, verifies it again through that
+  handle, and runs it while the handle is held: `identity` (the agent's uuid and public key), then,
+  with the proof signed by the service's own identity key (the one registered with hbbs for this
+  computer's Tether ID), `install --from-tether -` with one line on standard input (grant, Tether
+  ID, proof, channel), at most 3 minutes. The file is deleted afterwards.
+- **Minimum version** (`install` and `on-request`, for an agent Tether installed): it reads the index
+  at most every 6 hours. When the agent's service program or its worker has been below the entry's
+  `minimumVersion` for 48 hours, it downloads the entry's version the same way and runs its
+  `upgrade` (data, key, enrolment and the agent's own switches stay). It never installs a version
+  that is not above both.
+- **Enrol again** (`install` only, for an agent Tether installed): when the agent reports that no
+  relay knows it any more, at most once a day, and once whenever the policy's grant changes (for
+  example a group moved to another customer): `identity`, a new proof, `enrol --from-tether -` of the
+  installed agent.
+- **Remove** (`remove`): `uninstall --by-tether` of the installed agent (plain `uninstall` for one
+  older than 0.2.0), also of an agent installed by hand. The agent deletes its enrolment on every
+  relay, its service and its folders.
+- Failures are retried after 1 hour, 6 hours, then every 24 hours. The state is kept in
+  `%ProgramData%\Tether\health-agent.json` (never the grant or the proof, only the grant's id), so a
+  restart changes nothing; a read-only copy for the window's Settings line is
+  `health-agent-status.json` beside it.
+
+What it never does:
+
+- **Install again after a removal that sticks.** When the agent was removed on the computer
+  (*Settings › Apps*, `tether-monitor uninstall`; Tether sees the agent's `RemovedAt` value under
+  `HKLM\SOFTWARE\Tether Monitor`, or the service it installed is gone) or by a technician in a
+  session, the policy never installs it again. Only a technician's install in a session clears that.
+- Touch an agent installed by hand (service present, no state of Tether's), except for `remove` and
+  a technician's **Remove…**.
+- Change the agent's own switches: it passes only the channel at install.
+- Run any other program, pass a command line from the network, or run a file from a folder a user
+  can write. Besides the verified download it runs only the installed agent in
+  `%ProgramFiles%\Tether Monitor` (`identity`, `enrol`, `uninstall`, `--version`).
+
+A standard user who created `%ProgramData%\Tether` before Tether's service did blocks the feature on
+that computer: the folder is refused, not taken over, and the state says why. When Tether's service
+is removed, nothing more happens; the agent keeps running and updating itself.
+
+### In a session (technician)
+
+Connect with control of mouse and keyboard, open **Remote actions** › **Health monitoring agent…**.
+The item is disabled in a view-only session ("Not in a view-only session: it needs control of the
+remote computer.") and when the person at the computer has turned off mouse and keyboard; the remote
+computer accepts the request only from a logged-in remote-control connection whose control is on.
+Every team member sees the item; the remote computer's policy decides. The dialog first asks the
+remote computer and shows its answer; under the sentence a line "The remote computer says: “…”" may
+give the remote computer's own words (for `busy` and `not-allowed` always its reason).
+
+| The dialog says | Do |
+|---|---|
+| "The health monitoring agent is not installed on the remote computer." | **Install…** |
+| "Installed <version> by Tether on <date> (policy \| technician in a session)." | Nothing; **Remove…** to remove it. A line "It is linked to another ID (<id>), so its health shows on that host's row." means it belongs to another Tether ID (TetherQS of another user, an earlier install). |
+| "Installed by hand <version> (managed outside Tether)." | Tether leaves it alone; **Remove…** removes it. |
+| "Removed on the remote computer on <date> by someone at that computer. Tether does not install it again by itself." | **Install again…** only if they agree: the confirmation names the date, and they see the session. |
+| "Removed by Tether on <date>." | **Install…** if wanted; the policy does not install it again. |
+| "The last action on the remote computer did not succeed." | Read the remote computer's line; **Ask again** or **Install…**. |
+| "Still running on the remote computer. Ask again in a moment to see the result." | **Ask again**. |
+| "Tether on the remote computer is busy with the agent right now. Ask again in a moment." | **Ask again** later. |
+| "Not allowed by the remote computer's policy. The person or administrator of that computer decides (machine policy)." | The layer says `manual`, a machine policy locks it, TetherQS's `customer.elevate` is off, or Windows there would not prompt: change the policy, or ask the person at the computer. |
+| "Needs Tether's service on the remote computer (Tether installed as a service)." | Install Tether's service there. |
+| "The remote computer does not support this: the health monitoring agent is for Windows computers with Tether installed." | Nothing (a Mac). |
+| "Tether on the remote computer is too old (needs 0.7.0)." | Update Tether there (no answer within 10 s). |
+
+**Install…** asks once ("Install the health monitoring agent?", naming that it runs as a Windows
+service, stays after the session and reports to your organisation's servers), then shows "Installing
+on the remote computer… This can take up to three minutes. Without Tether's service there, the
+person at the remote computer is asked first." With the service the result is "Installed
+<version>, linked to this host; first report within five minutes." The host waits at most 3
+minutes for the outcome; an install that takes longer goes on and the dialog says "Still running…".
+A remote computer takes at most one install or remove per connection every 10 s, and one action at
+a time. **Remove…** asks once and runs the agent's uninstall ("Removed: the agent's service,
+folders and enrolment are gone."); Tether does not install it again by policy afterwards.
+
+The person at the computer sees a line in Tether's connection window ("The technician installed the
+health monitoring agent.", "… removed …", or "The technician asked to install …" when the outcome
+was another). Each install or remove the host acted on is posted to the session audit log as an
+`alarm` record of type 30 with the action and its result ([api.md](api.md#post-apiauditconn-post-apiauditfile-post-apiauditalarm-session-audit-log)).
+
+**On a host without Tether's service** the same item asks the person at the computer first (next
+section). A no holds further requests from the session off for 10 minutes ("The person at the
+computer said no a moment ago; ask again in N minutes."). Where Windows would not show an
+elevation prompt (Tether started as administrator, UAC switched off, administrators elevated without
+asking, TetherQS running elevated or with its elevated service), a technician's install or removal
+is refused before anything is shown: "Windows would not ask for confirmation on this computer; the
+person at the computer can install it there." An agent older than 0.2.0 cannot be removed this way.
+
+**A lost or reimaged machine.** **Remove from health monitoring…** in the host list deletes the
+device on the relays only. Where Tether on that computer has the policy `install`, it enrols the
+agent again within a day; to remove the agent, use the session menu or change the policy. A new
+agent on a machine whose Tether ID another device still holds gets `409 tether_id is enrolled with
+another key`: remove the old device first.
+
+### At the computer (the person there)
+
+**With Tether's service** nobody is asked: the organisation decided by policy, or the technician in
+the session did. The person sees:
+
+- in Tether's connection window during a session, the line above;
+- in Tether's **Settings**, when Tether installed the agent: "Health monitoring agent: installed by
+  Tether on <date> at your organisation's request (policy | technician in a session). What it
+  reports: the health of this computer's software and, if your organisation collects it, the list
+  of installed programs (see Tether's privacy policy). Remove it in Settings › Apps (Tether
+  Monitor).";
+- in Windows *Settings › Apps*: **Tether Monitor** (written by the agent from 0.2.0 on).
+
+**Without Tether's service**, Tether's (or TetherQS's) own window comes to the front with **Install
+the health monitoring program?**: "A technician (support of <program>) asks to install Tether
+Monitor." (on the card's path: "Your organisation (<program>) asks …"); in TetherQS, when the policy
+or the custom app sets a title, "Your support organisation: <title>"; "Name given by the technician
+(not verified): <name>"; "It runs in the background as a Windows service, stays on this computer
+after this session, and sends information about the computer's state and installed software to
+<relays>."; where it is listed (this repository's [PRIVACY.md](../PRIVACY.md)); how to remove it;
+"Windows will ask for administrator approval next."; buttons **Don't install** (selected) and
+**Install**. <program> is Tether or TetherQS: an installed Tether has no organisation name to show.
+**Don't install**, closing it, or 2 minutes without an answer: nothing is downloaded or started
+("The person at the computer declined." / "… did not answer." for the technician). After
+**Install**, Tether downloads and verifies the agent (the same index rules as the service, without
+the staged rollout) into the user's own `%LOCALAPPDATA%\<program>\health-agent\` and starts it with the Windows elevation prompt; the prompt
+names the publisher Windows verified on the agent's file. A standard user must type an
+administrator's name and password. Declined or timed out: "Administrator approval was not given
+(declined, or no administrator's name and password)." and nothing is installed. Approved: the
+elevated agent copies itself into `%ProgramFiles%\Tether Monitor`, checks that copy against the
+signed index Tether hands it, and only then creates its service and enrols; it is linked to the
+Tether ID of the program that asked (for TetherQS, TetherQS's own ID). Removal from a session works
+the same way ("Remove the health monitoring program?", then the prompt for the installed
+`%ProgramFiles%\Tether Monitor\tether-monitor.exe uninstall --by-tether`).
+
+With the policy value `install`, an installed Tether without its service shows on its home view
+"Your organisation asks to install its health monitoring program on this computer." with
+**Install…** (the same question, then the prompt) and **Not now** (hidden until Tether starts
+again). TetherQS has no card.
+
+Without Tether's service only the agent keeps itself current; Tether does not upgrade it.
+
+**Removing it.** *Settings › Apps › Tether Monitor › Uninstall* (Windows asks for administrator
+approval), or `tether-monitor uninstall` in an administrator's command prompt. The agent removes its
+service, folders and enrolment on every relay, and Tether never installs it again by policy.
+
+**Refusing it for good.** The machine policy `{"health.agent":{"state":"locked","value":"manual"}}`
+as the REG_SZ value `PolicyJson` under `HKLM\SOFTWARE\Policies\Tether` (or by Group Policy;
+`Policies\Tether-<instance>` for an instance build) blocks the install by policy and every
+technician's request on that computer. Tether without its service and TetherQS refuse every request
+then before any question, with "This computer's administrator has switched this off (machine
+policy)."; TetherQS reads only this one rule, and only from `Policies\Tether`.
+
+The question before the prompt is not a security boundary (whoever controls the desktop can operate
+it, for example through the On-Screen Keyboard); the Windows elevation prompt is
+([SECURITY.md](../SECURITY.md#device-status-health-reports)).
+
+### Without Tether: the manual path
+
+For a machine without Tether, or where Tether cannot do it (an older Tether, a server that is not
+supported), the agent is installed by hand as before: an administrator creates an enrolment token
+([Creating an enrolment token](#creating-an-enrolment-token)), the agent's installer is run with
+it, and a team member links the host with **Link to this host** when the token was not issued for
+its Tether ID ([Linking an agent to its host](#linking-an-agent-to-its-host)). The agent's own
+documentation has the commands.
+
+### What was checked
+
+The parts were checked with unit and integration tests only: the token flag and the proof
+(`tether-trust`), the key lookup in hbbs and the proof enrolment against a stub hbbs (tether-api,
+on Linux under WSL), the service's manager and the elevated path with fake processes, services and
+downloads (desktop and TetherQS backends), the session message's logic (from the desktop crate,
+because the vendored core's own tests cannot be built here), the dialogs (vitest) and the host-list
+text (mock end-to-end test, Chromium). **Not run yet:** any of it on a real Windows machine, so no
+real service install, upgrade or removal, no real Windows elevation prompt, no TetherQS install, no
+session between two machines, no round trip against a real relay with a real hbbs, and no macOS or
+Linux build of the new code.
 
 ## For the relay operator
 
@@ -96,7 +371,21 @@ come back when the setting is removed. Pins that have not seen a post for 180 da
 dropped while it is off.
 
 Enrolment is refused when the same Tether ID or uuid is pinned to another key, and limited to 30
-new pins or refused tokens (wrong Tether proofs included) per minute per IP (an IPv6 client counts as its /64).
+new pins or refused tokens (wrong Tether proofs and Tether IDs hbbs does not know included) per
+minute per IP (an IPv6 client counts as its /64).
+
+**Enrolment with a Tether proof** needs hbbs 0.7.0 beside tether-api 0.7.0. hbbs answers
+`GET /peer-pk/<id>` on its health port (21122) with the key it holds for that ID, only to loopback
+and to the addresses in its `PEER_LOOKUP_FROM` (comma-separated CIDRs, default empty; a bad entry
+stops hbbs at start), and only for IDs of 6 to 16 characters `A-Z a-z 0-9 _ -` (every Tether ID
+today is numeric); everyone else gets `404`. The health port listens on IPv4 only, so an IPv6 range
+in `PEER_LOOKUP_FROM` never matches. On a relay where tether-api and hbbs run on one server, the
+defaults work. Where they run apart, point `HBBS_PEER_URL` at hbbs and put tether-api's address
+into hbbs's `PEER_LOOKUP_FROM`; a relay outside it gets `404` and every proof enrolment there
+answers `409 tether id unknown to this relay`. An hbbs that does not know the ID yet (the host never
+registered on that relay) gives the same `409`; the agent is then enrolled only on the relays that
+accepted it, which is enough for its reports. When no hbbs answers within 2 s, `503 tether proof
+unavailable`: the agent is never linked without the proof, and Tether tries again with its backoff.
 
 ### Storage and backup
 
@@ -104,7 +393,7 @@ Everything is in `/var/lib/tether-api/status/` (directory `0700`, files `0600`):
 
 | File | Content | If it is lost |
 |---|---|---|
-| `keys.jsonl` | The pins, one line per change: `set` (enrolment, link, unlink, allowing a new claim, a claim taken from an accepted report: uuid, device public key, the token's label and id, time of enrolment, the verified Tether ID, the claimed one, who linked it and when, `no_claim`, the customer reference), `used` (a token issued for one Tether ID was used, with its expiry), `dismissed` and `forgotten` (the key of a device whose link was dismissed released its own pin; kept 180 days, at most 10 000: when full, the oldest goes with a `forgotten` line, also when the file is read at start) and `unpin` (removal); `pin` lines from before are still read. Appended and synced for each change, compacted in the background. | Every device must enrol again, with a valid token ([Locked state](#the-locked-state)). **Back this one up.** |
+| `keys.jsonl` | The pins, one line per change: `set` (enrolment, link, unlink, allowing a new claim, a claim taken from an accepted report: uuid, device public key, the token's label and id, time of enrolment, the verified Tether ID, the claimed one, who linked it and when (a link by a Tether proof as `linked_token` `proof:<grant id>`), `no_claim`, the customer reference), `used` (a token issued for one Tether ID was used, with its expiry), `dismissed` and `forgotten` (the key of a device whose link was dismissed released its own pin; kept 180 days, at most 10 000: when full, the oldest goes with a `forgotten` line, also when the file is read at start) and `unpin` (removal); `pin` lines from before are still read. Appended and synced for each change, compacted in the background. | Every device must enrol again, with a valid token ([Locked state](#the-locked-state)). **Back this one up.** |
 | `revoked.json` | Revoked tokens: `{"<token id>": <its expiry>}`, at most 10 000; an entry is dropped once the token would have expired anyway. Written by the status writer, synced before a revocation is answered. | Revoked tokens that have not expired work again. **Back this one up.** |
 | `<uuid>.json` | The last full report, byte for byte as the agent sent it. | Shown as "No full report yet" until the device posts a full one. |
 | `<uuid>.sbom.json` | Only with `STATUS_SBOM=on` ([The software list](#the-software-list)): the device's software list, byte for byte as it was uploaded. | The list of that device, until the device uploads one again. |
@@ -308,6 +597,9 @@ post to it.
 
 ### Creating an enrolment token
 
+For agents Tether installs you need no token of your own: Tether Manage makes the layer's grant
+([Setting it up](#setting-it-up-administrator)). The tokens below are for the manual path.
+
 A token is signed with the admin key, names a label (1 to 64 characters, for your own records),
 has a random id and expires after 1 to 30 days. Two kinds:
 
@@ -387,10 +679,18 @@ bash scripts/monitor-publish.sh stable monitor 0.1.0 dist/tether-monitor-0.1.0.e
 month, a manual step from the admin's own machine: it signs the published index again, unchanged
 but for serial + 1 and a new expiry, and prints the new expiry. The metric
 `tether_api_release_index_expires_timestamp{index="monitor"}` shows it on each relay. What an agent
-does with an expired index is defined by the agent, not here.
+does with an expired index is defined by the agent, not here. Tether installs and upgrades nothing
+from an expired index: when it expires, installs through Tether stop until the next refresh.
 
-Publishing to `monitor.json` does not move Tether's release generation and never reaches installed
-Tether clients. Every status answer carries `releases`, an opaque hint that changes when a
+**The minimum version.** An entry's `minimumVersion` is set when you publish it
+(`monitor-publish index … --min-version <v>`; the wrapper script does not pass it). Tether's service
+raises an agent it installed that stays below it for 48 hours to the entry's version with the
+agent's `upgrade` ([What Tether's service does by itself](#what-tethers-service-does-by-itself)).
+To make every machine move to a new version: publish that version with `--min-version` set to it.
+Agents installed by hand are never upgraded by Tether.
+
+Publishing to `monitor.json` does not move Tether's release generation and is never taken as a
+Tether update. Every status answer carries `releases`, an opaque hint that changes when a
 `monitor.json` on that relay changes; an agent compares it for inequality and then fetches its
 channel's `monitor.json`.
 
@@ -415,7 +715,9 @@ Both delete the pin with its link or claim, the report, the history and the soft
 enrolment token, it enrols again by itself and comes back as an agent that is not linked to any
 host (with a claim if it names a Tether ID). Uninstall the agent there, or revoke the token. A
 token issued for one Tether ID stays used on that relay: it does not enrol a device there again
-after the removal.
+after the removal. An agent Tether installed is enrolled again, and linked again by its proof,
+within a day while that computer's policy says `install`; to remove it, use the session menu or the
+policy value `remove`.
 
 **The record of team actions.** Linking, unlinking, allowing a new claim and removing write one
 line each to tether-api's journal on stderr (`status: <uuid> linked to <id> by team member
@@ -502,8 +804,10 @@ not installed on the machine.
 
 ### Linking an agent to its host
 
-Nothing links an agent to a host row automatically. An agent enrolled with a token issued for its
-Tether ID is linked from the start. Any other agent that names a Tether ID only claims it: its
+An agent is linked to a host row in three ways only. An agent Tether installed is linked from the
+start by its Tether proof, checked by each relay: its Health section says "Health linked by Tether
+on that computer" (`linked_proof` in the relay's answer). An agent enrolled with a token issued for
+its Tether ID is linked from the start too. Any other agent that names a Tether ID only claims it: its
 row's Health section says "Claims to be 123456789 (FRONT-DESK-1). Confirm only if this is that
 computer.", with the agent's own host name and when it enrolled. If that is the machine, a member
 with the `write` permission chooses **Link to this host** and confirms once. The app asks every
@@ -511,14 +815,16 @@ relay; each pins that Tether ID to the agent (`409` when another agent has it al
 who linked it and when, and the agent's health shows on the host row. Without `write` the button
 is disabled.
 
-A linked host's Health section says who linked it and when ("Health linked by Anna Berger, …", or
-by the token issued for the host). **Unlink** (members with `write`) removes the link and the
+A linked host's Health section says who linked it and when ("Health linked by Anna Berger, …", by
+Tether on that computer, or by the token issued for the host; a desktop before 0.7.0 shows a proof
+link as the token's). **Unlink** (members with `write`) removes the link and the
 agent's claim; the agent becomes a row of its own that shows "Link dismissed". It cannot claim a
 Tether ID again, neither by enrolling again (also not with the token issued for the host, whose
 first use is past) nor by its reports, which are still accepted with the field ignored. A member
 with `write` can choose **Allow a new claim**: the agent's next enrolment or report names its
 claim again, and the claim waits to be linked like any other. Only the first use of a token issued
-for that ID, or a member's Allow a new claim followed by a Link, can link it again. A dismissed
+for that ID, or a member's Allow a new claim followed by a Link, can link it again; an enrolment
+with a Tether proof does not (the Unlink holds against it too). A dismissed
 device's key claims nothing under any uuid: enrolling another uuid with the same key, while the
 dismissed pin is still there or after the device released it itself (`DELETE /api/status`), gives a
 pin with `no_claim` and no claim, and its reports claim nothing either. Allow a new claim on every
@@ -559,7 +865,9 @@ and enrolment time in its Health section). A conflict counts as needing attentio
 the host, then removes the agent's enrolment, link and stored reports on every relay. As the
 dialog says: if the agent on that computer still holds a valid enrolment token it enrols again by
 itself, and comes back as an agent that is not linked to any host. Uninstall the agent there, or
-ask an admin to revoke the token.
+ask an admin to revoke the token. And: "Tether on that computer enrols it again while its policy
+says install; to remove the agent, use the session menu or change the policy." (an agent Tether
+installed comes back linked, by its proof).
 
 ### Search terms
 
@@ -731,16 +1039,26 @@ Enrolment, the signature, the answers and the status codes: [api.md](api.md#devi
   and root) and every member of the team roster. Reports are not encrypted end to end. They
   contain the machine's name, the names and versions of installed products, and the titles, values
   and hints the agent writes; keep personal data out of them. See [PRIVACY.md](../PRIVACY.md).
-- **Who can write:** only a device with a key that was pinned with a valid enrolment token, by an
-  enrolment signed with that key. Each post is signed; a device key is never accepted as an admin or member key and the reverse.
+- **Who can write:** only a device with a key that was pinned with a valid enrolment token (a grant
+  only together with a Tether proof), by an enrolment signed with that key. Each post is signed; a
+  device key is never accepted as an admin or member key and the reverse.
+- **Who can install the agent through Tether:** the administrator by policy, a technician in a
+  session with control (where the policy allows it), and the person at the computer through the
+  card; without Tether's service always through the Windows elevation prompt. Tether runs nothing
+  but the organisation's signed agent from `monitor.json`. Whoever administers the computer removes it in *Settings ›
+  Apps* and refuses it for good by machine policy ([At the computer](#at-the-computer-the-person-there),
+  [SECURITY.md](../SECURITY.md#device-status-health-reports)).
 - **The token** allows enrolling new devices until it expires or is revoked; one issued for a
   Tether ID enrols one device per relay, with that ID (two relays, two devices: a [link
   conflict](#link-conflicts) the app shows instead of choosing). It cannot read anything or
   remove a device. A token that names a customer sets that customer also on a device that is
   already enrolled, when that device enrols with it again (like every enrolment, signed with its own key)
-  ([Customer reference](#customer-reference)). A device's Tether ID is shown only when a token was issued for it or a team member
-  confirmed it. Both are the word of a trusted person, not a proof by Tether on that machine:
-  [SECURITY.md](../SECURITY.md#device-status-health-reports).
+  ([Customer reference](#customer-reference)). A device's Tether ID is shown only when Tether on
+  that machine proved it (a grant with a Tether proof, checked against hbbs), when a token was
+  issued for it, or when a team member confirmed it. The proof rests on hbbs's record of the ID's
+  key; the other two are the word of a trusted person:
+  [SECURITY.md](../SECURITY.md#device-status-health-reports). A grant is public (it travels in the
+  policy) and enrols nothing without a proof.
 - **The software list** (only when the relay has `STATUS_SBOM=on`) is readable by the same people
   and is as little end-to-end encrypted. A device can store one JSON document of its own choosing
   there, never run by anything ([SECURITY.md](../SECURITY.md#the-software-list)).

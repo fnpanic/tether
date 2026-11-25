@@ -17,7 +17,21 @@ What goes to those relay servers:
 | Software list and hardware identity, only on machines where the organization installed a monitoring agent that collects them, and only if the relay's operator switched the storage on: names, versions and publishers of the installed programs and of the operating system, and the machine's manufacturer, model, serial number, memory and processor | Showing a machine's installed software to technicians and the organization's own inventory exports | one document per machine; removed when the device is removed or after 180 days without a report (the organization can also switch the collection off, which deletes it) |
 
 Health reports come from a separate monitoring agent, not from Tether or TetherQS, and only if the
-organization installed it. They go to the same relay servers, are not end-to-end encrypted, and can be
+organization installed it. On Windows, Tether and TetherQS can install that agent for the
+organization (from version 0.7.0), but only in these ways: the organization's signed policy tells
+an installed Tether that runs as a Windows service to install it; a technician in a remote session
+with control of the computer asks for it, where the organization's policy allows that; or the person
+at the computer clicks **Install…** on Tether's card. Without Tether's service nothing is installed
+until the person at the computer has said yes in Tether's own window, which says who asks, that the
+program stays on the computer after the session and what it sends to which servers, and has
+approved the Windows administrator prompt. With Tether's service nobody at the computer is asked;
+during a session Tether's connection window says when the technician installed or removed it, and
+Tether's Settings say when and why Tether installed it. Tether installs only the organization's
+signed agent. The person at the computer can remove it at any time in Windows *Settings › Apps ›
+Tether Monitor* (or with `tether-monitor uninstall`); Tether then never installs it again by
+policy. A computer's administrator can refuse it for good with the machine policy
+`{"health.agent":{"state":"locked","value":"manual"}}` in `HKLM\SOFTWARE\Policies\Tether` (value
+`PolicyJson`, also by Group Policy). Details: [docs/health.md](docs/health.md#installing-the-agent-through-tether). They go to the same relay servers, are not end-to-end encrypted, and can be
 read by the relay's operator and by every member of the organization's technician team in Tether.
 What a report contains is decided by the agent; the format is described in [docs/health.md](docs/health.md).
 The software list is stored and read in the same way ([docs/health.md](docs/health.md#the-software-list)): it is not

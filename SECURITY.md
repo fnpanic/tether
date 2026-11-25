@@ -41,18 +41,20 @@ is left.
 | Actor | Can | Cannot (mitigation) | Residual risk |
 | --- | --- | --- | --- |
 | Remote attacker (internet, knows or guesses an ID) | Request sessions; try passwords; flood rendezvous | Get in without password/Accept; guess the 50-bit one-time password (per-IP throttling and blocking, rotation after 10 wrong attempts, [Authentication](#authentication)); downgrade to plaintext (refused on both sides) | Weak permanent passwords if policy allows them; social engineering of the Accept click; the viewer's ID and name in the prompt are self-reported |
-| Malicious technician (legitimate session) | Everything the session permissions allow, as the logged-in user | Click or type into Tether's own windows (`own_ui_guard`); read or change Tether's config/install folders via file transfer; use Tether's own recorder without the host user's consent; change host settings remotely (this build has no remote path for that); open the camera view or the remote terminal (`enable-camera`, `enable-terminal` forced `N`) | Full control of the OS as that user by design: start programs (a command prompt included), files outside the guarded folders, admin rights if UAC is approved. Windows Mouse Keys and the On-Screen Keyboard still reach a Tether window ([below](#tethers-own-windows-are-for-the-local-user-only-056), W18). Recording with any other tool (screen recorder, modified viewer) is not prevented: the consent gate is enforced by the honest viewer |
+| Malicious technician (legitimate session) | Everything the session permissions allow, as the logged-in user | Click or type into Tether's own windows (`own_ui_guard`); read or change Tether's config/install folders via file transfer; use Tether's own recorder without the host user's consent; change host settings remotely (this build has no remote path for that); open the camera view or the remote terminal (`enable-camera`, `enable-terminal` forced `N`) | Full control of the OS as that user by design: start programs (a command prompt included), files outside the guarded folders, admin rights if UAC is approved. Windows Mouse Keys and the On-Screen Keyboard still reach a Tether window ([below](#tethers-own-windows-are-for-the-local-user-only-056), W18). Recording with any other tool (screen recorder, modified viewer) is not prevented: the consent gate is enforced by the honest viewer. Where the host's policy `health.agent` is `on-request` or `install` and Tether's service runs, the session (any approval, control on) can have the organisation's signed health monitoring agent installed as a LocalSystem service even when the signed-in user is no administrator, or removed; visible in the connection window and the session audit log, blocked by machine policy `manual` ([Device status](#device-status-health-reports)) |
 | Malicious customer (host side) | Show fake content; record their own screen; keep what the technician sends (files, clipboard); put content into the technician's clipboard while clipboard sync is on | Inject keyboard or mouse input into the technician's PC (input messages flow from viewer to host only); read files the technician does not send | The host is the trusted endpoint for what it shows; treat files and clipboard from a host as untrusted |
 | Compromised relay host **without** the server key (hbbr only, Caddy, TURN) | See IPs, timing, sizes, host IDs; drop or delay traffic; serve stale downloads | Decrypt or alter session content (session keys are sealed to the host's ephemeral key; [docs/encryption.md §8](docs/encryption.md#8-who-can-decrypt-who-can-attack)); forge policies, key lists or updates (admin/updater signatures) | Denial of service; metadata; legacy TCP tunnels (W2) and version-0 sessions with non-Tether peers (W1) are readable |
+| Compromised tether-api (or the relay's data folder) | Withhold or falsify what it serves: policy, release and monitor indexes it can only withhold or replay within their signed validity; refuse or accept enrolments, link or unlink devices in its own store and show false health; with control of its hbbs lookup answer, make any Tether proof pass there, so an attacker's agent shows on a host row that has no agent yet | Make a client install or run anything not in an admin-signed index and signed with the updater key; start an agent install where the signed policy does not ask for it; forge or replay the session message (it is end to end in the session) | False health on its own rows; denial of service ([Device status](#device-status-health-reports)) |
 | Compromised hbbs **with** the server key | Everything above, plus sign any key for any ID | Decrypt past or running sessions (forward secrecy) | **Undetected man-in-the-middle of new sessions** by impersonating hosts: no host-key pinning and no viewer authentication ([docs/encryption.md](docs/encryption.md#active-attacks-with-the-server-key)). Mitigated only by keeping the key secret, hardening and monitoring the relays, and rotating the key on suspicion ([key rotation](docs/key-rotation.md)) |
 | Network attacker (Wi-Fi, ISP, LAN) | See IPs, timing, TLS record sizes, SNI; block traffic | Read rendezvous or session data (TLS with verified certificates, no unverified fallback, then end-to-end encryption); answer as a LAN host without its signed key | Denial of service |
 | TLS-inspecting corporate proxy | Read the rendezvous signalling (IDs, machine uuids, device public keys, connect requests) and the clear handshake at the start of each relay stream | Decrypt session content (except W1, W2) or swap the host key without the server key | With a stolen server key, the MITM above. Clients behind one proxy share an IP as hbbs sees it, which matters for the `RegisterPk` key replacement in [docs/encryption.md](docs/encryption.md#related-replacing-a-hosts-key-at-hbbs-without-the-server-key) |
-| Local malware on the host | Read the screen and input like any program; read the config (device key, permanent password hash, which is password-equivalent); use Tether's IPC as the user | – (endpoint security is out of scope) | Full compromise of that host's sessions |
+| Local malware on the host | Read the screen and input like any program; read the config (device key, permanent password hash, which is password-equivalent); use Tether's IPC as the user; sign Tether proofs for this user's own Tether ID (it can read the key); without Tether's service, swap the staged agent before the elevation prompt or break the install over the pipe | – (endpoint security is out of scope). It cannot get an elevated program started without someone approving the Windows prompt, which then shows the swapped file's (other or missing) publisher, and the genuine agent installs only its own verified copy | Full compromise of that host's sessions |
 | Local malware on a Mac host with unattended access, running as an `admin`-group user | Replace `/Applications/Tether.app` (no password needed), which the root LaunchDaemon and the login-window host then run: root on that Mac | – (macOS lets the admin group change `/Applications`; an update signed by Tether must stay installable without a prompt) | Root on that Mac. Only where *Install as service* was used ([docs/unattended.md](docs/unattended.md#macos)) |
 | Local malware on the viewer | Read the session, inject input into it, read remembered passwords | – | Full compromise of that viewer's sessions |
 | Stolen technician laptop | Remembered peer passwords (obfuscated with the machine uid, so readable), trusted-device tokens, the team member key | Admin actions: the technician app has no admin key; if Tether Manage is on the same laptop, its vault still needs the passphrase | Unattended access to remembered hosts until their passwords change; remove the team key from the roster ([Team access](#team-access)) |
 | Malicious update server (compromised relay serving `/download/`) | Withhold updates; serve an old copy of the signed release index (a device that already accepted a newer serial refuses it) | Make a client run code not signed by the updater key (minisign key `1AD0C3FBDCA3B4EA`, verified before install); change version, minimum version or rollout (the release index is signed by the admin key; the unsigned `latest.json` is not read by builds with `REQUIRE_SIGNED_INDEX`); offer an older signed build under a higher version (the signed trusted comment names file and version) | Denial of service: no updates while the device reaches no other source (after 30 days the app warns that the update information is out of date). Builds before the signed index: W9 |
-| Holder of the admin and updater keys | Change policy within the floor, trust another server key, ship signed code | Turn off TLS verification or end-to-end encryption by policy (`FLOOR`) | Fully trusted: guard the vault and passphrase |
+| Holder of an enrolment grant (public: it is in the policy) | Enrol agents for Tether IDs whose identity key it holds, up to 30 new pins a minute per IP and `STATUS_MAX_DEVICES` | Enrol or link anything without a Tether proof by the key hbbs holds for the ID named; read anything | Many fake agents for IDs it registered itself (hbbs accepts new IDs freely): revoke the grant, remove their devices, renew |
+| Holder of the admin and updater keys | Change policy within the floor, trust another server key, ship signed code; set `health.agent`, which makes Tether's service install or remove the signed agent on every machine the policy reaches | Turn off TLS verification or end-to-end encryption by policy (`FLOOR`) | Fully trusted: guard the vault and passphrase |
 | Mac build runner sender | Run signed jobs on the build Mac | Run unsigned jobs, act as another sender, replay jobs ([docs/mac-build-runner.md](docs/mac-build-runner.md#security-model)) | A job is arbitrary code as the Mac user |
 
 The relay operator is **not trusted with content**: hbbr and Caddy forward ciphertext. hbbs is
@@ -159,8 +161,11 @@ never replaced (`apps/desktop/src-tauri/src/team.rs::key_at`).
 
 A monitoring agent on a machine can report its health to the relay ([docs/health.md](docs/health.md),
 [docs/api.md](docs/api.md#device-status-health-reports)). It adds two kinds of caller to the relay:
-devices that sign with their own key, and members that read what the devices posted. The feature
-runs nothing on a device and opens no port on it.
+devices that sign with their own key, and members that read what the devices posted. The relay
+side runs nothing on a device and opens no port on it. On Windows, Tether on the device can
+install, update and remove the agent itself when its signed policy or a technician in a session
+asks for it ([Installing the agent through Tether](#installing-the-agent-through-tether) below);
+that runs only the organisation's signed agent and opens no port either.
 
 - **Device keys are pinned.** A device generates an Ed25519 key and enrols with an admin-signed
   token, the request signed with that key: enrolling needs a valid token **and** the private key of
@@ -175,7 +180,8 @@ runs nothing on a device and opens no port on it.
   member-signed `DELETE /api/team/status/<uuid>` from a member with `write`, or the device's own
   signed `DELETE /api/status` releases a pin; the journal names who did it.
 - **Tether IDs are verified, not claimed.** A device's Tether ID, the only thing that puts its
-  health on a host row in the technician app, is set in two ways only: the admin issued the token
+  health on a host row in the technician app, is set in three ways only: a **Tether proof** with a
+  grant (next point), or the admin issued the token
   for that Tether ID (`tether_id` in the signed token; it enrols one device per relay, a second uuid gets
   `409 token already used` there, and a request naming another ID `409 token is issued for another
   id`; only its first use links, so it cannot undo a member's Unlink), or a roster member with `write` confirmed the device's claim
@@ -196,10 +202,37 @@ runs nothing on a device and opens no port on it.
   token's use itself, so a copy of a token issued for one ID can link a second device on a relay
   the first device has not enrolled on; the technician app then shows a link conflict and joins
   neither device to the host. Give such tokens only to that machine and keep them short-lived.
-  **What this does not prove:** both ways are the word of
+  **What this does not prove:** a bound token and a member's confirmation are the word of
   a trusted person (the admin who issued the token, the technician who confirmed), not a
   cryptographic proof by Tether on that machine. A technician who confirms the claim of the wrong
   agent shows that agent's reports on the wrong host until someone unlinks it.
+- **The Tether proof replaces that word for agents Tether installs.** Tether on the machine signs
+  `"tether-agent-link-v1\n<tether_id>\n<uuid>\n<pubkey>"` (the agent's uuid and key) with its own
+  identity key, the key hbbs holds for that Tether ID; the agent sends it with a grant in its
+  enrolment, which it signs with its own key as every enrolment. Each relay asks its hbbs for the
+  ID's key (`GET /peer-pk/<id>`, outside the state lock, answered only to loopback and
+  `PEER_LOOKUP_FROM`) and verifies the proof strictly (`verify_agent_link`; weak keys and
+  non-canonical signatures refused); only then is the pin linked, with `linked_proof`. A proof for
+  another uuid, agent key or ID does not verify, and it is usable only with a request the named
+  agent key signed, so a copied proof gives nothing to another agent. It does not move an existing
+  link: another uuid holding the ID gets `409 tether_id is enrolled with another key`, and a
+  member's Unlink (`no_claim`, a dismissed key) holds against it. When no hbbs answers, `503 tether
+  proof unavailable`: never linked without the proof. Wrong proofs and unknown IDs count against the
+  IP's enrolment limit. **What the proof rests on:** hbbs's record of the ID's key. Whoever can
+  replace that key at hbbs (W8: a registration with the ID's machine uuid from the same IP, the uuid
+  is not secret) can produce a valid proof for that ID on a relay where no agent is linked to it yet,
+  and so show a rogue agent's reports on that host's row, until the real host registers its key again;
+  no code runs anywhere through it. A compromised hbbs or tether-api, or whoever controls the path
+  of `HBBS_PEER_URL` (plain HTTP), can make any proof pass on that relay with the same result.
+- **The grant is public by design.** A grant is an enrolment token with `tether_proof` (never with a
+  `tether_id`), made by Tether Manage for one policy layer (365 days, optional customer) and carried
+  in the signed policy, which `GET /api/policy` serves to anyone. Alone it is worth nothing: without
+  a valid proof the relay answers `400 tether proof required` or `401 tether proof does not match`.
+  With it, a holder can enrol agents only for Tether IDs whose identity key it controls; since hbbs
+  accepts new IDs freely, someone who registers many IDs can enrol many agents for them, up to 30 new
+  pins a minute per IP and `STATUS_MAX_DEVICES`, the same exposure as a leaked unbound token. Remedy:
+  **Revoke** in Tether Manage (or `monitor-publish revoke`), remove the devices (`monitor-publish
+  devices --token <grant id>`, `remove`), renew. A relay before 0.7.0 refuses grants (fails closed).
 - **What a token holder can do.** Enrol devices until the token expires or is revoked: any uuid
   that is not pinned yet, up to 30 new pins per minute per IP and `STATUS_MAX_DEVICES` in total;
   with a token issued for a Tether ID, one device with that ID. A token is valid 1 to 30 days and
@@ -256,8 +289,108 @@ runs nothing on a device and opens no port on it.
   ([docs/health.md](docs/health.md#the-locked-state)).
 - **The monitor release index** is signed like the Tether one and refused in the other direction:
   `monitor.json` takes only the apps `monitor` and `monitor-packs`, `releases.json` only Tether's,
-  so the agent's files can never be offered to an installed Tether client. The agent verifies the
-  index, the size, the SHA-256 and the minisign signature of each artifact before installing.
+  so the agent's files can never be offered as a Tether update. The agent verifies the
+  index, the size, the SHA-256 and the minisign signature of each artifact before installing, and
+  so does Tether when it installs the agent (below).
+
+### Installing the agent through Tether
+
+From 0.7.0, on Windows, the policy features `health.agent` and `health.enrol-grant`
+([docs/health.md](docs/health.md#installing-the-agent-through-tether)) let Tether install, upgrade
+and remove the monitoring agent. Code: `apps/desktop/src-tauri/src/agent.rs` (the service's
+manager), `agent_elevated.rs` (the path through the elevation prompt, shared with TetherQS), the
+session message in `vendor/rustdesk/src/tauri_ui/agent.rs`. None of it has been run on a real
+machine yet; the statements below are from the code and its tests.
+
+- **What Tether will run, and from where.** Only the bytes of the `monitor/windows-x86_64` entry of
+  an admin-signed, **unexpired**, not halted `monitor.json` at or above the machine's serial floor
+  for that channel, whose file is named `tether-monitor-<version>.exe` and verifies for size,
+  SHA-256, minisign signature with the compiled-in updater key (`TETHER_UPDATER_PUB_KEY`) and the
+  signed trusted comment (file and version). Tether's service downloads it into
+  `%ProgramData%\Tether\health-agent\` (only SYSTEM and Administrators can write; a folder a user
+  created first, one with another owner or a junction is refused), always under the fixed name
+  `health-agent.exe`, opens it with a handle that denies writing and deleting, verifies it again
+  through that handle and runs it while holding the handle, so the bytes verified are the bytes
+  executed. The only other program it runs is the installed agent in `%ProgramFiles%\Tether Monitor`
+  (found through the known-folder API, not the environment). Every argument list is a constant
+  (`identity`, `install --from-tether -`, `enrol --from-tether -`, `upgrade`, `uninstall
+  --by-tether`, `uninstall`, `--version`); the grant and the proof go only over standard input and
+  are never stored or logged. Nothing from the network or the session reaches a command line.
+- **Who can cause an install on which machine, and what each needs.**
+
+  | Who | Can | Needs |
+  | --- | --- | --- |
+  | Holder of the admin key (Tether Manage) | Install or remove by policy | Every machine whose resolved policy says `install` or `remove` (profile or group; a group reaches Tether's service only after a user opened Tether there) and that has Tether's service. No prompt is ever started by policy alone |
+  | Technician in a session | Install or remove on that machine | An approved remote-control session with control on (the menu is shown to every team member; the remote computer checks control and its own policy `on-request` or `install`; `remove` allows only removal). Without Tether's service also the person at the computer's yes and an approved Windows prompt |
+  | The person at the computer | Install through the card (Tether without its service, policy `install`), remove in *Settings › Apps*, refuse for good by machine policy | Administrator rights, or an administrator's name and password, for the Windows prompt |
+  | The computer's own administrator | `{"health.agent":{"state":"locked","value":"manual"}}` in `HKLM\SOFTWARE\Policies\Tether` `PolicyJson` (GPO) | Blocks policy installs and every session request on that machine, also on the prompt path and in TetherQS |
+  | Anyone else, a team member without a session | Nothing on the machine | — |
+
+  A removal on the computer (*Settings › Apps*, the agent's uninstall) or by a technician sticks:
+  Tether never installs the agent again by policy; only a technician's install in a session, after
+  a warning that names the date, does. Agents installed by hand are touched only by `remove` and a
+  technician's removal.
+- **The session message** (`Misc` 1001 request, 1002 answer) carries only `status`, `install` or
+  `remove`, and the answer only state, version, who, a cleaned detail line and a time. The host
+  takes it only on a logged-in remote-control connection whose keyboard control is on, one request
+  at a time, an install or remove at most every 10 s per connection, and runs one action at a time.
+  Each install or remove it acted on goes to the session audit log (`alarm`, type 30, action and
+  result only); the connection window shows the person at the computer a line about it. On the
+  service path the session needs no administrator: the organisation's signed agent becomes a
+  LocalSystem service and reports system data and, where collected, the software list to the
+  organisation's relays. That is the new power a session gets, bounded by policy and visible.
+- **Without Tether's service** (an installed Tether without unattended access, TetherQS) nothing runs
+  elevated except the agent itself, started with the Windows elevation prompt (`runas`) as
+  `health-agent.exe install --from-tether pipe:<name>` from the user's
+  `%LOCALAPPDATA%\<app>\health-agent\` after the same verification, or the installed
+  `tether-monitor.exe uninstall --by-tether` (only when the agent's service runs exactly that file
+  and its version is 0.2.0 or later). The elevated agent copies itself into `%ProgramFiles%\Tether
+  Monitor`, receives the raw signed `monitor.json` over a named pipe (128 random bits in the name,
+  access for this user and Administrators, one instance, the client's process must be the one
+  started), and verifies its own copy against it before it creates the service. **The boundary is
+  the Windows elevation prompt** on the secure desktop, which a session cannot see or operate. The
+  question Tether shows first ("Install the health monitoring program?", the name the technician
+  gave marked as not verified, what it sends and to which relays) is **not** a boundary: a remote
+  session cannot click it directly (`own_ui_guard`), but whoever controls the desktop
+  can operate it through the On-Screen Keyboard or a program run as the user (W18). Therefore, where
+  Windows would not ask (Tether running elevated, UAC off, administrators elevated without a prompt,
+  TetherQS running elevated or with its elevated service), a session-triggered install or removal is
+  refused before anything is shown; only the person at the computer can start it there. A no holds
+  the session off for 10 minutes. TetherQS also refuses when `customer.elevate` is off.
+- **A compromised relay** (tether-api, Caddy, a CDN) **can:** withhold the policy, the index or the
+  files (no installs, no upgrades); serve an older signed policy or index that is still unexpired and
+  not below the machine's serial floor, within its validity (an index expires 30 days after its
+  last signing; an expired one is refused for installs and upgrades); refuse or accept enrolments falsely, link
+  or unlink devices in its own store and show false health; with control of its hbbs lookup, link an
+  attacker's agent to any host row on that relay that has no agent yet. **It cannot:** make Tether
+  install or remove anything where the signed policy does not say so; get any bytes run that are not
+  an entry of an admin-signed index signed with the updater key; swap the artifact; start an
+  elevation prompt (only a person or a session does); forge or replay the session message (end to
+  end in the session); learn the agent's key. No code runs anywhere through a false link.
+- **A process running as the same user can:** read that user's or TetherQS's identity key and sign
+  proofs for that ID (nothing new: it holds that ID's key); replace the staged file before Tether locks
+  it (the check through the lock then fails and nothing starts) or, by renaming the folder, put
+  another program where the prompt starts it (Tether then sees a different image and sends it
+  nothing; that program gets administrator rights only if the person approves a prompt that shows
+  its other or missing publisher, the same exposure as any program that asks for elevation);
+  connect to the pipe first or hand the agent a wrong proof (the install fails); lower its own
+  per-user index cache and floor (the elevated agent checks its own floor); show an elevation prompt
+  of its own at any time, which this path adds nothing to. It cannot change the protected copy or
+  the service, get administrator rights without someone approving the prompt, or link an agent to
+  another machine's ID. With Tether's service, a local process that can write core options over the
+  service's IPC can choose which signed policy group applies to the service ([Known
+  limits](#known-limits)), and so,
+  where a group says `install` or `remove`, cause the signed agent's install or removal.
+- **Tether's own files** (state `health-agent.json`, the download folder, the floor) are SYSTEM and
+  Administrators only; files a user planted there are ignored and replaced. A local administrator
+  can change them, which is their right on their own machine anyway. A standard user who created
+  `%ProgramData%\Tether` before the service did blocks the feature on that machine.
+- **Residual risks, plainly.** Nothing of this has been run on a real Windows machine yet. A session
+  on a machine with Tether's service can install a LocalSystem service (the signed agent) without
+  the signed-in user being an administrator. The link rests on hbbs's key record (W8). The grant is
+  public, so registered-but-fake IDs can fill the device cap until it is revoked. The pre-dialog can
+  be operated by whoever controls the desktop; the Windows prompt is what protects. The prompt
+  path's 10-minute hold after a no lives in memory and resets when Tether restarts.
 
 ### The software list
 
@@ -570,7 +703,7 @@ Update the status here and there together.
 | W5 | hbbs/hbbr WebSocket ports 21118/21119 bound all interfaces; reached directly (no host firewall) they took client-sent IP headers and had no TLS | fixed, deployed 2026-11-07 |
 | W6 | Host authenticity rests on hbbs and the server key (no pinning, no own-fingerprint display, no viewer key) | open — by design today |
 | W7 | Connecting by IP address skips the handshake and the refusal (plaintext against a stock host) | fixed in the next release |
-| W8 | `RegisterPk` with an ID's uuid from the same IP replaces its key (upstream rule). Over UDP the source IP could be forged. Once the attacker re-registers the new key from its own IP, the real host gets `UUID_MISMATCH` and takes a new ID; the attacker keeps the old one. Side effect of the UDP fix: a stock RustDesk client that registers over UDP again with a new key but the same machine uuid (config wiped, reinstall) gets `UUID_MISMATCH` and takes a new ID; Tether clients register over WebSocket and are not affected | UDP path fixed in the next release (a registered key is never changed over UDP); TCP/WebSocket from the same IP (same NAT or proxy): open |
+| W8 | `RegisterPk` with an ID's uuid from the same IP replaces its key (upstream rule). Over UDP the source IP could be forged. Once the attacker re-registers the new key from its own IP, the real host gets `UUID_MISMATCH` and takes a new ID; the attacker keeps the old one. Side effect of the UDP fix: a stock RustDesk client that registers over UDP again with a new key but the same machine uuid (config wiped, reinstall) gets `UUID_MISMATCH` and takes a new ID; Tether clients register over WebSocket and are not affected. With the replaced key a Tether proof for that ID passes, so a rogue agent's reports can show on that host's row where no agent is linked yet ([Device status](#device-status-health-reports)) | UDP path fixed in the next release (a registered key is never changed over UDP); TCP/WebSocket from the same IP (same NAT or proxy): open |
 | W9 | Update manifest unsigned (rollback to an older signed build, blocking via `minimum_version`); neither app checked the signed trusted comment, so an older signed build could be offered under a higher version | fixed in the next release (trusted-comment check, signed release index with serial floor) |
 | W10 | macOS direct listener is not limited to the local subnet | open |
 | W11 | Traffic analysis: frame sizes and keystroke timing visible to relay and proxy | open |
@@ -603,9 +736,12 @@ Report vulnerabilities privately to the maintainers. Do not open a public issue.
 - While a relay accepts v1 request signatures, a captured admin or team request can be replayed at
   another relay within ±300 s. Remedy: update the relays first (with `RELAY_HOST`), then the apps,
   then set `TETHER_SIG_V1=off` (W14).
-- A device's Tether ID in the health view rests on a token issued for that ID or on a
-  technician's confirmation, both the word of a trusted person, not a cryptographic proof by
-  Tether on that machine ([Device status](#device-status-health-reports)). Reports are readable
+- A device's Tether ID in the health view rests on a Tether proof (which rests on hbbs's record of
+  the ID's key, W8), or on a token issued for that ID or a technician's confirmation, both the word
+  of a trusted person ([Device status](#device-status-health-reports)). On a machine with Tether's
+  service a remote session, where the policy allows it, can have the organisation's signed agent
+  installed as a LocalSystem service without the signed-in user being an administrator
+  ([Installing the agent through Tether](#installing-the-agent-through-tether)). Reports are readable
   by the relay operator and every team member, not end-to-end encrypted. The same holds for the
   software list ([The software list](#the-software-list)), which also holds the hardware identity.
 - A custom app's settings apply above the policy profile, except for features the profile locks:

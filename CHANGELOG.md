@@ -40,8 +40,9 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   [SECURITY.md](SECURITY.md#device-status-health-reports).
 - **A second signed release index per channel, `monitor.json`,** carries the agent
   (`monitor/windows-x86_64`) and its check packs (`monitor-packs/any`). `releases.json` refuses
-  these keys and `monitor.json` refuses Tether's, so installed Tether clients never read it and
-  Tether's release generation does not move. Publish with `scripts/monitor-publish.sh` (it runs
+  these keys and `monitor.json` refuses Tether's, so the agent is never offered as a Tether update
+  and Tether's release generation does not move (from 0.7.0 Tether reads it to install the agent,
+  below). Publish with `scripts/monitor-publish.sh` (it runs
   `tools/monitor-publish`, which reads Tether Manage's key file); Tether Manage has no screen for
   it yet. The new `Caddyfile` and `nginx.conf` route `monitor.json` to tether-api,
   so they go out with it ([docs/updates.md](docs/updates.md#device-status-agent-monitorjson-and-enrolment-tokens)).
@@ -123,6 +124,70 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   30 s warm-up, p99.9 of the probes against a noisy baseline), with and without uploads; they
   are not a pass.
 - Checked and not checked: to be filled in at release.
+
+### The health monitoring agent through Tether (for 0.7.0; not in a numbered version yet)
+
+- **Tether installs, upgrades and removes the agent (Windows).** Two new policy features:
+  `health.agent` (`manual` default and exactly as before, `on-request`, `install`, `remove`) and
+  `health.enrol-grant` (the layer's grant). With Tether's service its LocalSystem `--server`
+  process installs the organisation's signed agent from `monitor.json` at its next policy check
+  (staged rollout), raises an agent it installed that stays 48 hours below the index's
+  `minimumVersion` with the agent's `upgrade`, enrols it again when the relays forgot it (at most
+  once a day, and once per new grant) and removes it with `remove`; failures back off 1 h, 6 h,
+  24 h. It runs only the `monitor/windows-x86_64` entry of an admin-signed, unexpired, not halted
+  index at or above its serial floor, verified (size, SHA-256, minisign, trusted comment) into a
+  SYSTEM/Administrators-only folder and verified again through a write-denying handle right before
+  it runs; nothing from the network reaches a command line. A removal on the computer
+  (*Settings › Apps*) or by a technician is never undone by policy; agents installed by hand are
+  touched only by `remove`; a machine policy `health.agent` = `manual` blocks everything. State in
+  `%ProgramData%\Tether\health-agent.json`, a read-only copy for Settings beside it. macOS ignores
+  the features ([docs/health.md](docs/health.md#installing-the-agent-through-tether),
+  [docs/policy.md](docs/policy.md#the-health-monitoring-agent-healthagent-healthenrol-grant)).
+- **Linked by proof, not by a person's word.** A grant is an enrolment token with `tether_proof`
+  (`make_token(…, tether_proof, admin)`; never with `tether_id`; at most 1024 characters). The
+  enrolment carries `tether_proof`, Tether's signature over `"tether-agent-link-v1\n<id>\n<uuid>\n<pubkey>"`;
+  tether-api asks hbbs for the ID's key (`GET /peer-pk/<id>` on the health port, loopback and
+  `PEER_LOOKUP_FROM` only, IDs of 6 to 16 `A-Za-z0-9_-`) outside its state lock (setting
+  `HBBS_PEER_URL`, default `http://127.0.0.1:21122`, plain HTTP, 2 s, at most 4 lookups at once)
+  and links the pin with `linked_proof` (stored as `linked_token` `proof:<grant id>`, so a 0.6
+  relay can still read `keys.jsonl`). New answers: `400 tether proof required`, `401 tether proof
+  does not match`, `409 tether id unknown to this relay` (both counted against the IP), `503 tether
+  proof unavailable`, `503 tether proof needs HBBS_PEER_URL`. The host list says "Health linked by
+  Tether on that computer" ([docs/api.md](docs/api.md#post-apistatusenroll-token-and-device-signature)).
+- **In a session.** **Remote actions › Health monitoring agent…** asks the remote computer and
+  installs or removes the agent there (session message `Misc` 1001/1002, only with control, one at
+  a time, at most every 10 s); the host's connection window says what the technician did, and the
+  session audit log gets an `alarm` record of type 30 (`running` followed by the outcome when it
+  takes longer than 3 minutes). An old host answers nothing ("too old" after 10 s).
+- **Without Tether's service, and TetherQS.** Only on a technician's request or the person's click
+  on the home card (policy `install`): Tether's window asks first, then the Windows elevation
+  prompt starts the verified agent, which checks its own copy in `%ProgramFiles%\Tether Monitor`
+  against the signed index it gets over a named pipe before it creates its service. No prompt by
+  policy alone; refused for a session where Windows would not prompt, for 10 minutes after a no,
+  where `customer.elevate` is off (TetherQS) or the machine policy says `manual`. The agent is
+  linked to the asking program's Tether ID (TetherQS: its own).
+- **Tether Manage.** The Health monitoring area makes the layer's grant (365 days, optional
+  customer, journal `health-grants.json`), shows its state, **Renew** (the old grant is revoked on
+  every relay once all of them serve the new policy) and **Revoke** (every relay at once; the layer
+  goes to `manual`), refuses to publish `on-request`/`install` without a valid grant, reminds after
+  unlocking when fewer than 60 days are left, and explains an old relay's `400 unknown feature`.
+  Custom apps cannot carry the features. Loading an older History version without a group marks
+  that group's grants revoked ([docs/management.md](docs/management.md#health-monitoring-agent)).
+- **Order.** Relays first (tether-api and hbbs; an old relay refuses a policy with the features,
+  the grant and the proof), then the agent 0.2.0 or later to `monitor.json`, then Manage and the
+  apps, the policy last ([docs/updates.md](docs/updates.md#relay-deploy-notes),
+  [docs/deployment.md](docs/deployment.md#update-the-agent-through-tether-070)). Security and privacy:
+  [SECURITY.md](SECURITY.md#installing-the-agent-through-tether), [PRIVACY.md](PRIVACY.md).
+- **Checked:** unit and integration tests on this PC: `tether-trust` (token flag, proof, features),
+  hbbs's lookup and tether-api's proof enrolment against a stub hbbs (Linux under WSL, whole relay
+  suite), the desktop backend (the manager and the elevated path with fake processes, services,
+  downloads and pipes; one real named pipe and one real locked file), TetherQS's backend, Tether
+  Manage's backend and front end, the desktop front end (vitest) and the mock end-to-end host list
+  (Chromium). **Not checked:** nothing has run on a real machine yet: no real service install,
+  upgrade or removal, no real Windows elevation prompt, no TetherQS install, no session round trip
+  between two machines, no relay with a real hbbs; no macOS or Linux build of the new code (the
+  Linux check stopped at a missing system package); the vendored core's own tests could not be
+  built here, so the session message's logic is tested from the desktop crate; WebKit e2e not run.
 
 ### Instances: two organisations' Tether on one PC (not in a numbered version yet)
 

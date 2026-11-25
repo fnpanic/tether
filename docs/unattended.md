@@ -139,6 +139,17 @@ Added after the runs above (not part of them; unit tests in `apps/desktop/src-ta
   resume, where the connection window runs (`sink::enforce_permission_locks` and `revoke_locked`,
   in the `--cm` process). A running file-transfer connection is closed when file transfer is
   locked off.
+- The service also manages the health monitoring agent when the policy feature `health.agent` asks
+  for it (0.7.0, Windows): after each policy check its `--server` process, and only that process
+  running as LocalSystem, installs the organisation's signed agent from `monitor.json`, keeps it at
+  the index's minimum version, enrols it again and removes it by policy; on a technician's request
+  in a session it installs or removes it at once. Nobody at the computer is asked: the policy (or the
+  technician with control in the session) decides, the connection window says what was done, and a
+  machine policy `health.agent` = `manual` blocks it. The proof that links the agent to this host is
+  signed with the service's own identity key, the one it registers with hbbs. A group's setting
+  reaches the service only after a user has opened Tether (above). Without the service, Tether asks
+  the person at the computer and uses the Windows elevation prompt instead
+  ([health.md](health.md#installing-the-agent-through-tether)). Not run on the test VM yet.
 
 ## Open
 

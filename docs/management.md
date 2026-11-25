@@ -75,6 +75,7 @@ Keys, settings, the policy draft and local copies of published policies live in
 | `policy/published/<serial>.json` | Every policy this PC published |
 | `releases/<channel>.serial`, `releases/<channel>.live` | Per channel: the last release index serial this PC signed, and the last one a relay accepted from this PC (see "A relay that may hold a newer index" under [Keys](#keys)) |
 | `custom/<id>.json` | Custom apps created on this PC: profile (logo, colour, settings), token, expiry |
+| `health-grants.json` | Journal of the enrolment grants made on this PC ([Health monitoring agent](#health-monitoring-agent)): id, label, layer, customer, creation, expiry, state and the relays it was revoked on; never the grant itself. A damaged journal stops grant actions and publishing with a message (it is not read as empty) |
 
 Set `TETHER_MANAGE_DIR` to use a different folder: a separate vault for tests or for several
 deployments on one PC.
@@ -366,6 +367,78 @@ verifies with this PC's admin key. Both PCs must therefore use the same keys (im
 
 On a new PC with no draft, the editor starts from the policy the server serves, again only if this
 admin key signed it.
+
+## Health monitoring agent
+
+The policy features `health.agent` and `health.enrol-grant` let Tether on Windows install, keep
+current and remove the health monitoring agent ([health.md](health.md#installing-the-agent-through-tether),
+[policy.md](policy.md#the-health-monitoring-agent-healthagent-healthenrol-grant)). Update every
+relay to tether-api and hbbs 0.7.0 first: an older relay refuses a policy that uses them (the
+message above), and it would refuse the grant and the proof anyway.
+
+In the editor's **Health monitoring** area of a layer (technician profile, customer profile or a
+group):
+
+1. Set **Monitoring agent installed and removed by Tether (Windows; manual: as before)**
+   (`health.agent`) to `on-request`,
+   `install` or `remove`, usually **Locked**.
+2. In the row below (`health.enrol-grant`) type a customer reference into **Customer (optional)**
+   if the layer is one customer (1 to 32 letters, digits, dots, underscores or dashes), and click
+   **Create grant**. The grant cannot be typed in: Manage makes it with this vault's admin key
+   (`make_token` with label `policy:<layer>`, 365 days, `tether_proof`) and puts it into the draft.
+   The row shows a badge, the grant's id, its expiry, the customer (or "no customer") and "made on
+   another PC" when this PC's journal does not know it.
+3. Publish.
+
+A group without a grant of its own uses its profile's grant ("no grant of its own: uses the
+profile's grant"); clients resolve the two features per feature, group over profile. Manage
+refuses to publish ("Not publishable") a profile, or a group over its profile, that resolves to
+`on-request` or `install` without a valid grant, for example "Group monitored: health.agent is
+install, but its enrolment grant has expired. Create or renew the grant in this group or its
+profile (Health monitoring), or set health.agent to manual or remove." `manual`, `remove` and Off
+need no grant. A grant longer than the 1024 characters the feature holds is refused at creation
+("Use a shorter customer reference or group name.").
+
+| Badge | Meaning |
+| --- | --- |
+| Valid | Verifies with this vault's admin key, not expired, not revoked here |
+| Expires in N days: renew | Valid, fewer than 60 days left; after unlocking Manage also says "Health monitoring: renew the enrolment grant of … on the Policy page, then publish." |
+| Replaced by a newer grant (not published) | Renewed in the draft; the old grant stays valid everywhere until the new policy is on every relay |
+| Expired | New installs and re-enrolments with it fail (`401 enrollment token: expired`); blocks publishing |
+| Revoked | Revoked from this PC; blocks publishing |
+| Does not verify with this app's admin key: renew | Made with another admin key (for example before a key rotation); blocks publishing |
+| Not valid | Junk, or an ordinary enrolment token without `tether_proof`; blocks publishing |
+
+**Renew** makes a new grant (the customer is kept unless you change the field) and puts it into the
+draft. After you publish, the old grant is revoked on every relay (`POST /api/admin/status/revoke`)
+only once **all** relays serve a policy without it, so no relay is left where machines would still
+try the old one. Until then the row says "Old grant <id> is still valid: it is revoked on every
+relay once all of them serve the published policy. The new policy is missing on <relays>."; the
+publish result and **Bring N relay(s) up to date** revoke it when the last relay catches up, and
+**Revoke again** finishes what a relay refused.
+
+**Revoke** (after a confirmation) revokes the grant, and every older grant of that layer not yet
+revoked everywhere, on every relay at once: new installs and re-enrolments with it stop; installed
+agents keep working. The draft drops the grant and sets that layer's `health.agent` to `manual`
+(nothing installed is removed); publish it, since until then "The published policy still has the
+revoked grant, so machines keep trying to enrol with it". Relays that failed are listed with
+**Revoke again**. Expired grants are not sent (a relay answers `400 exp has passed`).
+
+What the journal does on its own: a draft saved with a grant that was renewed but revoked nowhere
+makes that grant current again (loading an older version from History brings its grant back).
+Deleting a group revokes its grants at the next publish or sync. **Loading an older History version
+that lacks a group marks that group's grants revoked too**: to bring the group back, load or
+recreate it and **Renew** its grant. A pending revoke of a deleted group is listed once at the top of
+the Health monitoring area.
+
+Custom apps cannot carry the two features (their signed profile has no serial and cannot be
+revoked): the Custom apps page does not offer them, removes them from an older app's settings when
+you edit it, and the backend refuses them ("A custom app cannot set health.agent …").
+
+An old Tether Manage does not know the features: a policy that uses them is "Not publishable"
+there. Publishing the agent itself stays `tools/monitor-publish`
+([updates.md](updates.md#device-status-agent-monitorjson-and-enrolment-tokens)); Manage has no
+screen for `monitor.json`.
 
 ## Devices
 

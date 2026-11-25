@@ -130,6 +130,13 @@ recorded: not a status request, nor one refused (`not-allowed`, `needs-service`,
 or `busy`; a connection gets an install or remove through at most every 10 s, and one action runs
 on the computer at a time. Each post is one attempt of at most 10 s (no retries); a relay that
 refuses it only loses the record; the session goes on.
+The session message itself (end to end in the session, never through tether-api): the viewer sends
+`Misc.tether_agent_request` (tag 1001, `{action: Status | Install | Remove}`, nothing else), the host
+answers `Misc.tether_agent_answer` (tag 1002, `{state, version, installed_by, detail, at, action}`;
+`detail` without control characters, at most 512 characters, cut again by the viewer). The host takes
+it only on a logged-in remote-control connection whose keyboard control is on, one at a time per
+connection. The viewer waits 10 s for a `status` answer (none: "too old", a host before 0.7.0 ignores
+the message) and 190 s for an install or remove.
 
 Answers: `204` with an empty body when stored (also when the same `nonce` was stored in the last
 10 minutes: a client retry), `400` invalid (the client drops it), `413` too large, `429` more than
@@ -310,7 +317,9 @@ agent (no pin, so no customer: `*` only), answers exactly as an unknown device (
 an ID that a device outside the member's scope holds answers `409 tether_id is not the one this device
 claims`, as for a wrong ID. Fleet-wide by design (and recorded in the team audit log as
 `device-list`): the device list (`/api/team/devices`, from heartbeats, which carry no customer) and the shared tags (one document for the whole team). `agent`
-is enforced by the viewer's desktop, not here.
+is meant for the viewer's desktop (the session menu **Health monitoring agent…**), not the relay;
+the desktop does not check it yet, so every member sees that menu item, and the host decides by its
+policy ([health.md](health.md#in-a-session-technician)).
 
 **What the signature on the team document protects.** The document is signed with an admin key, not
 trusted because of the request that carries it: another relay, or a desktop or Manage reading
@@ -381,7 +390,9 @@ files `0600`), also with a plain roster. Fields, in this order (absent ones left
 
 Posted events: `{"event":"export","what":…,"rows":<≤ 10 000 000>,"uuid"?}`,
 `{"event":"session-start","tether_id","uuid"?}`, `{"event":"agent-request","tether_id","action","outcome"?,"uuid"?}`
-(`outcome` `[a-z-]{1,32}`); nothing else is accepted.
+(`outcome` `[a-z-]{1,32}`); nothing else is accepted. The relay accepts them; no Tether app
+posts them yet (the host's own record of an agent install or remove is the session audit
+`alarm` of type 30 above).
 
 **Writing.** One writer thread takes records from a queue of 10 000; a request never waits for it.
 When the queue is full, today's file alone reaches `TEAM_AUDIT_MAX_MB`, or a line cannot be written
@@ -452,14 +463,15 @@ public half goes to the relay as standard base64 (padded) of the 32 raw bytes, t
 1–32 printable ASCII characters without spaces.
 
 **Tether IDs are verified.** A device's `tether_id` (what the technician app joins a host row by)
-comes from a token issued for it, or from a team member's confirmation
-(`POST /api/team/status/<uuid>/link`). A `tether_id` the device names with any other token is kept
+comes from a grant with a valid Tether proof (below), from a token issued for it, or from a team
+member's confirmation (`POST /api/team/status/<uuid>/link`). A `tether_id` the device names with any other token is kept
 as its `claimed_id` and shown as a claim only. Reports never change either.
 
 **Enrolment token.** The base64url string, without padding, of the JSON of a
 `tether_trust::envelope::Signed` document signed with an admin key, whose payload is
-`{"purpose":"status-enroll","exp":<unix seconds>,"label":"<1–64 characters, no control characters>","id":"<16–32 [A-Za-z0-9]>","tether_id":"<optional>","customer":"<optional>"}`
-(unknown fields refused, `id` required). `id` is random; it is what a relay revokes and records
+`{"purpose":"status-enroll","exp":<unix seconds>,"label":"<1–64 characters, no control characters>","id":"<16–32 [A-Za-z0-9]>","tether_id":"<optional>","customer":"<optional>","tether_proof":true}`
+(unknown fields refused, `id` required; `tether_proof` is written only when true, so a token
+without it is byte for byte what older relays know). `id` is random; it is what a relay revokes and records
 on each pin made with the token. With `tether_id` (a Tether ID, never starting with `m:`) the token
 is issued for that ID: it enrols one device, which gets exactly that ID. With `customer`
 (1–32 characters `[A-Za-z0-9._-]`, `tether_trust::status::valid_customer`) the relay sets that
@@ -478,6 +490,20 @@ signature over `"tether-agent-link-v1\n<tether_id>\n<uuid>\n<pubkey>"` (`tether_
 checked against the key hbbs holds for that ID (`GET /peer-pk/<id>` on hbbs's health port, see
 `HBBS_PEER_URL` below). Not single-use. A relay from before the flag refuses such a token
 (`401 enrollment token: not an enrollment token`) and a request with `tether_proof` (`400`).
+`make_token` and `verify_token` refuse a token with both the flag and a `tether_id` (`a
+tether_proof token names no tether_id`), and `make_token` one longer than 1024 characters, the
+size the policy feature `health.enrol-grant` holds. Tether Manage makes grants (label
+`policy:<layer>`, 365 days); `tools/monitor-publish` makes none.
+`tether_trust::status::verify_agent_link(pk, sig, tether_id, uuid, pubkey)` checks a proof
+strictly (weak keys and non-canonical signatures refused; `tether_id`, `uuid` and `pubkey` must be
+valid and `pubkey` in its canonical encoding).
+
+**hbbs's key lookup.** `GET /peer-pk/<id>` on hbbs's health port (21122, IPv4 only) answers
+`200` with `<std base64 of the 32-byte key>\n` for an ID hbbs knows, and `404 not found\n` for
+anything else: an unknown ID, an ID outside 6–16 characters `A-Za-z0-9_-`, a caller that is
+neither loopback nor inside hbbs's `PEER_LOOKUP_FROM` (comma-separated CIDRs, default empty; a bad
+entry stops hbbs at start). hbbr answers `404` always. tether-api reads at most 256 bytes, follows
+no redirect and takes only `200` with exactly that body, or `404`.
 
 ### `POST /api/status/enroll` (token and device signature)
 
