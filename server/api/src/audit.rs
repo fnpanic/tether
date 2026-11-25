@@ -404,6 +404,7 @@ mod tests {
 
     #[test]
     fn read_stops_at_the_byte_budget() {
+        let _rss = crate::teamaudit::RSS_TEST.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("tether-audit-budget-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let (t, pad) = (1_794_009_599, "x".repeat(7000));

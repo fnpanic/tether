@@ -1191,6 +1191,11 @@ impl App {
 
     /// The team audit record of an admin request that reads or changes a device's data.
     fn audit_admin(&mut self, rq: &Request, key: usize, method: &str, url: &str, rest: &str, body: &[u8]) {
+        let actor = teamaudit::Actor { key_fingerprint: tether_trust::team::key_id(&self.keys[key]), name: "admin".into() };
+        if (method, rest) == ("GET", "status/devices") {
+            self.audit_pending = self.team.reads.read("status-device-list", actor, Some(client_ip(rq)), now());
+            return;
+        }
         let (event, target, detail) = match (method, rest) {
             ("DELETE", r) if r.starts_with("status/") => ("remove", self.audit_target(&r["status/".len()..]), serde_json::Value::Null),
             ("POST", "status/revoke") => {
@@ -1201,7 +1206,6 @@ impl App {
             ("GET", "team-audit") => ("team-audit-read", teamaudit::Target::default(), teamaudit::Query::parse(url).map(|q| q.detail()).unwrap_or_default()),
             _ => return,
         };
-        let actor = teamaudit::Actor { key_fingerprint: tether_trust::team::key_id(&self.keys[key]), name: "admin".into() };
         self.audit_pending = Some(teamaudit::Rec::new(event, Some(actor), Some(client_ip(rq)), target, detail));
     }
 
@@ -1717,7 +1721,7 @@ impl App {
             downloads: self.downloads.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             status_hosts: self.status_hosts(t),
             status_sbom: self.status_sbom(),
-            team_audit: [&self.team_audit.counters.written, &self.team_audit.counters.queue_full, &self.team_audit.counters.log_full].map(|c| c.load(Ordering::Relaxed)),
+            team_audit: [&self.team_audit.counters.written, &self.team_audit.counters.queue_full, &self.team_audit.counters.log_full, &self.team_audit.counters.write_failed].map(|c| c.load(Ordering::Relaxed)),
         })
     }
 
@@ -1739,6 +1743,9 @@ impl App {
         self.audit_dev_hits.retain(|_, (start, _)| t < *start + 60);
         self.audit.prune(t, 0);
         self.team.maintain(t);
+        for r in self.team.reads.due(t, false) {
+            self.team_audit.submit(r);
+        }
         // Pruned in memory only: the file keeps the old entries until the next write (harmless:
         // the first maintain after a restart prunes them again).
         self.nonces.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
@@ -2134,7 +2141,13 @@ fn main() {
     }
     lock(&app).flush_devices();
     status::flush_at_exit(&app);
-    let log = lock(&app).team_audit.clone();
+    let log = {
+        let mut a = lock(&app);
+        for r in a.team.reads.due(now(), true) {
+            a.team_audit.submit(r);
+        }
+        a.team_audit.clone()
+    };
     log.flush(Duration::from_secs(5));
 }
 

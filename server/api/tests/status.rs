@@ -3026,6 +3026,11 @@ fn the_team_audit_log_records_every_access_and_nothing_it_returned() {
     let body = json!({"id": tok, "exp": now() + 3600}).to_string();
     assert_eq!(go("admin", &admin, "POST", "/api/admin/status/revoke", body.as_bytes(), "revoke", None).status, 204);
     assert_eq!(go("admin", &admin, "DELETE", "/api/admin/status/dev-0002", b"", "remove", Some("dev-0002")).status, 204);
+    // The device lists the same way: one record per reader and hour.
+    assert_eq!(go("All", &all, "GET", "/api/team/devices", b"", "device-list", None).status, 200);
+    assert_eq!(team_get(&s, &all, "/api/team/devices").status, 200);
+    assert_eq!(go("admin", &admin, "GET", "/api/admin/status/devices", b"", "status-device-list", None).status, 200);
+    assert_eq!(s.admin(&admin, "GET", "/api/admin/status/devices", b"").status, 200);
     // Not recorded: what is not a device's data.
     assert_eq!(team_get(&s, &all, "/api/team/me").status, 200);
 
@@ -3107,6 +3112,26 @@ fn members_report_their_own_events_marked_as_self_reported() {
     // 30 per minute and member key (5 used above, refused ones included).
     let codes: Vec<u16> = (0..30).map(|_| post(json!({"event": "session-start", "tether_id": "123456789"})).status).collect();
     assert_eq!((codes.iter().filter(|c| **c == 204).count(), codes.last().copied()), (25, Some(429)));
+}
+
+#[test]
+fn a_source_at_the_failed_signature_limit_is_recorded_once_a_minute() {
+    let (s, admin) = server();
+    let _m = member(&s, &admin);
+    let stranger = generate_key();
+    let kid = tether_trust::team::key_id(&stranger.verifying_key());
+    let codes: Vec<u16> = (0..64)
+        .map(|_| {
+            let sig = reqauth::sign_request_for_kid(&stranger, RELAY, "GET", "/api/team/me", b"", now());
+            s.req("GET", "/api/team/me", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", "198.51.100.77")], b"").status
+        })
+        .collect();
+    assert_eq!((codes[..60].iter().all(|c| *c == 401), codes[60..].iter().all(|c| *c == 429)), (true, true), "{codes:?}");
+    let v = team_audit(&s, &admin, "?event=signature-limit");
+    let recs = v["records"].as_array().unwrap();
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    assert_eq!((recs[0].get("actor"), recs[0]["ip"].as_str(), recs[0]["detail"].clone(), recs[0]["result"].as_u64()), (None, Some("198.51.100.77"), json!({"kid": kid, "unverified": true}), Some(429)));
+    assert_eq!(s.journal().matches("team: failed member signatures from 198.51.100.77").count(), 1);
 }
 
 #[test]

@@ -461,7 +461,7 @@ fn recap_entry(e: &str) -> Option<String> {
 
 /// Appends `bytes` through `write`; on an error the file is cut back to its length before, so a
 /// partly written line (a full disk) is never left for the next append to be glued onto.
-fn append_whole(f: &fs::File, bytes: &[u8], write: impl FnOnce(&fs::File, &[u8]) -> io::Result<()>) -> io::Result<()> {
+pub(crate) fn append_whole(f: &fs::File, bytes: &[u8], write: impl FnOnce(&fs::File, &[u8]) -> io::Result<()>) -> io::Result<()> {
     let len = f.metadata()?.len();
     write(f, bytes).inspect_err(|_| {
         let _ = f.set_len(len);

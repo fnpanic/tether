@@ -38,35 +38,57 @@ const KEY_PER_MIN: u32 = 120;
 const FAIL_PER_MIN: u32 = 60;
 /// Signatures without `kid` being checked (up to 2000 keys, about 105 ms each in a release build):
 /// two at a time for the whole relay and one per source address, so they cannot keep many workers
-/// busy and one source cannot hold both; a request waits up to `NO_KID_WAIT` for a slot (outside
-/// the state lock). `kid` requests are not limited by it.
+/// busy and one source cannot hold both; at most two requests (one per source) wait up to
+/// `NO_KID_WAIT` for a slot (outside the state lock), any other gets `429 busy` at once and counts
+/// as a failed signature. `kid` requests are not limited by it.
 static NO_KID: Slots = Slots::new(2);
 const NO_KID_WAIT: Duration = Duration::from_secs(1);
 
-/// A fixed number of slots, at most one per source.
+/// A fixed number of slots, at most one per source, and at most as many waiters as slots, at most
+/// one per source: a waiter holds a worker, so everything beyond is refused at once.
 struct Slots {
-    held: Mutex<Vec<String>>,
+    /// Sources holding a slot, and sources waiting for one.
+    held: Mutex<(Vec<String>, Vec<String>)>,
     freed: Condvar,
     max: usize,
 }
 
 impl Slots {
     const fn new(max: usize) -> Self {
-        Slots { held: Mutex::new(Vec::new()), freed: Condvar::new(), max }
+        Slots { held: Mutex::new((Vec::new(), Vec::new())), freed: Condvar::new(), max }
     }
 
-    /// A slot for `src`, waiting up to `wait` for one; `None` after that.
+    /// A slot for `src`, waiting up to `wait` for one if a waiter's place is free; `None` after
+    /// that, or at once.
     fn take(&'static self, src: &str, wait: Duration) -> Option<Slot> {
         let end = Instant::now() + wait;
-        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
-        loop {
-            if held.len() < self.max && !held.iter().any(|h| h == src) {
-                held.push(src.to_owned());
-                return Some(Slot(self, src.to_owned()));
-            }
-            let left = end.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
-            held = self.freed.wait_timeout(held, left).unwrap_or_else(|e| e.into_inner()).0;
+        let mut g = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        let free = |g: &(Vec<String>, Vec<String>)| g.0.len() < self.max && !g.0.iter().any(|h| h == src);
+        if !free(&g) && (g.1.len() >= self.max || g.1.iter().any(|w| w == src)) {
+            return None;
         }
+        let waiting = !free(&g);
+        if waiting {
+            g.1.push(src.to_owned());
+        }
+        let got = loop {
+            if free(&g) {
+                break true;
+            }
+            match end.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) {
+                Some(left) => g = self.freed.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner()).0,
+                None => break false,
+            }
+        };
+        if waiting {
+            if let Some(i) = g.1.iter().position(|w| w == src) {
+                g.1.swap_remove(i);
+            }
+        }
+        got.then(|| {
+            g.0.push(src.to_owned());
+            Slot(self, src.to_owned())
+        })
     }
 }
 
@@ -74,9 +96,9 @@ struct Slot(&'static Slots, String);
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        let mut held = self.0.held.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(i) = held.iter().position(|h| *h == self.1) {
-            held.swap_remove(i);
+        let mut g = self.0.held.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = g.0.iter().position(|h| *h == self.1) {
+            g.0.swap_remove(i);
         }
         self.0.freed.notify_all();
     }
@@ -162,9 +184,10 @@ pub struct Team {
     fail_hits: HashMap<String, (u64, u32)>,
     /// `POST /api/team/audit-event` per member key.
     posted_hits: HashMap<String, (u64, u32)>,
-    /// Per key id: when the last summary record was written, and the summary reads since then
-    /// not recorded (one record per member and hour).
-    summary_seen: HashMap<String, (u64, u64)>,
+    /// Summary and device-list reads, one record per actor and hour (also the admin's, main.rs).
+    pub(crate) reads: teamaudit::Folded,
+    /// Sources refused by `FAIL_PER_MIN`: when their last `signature-limit` record was written.
+    limit_noted: HashMap<String, u64>,
 }
 
 impl Team {
@@ -224,6 +247,7 @@ impl Team {
         self.key_hits.retain(|_, (start, _)| t < *start + 60);
         self.fail_hits.retain(|_, (start, _)| t < *start + 60);
         self.posted_hits.retain(|_, (start, _)| t < *start + 60);
+        self.limit_noted.retain(|_, at| t < *at + 60);
     }
 }
 
@@ -318,7 +342,9 @@ impl App {
         let m = &perms;
         let actor = Actor { key_fingerprint: team::key_id(&self.team.members.keys[i]), name: name.clone() };
         let ip = crate::client_ip(rq);
-        if let Some((event, target, detail)) = self.audited(method, rest, url, body, &actor.key_fingerprint, t) {
+        if let ("GET", r @ ("status" | "devices")) = (method, rest) {
+            self.audit_pending = self.team.reads.read(if r == "status" { "summary" } else { "device-list" }, actor.clone(), Some(ip.clone()), t);
+        } else if let Some((event, target, detail)) = self.audited(method, rest, url, body) {
             self.audit_pending = Some(Rec::new(event, Some(actor.clone()), Some(ip.clone()), target, detail));
         }
         match (method, rest) {
@@ -406,7 +432,12 @@ impl App {
         let Verified { r, t } = self.team.verified.take().ok_or_else(|| crate::internal("member signature not checked"))?;
         let r = match r {
             Err(Refused::Limited) => return Err(text(429, "too many failed requests")),
-            Err(Refused::Busy) => return Err(text(429, "busy").with_header(hdr("Retry-After", "1"))),
+            // Counted as a failure: a source sending many at once reaches FAIL_PER_MIN and is then
+            // refused before any signature check.
+            Err(Refused::Busy) => {
+                rate_ok(&mut self.team.fail_hits, ip, t, u32::MAX);
+                return Err(text(429, "busy").with_header(hdr("Retry-After", "1")));
+            }
             Err(Refused::Auth(e)) => Err(e),
             Ok((snap, i, nonce)) => {
                 let cur = &self.team.members;
@@ -434,22 +465,12 @@ impl App {
     }
 
     /// The team audit record a member request leaves, before its handler runs (a removed device's
-    /// pin is still there): event, target, detail. The summary: one record per member and hour,
-    /// with the reads since the one before (`{"reads": n}`, this one included).
-    fn audited(&mut self, method: &str, rest: &str, url: &str, body: &[u8], kid: &str, t: u64) -> Option<(&'static str, Target, Value)> {
+    /// pin is still there): event, target, detail. The summary and the device list are folded
+    /// per member and hour (`team_route`, teamaudit::Folded).
+    fn audited(&mut self, method: &str, rest: &str, url: &str, body: &[u8]) -> Option<(&'static str, Target, Value)> {
         let none = Value::Null;
         let dev = |r: &str, suffix: &str| r.strip_prefix("status/")?.strip_suffix(suffix).map(str::to_owned);
         Some(match (method, rest) {
-            ("GET", "status") => {
-                let (at, reads) = self.team.summary_seen.entry(kid.to_owned()).or_insert((0, 0));
-                *reads += 1;
-                if t < *at + 3600 {
-                    return None;
-                }
-                let n = std::mem::take(reads);
-                *at = t;
-                ("summary", Target::default(), serde_json::json!({"reads": n}))
-            }
             ("GET", "audit") => ("session-audit-read", query_param(url, "device").map(|d| Target::asked(&d)).unwrap_or_default(), none),
             ("GET", r) => match dev(r, "/sbom") {
                 Some(u) => ("software-list", self.audit_target(&u), none),
@@ -530,8 +551,16 @@ pub(crate) fn member_verify(app: &Mutex<App>, rq: &Request, body: &Body) -> Opti
     let body = body.bytes(route_limit(method, rest)?).ok()?;
     let (t, ip) = (now(), crate::rate_ip(rq));
     let snap = {
-        let a = lock(app);
+        let mut a = lock(app);
         if a.team.fail_hits.get(&ip).is_some_and(|h| t < h.0 + 60 && h.1 >= FAIL_PER_MIN) {
+            // Once per source and minute: the journal and the team audit log name the source and
+            // the `kid` it tried (no actor: no signature verified).
+            if a.team.limit_noted.get(&ip).is_none_or(|at| t >= at + 60) {
+                a.team.limit_noted.insert(ip.clone(), t);
+                let kid = header(rq, reqauth::HEADER).and_then(|s| reqauth::header_kid(&s).map(teamaudit::text));
+                eprintln!("team: failed member signatures from {ip} reached {FAIL_PER_MIN} per minute (kid {})", kid.as_deref().unwrap_or("none"));
+                a.team_audit.submit(Rec::new("signature-limit", None, Some(crate::client_ip(rq)), Target::default(), serde_json::json!({"kid": kid, "unverified": true})).answered(429));
+            }
             return Some(Verified { r: Err(Refused::Limited), t });
         }
         a.team.members.clone()
@@ -603,8 +632,28 @@ mod tests {
             // Woken when the slot is freed, not at the end of the wait.
             assert!(got && took < Duration::from_secs(2), "{got} {took:?}");
         });
-        assert_eq!(P.held.lock().unwrap().len(), 0);
+        assert_eq!(P.held.lock().unwrap().0.len(), 0);
         let _c = P.take("c", Duration::ZERO).unwrap();
         assert!(P.take("d", Duration::ZERO).is_some());
+    }
+
+    #[test]
+    fn no_kid_waiters_are_as_many_as_slots_and_one_per_source() {
+        static P: Slots = Slots::new(2);
+        let (a, b) = (P.take("a", Duration::ZERO).unwrap(), P.take("b", Duration::ZERO).unwrap());
+        std::thread::scope(|sc| {
+            let w: Vec<_> = ["c", "d"].map(|s| sc.spawn(move || P.take(s, Duration::from_secs(5)).is_some())).into();
+            while P.held.lock().unwrap().1.len() < 2 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // Two waiting: a third source, and a second waiter of a waiting source, are refused at once.
+            let t = Instant::now();
+            assert!(P.take("e", Duration::from_secs(5)).is_none());
+            assert!(P.take("c", Duration::from_secs(5)).is_none());
+            assert!(t.elapsed() < Duration::from_millis(100), "{:?}", t.elapsed());
+            drop((a, b));
+            assert!(w.into_iter().all(|h| h.join().unwrap()));
+        });
+        assert_eq!(P.held.lock().unwrap().1.len(), 0);
     }
 }

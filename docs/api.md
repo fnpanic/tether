@@ -256,9 +256,11 @@ machine; a request with `kid` about 3 ms). Signatures are checked before the rel
 on a snapshot of the member keys (replaced whole when a roster or document is accepted; a key removed
 meanwhile is refused, `401 not a team member`), so device heartbeats and reports never wait for them.
 At most two requests without `kid` are checked at a time for the whole relay, at most one per client
-address (as the per-IP limits count it); another one waits up to 1 s for a slot and then gets
-`429 busy` with `Retry-After: 1` (not counted as a failed signature); requests with `kid` are not
-limited by this. Send `kid` only to relays of 0.7 or later: an older relay refuses the header as
+address (as the per-IP limits count it); at most two more wait for a slot (at most one per address),
+up to 1 s, and then get `429 busy` with `Retry-After: 1`; any request beyond that gets the same `429`
+at once, so a burst from one address holds at most two of the relay's 32 workers. Each `429 busy`
+counts as a failed signature for the address (60 a minute lead to `429 too many failed requests`
+before any check). Requests with `kid` are not limited by this. Send `kid` only to relays of 0.7 or later: an older relay refuses the header as
 malformed (`401`).
 
 **The signed team document** (0.7) replaces the roster. Tether Manage publishes an upload
@@ -306,8 +308,8 @@ whose pin is in its scope, named by the Tether ID the pin is verified for (a tea
 proof) or by its uuid (the records of that Tether ID); anything else, also a machine without a health
 agent (no pin, so no customer: `*` only), answers exactly as an unknown device (`200 []`). Linking
 an ID that a device outside the member's scope holds answers `409 tether_id is not the one this device
-claims`, as for a wrong ID. Fleet-wide by design: the device list (`/api/team/devices`, from
-heartbeats, which carry no customer) and the shared tags (one document for the whole team). `agent`
+claims`, as for a wrong ID. Fleet-wide by design (and recorded in the team audit log as
+`device-list`): the device list (`/api/team/devices`, from heartbeats, which carry no customer) and the shared tags (one document for the whole team). `agent`
 is enforced by the viewer's desktop, not here.
 
 **What the signature on the team document protects.** The document is signed with an admin key, not
@@ -348,17 +350,23 @@ files `0600`), also with a plain roster. Fields, in this order (absent ones left
 
 - `actor`: the member's name in the roster or team document and the id of the key that signed
   (`tether_trust::team::key_id`, the `kid`); the admin as `"name":"admin"` with its key's id. The
-  writer's own records (`dropped`, `chain-gap`) have none. `ip`: the client address (design 12.5).
+  writer's own records (`dropped`, `chain-gap`) and `signature-limit` have none. `ip`: the client
+  address (design 12.5).
 - `target`: the uuid as the request named it (at most 128 bytes); for an answer below `400` also
   the pin's Tether ID and customer. A refused request keeps only what it named, so the record
   confirms nothing about a device the member may not see.
 - Never in a record: report or history content, host names, software lists, summary content.
-- Not recorded: requests without a valid member or admin signature (no person to name) or refused
-  by a rate limit, and routes that are not a device's data (`me`, `tags`, the heartbeat device list).
+- Not recorded: requests without a valid member or admin signature (no person to name; only an
+  address reaching the failed-signature limit is, as `signature-limit`) or refused by a rate limit,
+  and `me` and `tags`. The device lists are recorded like the summary: the heartbeat list
+  (`GET /api/team/devices`, every Tether device with its ID, version and last contact) and the admin's
+  pin list (`GET /api/admin/status/devices`, with host names).
 
 | Event | Route | `detail` |
 |---|---|---|
-| `summary` | `GET /api/team/status` | `{"reads":n}`: at most one record per member and hour; `n` the reads since the member's previous summary record, this one included |
+| `summary` | `GET /api/team/status` | `{"reads":n}`: one record for the first read of an hour, with `n` the reads since the member's previous summary record, this one included; reads after it are written by the relay's hourly maintenance (and at a clean stop) as a record without `result`. A hard kill loses at most an hour of such counts |
+| `device-list`, `status-device-list` | `GET /api/team/devices`, `GET /api/admin/status/devices` | `{"reads":n}`, folded per reader and hour as `summary` |
+| `signature-limit` | any member route | `{"kid":"<16 hex>"\|null,"unverified":true}`, no `actor`, `result` `429`: an address reached 60 failed member signatures a minute; at most one record (and one journal line `team: failed member signatures from <ip> …`) per address and minute; `kid` the one the refused request named (not verified) |
 | `report` | `GET /api/team/status/<uuid>` (report and history) | – |
 | `software-list` | `GET /api/team/status/<uuid>/sbom` | – |
 | `link` | `POST /api/team/status/<uuid>/link` | `{"tether_id"}` asked for |
@@ -368,7 +376,7 @@ files `0600`), also with a plain roster. Fields, in this order (absent ones left
 | `session-audit-read` | `GET /api/team/audit`, `GET /api/admin/audit` | – (`target`: the `device` asked for; digits only: a Tether ID) |
 | `team-audit-read` | `GET /api/admin/team-audit` | the filters given |
 | `export`, `session-start`, `agent-request` | `POST /api/team/audit-event` (`self_reported`) | `{"what":"hosts"\|"failing"\|"sbom","rows":n}`; –; `{"action":"install"\|"remove","outcome"?}` |
-| `dropped` | the writer | `{"queue_full":n,"log_full":n}`: records lost since the last such record |
+| `dropped` | the writer | `{"since":<unix>,"queue_full":n,"log_full":n,"write_failed":n}`: records lost since `since` (the previous `dropped` record, or the writer's start) |
 | `chain-gap` | the writer at start | `{"expected","found"}`: the files no longer reach the head written before |
 
 Posted events: `{"event":"export","what":…,"rows":<≤ 10 000 000>,"uuid"?}`,
@@ -376,11 +384,23 @@ Posted events: `{"event":"export","what":…,"rows":<≤ 10 000 000>,"uuid"?}`,
 (`outcome` `[a-z-]{1,32}`); nothing else is accepted.
 
 **Writing.** One writer thread takes records from a queue of 10 000; a request never waits for it.
-When the queue is full, or today's file alone reaches `TEAM_AUDIT_MAX_MB`, records are dropped and
-counted (`tether_api_team_audit_dropped_total`, a journal line `team-audit: N records dropped` at
-most every 10 s) and a `dropped` record in the log says how many. Lines are synced every second;
-each is also written to the journal as `team-audit: <line>`, and the head as `team-audit: head <hash>`
-every 10 minutes. A record is about 280 bytes (measured); 50 000 records at once raised the
+When the queue is full, today's file alone reaches `TEAM_AUDIT_MAX_MB`, or a line cannot be written
+(disk full, folder not writable), records are dropped and counted (`tether_api_team_audit_dropped_total`,
+failed writes also in `tether_api_team_audit_write_failed_total`; a journal line
+`team-audit: N records dropped since <unix> (…)` and, for failed writes, `error: team-audit: a record could
+not be written: …`, each at most every 10 s) and a `dropped` record in the log says how many (when
+that record cannot be written either, its counts go into the next one). A failed write is cut back to
+the file's length before it, so no torn line is left for a reader to report as a break; a line cut by
+a crash is ended at the next start (journal line `team-audit: <day>.jsonl ended in a cut line …`).
+Lines are synced every second; each is also written to the journal as `team-audit: <line>`, and the
+head as `team-audit: head <hash>` every 10 minutes. The journal copy is not complete under load:
+journald's rate limit (by default 10 000 messages per 30 s per service) drops lines silently; set
+`LogRateLimitIntervalSec=0` in the unit (`[Service]`) when the journal is the copy a SIEM relies on.
+
+**Fails open.** While running, the relay keeps answering when it cannot write the audit log: support
+for practices goes on, and the outage is visible as dropped counts in the log itself (the next
+`dropped` record), in the metrics and in the journal. At start it refuses to run (exits with
+`data dir: …`) when the `team-audit` folder cannot be created or written. A record is about 280 bytes (measured); 50 000 records at once raised the
 memory by about 5 MB (the full queue), the rest was dropped and counted.
 
 **The chain.** `prev` is the SHA-256 (lower-case hex) of the line before (its bytes without the

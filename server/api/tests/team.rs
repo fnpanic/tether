@@ -554,6 +554,47 @@ fn a_signature_without_kid_is_checked_outside_the_state_lock() {
     assert_eq!(s.get(&last, "/api/team/me").status, 200);
 }
 
+/// 32 junk requests without `kid` at once from one address (as many as the relay has workers):
+/// one is checked, at most one waits for the slot, the rest get `429 busy` at once, so a device
+/// heartbeat sent meanwhile is not held up (and never gets `503 busy`).
+#[test]
+fn junk_without_kid_from_one_address_waits_for_one_slot_at_most() {
+    use std::time::{Duration, Instant};
+    let admin = generate_key();
+    let s = start(&admin);
+    let member = generate_key();
+    assert_eq!(s.publish(&admin, &big_doc(&admin, 1, &[("Member", &member)])).status, 204);
+    let go = std::sync::Barrier::new(33);
+    std::thread::scope(|sc| {
+        let junk: Vec<_> = (0..32)
+            .map(|_| {
+                sc.spawn(|| {
+                    let k = generate_key();
+                    go.wait();
+                    let t = Instant::now();
+                    let r = s.signed(&k, "GET", "/api/team/me", &[("X-Forwarded-For", "198.51.100.9")], b"");
+                    (r.status, r.header("Retry-After"), t.elapsed(), Instant::now())
+                })
+            })
+            .collect();
+        go.wait();
+        std::thread::sleep(Duration::from_millis(30));
+        let t = Instant::now();
+        let hb_status = s.req("POST", "/api/heartbeat", &[("X-Forwarded-For", "203.0.113.9")], hb("dev-0001", "111222333").as_bytes()).status;
+        let (hb_t, hb_done) = (t.elapsed(), Instant::now());
+        let got: Vec<_> = junk.into_iter().map(|j| j.join().unwrap()).collect();
+        let at_once = got.iter().filter(|g| g.0 == 429 && g.1.as_deref() == Some("1") && g.2 < Duration::from_millis(500)).count();
+        eprintln!("32 no-kid junk requests from one address: heartbeat {hb_status} after {hb_t:?}; {at_once} refused at once; {:?}", got.iter().map(|g| (g.0, g.2)).collect::<Vec<_>>());
+        assert_eq!(hb_status, 200);
+        assert!(got.iter().all(|g| matches!(g.0, 401 | 429)), "{:?}", got.iter().map(|g| g.0).collect::<Vec<_>>());
+        assert!(at_once >= 30, "{at_once} refused at once");
+        assert!(hb_t < Duration::from_millis(200), "heartbeat {hb_t:?}");
+        assert!(got.iter().any(|g| hb_done < g.3), "the heartbeat waited for every junk request");
+    });
+    // Another address is not affected.
+    assert_eq!(s.signed(&member, "GET", "/api/team/me", &[("X-Forwarded-For", "198.51.100.10")], b"").status, 200);
+}
+
 #[test]
 fn no_kid_checks_have_two_slots_one_per_address_and_a_bounded_wait() {
     use std::time::{Duration, Instant};

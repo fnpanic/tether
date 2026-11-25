@@ -66,6 +66,9 @@ pub struct Counters {
     pub queue_full: AtomicU64,
     /// Dropped because today's file alone reached TEAM_AUDIT_MAX_MB.
     pub log_full: AtomicU64,
+    /// Dropped because the line could not be written (disk full, folder not writable).
+    pub write_failed: AtomicU64,
+    /// Failed syncs of the day file.
     pub write_errors: AtomicU64,
 }
 
@@ -140,6 +143,51 @@ impl Rec {
     }
 }
 
+/// Reads folded into one record per actor, event and hour (`summary`, `device-list`,
+/// `status-device-list`): the first read of an hour is recorded at once with `{"reads": n}` (the
+/// reads since the record before, this one included); reads after it are written by the hourly
+/// maintenance ([`Folded::due`]) or at a clean stop. Entries unseen for a day are dropped.
+#[derive(Default)]
+pub struct Folded(std::collections::HashMap<(String, &'static str), Fold>);
+
+struct Fold {
+    /// When the last record was written.
+    at: u64,
+    /// Reads since then, not recorded yet.
+    reads: u64,
+    last: u64,
+    actor: Actor,
+    ip: Option<String>,
+}
+
+impl Folded {
+    /// A read by `actor`: its record when one is due now (the first read of an hour).
+    pub fn read(&mut self, event: &'static str, actor: Actor, ip: Option<String>, t: u64) -> Option<Rec> {
+        let f = self.0.entry((actor.key_fingerprint.clone(), event)).or_insert_with(|| Fold { at: 0, reads: 0, last: t, actor: actor.clone(), ip: None });
+        (f.reads, f.last, f.actor, f.ip) = (f.reads + 1, t, actor, ip);
+        (t >= f.at + 3600).then(|| Self::take(event, f, t))
+    }
+
+    fn take(event: &'static str, f: &mut Fold, t: u64) -> Rec {
+        let n = std::mem::take(&mut f.reads);
+        f.at = t;
+        Rec::new(event, Some(f.actor.clone()), f.ip.clone(), Target::default(), json!({"reads": n}))
+    }
+
+    /// The records of reads not recorded for an hour (`all`: every pending one, at a stop); drops
+    /// entries without reads unseen for a day.
+    pub fn due(&mut self, t: u64, all: bool) -> Vec<Rec> {
+        let mut out = Vec::new();
+        for ((_, event), f) in self.0.iter_mut() {
+            if f.reads > 0 && (all || t >= f.at + 3600) {
+                out.push(Self::take(event, f, t));
+            }
+        }
+        self.0.retain(|_, f| f.reads > 0 || t < f.last + DAY);
+        out
+    }
+}
+
 /// At most TEXT_MAX bytes of `s` (on a character boundary).
 pub fn text(s: &str) -> String {
     let mut n = s.len().min(TEXT_MAX);
@@ -178,6 +226,10 @@ impl Log {
     /// every line to stderr (off in unit tests).
     pub fn start(dir: PathBuf, retention_days: u64, max_bytes: u64, journal: bool) -> io::Result<Log> {
         crate::mkdirs(&dir, 0o700)?;
+        // At start the relay refuses to run without a folder it can write (while running it fails open).
+        let probe = dir.join("probe.tmp");
+        OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&probe)?.write_all(b"x")?;
+        fs::remove_file(&probe)?;
         let counters = Arc::new(Counters::default());
         let w = Writer::open(dir.clone(), retention_days, max_bytes, journal, counters.clone(), crate::now())?;
         let head = Arc::new(Mutex::new(w.prev.clone()));
@@ -223,8 +275,16 @@ struct Writer {
     total: u64,
     dirty: bool,
     head_saved: String,
-    seen: (u64, u64),
+    /// The drop counters as of the last `dropped` record, and when its window began.
+    seen: (u64, u64, u64),
+    since: u64,
     last_dropped: u64,
+    /// When a failed write was last copied to the journal.
+    last_write_err: u64,
+    /// The day on which today's file alone reached the size cap: no folder scan per record that day.
+    cap_day: Option<String>,
+    /// Appends one line (a failing one in tests); a failed append is cut back to the length before.
+    put: fn(&File, &[u8]) -> io::Result<()>,
     last_head: u64,
     last_prune: u64,
 }
@@ -247,8 +307,12 @@ impl Writer {
             prev,
             file: None,
             dirty: false,
-            seen: (0, 0),
+            seen: (0, 0, 0),
+            since: t,
             last_dropped: 0,
+            last_write_err: 0,
+            cap_day: None,
+            put: |mut f, b| f.write_all(b),
             last_head: 0,
             last_prune: t,
         };
@@ -270,7 +334,9 @@ impl Writer {
         let mut synced = Instant::now();
         loop {
             match rx.recv_timeout(SYNC_EVERY) {
-                Ok(Msg::Rec(r)) => self.write(*r, crate::now(), false),
+                Ok(Msg::Rec(r)) => {
+                    self.write(*r, crate::now(), false);
+                }
                 Ok(Msg::Flush(done)) => {
                     self.housekeep(crate::now(), true);
                     *head.lock().unwrap_or_else(|e| e.into_inner()) = self.prev.clone();
@@ -295,21 +361,26 @@ impl Writer {
 
     /// Appends `rec` to its day's file. `force`: also over the size cap (the writer's own small
     /// `dropped` and `chain-gap` records, at most one per DROPPED_EVERY).
-    fn write(&mut self, mut rec: Rec, t: u64, force: bool) {
+    fn write(&mut self, mut rec: Rec, t: u64, force: bool) -> bool {
         let day = date(rec.ts).max(self.day.clone());
         if day != self.day {
             self.file = None;
             self.day = day;
+            self.cap_day = None;
             self.prune(t, 0);
         }
         rec.prev = self.prev.clone();
-        let Ok(mut line) = serde_json::to_vec(&rec) else { return };
+        let Ok(mut line) = serde_json::to_vec(&rec) else { return false };
         let n = line.len() as u64 + 1;
         if !force && self.total + n > self.max_bytes {
-            self.prune(t, n);
+            if self.cap_day.as_ref() != Some(&self.day) {
+                self.prune(t, n);
+            }
             if self.total + n > self.max_bytes {
+                // Only today's file is left (never removed): no folder scan again until the hourly prune.
+                self.cap_day = Some(self.day.clone());
                 self.counters.log_full.fetch_add(1, Relaxed);
-                return;
+                return false;
             }
         }
         let h = hash(&line);
@@ -323,17 +394,23 @@ impl Writer {
                 if ends_unterminated(&mut f)? {
                     f.write_all(b"\n")?;
                     self.total += 1;
+                    eprintln!("team-audit: {}.jsonl ended in a cut line (a crash while writing): the next record starts on a new line", self.day);
                 }
                 self.file = Some(f);
             }
-            self.file.as_mut().map_or(Ok(()), |f| f.write_all(&line))
+            let put = self.put;
+            self.file.as_ref().map_or(Ok(()), |f| crate::status::append_whole(f, &line, put))
         })();
         if let Err(e) = r {
-            if self.counters.write_errors.fetch_add(1, Relaxed) == 0 {
-                eprintln!("error: team-audit: {e}");
+            // Counted as dropped (reported in the next `dropped` record); the request is answered
+            // anyway (fails open, docs/api.md).
+            self.counters.write_failed.fetch_add(1, Relaxed);
+            if t >= self.last_write_err + DROPPED_EVERY {
+                self.last_write_err = t;
+                eprintln!("error: team-audit: a record could not be written: {e}");
             }
             self.file = None;
-            return;
+            return false;
         }
         self.prev = h;
         self.total += n;
@@ -342,18 +419,23 @@ impl Writer {
         if self.journal {
             eprintln!("team-audit: {}", String::from_utf8_lossy(&line[..line.len() - 1]));
         }
+        true
     }
 
     /// Every second and on a flush: the `dropped` record when records were dropped, the sync, the
     /// head file; the head into the journal, retention.
     fn housekeep(&mut self, t: u64, now: bool) {
-        let seen = (self.counters.queue_full.load(Relaxed), self.counters.log_full.load(Relaxed));
+        let c = &self.counters;
+        let seen = (c.queue_full.load(Relaxed), c.log_full.load(Relaxed), c.write_failed.load(Relaxed));
         if seen != self.seen && (now || t >= self.last_dropped + DROPPED_EVERY) {
-            let (q, f) = (seen.0 - self.seen.0, seen.1 - self.seen.1);
-            self.seen = seen;
+            let (q, f, w) = (seen.0 - self.seen.0, seen.1 - self.seen.1, seen.2 - self.seen.2);
             self.last_dropped = t;
-            eprintln!("team-audit: {} records dropped ({q} with the queue full, {f} with the log full)", q + f);
-            self.write(Rec { ts: t, ..Rec::new("dropped", None, None, Target::default(), json!({"queue_full": q, "log_full": f})) }, t, true);
+            eprintln!("team-audit: {} records dropped since {} ({q} with the queue full, {f} with the log full, {w} not written)", q + f + w, self.since);
+            let detail = json!({"since": self.since, "queue_full": q, "log_full": f, "write_failed": w});
+            // When this one cannot be written either, its counts go into the next one.
+            if self.write(Rec { ts: t, ..Rec::new("dropped", None, None, Target::default(), detail) }, t, true) {
+                (self.seen, self.since) = (seen, t);
+            }
         }
         if self.dirty {
             if let Some(f) = &self.file {
@@ -380,6 +462,7 @@ impl Writer {
         }
         if t >= self.last_prune + PRUNE_EVERY {
             self.last_prune = t;
+            self.cap_day = None;
             self.prune(t, 0);
         }
     }
@@ -580,7 +663,8 @@ impl Query {
 pub fn read(dir: &Path, q: &Query, head: &str, out: &mut impl Write) -> io::Result<()> {
     let files = files(dir);
     let (start, mut expect) = match &q.cursor {
-        Some(c) => (c.day.clone(), Some(c.prev.clone())),
+        // A cursor into a day removed since (retention, the size cap): what follows starts after it.
+        Some(c) => (c.day.clone(), files.iter().any(|(d, _)| *d == c.day).then(|| c.prev.clone())),
         None => {
             let start = date(q.since);
             let before = files.iter().rev().find(|(d, n)| *d < start && *n > 0);
@@ -719,6 +803,10 @@ pub fn posted(body: &[u8]) -> Result<(&'static str, Target, Value), String> {
     };
     Ok((event, Target { uuid: p.uuid, tether_id: p.tether_id, customer: None }, detail))
 }
+
+/// Tests that measure the process's RSS hold this, and so do tests that allocate many MB.
+#[cfg(test)]
+pub(crate) static RSS_TEST: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -881,7 +969,78 @@ mod tests {
         // The writer's own note of it goes in.
         w.housekeep(T, true);
         let last: Value = serde_json::from_str(fs::read_to_string(day_file(&dir, T)).unwrap().lines().last().unwrap()).unwrap();
-        assert_eq!((last["event"].as_str(), last["detail"].clone()), (Some("dropped"), json!({"queue_full": 0, "log_full": 1})));
+        assert_eq!((last["event"].as_str(), last["detail"].clone()), (Some("dropped"), json!({"since": T, "queue_full": 0, "log_full": 1, "write_failed": 0})));
+        // At the cap the folder is not scanned again for each dropped record that day.
+        assert_eq!(w.cap_day.as_deref(), Some(date(T).as_str()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A write that fails halfway (disk full): the file is cut back to its length before, the
+    /// record counted as dropped and reported, and the chain still verifies.
+    #[test]
+    fn a_failed_write_is_cut_back_counted_and_reported() {
+        let dir = tmp();
+        let mut w = writer(&dir, 90, 1 << 30, T - 100);
+        assert!(w.write(rec(T - 50, "a"), T - 50, false));
+        let before = fs::read(day_file(&dir, T)).unwrap();
+        w.put = |mut f, b| {
+            f.write_all(&b[..b.len() / 2])?;
+            Err(io::Error::other("no space left on device"))
+        };
+        assert!(!w.write(rec(T - 40, "b"), T - 40, false));
+        assert!(!w.write(rec(T - 39, "c"), T - 39, false));
+        assert_eq!(fs::read(day_file(&dir, T)).unwrap(), before, "no torn line stays");
+        assert_eq!(w.counters.write_failed.load(Relaxed), 2);
+        // The dropped record cannot be written either: its counts go into the next one.
+        w.housekeep(T - 30, true);
+        assert_eq!(fs::read(day_file(&dir, T)).unwrap(), before);
+        w.put = |mut f, b| f.write_all(b);
+        w.housekeep(T - 20, true);
+        let last: Value = serde_json::from_str(fs::read_to_string(day_file(&dir, T)).unwrap().lines().last().unwrap()).unwrap();
+        assert_eq!((last["event"].as_str(), last["detail"].clone()), (Some("dropped"), json!({"since": T - 100, "queue_full": 0, "log_full": 0, "write_failed": 3})));
+        assert!(w.write(rec(T - 10, "d"), T - 10, false));
+        assert!(problems(&answer(&dir, "/x", &w.prev)).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn folded_reads_are_written_each_hour_with_their_count() {
+        let mut f = Folded::default();
+        let actor = |n: &str| Actor { key_fingerprint: format!("{n:0>16}"), name: n.into() };
+        let reads = |r: &Rec| r.detail["reads"].as_u64().unwrap();
+        // The first read is recorded at once; the next ones of the hour are counted.
+        assert_eq!(f.read("summary", actor("a"), None, T).map(|r| reads(&r)), Some(1));
+        for i in 1..=4 {
+            assert!(f.read("summary", actor("a"), Some("192.0.2.9".into()), T + i * 60).is_none());
+        }
+        assert!(f.read("device-list", actor("a"), None, T + 300).is_some(), "another event, its own record");
+        assert!(f.due(T + 3599, false).is_empty(), "not an hour yet");
+        // The hour is over: maintenance writes the 4 reads, with the last read's address.
+        let d = f.due(T + 3600, false);
+        assert_eq!(d.iter().map(|r| (r.event, reads(r), r.ip.clone())).collect::<Vec<_>>(), [("summary", 4, Some("192.0.2.9".to_owned()))]);
+        // Reads in the next hour: counted, and at a stop written whatever the hour.
+        assert!(f.read("summary", actor("a"), None, T + 3700).is_none());
+        assert!(f.read("summary", actor("a"), None, T + 3800).is_none());
+        assert_eq!(f.due(T + 3900, true).iter().map(reads).collect::<Vec<_>>(), [2]);
+        // An actor unseen for a day is forgotten; its next read is recorded at once.
+        assert!(f.due(T + 3800 + DAY, false).is_empty());
+        assert!(f.0.is_empty());
+        assert_eq!(f.read("summary", actor("a"), None, T + 3800 + DAY).map(|r| reads(&r)), Some(1));
+    }
+
+    #[test]
+    fn a_cursor_into_a_removed_day_starts_after_it() {
+        let dir = tmp();
+        let mut w = writer(&dir, 90, 1 << 30, T);
+        for ts in [T - 3, T - 2, T - 1, T + 1, T + 2] {
+            w.write(rec(ts, "a"), ts, false);
+        }
+        let a = answer(&dir, "/x?limit=1", &w.prev);
+        let c = a["next"].as_str().unwrap().to_owned();
+        assert!(c.starts_with(&date(T)));
+        fs::remove_file(day_file(&dir, T)).unwrap();
+        let b = answer(&dir, &format!("/x?cursor={c}"), &w.prev);
+        assert_eq!((b["records"].as_array().unwrap().len(), problems(&b)), (2, vec![(date(T + 1), 0, "starts-after-removed-day".to_owned())]));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -946,6 +1105,7 @@ mod tests {
     /// most QUEUE), every record is written or counted as dropped, and the chain verifies.
     #[test]
     fn a_burst_of_50000_records_never_blocks_and_keeps_memory_flat() {
+        let _alone = RSS_TEST.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tmp();
         let log = Log::start(dir.clone(), 90, 2048 << 20, false).unwrap();
         let base = rss_kb();

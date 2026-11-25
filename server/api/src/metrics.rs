@@ -104,8 +104,8 @@ pub struct Now {
     pub status_hosts: [(&'static str, u64); 4],
     /// Stored software lists: (files, bytes).
     pub status_sbom: (u64, u64),
-    /// Team audit records written, dropped with the queue full, dropped with the log full.
-    pub team_audit: [u64; 3],
+    /// Team audit records written, dropped with the queue full, with the log full, not written (write failed).
+    pub team_audit: [u64; 4],
 }
 
 /// The `n` largest groups; the rest summed per profile as version "other" (bounded label sets:
@@ -161,7 +161,8 @@ pub fn render(now: &Now, data_dir: &Path) -> String {
         ("tether_api_status_sbom_files", "gauge", "Software lists stored (status/<uuid>.sbom.json).", now.status_sbom.0 as f64),
         ("tether_api_status_sbom_bytes", "gauge", "Bytes of the software lists stored (counted against STATUS_SBOM_MAX_TOTAL_MB).", now.status_sbom.1 as f64),
         ("tether_api_team_audit_records_total", "counter", "Team audit records written since start.", now.team_audit[0] as f64),
-        ("tether_api_team_audit_dropped_total", "counter", "Team audit records dropped since start (queue full or TEAM_AUDIT_MAX_MB reached; each drop is also a dropped record in the log).", (now.team_audit[1] + now.team_audit[2]) as f64),
+        ("tether_api_team_audit_dropped_total", "counter", "Team audit records dropped since start (queue full, TEAM_AUDIT_MAX_MB reached or a failed write; each drop is also a dropped record in the log).", (now.team_audit[1] + now.team_audit[2] + now.team_audit[3]) as f64),
+        ("tether_api_team_audit_write_failed_total", "counter", "Team audit records that could not be written (disk full, folder not writable; counted in the dropped total too).", now.team_audit[3] as f64),
         ("tether_api_devices", "gauge", "Devices in the device list (heartbeat within 180 days).", now.devices as f64),
         ("tether_api_devices_active_24h", "gauge", "Devices with a heartbeat within 24 h.", now.devices_24h as f64),
         ("tether_api_data_bytes", "gauge", "Size of the data directory (releases, audit, diagnostics, state).", du as f64),
@@ -326,7 +327,7 @@ mod tests {
             downloads: vec![(("customer".into(), "0.5.24".into()), 3)],
             status_hosts: [("ok", 4), ("warn", 0), ("crit", 1), ("stale", 2)],
             status_sbom: (2, 81_920),
-            team_audit: [7, 2, 1],
+            team_audit: [7, 2, 1, 4],
         };
         let before = render(&now, &dir);
         observe(2, 204, Duration::from_millis(3));
@@ -356,7 +357,7 @@ mod tests {
         assert_eq!(value(&t, "tether_api_release_downloads_total{profile=\"customer\",version=\"0.5.24\"}"), 3.);
         assert_eq!(value(&t, "tether_api_status_hosts{state=\"stale\"}"), 2.);
         assert_eq!((value(&t, "tether_api_status_sbom_files"), value(&t, "tether_api_status_sbom_bytes")), (2., 81_920.));
-        assert_eq!((value(&t, "tether_api_team_audit_records_total"), value(&t, "tether_api_team_audit_dropped_total")), (7., 3.));
+        assert_eq!((value(&t, "tether_api_team_audit_records_total"), value(&t, "tether_api_team_audit_dropped_total"), value(&t, "tether_api_team_audit_write_failed_total")), (7., 7., 4.));
         assert!(!t.contains("x\"}"), "label values are filtered");
         let _ = std::fs::remove_dir_all(&dir);
     }
