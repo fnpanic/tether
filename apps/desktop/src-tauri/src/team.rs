@@ -14,7 +14,11 @@ type R<T> = Result<T, String>;
 const DEVICES_MAX: usize = 4 * 1024 * 1024;
 const TAGS_MAX: usize = 1024 * 1024;
 const AUDIT_MAX: usize = 2 * 1024 * 1024;
-const STATUS_MAX: usize = 16 << 20;
+/// The status summary: an entry is at most 2 KiB on the relay and a relay holds 20 000 devices by
+/// default (about 20 MiB measured at that size), so 48 MiB leaves room; larger is refused.
+const STATUS_MAX: usize = 48 << 20;
+// A full default fleet must fit: 16 MiB was below the 20.3 MB measured at 20 000 devices.
+const _: () = assert!(STATUS_MAX >= 2048 * 20_000);
 /// One report (≤ 64 KiB) plus 90 days of history.
 const REPORT_MAX: usize = 1 << 20;
 /// A software list (SBOM): the relay keeps at most 512 KiB by default; more than 1 MiB is not shown.
