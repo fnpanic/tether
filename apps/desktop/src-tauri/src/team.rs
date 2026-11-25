@@ -147,6 +147,14 @@ fn call_via(hosts: Option<&[String]>, method: &str, path: &str, body: Option<&[u
         Some(h) => crate::policy::api_via(h, build),
         None => crate::policy::api(build),
     }?;
+    answer(r, limit)
+}
+
+/// Status, ETag and body of `r`, at most `limit` bytes after decoding. The relay API clients
+/// (`policy::api_via`) keep reqwest's `gzip` feature on: every request says `Accept-Encoding: gzip`
+/// and a gzip answer (the health summary) is decoded while it is read, so `limit` bounds the
+/// decoded size; a relay that ignores the header answers plain and is read the same way.
+fn answer(r: reqwest::blocking::Response, limit: usize) -> R<(u16, Option<String>, Vec<u8>)> {
     let code = r.status().as_u16();
     let etag = r.headers().get("ETag").and_then(|v| v.to_str().ok()).map(str::to_owned);
     let raw = tether_trust::read_limited(r, limit)?;
@@ -515,6 +523,62 @@ mod tests {
             assert!(ask(Ok((500, None, vec![]))).is_err(), "nothing cached to show: {a:?}");
             assert_eq!(sent.lock().unwrap().last().cloned().flatten(), None, "no tag after a drop: {a:?}");
         }
+    }
+
+    /// One answer per connection from a stand-in relay; the request heads it received.
+    fn stand_in(answers: Vec<Vec<u8>>) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for a in answers {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut head = Vec::new();
+                let mut b = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && s.read(&mut b).unwrap_or(0) == 1 {
+                    head.push(b[0]);
+                }
+                let _ = tx.send(String::from_utf8_lossy(&head).to_lowercase());
+                let _ = s.write_all(&a);
+            }
+        });
+        (format!("http://{addr}/api/team/status"), rx)
+    }
+
+    fn gz(b: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(b).unwrap();
+        e.finish().unwrap()
+    }
+
+    fn reply(extra: &str, body: &[u8]) -> Vec<u8> {
+        let mut r = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: W/\"0123456789abcdef\"\r\nVary: Accept-Encoding\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+        r.extend_from_slice(body);
+        r
+    }
+
+    /// The summary is asked for gzip (with the tag) and decoded, the decoded size bounded; a relay
+    /// that ignores the header (an old one) is read as before.
+    #[test]
+    fn the_summary_is_asked_for_gzip_and_decoded_within_the_limit() {
+        let plain = br#"{"built":1,"hosts":[{"uuid":"u1","tether_id":"111","last_seen":5,"stale":false}]}"#.repeat(1000);
+        let bomb = gz(&vec![b' '; STATUS_MAX + 1]);
+        assert!(bomb.len() < 64 << 10, "{}", bomb.len());
+        let (url, heads) = stand_in(vec![reply("Content-Encoding: gzip\r\n", &gz(&plain)), reply("", &plain), reply("Content-Encoding: gzip\r\n", &bomb)]);
+        // The relay API clients' settings that matter here (policy::api_via): reqwest's defaults.
+        let c = reqwest::blocking::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let get = || answer(c.get(&url).header("If-None-Match", "W/\"0123456789abcdef\"").send().unwrap(), STATUS_MAX);
+        let (code, etag, raw) = get().unwrap();
+        assert_eq!((code, etag.as_deref(), raw == plain), (200, Some("W/\"0123456789abcdef\""), true));
+        let head = heads.recv().unwrap();
+        assert!(head.lines().any(|l| l.starts_with("accept-encoding:") && l.contains("gzip")), "{head}");
+        assert!(head.contains("if-none-match: w/\"0123456789abcdef\""), "{head}");
+        // A relay that answers plain.
+        assert_eq!(get().unwrap().2, plain);
+        // A gzip answer that decodes to more than the limit is refused while it is read.
+        assert!(get().unwrap_err().contains("larger than"));
     }
 
     #[test]
