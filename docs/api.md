@@ -709,13 +709,22 @@ it sends no `customer` field), `linked_proof` `true` (only then present) when a 
 proof made the link; `last_seen` and `built` are the relay's unix time. An entry holds at most 8 products and 10 faults; when more were reported it also has
 `more_products` and `more_faults` with the number left out (the host's report has them all). The
 summary is rebuilt at most every 30 s from a snapshot and sent from `status/summary.json`, so
-`stale` is as of that build. `ETag` is `"<16 hex>"`, the first 16 hex digits of the SHA-256 over
-the `hosts` array, so an unchanged summary keeps its tag and answers `304` to `If-None-Match`.
+`stale` is as of that build. Each build also writes `status/summary.json.gz`; a client whose
+`Accept-Encoding` lists `gzip` (the desktop does) gets that copy with `Content-Encoding: gzip`, any
+other the plain file exactly as before; both with `Vary: Accept-Encoding`. `ETag` is
+`W/"<16 hex>"` (weak: the same for both copies), the first 16 hex digits of a SHA-256 over what a
+technician sees: every entry without its `last_seen` and `next` (its `stale` is in it), and the window of the
+stale threshold the build falls in (build time divided by 3 × the relay's current `next`, rounded down to 15 minutes, so the pace changing with enrolments moves it only every 3 000 devices). So
+heartbeats of healthy devices keep the tag and `If-None-Match` answers `304` (the file is not
+opened); a host turning stale or reporting again changes it at the first build after; and the
+`last_seen` a client keeps from an earlier answer is at most one window (15 minutes up to 3 000
+devices, `3 × next` above) plus its polling interval old. `stale` is decided by the relay; a client
+must not compute it from `last_seen` and its own clock.
 With a signed team document each member scope (its customer patterns sorted without repeats, `*`
 alone when `*` is among them, and whether it has `sbom`) has its own summary file
 (`status/summary-<16 hex>.json`; the scope of every customer with `sbom` keeps `summary.json`), built
-only from that scope's hosts, with its own ETag; at most 32 scopes and 256 MiB of them, least
-recently used dropped first, one build at a time for all scopes.
+only from that scope's hosts, with its own ETag; at most 2 001 scopes (one per possible member) and 256 MiB of them (plain files
+and gzip copies), least recently used dropped first, one build at a time for all scopes.
 A host whose device has a software list (with `STATUS_SBOM=on`) also has `"sbom":{"at":<unix time>,"sha":"<16 hex>"}` (`at` is the modification time of the stored file, which is when it was uploaded), outside the 2 KiB entry; the list itself is
 `GET /api/team/status/<uuid>/sbom`.
 

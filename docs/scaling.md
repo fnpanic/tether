@@ -162,6 +162,86 @@ the device's hour, the record scan), which were not measured again. The differen
 columns are within the spread of one run to the next here: do not read them as an effect of the
 uploads, in either direction.
 
+**1 000 technician desktops** (*measured*, 2026-11-25, same PC: i5-13600KF, WSL2 Ubuntu 24.04,
+kernel 6.18; the static musl `tether-api` of `scripts/build-relay.sh`, as deployed, in a systemd user
+scope with `MemoryMax=64M` and `MemorySwapMax=0`; team audit log on; raw output in
+`tools/load/results/status-members-2026-11-25-*.txt`). Command:
+
+```
+API_BIN=~/ha-build/bin/tether-api DEVICES=20000 SECS=900 WARMUP=60 BASELINE=60 MEMORY_MAX=64M \
+  STATUS_SBOM=on SBOM_DEVICES=2000 SBOM_UPLOAD_RPS=0 CUSTOMERS=500 SELF_CHECK=1 [STATUS_TRACE_LOCK=1] \
+  MEMBERS=1000 SCOPED=500 JUNK=32 tools/load/status-run.sh
+```
+
+20 000 devices in 500 customers post at the paced 10 per second (`next` 2 000 s, 5 % full reports),
+2 000 of them have a stored 60 KiB software list (none uploaded during the run), 600 enrol in the
+first 5 minutes. 1 000 members of a signed team document, each with its own key (`kid`) and
+address: 500 see every customer, 500 one customer each (40 devices), so 501 scopes. Each fetches
+the summary every 5 minutes with `If-None-Match` (90 % with `Accept-Encoding: gzip`, 10 % without,
+as a desktop before 0.7), opens one host's report every 5 minutes and one software list every 15.
+Meanwhile 32 junk requests a second (member signatures of unknown keys without `kid`) come at once
+from one address. The reference run is the same without members and junk (`MEMBERS=0`).
+
+| p50 / p99 / p99.9 / max, ms | devices only | with 1 000 desktops (final code) |
+|---|---|---|
+| `POST /api/heartbeat` probe, baseline | 0.51 / 0.88 / 1.37 / 22.4 | 0.46 / 0.84 / 1.94 / 6.9 |
+| `POST /api/heartbeat` probe, during the run | 0.51 / 0.90 / 4.30 / 137.1 | 0.46 / 0.91 / 4.02 / 32.4 |
+| `POST /api/status` (device posts, 9.9 per s) | 0.55 / 12.6 / 69.1 / 154.2 | 0.50 / 4.96 / 55.9 / 102.0 |
+| member summary (3.33 per s) | | 6.6 / 363 / 1 661 / 2 408 |
+| member host report (3.33 per s) | | 3.1 / 67 / 119 / 156 |
+| member software list (1.11 per s) | | 3.1 / 60 / 211 / 212 |
+| junk without `kid` (32 per s) | | 1.3 / 5.0 / 60 / 185; 28 727 `429` (the failure limit), 64 `401`, 9 `503 busy` |
+
+- **Summary size**: 20 257 KB plain, 1 756 KB gzip for 19 954 hosts (11.5 ×; the design's
+  estimate was 8 to 10 ×). Writing the gzip copy takes about 0.19 s and 0.25 MB of memory (RSS
+  +0.25 MB, peak +0.44 MB, flate2 1.1.11 with miniz_oxide 0.9.1, measured on its own on that file).
+- **Bytes out for summaries**: 6.0 MB/s at 3.33 summaries a second: the 10 % of old desktops
+  without gzip took 3.4 of them (200 answers of 15.2 MB on average), the 90 % with gzip 2.6 MB/s.
+  All with gzip would be about 2.9 MB/s, all without about 34 MB/s (*computed* from these answers).
+  These are loopback numbers: TLS and Caddy were not in the path.
+- **304 share**: 33.3 % (1 000 of 3 000). In 15 minutes each member polls 3 times and its first poll
+  has no tag, so at most 67 % can be `304`. Members of one customer got `304` on every later poll
+  but the first after the enrolment phase; members who see every customer got almost none: at
+  20 000 devices something every one of them sees changes in every 30 s (here new hosts and their
+  first full reports; in a real fleet any change of health), so the whole-fleet summary is sent
+  again on nearly every poll. Rounding `last_seen` per entry, as the design proposed, would not
+  have given `304` either: with 20 000 devices about 3 per second cross such a rounding boundary.
+  The tag therefore leaves `last_seen` (and `next`) out and hashes the window of the stale threshold
+  instead ([api.md](api.md#get-apiteamstatus-member-signed)). The next step for whole-fleet members
+  is a delta route, as the design says; not built.
+- **Rebuilds**: 1 497 summary builds in 900 s took 21.7 s together; a whole-fleet build takes about
+  1 s (31 builds took 31.9 s in the reference run, the longest 2.9 s), so the ~1 470 one-customer
+  builds took about a second together (*estimated* from the totals). Every one-customer poll
+  rebuilds its scope (its file is older than 30 s), walking the whole fleet in chunks of 1 000 under
+  the lock, but copying only its own hosts: cheap at this rate, so it was left so. With the
+  former limit of 32 cached scopes, a one-customer request that came while a whole-fleet build ran
+  found no file of its own and waited up to 3 s holding a worker: in that run 2 heartbeats, 3 posts
+  and a host report got `503 busy`. Every scope now keeps its file (up to 2 001, one per possible
+  member; the 256 MiB bound decides), and waits only for its very first build.
+- **Memory**: RSS 35.9 MiB after the warm-up, 40.3 MiB at the peak (reference run: 38.7 MiB). The
+  scope's `memory.peak` was 64 MiB, its limit, in every run: the page cache of the files the relay
+  writes (summaries, `seen.json`, reports) counts against `MemoryMax`, and the kernel reclaimed it
+  (7 132 `max` events, no OOM kill; at the end 37.7 MiB anonymous, 18.9 MiB file). A **glibc** build
+  of the same code (the default of `status-run.sh` without `API_BIN`) grew to 61.6 MiB RSS and was
+  OOM-killed after 9 minutes of the same load: the deployed build is the musl one; do not run a
+  glibc build under `MemoryMax=64M` with this load.
+- **Audit log**: 5 017 records in 15 minutes (1.4 MB), none dropped, no failed write; the
+  summary is one record per member and hour, every report and software-list read one record.
+- **Refused**: no `429` for any member or device; `503 busy` for 10 requests in 900 s (1 device
+  post, 9 junk): 32 junk connections a second at once fill all 32 workers for a moment.
+  `STATUS_TRACE_LOCK=1`: 3 state-lock holds over 20 ms, all `maintain` (28 ms at most).
+- **One run stalled**: a repeat of the run (the same code) had a pause of about 10 s in which
+  every route waited (heartbeat max 9.5 s, 1 196 `503 busy`, among them 275 heartbeat probes and 167
+  device posts). The generator's own pauses stayed under 50 ms, so the relay (or its I/O) stood
+  still; the run with the lock trace did not show it again. *Not explained*: candidates are a
+  writeback stall of the WSL disk with the scope at its memory limit, or the host. Measure on a
+  real server before relying on more than one run here.
+
+Not measured: TLS and Caddy in front, real networks, more than 15 minutes, 2 000 members, desktops
+signed in through an identity provider (sessions), software search (not built), uploads of software
+lists during the member load, the fleet's real rate of health changes (which decides the 304 share
+of whole-fleet members).
+
 Disk writes of the status store at 20 000 devices: `seen.json` (about 22 MB, *estimated* from the
 entry sizes) is rewritten at most every 5 minutes, about 6 GB a day; a hard kill loses at most 5
 minutes of last-seen times (a stop by systemd flushes it). Summary entries are capped at 2 KiB.

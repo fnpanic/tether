@@ -355,7 +355,7 @@ fn stale_is_computed_on_read() {
     let r = team_get(&s, &m, "/api/team/status");
     assert_eq!(r.status, 200);
     let etag = r.header("ETag").unwrap();
-    assert_eq!(etag.len(), 18, "{etag}");
+    assert_eq!(etag.len(), 20, "{etag}"); // W/"<16 hex>"
     let v = r.json();
     let hosts = v["hosts"].as_array().unwrap();
     assert_eq!(hosts.len(), 2);
@@ -2951,7 +2951,7 @@ fn each_scope_gets_its_own_cached_summary() {
     assert_eq!((r.status, summary_hosts(&r)), (200, vec!["dev-0002".to_owned()]));
     assert_eq!(summary(&c, None).status, 401, "removed");
 
-    // At most 32 summaries are kept; the oldest scope's file goes.
+    // 33 more scopes: every one keeps its file (the 4 above too), each with its gzip copy.
     let keys: Vec<SigningKey> = (0..33).map(|_| generate_key()).collect();
     let names: Vec<String> = (0..33).map(|i| format!("S{i}")).collect();
     let members: Vec<(&str, &SigningKey, Value)> = keys.iter().zip(&names).enumerate().map(|(i, (k, n))| (n.as_str(), k, json!({"customers": [format!("c{i}")]}))).collect();
@@ -2960,7 +2960,7 @@ fn each_scope_gets_its_own_cached_summary() {
         assert_eq!(summary(k, None).json()["hosts"], json!([]));
     }
     let files = std::fs::read_dir(s.dir.join("status")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("summary")).count();
-    assert_eq!(files, 32);
+    assert_eq!(files, 2 * (33 + 4));
 }
 
 #[test]
@@ -3148,4 +3148,93 @@ fn the_team_audit_chain_continues_across_a_restart() {
     // The first read follows the head it returned (the summary); the event after the restart follows the read.
     assert_eq!(recs.iter().map(|r| r["event"].as_str().unwrap()).collect::<Vec<_>>(), ["summary", "team-audit-read", "session-start"]);
     assert_eq!(recs[1]["prev"], head);
+}
+
+fn gunzip(b: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(b).read_to_end(&mut out).unwrap();
+    out
+}
+
+fn summary_with(s: &Srv, m: &SigningKey, headers: &[(&str, &str)]) -> Reply {
+    let sig = reqauth::sign_request(m, "GET", "/api/team/status", b"", now());
+    let mut h = vec![(reqauth::HEADER, sig.as_str())];
+    h.extend_from_slice(headers);
+    s.req("GET", "/api/team/status", &h, b"")
+}
+
+#[test]
+fn the_summary_is_gzip_for_who_asks_and_plain_as_before_for_the_rest() {
+    let admin = generate_key();
+    let dir = new_dir();
+    for (i, u) in ["dev-0001", "dev-0002", "dev-0003"].iter().enumerate() {
+        prep_device(&dir, u, &generate_key(), now() - 61 - i as u64, 5);
+    }
+    let s = start_in(dir, &admin);
+    let m = member(&s, &admin);
+    // An old desktop (no Accept-Encoding): the file as before, uncompressed.
+    let plain = summary_with(&s, &m, &[]);
+    assert_eq!((plain.status, plain.header("Content-Encoding")), (200, None));
+    assert_eq!(plain.body, std::fs::read(s.dir.join("status/summary.json")).unwrap());
+    assert!(plain.body.starts_with(b"{\"built\":") && plain.json()["hosts"].as_array().unwrap().len() == 3);
+    let etag = plain.header("ETag").unwrap();
+    assert!(etag.starts_with("W/\"") && etag.len() == 20, "{etag}");
+    assert!(plain.header("Vary").is_some_and(|v| v.contains("Accept-Encoding")));
+    // gzip: the copy written at the build, decoding to the same bytes, with the same tag.
+    for ae in ["gzip", "gzip, deflate, br", "br;q=1.0, GZIP;q=0.5"] {
+        let r = summary_with(&s, &m, &[("Accept-Encoding", ae)]);
+        assert_eq!((r.status, r.header("Content-Encoding").as_deref(), r.header("ETag")), (200, Some("gzip"), Some(etag.clone())), "{ae}");
+        assert!(r.header("Vary").is_some_and(|v| v.contains("Accept-Encoding")));
+        assert!(r.body.len() < plain.body.len());
+        assert_eq!(gunzip(&r.body), plain.body, "{ae}");
+    }
+    assert_eq!(gunzip(&std::fs::read(s.dir.join("status/summary.json.gz")).unwrap()), plain.body);
+    for ae in ["gzip;q=0", "identity", "deflate, br", "gzipx"] {
+        let r = summary_with(&s, &m, &[("Accept-Encoding", ae)]);
+        assert_eq!((r.header("Content-Encoding"), &r.body), (None, &plain.body), "{ae}");
+    }
+    // 304 to the tag for both, with Vary, without a body.
+    for h in [vec![("If-None-Match", etag.as_str())], vec![("If-None-Match", etag.as_str()), ("Accept-Encoding", "gzip")]] {
+        let r = summary_with(&s, &m, &h);
+        assert_eq!((r.status, r.body.len(), r.header("ETag")), (304, 0, Some(etag.clone())));
+        assert!(r.header("Vary").is_some_and(|v| v.contains("Accept-Encoding")));
+    }
+    // The tag without W/ (a client that strips it) matches too.
+    assert_eq!(summary_with(&s, &m, &[("If-None-Match", etag.trim_start_matches("W/"))]).status, 304);
+}
+
+/// The next rebuild after 30 s: a heartbeat that only moved `last_seen` keeps the tag (`304`); a
+/// host that turned stale meanwhile changes it (`200`, `stale: true`).
+#[test]
+fn heartbeats_keep_the_summary_tag_and_a_host_turning_stale_changes_it() {
+    // Both builds in one window of the tag (the stale threshold, 900 s at this pace).
+    while now() % 900 > 900 - 45 {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    let admin = generate_key();
+    let (a, b) = (generate_key(), generate_key());
+    // Relay 1: only dev-0001, which posts a heartbeat. Relay 2: also dev-0002, stale 20 s from now.
+    let (d1, d2) = (new_dir(), new_dir());
+    prep_device(&d1, "dev-0001", &a, now() - 61, 5);
+    prep_device(&d2, "dev-0001", &a, now() - 61, 5);
+    prep_device(&d2, "dev-0002", &b, now() - 900 + 20, 5);
+    let (s1, s2) = (start_in(d1, &admin), start_in(d2, &admin));
+    let (m1, m2) = (member(&s1, &admin), member(&s2, &admin));
+    let (r1, r2) = (summary_with(&s1, &m1, &[]), summary_with(&s2, &m2, &[]));
+    assert_eq!(r2.json()["hosts"][1]["stale"], false);
+    let (e1, e2) = (r1.header("ETag").unwrap(), r2.header("ETag").unwrap());
+    let seen = r1.json()["hosts"][0]["last_seen"].as_u64().unwrap();
+    assert_eq!(post(&s1, &a, "dev-0001", &heartbeat("dev-0001", 6)).status, 200);
+    assert_eq!(post(&s2, &a, "dev-0001", &heartbeat("dev-0001", 6)).status, 200);
+    std::thread::sleep(std::time::Duration::from_secs(31));
+    let r = summary_with(&s1, &m1, &[("If-None-Match", &e1), ("Accept-Encoding", "gzip")]);
+    assert_eq!((r.status, r.header("ETag")), (304, Some(e1.clone())), "only last_seen moved");
+    // The new file has the new last_seen (a client asking without the tag gets it).
+    let fresh = summary_with(&s1, &m1, &[]);
+    assert!(fresh.json()["hosts"][0]["last_seen"].as_u64().unwrap() > seen);
+    assert_eq!(fresh.header("ETag"), Some(e1));
+    let r = summary_with(&s2, &m2, &[("If-None-Match", &e2)]);
+    assert_eq!(r.status, 200, "dev-0002 turned stale");
+    assert_ne!(r.header("ETag"), Some(e2));
+    assert_eq!((r.json()["hosts"][0]["stale"].clone(), r.json()["hosts"][1]["stale"].clone()), (json!(false), json!(true)));
 }

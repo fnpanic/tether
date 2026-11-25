@@ -1,12 +1,21 @@
 //! Load generator for tether-api's device status store (driven by `tools/load/status-run.sh`).
 //!
 //!   status-load keygen <file>                      a throwaway admin key; prints its public key
-//!   status-load prep <data-dir> devices=N enroll=E pins devices E..N (status/keys.json, which
+//!   status-load prep <data-dir> devices=N enroll=E [customers=C sbom=K]
+//!                                                  pins devices E..N (status/keys.json, which
 //!                                                  the relay migrates) with a last full report
-//!                                                  in seen.json
+//!                                                  in seen.json (customer c<i % C>; devices
+//!                                                  below K with a 60 KiB software list)
 //!   status-load run addr=<host:port> key=<file> pid=<tether-api pid> devices=N enroll=E
 //!       seconds=600 warmup=60 baseline=60 probe_ms=50 workers=16 full_pct=5
 //!       new_per_s=2 new_secs=300 summary_s=30 metrics_s=15 sbom_rps=0
+//!       members=0 scoped=0 customers=0 sbom=0 plain_pct=10 member_s=300 open_s=300 sw_s=900
+//!       member_workers=32 junk=0 [--any-address]
+//!
+//! For test relays only: `run` refuses an `addr` that is not loopback or private unless
+//! `--any-address` is given. With `members` > 0 it publishes a signed team document with that many
+//! simulated desktops (see `Members`) and runs them beside the device load; `junk` > 0 sends that
+//! many requests at once every second from one address with no-`kid` signatures of unknown keys.
 //!
 //! `run` publishes a policy, enrols devices 0..E through `POST /api/status/enroll` with an
 //! admin-signed token and publishes a roster with one throwaway member. Then it probes
@@ -54,8 +63,20 @@ fn device_key(i: usize) -> SigningKey {
     SigningKey::from_bytes(&seed)
 }
 
+/// Device i's uuid, shaped as the agent's (random-looking, so the summary compresses as a real one).
 fn uuid(i: usize) -> String {
-    format!("load-{i:08}")
+    let h = reqauth::body_digest(&(i as u64).to_le_bytes());
+    format!("{}-{}-4{}-a{}-{}", &h[..8], &h[8..12], &h[13..16], &h[17..20], &h[20..32])
+}
+
+/// Device i's host name.
+fn host(i: usize) -> String {
+    format!("WS-{}", reqauth::body_digest(&(i as u64).to_be_bytes())[..8].to_uppercase())
+}
+
+/// Every second device is linked to a Tether ID (9 digits, unique).
+fn tether_id(i: usize) -> Option<String> {
+    (i % 2 == 0).then(|| format!("{}", 100_000_000 + (i as u64 * 7919) % 900_000_000))
 }
 
 fn ip(net: u8, i: usize) -> String {
@@ -77,7 +98,19 @@ impl Rng {
 struct Reply {
     status: u16,
     body: String,
+    head: String,
+    /// Body bytes as received (a gzip body is not text).
+    bytes: usize,
     took: Duration,
+}
+
+impl Reply {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.head.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case(name).then(|| v.trim())
+        })
+    }
 }
 
 /// One request on a new connection (`Connection: close`), timed from connect to the last byte.
@@ -95,10 +128,11 @@ fn req(addr: &str, method: &str, path: &str, headers: &[(&str, &str)], body: &[u
     let mut raw = Vec::new();
     s.read_to_end(&mut raw)?;
     let took = start.elapsed();
-    let text = String::from_utf8_lossy(&raw);
-    let (head, body) = text.split_once("\r\n\r\n").ok_or_else(|| io::Error::other("no response head"))?;
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| io::Error::other("no response head"))?;
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
     let status = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or_else(|| io::Error::other("no status"))?;
-    Ok(Reply { status, body: body.to_owned(), took })
+    let body = &raw[split + 4..];
+    Ok(Reply { status, body: String::from_utf8_lossy(body).into_owned(), head, bytes: body.len(), took })
 }
 
 /// `--self-check` on `run`: also print how late this generator itself woke up (its own pauses).
@@ -106,6 +140,22 @@ static SELF_CHECK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 fn args(list: &[String]) -> BTreeMap<String, String> {
     list.iter().filter_map(|a| a.split_once('=')).map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
+}
+
+/// A test relay only: `addr` (host:port) must resolve to loopback or private addresses only
+/// (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7, fe80::/10), unless `--any-address`.
+fn test_relay(addr: &str) -> Result<(), String> {
+    use std::net::{IpAddr, ToSocketAddrs};
+    let ips: Vec<IpAddr> = addr.to_socket_addrs().map_err(|e| format!("{addr}: {e}"))?.map(|a| a.ip()).collect();
+    let private = |ip: &IpAddr| match ip {
+        IpAddr::V4(v) => v.is_loopback() || v.is_private() || (v.octets()[0] == 100 && v.octets()[1] & 0xc0 == 64),
+        IpAddr::V6(v) => v.is_loopback() || (v.segments()[0] & 0xfe00) == 0xfc00 || (v.segments()[0] & 0xffc0) == 0xfe80 || v.to_ipv4_mapped().is_some_and(|m| m.is_loopback() || m.is_private()),
+    };
+    match ips.iter().find(|ip| !private(ip)) {
+        None if !ips.is_empty() => Ok(()),
+        None => Err(format!("{addr}: no address")),
+        Some(ip) => Err(format!("{addr} is {ip}, not a loopback or private address: this tool is for test relays only (--any-address to run it anyway)")),
+    }
 }
 
 fn num(a: &BTreeMap<String, String>, k: &str, d: u64) -> u64 {
@@ -122,10 +172,15 @@ fn main() {
         }
         Some("prep") if argv.len() >= 2 => {
             let a = args(&argv[2..]);
-            prep(Path::new(&argv[1]), num(&a, "devices", 20_000) as usize, num(&a, "enroll", 100) as usize);
+            prep(Path::new(&argv[1]), num(&a, "devices", 20_000) as usize, num(&a, "enroll", 100) as usize, num(&a, "customers", 0) as usize, num(&a, "sbom", 0) as usize);
         }
         Some("run") => {
             SELF_CHECK.store(argv.iter().any(|a| a == "--self-check"), Ordering::Relaxed);
+            let addr = args(&argv[1..]).get("addr").cloned().unwrap_or_default();
+            if let Err(e) = test_relay(&addr).or_else(|e| if argv.iter().any(|a| a == "--any-address") { Ok(()) } else { Err(e) }) {
+                eprintln!("status-load: {e}");
+                std::process::exit(2);
+            }
             std::process::exit(if run(&args(&argv[1..])) { 0 } else { 1 })
         }
         _ => {
@@ -139,27 +194,53 @@ fn main() {
 fn products_faults(i: usize) -> (Value, Value) {
     let (np, nf) = if i % 20 == 0 { (8, 10) } else { (4, 3) };
     let products: Vec<Value> = (0..np)
-        .map(|k| json!({"name": format!("Example Practice Management Server {k}"), "version": "12.3.4567.89", "role": if k == 0 { "server" } else { "client" }}))
+        .map(|k| json!({"name": format!("Example Practice Management Server {k}"), "version": format!("12.{}.{}.{}", i % 4, 4000 + (i + k) % 900, i % 100), "role": if k == 0 { "server" } else { "client" }}))
         .collect();
     let faults: Vec<Value> =
-        (0..nf).map(|k| json!({"id": format!("example-product-{k}/database-backup-age"), "state": if k == 0 { "crit" } else { "warn" }, "since": "2026-11-23T07:55:00Z"})).collect();
+        (0..nf).map(|k| json!({"id": format!("example-product-{k}/database-backup-age"), "state": if k == 0 { "crit" } else { "warn" }, "since": format!("2026-11-{:02}T{:02}:{:02}:00Z", 1 + (i + k) % 22, i % 24, (i * 7 + k) % 60)})).collect();
     (json!(products), json!(faults))
 }
 
 const COUNTS: &str = r#"{"ok":31,"warn":2,"crit":1,"unknown":0,"setup":0}"#;
 
-/// Devices `enroll..devices`: pinned, with a last full report seen two minutes ago.
-fn prep(data: &Path, devices: usize, enroll: usize) {
+/// Device i's customer reference with `customers` > 0.
+fn customer(i: usize, customers: usize) -> Option<String> {
+    (customers > 0).then(|| format!("c{:04}", i % customers))
+}
+
+/// Devices `enroll..devices`: pinned (with a customer reference with `customers` > 0), with a last
+/// full report seen within the last `next` seconds; devices `enroll..sbom` also with a stored software list.
+fn prep(data: &Path, devices: usize, enroll: usize, customers: usize, sbom: usize) {
     let dir = data.join("status");
     std::fs::create_dir_all(&dir).unwrap();
     let t = now();
     let (mut keys, mut seen) = (serde_json::Map::new(), serde_json::Map::new());
-    let counts: Value = serde_json::from_str(COUNTS).unwrap();
+    let counts: status::Counts = serde_json::from_str(COUNTS).unwrap();
     for i in enroll..devices {
         let (products, faults) = products_faults(i);
-        let entry = json!({"host": format!("PC-LOAD-{i:06}"), "agent": "0.1.0", "overall": "crit", "counts": counts, "products": products, "faults": faults}).to_string();
-        keys.insert(uuid(i), json!({"key": key_to_b64(&device_key(i).verifying_key()), "tether_id": null, "label": "load", "enrolled": t}));
-        seen.insert(uuid(i), json!({"last_seen": t - 120, "seq": 1, "next": 300, "entry": entry}));
+        // Byte for byte the entry the relay makes from this device's report (its field order), so
+        // a device's first post in the run does not change the summary.
+        let (products, faults): (Vec<status::Product>, Vec<status::Fault>) = (serde_json::from_value(products).unwrap(), serde_json::from_value(faults).unwrap());
+        let entry = format!(r#"{{"host":{},"agent":"0.1.0","overall":"crit","counts":{},"products":{},"faults":{}}}"#, json!(host(i)), serde_json::to_string(&counts).unwrap(), serde_json::to_string(&products).unwrap(), serde_json::to_string(&faults).unwrap());
+        let mut pin = json!({"key": key_to_b64(&device_key(i).verifying_key()), "tether_id": tether_id(i), "label": "load", "enrolled": t});
+        if let Some(c) = customer(i, customers) {
+            pin["customer"] = c.into();
+        }
+        keys.insert(uuid(i), pin);
+        // As in a fleet at the relay's pace: `next` as it answers (10 posts/s), the last post at any
+        // point of that interval (with next 300 for all, every device not posting within 13 minutes
+        // of the start would turn stale during the run).
+        let next = (devices as u64).div_ceil(10).clamp(300, 3600);
+        let mut s = json!({"last_seen": t - 60 - (i as u64 * 7919) % next, "seq": 1, "next": next, "entry": entry});
+        if i < sbom {
+            let doc = sbom_doc(&host(i));
+            let p = dir.join(format!("{}.sbom.json", uuid(i)));
+            std::fs::write(&p, &doc).unwrap();
+            // The relay's start-up scan trusts a record whose file has its size and mtime.
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(t - 3600)).unwrap();
+            s["sbom"] = json!({"at": t - 3600, "size": doc.len(), "sha": &reqauth::body_digest(doc.as_bytes())[..16]});
+        }
+        seen.insert(uuid(i), s);
     }
     std::fs::write(dir.join("keys.json"), serde_json::to_vec(&keys).unwrap()).unwrap();
     std::fs::write(dir.join("seen.json"), serde_json::to_vec(&seen).unwrap()).unwrap();
@@ -172,9 +253,10 @@ fn rss_kib(pid: u64) -> u64 {
 
 fn heartbeat(i: usize, seq: u64) -> String {
     format!(
-        r#"{{"v":1,"uuid":"{}","host":"PC-LOAD-{i:06}","seq":{seq},"time":"2026-11-23T08:20:00Z","next":300,"agent":"0.1.0","packs":{{"system":9}},"overall":"crit","counts":{COUNTS},"faults":{}}}"#,
+        r#"{{"v":1,"uuid":"{}","host":"{h}","seq":{seq},"time":"2026-11-23T08:20:00Z","next":300,"agent":"0.1.0","packs":{{"system":9}},"overall":"crit","counts":{COUNTS},"faults":{}}}"#,
         uuid(i),
-        products_faults(i).1
+        products_faults(i).1,
+        h = host(i)
     )
 }
 
@@ -206,6 +288,17 @@ mod tests {
         let d = super::sbom_doc("PC-LOAD-000001");
         assert!((59 * 1024..=61 * 1024).contains(&d.len()), "{}", d.len());
         assert!(serde_json::from_str::<serde_json::Value>(&d).unwrap().is_object());
+    }
+
+    #[test]
+    fn only_test_relays_are_loaded() {
+        for ok in ["127.0.0.1:8080", "[::1]:80", "10.1.2.3:443", "172.16.0.1:1", "192.168.1.1:1", "100.64.0.1:1", "[fd00::1]:1", "localhost:1"] {
+            assert!(super::test_relay(ok).is_ok(), "{ok}");
+        }
+        for bad in ["8.8.8.8:443", "172.32.0.1:1", "[2001:db8::1]:1", "1.1.1.1:80"] {
+            assert!(super::test_relay(bad).unwrap_err().contains("--any-address"), "{bad}");
+        }
+        assert!(super::test_relay("no-port").is_err());
     }
 }
 
@@ -309,6 +402,136 @@ fn enrol(addr: &str, token: &str, i: usize, net: u8) -> io::Result<Reply> {
     req(addr, "POST", "/api/status/enroll", &[("X-Forwarded-For", &ip(net, i)), (reqauth::HEADER, &sig)], b.as_bytes())
 }
 
+/// Simulated technician desktops (`members=M`): each its own roster key (requests signed with
+/// `kid`, from its own address), every `member_s` the summary with `If-None-Match` (and
+/// `Accept-Encoding: gzip`, but `plain_pct` % of them as an old desktop without it), every `open_s`
+/// a host's report and every `sw_s` a software list (devices below `sbom`) of a host in its scope.
+/// The first `scoped` members see one customer each (`customers` references, device i has
+/// `c<i % customers>`), the rest every customer.
+struct Members {
+    keys: Vec<SigningKey>,
+    scoped: usize,
+    customers: usize,
+    devices: usize,
+    sbom: usize,
+    /// Devices enrolled through the API have no stored list (`prep` writes them from here on).
+    sbom_from: usize,
+    plain_pct: u64,
+    every: [u64; 3],
+}
+
+/// Request kinds of a member.
+const KINDS: [&str; 3] = ["summary", "host open", "software list"];
+
+#[derive(Default)]
+struct Tally {
+    samples: [Samples; 3],
+    bytes: [u64; 3],
+    /// Summary answers: (200 gzip, 200 plain, 304), and the body bytes of the 200s each.
+    summary: [u64; 3],
+    summary_bytes: [u64; 2],
+}
+
+impl Members {
+    fn new(a: &BTreeMap<String, String>, devices: usize) -> Members {
+        let m = num(a, "members", 0) as usize;
+        Members {
+            keys: (0..m).map(|_| generate_key()).collect(),
+            scoped: (num(a, "scoped", 0) as usize).min(m),
+            customers: num(a, "customers", 0) as usize,
+            devices,
+            sbom: num(a, "sbom", 0) as usize,
+            sbom_from: num(a, "enroll", 100) as usize,
+            plain_pct: num(a, "plain_pct", 10),
+            every: [num(a, "member_s", 300), num(a, "open_s", 300), num(a, "sw_s", 900)],
+        }
+    }
+
+    /// Member j's one customer (None: all of them).
+    fn customer(&self, j: usize) -> Option<usize> {
+        (j < self.scoped && self.customers > 0).then(|| j % self.customers)
+    }
+
+    fn team_doc(&self, load: &SigningKey, admin: &SigningKey) -> Vec<u8> {
+        let entry = |name: String, k: &SigningKey, customers: Value| json!({"name": name, "key": key_to_b64(&k.verifying_key()), "write": false, "audit": false, "sbom": true, "agent": true, "customers": customers, "service": false});
+        let mut members = vec![entry("load".into(), load, json!(["*"]))];
+        members.extend(self.keys.iter().enumerate().map(|(j, k)| entry(format!("tech-{j:04}"), k, self.customer(j).map_or(json!(["*"]), |c| json!([format!("c{c:04}")])))));
+        let doc = json!({"serial": 1, "members": members});
+        serde_json::to_vec(&json!({"team": envelope::sign(&serde_json::to_vec(&doc).unwrap(), admin)})).unwrap()
+    }
+
+    /// Every request of the run: (ms from the start, member, kind), each kind at a random offset
+    /// within its period.
+    fn schedule(&self, secs: u64, rng: &mut Rng) -> Vec<(u64, usize, usize)> {
+        let mut ev = Vec::new();
+        for j in 0..self.keys.len() {
+            for (kind, every) in self.every.iter().enumerate() {
+                let mut at = (rng.unit() * (every * 1000) as f64) as u64;
+                while at < secs * 1000 {
+                    ev.push((at, j, kind));
+                    at += every * 1000;
+                }
+            }
+        }
+        ev.sort_unstable();
+        ev
+    }
+
+    /// A device in member j's scope (below `below`), if any.
+    /// A device in member j's scope in `from..below`, if any.
+    fn device(&self, j: usize, from: usize, below: usize, rng: &mut Rng) -> Option<usize> {
+        let (c, step) = self.customer(j).map_or((0, 1), |c| (c, self.customers));
+        let first = if from <= c { c } else { c + (from - c).div_ceil(step) * step };
+        let n = below.saturating_sub(first).div_ceil(step);
+        (n > 0).then(|| first + step * ((rng.unit() * n as f64) as usize % n))
+    }
+
+    fn request(&self, addr: &str, j: usize, kind: usize, etag: &Mutex<Vec<Option<String>>>, rng: &mut Rng, tally: &Mutex<Tally>) {
+        let path = match kind {
+            0 => "/api/team/status".to_owned(),
+            1 => match self.device(j, 0, self.devices, rng) {
+                Some(d) => format!("/api/team/status/{}", uuid(d)),
+                None => return,
+            },
+            _ => match self.device(j, self.sbom_from, self.sbom, rng) {
+                Some(d) => format!("/api/team/status/{}/sbom", uuid(d)),
+                None => return,
+            },
+        };
+        let sig = reqauth::sign_request_for_kid(&self.keys[j], RELAY, "GET", &path, b"", now());
+        let from = format!("10.{}.{}.{}", 30 + (j >> 16), (j >> 8) & 255, j & 255);
+        let gzip = (j as u64 * 37 % 100) >= self.plain_pct;
+        let inm = if kind == 0 { etag.lock().unwrap()[j].clone() } else { None };
+        let mut h: Vec<(&str, &str)> = vec![(reqauth::HEADER, &sig), ("X-Forwarded-For", &from)];
+        if kind == 0 && gzip {
+            h.push(("Accept-Encoding", "gzip"));
+        }
+        if let Some(e) = &inm {
+            h.push(("If-None-Match", e));
+        }
+        let r = req(addr, "GET", &path, &h, b"");
+        let mut t = tally.lock().unwrap();
+        match &r {
+            Ok(r) => {
+                t.bytes[kind] += r.bytes as u64;
+                if kind == 0 {
+                    match (r.status, r.header("Content-Encoding")) {
+                        (304, _) => t.summary[2] += 1,
+                        (200, Some("gzip")) => (t.summary[0], t.summary_bytes[0]) = (t.summary[0] + 1, t.summary_bytes[0] + r.bytes as u64),
+                        (200, _) => (t.summary[1], t.summary_bytes[1]) = (t.summary[1] + 1, t.summary_bytes[1] + r.bytes as u64),
+                        _ => {}
+                    }
+                    if r.status == 200 {
+                        etag.lock().unwrap()[j] = r.header("ETag").map(str::to_owned);
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+        t.samples[kind].push(sample(r));
+    }
+}
+
 fn run(a: &BTreeMap<String, String>) -> bool {
     let addr = a.get("addr").expect("addr=").clone();
     let pid = num(a, "pid", 0);
@@ -327,10 +550,16 @@ fn run(a: &BTreeMap<String, String>) -> bool {
     let doc = serde_json::to_vec(&envelope::sign(format!(r#"{{"serial":1,"issued_at":{}}}"#, now()).as_bytes(), &admin)).unwrap();
     let r = admin_req(&addr, &admin, "PUT", "/api/admin/policy", &doc);
     assert_eq!(r.status, 204, "publish policy: {}", r.body);
-    // A throwaway roster member for the team summary.
+    // A throwaway roster member for the team summary; with members > 0 a signed team document
+    // with it and the simulated desktops (`scoped` of them limited to one customer each).
     let member = generate_key();
-    let roster = json!({"members": [{"name": "load", "key": key_to_b64(&member.verifying_key()), "write": false, "audit": false}]});
-    let r = admin_req(&addr, &admin, "PUT", "/api/admin/team", roster.to_string().as_bytes());
+    let sim = Members::new(a, devices);
+    let r = if sim.keys.is_empty() {
+        let roster = json!({"members": [{"name": "load", "key": key_to_b64(&member.verifying_key()), "write": false, "audit": false}]});
+        admin_req(&addr, &admin, "PUT", "/api/admin/team", roster.to_string().as_bytes())
+    } else {
+        admin_req(&addr, &admin, "PUT", "/api/admin/team", &sim.team_doc(&member, &admin))
+    };
     assert_eq!(r.status, 204, "publish roster: {}", r.body);
 
     // Enrolment through the API for devices 0..enroll (one IP each: 30 new pins per IP and
@@ -433,7 +662,7 @@ fn run(a: &BTreeMap<String, String>) -> bool {
         std::thread::spawn(move || every(Duration::from_millis(1000 / new_per_s.max(1)), stop, |n| sample(enrol(&addr, &token, devices + n, 201))))
     };
     let summaries = {
-        let addr = addr.clone();
+        let (addr, member) = (addr.clone(), member.clone());
         std::thread::spawn(move || {
             every(Duration::from_secs(summary_s), until, |_| {
                 let sig = reqauth::sign_request(&member, "GET", "/api/team/status", b"", now());
@@ -445,6 +674,63 @@ fn run(a: &BTreeMap<String, String>) -> bool {
         let addr = addr.clone();
         std::thread::spawn(move || every(Duration::from_secs(metrics_s), until, |_| sample(req(&addr, "GET", "/metrics", &[], b""))))
     };
+    // The simulated desktops: their schedule through `member_workers` threads (open loop).
+    let sim = Arc::new(sim);
+    let tally = Arc::new(Mutex::new(Tally::default()));
+    let member_threads = {
+        let events = sim.schedule(secs, &mut rng);
+        println!("members: {} ({} limited to one of {} customers, {} % without gzip), {} requests scheduled", sim.keys.len(), sim.scoped, sim.customers, sim.plain_pct, events.len());
+        let (mtx, mrx) = mpsc::channel::<(usize, usize)>();
+        let mrx = Arc::new(Mutex::new(mrx));
+        let etags = Arc::new(Mutex::new(vec![None; sim.keys.len()]));
+        let mut ts: Vec<_> = (0..num(a, "member_workers", 32))
+            .map(|w| {
+                let (mrx, sim, tally, etags, addr) = (mrx.clone(), sim.clone(), tally.clone(), etags.clone(), addr.clone());
+                std::thread::spawn(move || {
+                    let mut rng = Rng((now_ms() ^ (w + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1);
+                    loop {
+                        let Ok((j, kind)) = mrx.lock().unwrap().recv() else { break };
+                        sim.request(&addr, j, kind, &etags, &mut rng, &tally);
+                    }
+                })
+            })
+            .collect();
+        ts.push(std::thread::spawn(move || {
+            for (at, j, kind) in events {
+                if let Some(d) = (start + Duration::from_millis(at)).checked_duration_since(Instant::now()) {
+                    std::thread::sleep(d);
+                }
+                let _ = mtx.send((j, kind));
+            }
+        }));
+        ts
+    };
+    // `junk` requests at once every second from one address, member-signed by unknown keys without
+    // `kid` (each tries every roster key until the address reaches the failure limit).
+    let junk_n = num(a, "junk", 0) as usize;
+    let junk = (junk_n > 0).then(|| {
+        let addr = addr.clone();
+        std::thread::spawn(move || {
+            let mut out: Samples = Vec::new();
+            while Instant::now() < until {
+                let next = Instant::now() + Duration::from_secs(1);
+                let hs: Vec<_> = (0..junk_n)
+                    .map(|_| {
+                        let addr = addr.clone();
+                        std::thread::spawn(move || {
+                            let sig = reqauth::sign_request_for(&generate_key(), RELAY, "GET", "/api/team/me", b"", now());
+                            sample(req(&addr, "GET", "/api/team/me", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", "198.51.100.66")], b""))
+                        })
+                    })
+                    .collect();
+                out.extend(hs.into_iter().map(|h| h.join().unwrap()));
+                if let Some(d) = next.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(d);
+                }
+            }
+            out
+        })
+    });
     // One 60 KiB list per device, in device order, at the relay's global budget, until every device
     // has sent one or the run is over.
     let sbom_refused: Arc<Mutex<BTreeMap<String, usize>>> = Arc::new(Mutex::new(BTreeMap::new()));
@@ -453,7 +739,7 @@ fn run(a: &BTreeMap<String, String>) -> bool {
         let stop = start + Duration::from_micros((devices as u64 * 1_000_000 / sbom_rps).min(secs * 1_000_000));
         std::thread::spawn(move || {
             every(Duration::from_micros(1_000_000 / sbom_rps), stop, |n| {
-                let body = sbom_doc(&format!("PC-LOAD-{n:06}"));
+                let body = sbom_doc(&host(n));
                 let sig = reqauth::sign_device_request(&device_key(n), &uuid(n), RELAY, "PUT", "/api/status/sbom", body.as_bytes(), now());
                 let r = req(&addr, "PUT", "/api/status/sbom", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", &ip(150 + (n >> 16) as u8, n))], body.as_bytes());
                 if let Ok(r) = &r {
@@ -472,6 +758,10 @@ fn run(a: &BTreeMap<String, String>) -> bool {
     }
     let (new_enrols, summaries, scrapes) = (new_enrols.join().unwrap(), summaries.join().unwrap(), scrapes.join().unwrap());
     let sboms: Samples = sboms.map(|t| t.join().unwrap()).unwrap_or_default();
+    for t in member_threads {
+        t.join().unwrap();
+    }
+    let junk: Samples = junk.map(|t| t.join().unwrap()).unwrap_or_default();
     let series = sampler.join().unwrap();
     let rss_end = rss_kib(pid);
     let peak = peak.load(Ordering::Relaxed).max(rss_end as usize) as u64;
@@ -500,6 +790,38 @@ fn run(a: &BTreeMap<String, String>) -> bool {
     for (k, n) in refusals.lock().unwrap().iter() {
         println!("  refused or failed status post x{n}: {}", k.chars().take(120).collect::<String>());
     }
+    let t = tally.lock().unwrap();
+    let member_stats: Vec<Stats> = t.samples.iter().map(stats).collect();
+    if !sim.keys.is_empty() {
+        let per_s = |n: u64| n as f64 / secs as f64;
+        for (k, s) in KINDS.iter().zip(&member_stats) {
+            show(&format!("member {k}"), s);
+            println!("  {:.2} requests/s, {:.0} bytes/s out", per_s(s.n as u64), per_s(t.bytes[KINDS.iter().position(|x| x == k).unwrap()]));
+        }
+        let [gz, plain, nm] = t.summary;
+        let all = (gz + plain + nm).max(1);
+        println!("summary answers: {gz} 200 gzip ({:.0} bytes avg), {plain} 200 plain ({:.0} bytes avg), {nm} 304: 304 share {:.1} %", t.summary_bytes[0] as f64 / gz.max(1) as f64, t.summary_bytes[1] as f64 / plain.max(1) as f64, nm as f64 * 100. / all as f64);
+    }
+    if !junk.is_empty() {
+        show("junk without kid", &stats(&junk));
+    }
+    // The full summary once plain and once gzip (sizes), and the relay's counters.
+    let sig = |p: &str| reqauth::sign_request(&member, "GET", p, b"", now());
+    if let (Ok(p), Ok(g)) = (req(&addr, "GET", "/api/team/status", &[(reqauth::HEADER, &sig("/api/team/status"))], b""), req(&addr, "GET", "/api/team/status", &[(reqauth::HEADER, &sig("/api/team/status")), ("Accept-Encoding", "gzip")], b"")) {
+        println!("full summary: {} bytes plain, {} bytes gzip ({:.1} x), {} hosts", p.bytes, g.bytes, p.bytes as f64 / g.bytes.max(1) as f64, serde_json::from_str::<Value>(&p.body).ok().and_then(|v| v["hosts"].as_array().map(Vec::len)).unwrap_or(0));
+    }
+    if let Ok(m) = req(&addr, "GET", "/metrics", &[], b"") {
+        for l in m.body.lines().filter(|l| ["tether_api_status_summary_", "tether_api_team_audit_", "tether_api_busy_rejected_total"].iter().any(|p| l.starts_with(p))) {
+            println!("  metrics: {l}");
+        }
+        let codes: BTreeMap<String, u64> = m.body.lines().filter_map(|l| l.strip_prefix("tether_api_requests_total{")).filter_map(|l| {
+            let (labels, n) = l.split_once("} ")?;
+            Some((labels.to_owned(), n.trim().parse().ok()?))
+        }).collect();
+        for (k, n) in codes {
+            println!("  metrics: requests {k}: {n}");
+        }
+    }
     let mib = |k: u64| k as f64 / 1024.;
     println!("tether-api RSS: reference {:.1} MiB, end {:.1} MiB, peak {:.1} MiB", mib(rss_ref), mib(rss_end), mib(peak));
     println!("tether-api RSS each minute of the run (MiB): {}", series.join(" "));
@@ -518,6 +840,7 @@ fn run(a: &BTreeMap<String, String>) -> bool {
         ("every status post accepted or 429".to_owned(), posts.codes.keys().all(|c| matches!(c, 200 | 429))),
         ("every probe, enrolment, summary and scrape answered 200".to_owned(), [&hb_b, &hb_r, &pol_b, &pol_r, &new_s, &sum_s, &met_s].iter().all(|s| s.codes.keys().all(|c| *c == 200))),
         ("every software list upload accepted (204) or 429".to_owned(), sbom_s.codes.keys().all(|c| matches!(c, 204 | 429))),
+        ("every member request answered 200 or 304 (no 429, no 5xx, no connection error)".to_owned(), member_stats.iter().all(|s| s.codes.keys().all(|c| matches!(c, 200 | 304)))),
         (format!("peak RSS {:.1} MiB < 48 MiB", mib(peak)), peak < 48 * 1024),
         (format!("RSS at the end within 10 % of the reference ({:.1} vs {:.1} MiB)", mib(rss_end), mib(rss_ref)), (rss_end as f64 - rss_ref as f64).abs() <= rss_ref as f64 * 0.1),
     ]);

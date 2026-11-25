@@ -25,8 +25,14 @@
 #   tools/load/status-run.sh [out-file]     (Linux; env: DEVICES=20000 SECS=600 WARMUP=60
 #                                            BASELINE=60 ENROLL=100 API_BIN=… LOAD_BIN=…
 #                                            STATUS_SBOM=on [STATUS_SBOM_RPS=2]: also software lists;
+#                                            SBOM_UPLOAD_RPS=0: lists stored, none uploaded in the run;
 #                                            SELF_CHECK=1: also the generator's own pauses;
-#                                            STATUS_TRACE_LOCK=1: tether-api logs state-lock holds over 20 ms)
+#                                            STATUS_TRACE_LOCK=1: tether-api logs state-lock holds over 20 ms;
+#                                            MEMBERS=1000 SCOPED=500 CUSTOMERS=500 SBOM_DEVICES=2000
+#                                            PLAIN_PCT=10 JUNK=32: simulated technician desktops (see
+#                                            `Members` in status-load/src/main.rs) and junk signatures;
+#                                            MEMORY_MAX=64M: tether-api in a systemd user scope with
+#                                            that MemoryMax and no swap, as in the service unit)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
 OUT="${1:-/tmp/status-load.txt}"
@@ -46,9 +52,12 @@ W="$(mktemp -d /tmp/status-load.XXXXXX)"; API_PID=""
 cleanup() { [ -n "$API_PID" ] && kill "$API_PID" 2>/dev/null; wait 2>/dev/null; rm -rf "$W"; }
 trap cleanup EXIT
 PUB="$("$LOAD_BIN" keygen "$W/admin.key")"
-"$LOAD_BIN" prep "$W/data" devices="$DEVICES" enroll="$ENROLL"
+MEMBERS="${MEMBERS:-0}"; SCOPED="${SCOPED:-0}"; CUSTOMERS="${CUSTOMERS:-0}"; SBOM_DEVICES="${SBOM_DEVICES:-0}"
+"$LOAD_BIN" prep "$W/data" devices="$DEVICES" enroll="$ENROLL" customers="$CUSTOMERS" sbom="$SBOM_DEVICES"
+WRAP=()
+[ -n "${MEMORY_MAX:-}" ] && WRAP=(systemd-run --user --scope -q -p "MemoryMax=$MEMORY_MAX" -p MemorySwapMax=0)
 ADMIN_PUB_KEY="$PUB" RELAY_HOST=relay.test STATUS_MAX_DEVICES=$((DEVICES + 1000)) STATUS_TRACE_LOCK="${STATUS_TRACE_LOCK:-}" STATUS_SBOM="${STATUS_SBOM:-}" STATUS_SBOM_RPS="${STATUS_SBOM_RPS:-2}" \
-  "$API_BIN" --data "$W/data" --listen 127.0.0.1:0 > "$W/api.out" 2> "$W/api.log" &
+  "${WRAP[@]}" "$API_BIN" --data "$W/data" --listen 127.0.0.1:0 > "$W/api.out" 2> "$W/api.log" &
 API_PID=$!
 for _ in $(seq 300); do grep -q '^listening on' "$W/api.out" 2>/dev/null && break; sleep 0.1; done
 ADDR="$(sed -n 's/^listening on //p' "$W/api.out")"
@@ -56,9 +65,15 @@ ADDR="$(sed -n 's/^listening on //p' "$W/api.out")"
 echo "tether-api pid $API_PID on $ADDR; $DEVICES devices, warm-up $WARMUP s, baseline $BASELINE s, run $SECS s" | tee "$OUT"
 set +e
 "$LOAD_BIN" run addr="$ADDR" key="$W/admin.key" pid="$API_PID" devices="$DEVICES" enroll="$ENROLL" \
-  seconds="$SECS" warmup="$WARMUP" baseline="$BASELINE" sbom_rps="$([ "${STATUS_SBOM:-}" = on ] && echo "${STATUS_SBOM_RPS:-2}" || echo 0)" ${SELF_CHECK:+--self-check} | tee -a "$OUT"
+  members="$MEMBERS" scoped="$SCOPED" customers="$CUSTOMERS" sbom="$SBOM_DEVICES" plain_pct="${PLAIN_PCT:-10}" junk="${JUNK:-0}" \
+  seconds="$SECS" warmup="$WARMUP" baseline="$BASELINE" sbom_rps="$([ "${STATUS_SBOM:-}" = on ] && echo "${SBOM_UPLOAD_RPS:-${STATUS_SBOM_RPS:-2}}" || echo 0)" ${SELF_CHECK:+--self-check} | tee -a "$OUT"
 rc=${PIPESTATUS[0]}
-grep -v -e '^warning' -e '^status: ' -e '^lock held' "$W/api.log" | head -20 | sed 's/^/tether-api: /' | tee -a "$OUT"
+if [ -n "${MEMORY_MAX:-}" ]; then
+  CG="$(sed -n 's/^0:://p' "/proc/$API_PID/cgroup")"
+  echo "cgroup: memory.max $(cat "/sys/fs/cgroup$CG/memory.max"), memory.peak $(cat "/sys/fs/cgroup$CG/memory.peak") bytes (page cache included), events: $(paste -sd' ' "/sys/fs/cgroup$CG/memory.events"); file $(sed -n 's/^file //p' "/sys/fs/cgroup$CG/memory.stat"), anon $(sed -n 's/^anon //p' "/sys/fs/cgroup$CG/memory.stat")" | tee -a "$OUT"
+fi
+echo "team audit log: $(cat "$W"/data/team-audit/*.jsonl 2>/dev/null | wc -l) lines, $(du -sh "$W/data/team-audit" | cut -f1)" | tee -a "$OUT"
+grep -v -e '^warning' -e '^status: ' -e '^lock held' -e '^team-audit: {' -e '^team-audit: head' "$W/api.log" | head -20 | sed 's/^/tether-api: /' | tee -a "$OUT"
 if [ -n "${STATUS_TRACE_LOCK:-}" ]; then
   echo "state-lock holds over 20 ms: $(grep -c '^lock held' "$W/api.log" || true)" | tee -a "$OUT"
   grep '^lock held' "$W/api.log" | sort -k3 -n -r | head -10 | sed 's/^/  /' | tee -a "$OUT"

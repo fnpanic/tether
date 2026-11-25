@@ -48,10 +48,13 @@ use crate::{empty, header, hdr, json, load_json, lock, mkdirs, not_found, now, r
 pub const LIMIT_STATUS: u64 = st::REPORT_MAX as u64;
 /// The team summary is rebuilt at most this often (and not sooner after a failed build).
 const SUMMARY_SECS: u64 = 30;
-/// Team summaries kept, one per member scope (customers and `sbom`; a plain roster has one).
-const SUMMARY_SCOPES: usize = 32;
-/// And at most this many bytes of them on disk (the files are streamed, not held in memory; one
-/// of 20 000 hosts is about 10 MB, at most about 50 MB).
+/// Team summaries kept, one per member scope (customers and `sbom`; a plain roster has one): as
+/// many as a team document has members, so every scope keeps its last file and a request that
+/// comes while another scope is being built gets it instead of waiting (with 32, 500 one-customer
+/// scopes made every such request wait for the build: docs/scaling.md). The byte bound below decides.
+const SUMMARY_SCOPES: usize = team::MAX_MEMBERS + 1;
+/// And at most this many bytes of them on disk, gzip copies included (the files are streamed, not
+/// held in memory; one of 20 000 hosts is about 20 MB plain and 1.7 MB gzip, measured).
 const SUMMARY_CACHE_BYTES: u64 = 256 << 20;
 
 /// One scope's cached summary, in `status/<file>`: `summary.json` for the default scope (every
@@ -64,6 +67,7 @@ struct Summary {
     built: Option<(u64, String)>,
     /// When a build last failed (the next one waits `SUMMARY_SECS`).
     failed: u64,
+    /// Bytes of the file and its gzip copy (both count against `SUMMARY_CACHE_BYTES`).
     size: u64,
 }
 /// `seen.json` is written at most this often (stale needs at least 900 s; a hard kill loses at
@@ -746,7 +750,7 @@ impl Status {
         // The scoped summaries of the last run: rebuilt on demand, and a scope nobody has any more
         // would never be dropped.
         for e in fs::read_dir(&dir)?.flatten() {
-            if e.file_name().to_str().is_some_and(|n| n.starts_with("summary-") && n.ends_with(".json")) {
+            if e.file_name().to_str().is_some_and(|n| n.starts_with("summary") && (n.ends_with(".json.gz") || (n.starts_with("summary-") && n.ends_with(".json")))) {
                 let _ = fs::remove_file(e.path());
             }
         }
@@ -776,7 +780,8 @@ impl Status {
 
     fn summary_drop(&mut self, i: usize) {
         let s = self.summaries.remove(i);
-        let _ = fs::remove_file(self.data.join("status").join(s.file));
+        let _ = fs::remove_file(self.data.join("status").join(&s.file));
+        let _ = fs::remove_file(self.data.join("status").join(gz_name(&s.file)));
     }
 
     /// The least recently used summaries go while all together are above `max` (`SUMMARY_CACHE_BYTES`)
@@ -1089,20 +1094,18 @@ fn trim_history(r: impl BufRead, t: u64) -> io::Result<Option<Vec<u8>>> {
     Ok((kept.len() < total).then(|| kept.into_iter().flat_map(|l| (l + "\n").into_bytes()).collect()))
 }
 
-/// Writes through and hashes what it writes (the summary's ETag without a copy in memory).
-struct Hashing<W: Write> {
-    w: W,
-    h: Sha256,
-}
+/// The summary file and its gzip copy, written together (no copy of either in memory).
+struct Both<A: Write, B: Write>(A, B);
 
-impl<W: Write> Write for Hashing<W> {
+impl<A: Write, B: Write> Write for Both<A, B> {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-        let n = self.w.write(b)?;
-        self.h.update(&b[..n]);
-        Ok(n)
+        self.0.write_all(b)?;
+        self.1.write_all(b)?;
+        Ok(b.len())
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.w.flush()
+        self.0.flush()?;
+        self.1.flush()
     }
 }
 
@@ -1164,15 +1167,37 @@ where
     }
 }
 
-/// Writes the summary for `scope` to `tmp` (no fsync: it is rebuilt after a restart) and returns
-/// its ETag (the first 16 hex characters of SHA-256 over the hosts array) and size: the hosts of
-/// the scope's customers, with their software list only for a scope with `sbom`.
+/// The gzip copy of a summary file: `<file>.gz`.
+fn gz_name(file: &str) -> String {
+    format!("{file}.gz")
+}
+
+/// Summary builds since start, their total and their longest time (`/metrics`).
+pub static SUMMARY_BUILDS: AtomicU64 = AtomicU64::new(0);
+pub static SUMMARY_BUILD_US: AtomicU64 = AtomicU64::new(0);
+pub static SUMMARY_BUILD_MAX_US: AtomicU64 = AtomicU64::new(0);
+
+/// Writes the summary for `scope` to `tmp` and its gzip copy to `tmp.gz` (no fsync: rebuilt after
+/// a restart) and returns its ETag and the size of both: the hosts of the scope's customers, with
+/// their software list only for a scope with `sbom`.
+///
+/// The ETag (`W/"<16 hex>"`, weak: the bytes may differ under one tag) is SHA-256 over what a
+/// technician sees: every entry without its `last_seen` and `next` (its `stale`, computed at `t`
+/// from both, is in it),
+/// and the window of the stale threshold `t` falls in (`t / W`, W = 3 × next rounded down to 15 min). So heartbeats of healthy
+/// devices keep the tag (a desktop gets `304`), a host turning stale or coming back changes it at
+/// the first build after, and the shown `last_seen` is at most one window older than the file.
 fn build_summary(app: &Mutex<App>, tmp: &Path, t: u64, scope: &Permissions) -> io::Result<(String, u64)> {
+    let tmp_gz = PathBuf::from(gz_name(&tmp.to_string_lossy()));
     let f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(tmp)?;
-    let mut w = io::BufWriter::new(&f);
-    write!(w, "{{\"built\":{t},\"hosts\":")?;
-    let mut h = Hashing { w, h: Sha256::new() };
-    h.write_all(b"[")?;
+    let fz = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp_gz)?;
+    // The stale threshold rounded down to 15 minutes: the pace changes with every 10 enrolments
+    // at 20 000 devices, the window only every 3 000.
+    let window = (3 * lock(app).status.next_secs() / 900).max(1) * 900;
+    let mut hash = Sha256::new();
+    hash.update(format!("{}:", t / window).as_bytes());
+    let mut h = Both(io::BufWriter::new(&f), flate2::write::GzEncoder::new(io::BufWriter::new(&fz), flate2::Compression::default()));
+    write!(h, "{{\"built\":{t},\"hosts\":[")?;
     let mut first = true;
     let copy = |a: &App, u: &Arc<str>, s: &Seen| {
         s.entry()?;
@@ -1194,43 +1219,60 @@ fn build_summary(app: &Mutex<App>, tmp: &Path, t: u64, scope: &Permissions) -> i
             if let Some((at, sha)) = sbom {
                 head["sbom"] = serde_json::json!({"at": at, "sha": sha});
             }
-            let head = head.to_string();
+            let text = head.to_string();
+            // The tag leaves out `"last_seen":<n>,` and `"next":<n>,` (keys in this order, neither
+            // the last one: `stale` and `uuid` follow).
+            let cut = |k: &str, from: usize| text[from..].find(k).and_then(|a| Some((from + a, from + a + text[from + a..].find(',')? + 1)));
+            let (a, b) = cut("\"last_seen\":", 0).unwrap_or((0, 0));
+            let (c, d) = cut("\"next\":", b).unwrap_or((b, b));
+            hash.update(&text.as_bytes()[..a]);
+            hash.update(&text.as_bytes()[b..c]);
+            hash.update(&text.as_bytes()[d..]);
+            hash.update(entry.as_bytes());
             if !first {
                 h.write_all(b",")?;
             }
             first = false;
             // Both are JSON objects: `{head…` + `,` + `…entry}`.
-            h.write_all(&head.as_bytes()[..head.len() - 1])?;
+            h.write_all(&text.as_bytes()[..text.len() - 1])?;
             h.write_all(b",")?;
             h.write_all(&entry.as_bytes()[1..])?;
         }
         Ok(())
     })?;
-    h.write_all(b"]")?;
-    let digest = h.h.finalize();
-    let mut w = h.w;
-    w.write_all(b"}")?;
-    w.flush()?;
-    drop(w);
-    Ok((format!("\"{}\"", digest.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>()), f.metadata()?.len()))
+    h.write_all(b"]}")?;
+    h.0.flush()?;
+    drop(h.0);
+    h.1.finish()?.flush()?;
+    let digest = hash.finalize();
+    Ok((format!("W/\"{}\"", digest.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>()), f.metadata()?.len() + fz.metadata()?.len()))
 }
 
 /// Builds scope `key`'s summary into `tmp` (the caller set `building`), renames it into place
 /// under the lock (a file opened under it always matches the ETag sent with it) and answers.
-fn summary_build(app: &Mutex<App>, key: &str, scope: &Permissions, tmp: PathBuf, t: u64, inm: Option<String>) -> Result<Resp, Resp> {
+fn summary_build(app: &Mutex<App>, key: &str, scope: &Permissions, tmp: PathBuf, t: u64, inm: Option<String>, gzip: bool) -> Result<Resp, Resp> {
+    let started = std::time::Instant::now();
     let built = build_summary(app, &tmp, t, scope);
+    let us = started.elapsed().as_micros() as u64;
+    SUMMARY_BUILDS.fetch_add(1, Ordering::Relaxed);
+    SUMMARY_BUILD_US.fetch_add(us, Ordering::Relaxed);
+    SUMMARY_BUILD_MAX_US.fetch_max(us, Ordering::Relaxed);
+    let tmp_gz = PathBuf::from(gz_name(&tmp.to_string_lossy()));
     let mut a = lock(app);
     a.status.building = false;
     let file = a.status.summary_slot(key).file.clone();
-    match built.and_then(|(etag, size)| fs::rename(&tmp, a.data.join("status").join(&file)).map(|()| (etag, size))) {
+    let dir = a.data.join("status");
+    // Both renamed under the lock: whichever file a request opens matches the tag sent with it.
+    match built.and_then(|(etag, size)| fs::rename(&tmp_gz, dir.join(gz_name(&file))).and_then(|()| fs::rename(&tmp, dir.join(&file))).map(|()| (etag, size))) {
         Ok((etag, size)) => {
             let s = a.status.summary_slot(key);
             (s.built, s.size) = (Some((t, etag.clone())), size);
             a.status.summary_trim(SUMMARY_CACHE_BYTES);
-            a.summary_file(&file, &etag, inm.as_deref())
+            a.summary_file(&file, &etag, inm.as_deref(), gzip)
         }
         Err(e) => {
             let _ = fs::remove_file(&tmp);
+            let _ = fs::remove_file(&tmp_gz);
             a.status.summary_slot(key).failed = now(); // no new attempt for SUMMARY_SECS
             write_error(&file, &e);
             Err(crate::internal(e))
@@ -1238,9 +1280,21 @@ fn summary_build(app: &Mutex<App>, key: &str, scope: &Permissions, tmp: PathBuf,
     }
 }
 
-/// `If-None-Match` names `etag` (weak or strong).
+/// `If-None-Match` names `etag` (weak comparison: `W/` ignored on both sides).
 fn etag_matches(inm: Option<&str>, etag: &str) -> bool {
-    inm.is_some_and(|inm| inm.split(',').any(|x| x.trim().trim_start_matches("W/") == etag))
+    inm.is_some_and(|inm| inm.split(',').any(|x| x.trim().trim_start_matches("W/") == etag.trim_start_matches("W/")))
+}
+
+/// `Accept-Encoding` lists `gzip` (or `x-gzip`) with a weight above 0.
+fn accepts_gzip(ae: Option<&str>) -> bool {
+    ae.is_some_and(|ae| {
+        ae.split(',').any(|c| {
+            let mut p = c.split(';').map(str::trim);
+            let coding = p.next().unwrap_or("");
+            let q = p.find_map(|x| x.strip_prefix("q=").or_else(|| x.strip_prefix("Q="))).map_or(Some(1.0), |q| q.parse::<f32>().ok());
+            (coding.eq_ignore_ascii_case("gzip") || coding.eq_ignore_ascii_case("x-gzip")) && q.is_some_and(|q| q > 0.0)
+        })
+    })
 }
 
 fn stale(s: &Seen, t: u64) -> bool {
@@ -2110,6 +2164,7 @@ impl App {
         self.status_open()?;
         let t = now();
         let inm = header(rq, "If-None-Match");
+        let gzip = accepts_gzip(header(rq, "Accept-Encoding").as_deref());
         let key = scope.scope_key();
         let building = self.status.building;
         let s = self.status.summary_slot(&key);
@@ -2117,7 +2172,7 @@ impl App {
         match &s.built {
             Some((at, etag)) if t < at + SUMMARY_SECS || building || failed_recently => {
                 let (file, etag) = (s.file.clone(), etag.clone());
-                return self.summary_file(&file, &etag, inm.as_deref());
+                return self.summary_file(&file, &etag, inm.as_deref(), gzip);
             }
             None if failed_recently => return Err(text(503, "status summary not ready").with_header(hdr("Retry-After", "30"))),
             _ => {}
@@ -2126,7 +2181,7 @@ impl App {
         if !building {
             self.status.building = true;
             let tmp = crate::tmp_path(&self.data);
-            return self.defer(move |app| summary_build(app, &key, &scope, tmp, t, inm));
+            return self.defer(move |app| summary_build(app, &key, &scope, tmp, t, inm, gzip));
         }
         // No summary of this scope yet, and a build runs (of this scope or another): wait for it.
         self.defer(move |app| {
@@ -2136,7 +2191,7 @@ impl App {
                     let s = a.status.summary_slot(&key);
                     let (built, file, failed) = (s.built.clone(), s.file.clone(), s.failed);
                     if let Some((_, etag)) = built {
-                        return a.summary_file(&file, &etag, inm.as_deref());
+                        return a.summary_file(&file, &etag, inm.as_deref(), gzip);
                     }
                     if !a.status.building {
                         if now() < failed + SUMMARY_SECS {
@@ -2145,7 +2200,7 @@ impl App {
                         a.status.building = true;
                         let tmp = crate::tmp_path(&a.data);
                         drop(a);
-                        return summary_build(app, &key, &scope, tmp, now(), inm);
+                        return summary_build(app, &key, &scope, tmp, now(), inm, gzip);
                     }
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -2154,18 +2209,20 @@ impl App {
         })
     }
 
-    /// `summary.json` with its ETag, or 304. Opened under the lock: a rebuild renames a new file
-    /// over it, this one stays readable.
-    fn summary_file(&self, file: &str, etag: &str, inm: Option<&str>) -> Result<Resp, Resp> {
+    /// `summary.json` (or its gzip copy, `Content-Encoding: gzip`) with its ETag, or 304 (the file
+    /// not opened). Opened under the lock: a rebuild renames a new file over it, this one stays readable.
+    fn summary_file(&self, file: &str, etag: &str, inm: Option<&str>, gzip: bool) -> Result<Resp, Resp> {
         if etag_matches(inm, etag) {
-            return Ok(empty(304).with_header(hdr("ETag", etag)));
+            return Ok(empty(304).with_header(hdr("ETag", etag)).with_header(hdr("Vary", "Accept-Encoding")));
         }
-        let f = fs::File::open(self.data.join("status").join(file)).map_err(crate::internal)?;
-        Ok(tiny_http::Response::from_file(f)
+        let name = if gzip { gz_name(file) } else { file.to_owned() };
+        let f = fs::File::open(self.data.join("status").join(name)).map_err(crate::internal)?;
+        let r = tiny_http::Response::from_file(f)
             .with_header(hdr("Content-Type", "application/json"))
             .with_header(hdr("ETag", etag))
-            .with_chunked_threshold(usize::MAX)
-            .boxed())
+            .with_header(hdr("Vary", "Accept-Encoding"))
+            .with_chunked_threshold(usize::MAX);
+        Ok(if gzip { r.with_header(hdr("Content-Encoding", "gzip")).boxed() } else { r.boxed() })
     }
 
     /// `GET /api/team/status/<uuid>`: the last report (raw bytes) and 90 days of history, read
@@ -2666,6 +2723,74 @@ mod tests {
         fs::write(&tmp, b"{}").unwrap();
         append_then_rename(Some(&f), b"{\"at\":2}\n", &tmp, &dest).unwrap();
         assert_eq!((fs::read(&hist).unwrap(), fs::read(&dest).unwrap()), (b"{\"at\":1}\n{\"at\":2}\n".to_vec(), b"{}".to_vec()));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The summary tag at chosen times: a host turning stale changes it at the first build after
+    /// the threshold (not one second earlier), coming back changes it again, a heartbeat that only
+    /// moves `last_seen` does not; the next window of the threshold always does.
+    #[test]
+    fn the_summary_tag_follows_staleness_not_heartbeats() {
+        let d = std::env::temp_dir().join(format!("tether-summary-tag-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("status")).unwrap();
+        fs::create_dir_all(d.join("tmp")).unwrap();
+        // Window 900 s (3 × next at this fleet size); `l` + 900 and + 901 in one window.
+        let l = 1_794_000_000 / 900 * 900 + 100;
+        let entry = r#"{"host":"PC-1","agent":"0.1.0","overall":"ok","counts":{"ok":1,"warn":0,"crit":0,"unknown":0,"setup":0},"products":[],"faults":[]}"#;
+        let (mut keys, mut seen) = (serde_json::Map::new(), serde_json::Map::new());
+        for u in ["dev-0001", "dev-0002"] {
+            keys.insert(u.into(), serde_json::json!({"key": tether_trust::key_to_b64(&tether_trust::generate_key().verifying_key()), "tether_id": null, "label": "t", "enrolled": l}));
+            seen.insert(u.into(), serde_json::json!({"last_seen": l, "seq": 1, "next": 300, "entry": entry}));
+        }
+        fs::write(d.join("status/keys.json"), serde_json::to_vec(&keys).unwrap()).unwrap();
+        fs::write(d.join("status/seen.json"), serde_json::to_vec(&seen).unwrap()).unwrap();
+        let app = Mutex::new(crate::App::open(d.clone(), vec![], 90, 1 << 30, (90, 1 << 30)).unwrap());
+        let all = Permissions { write: false, audit: false, sbom: true, agent: true, customers: vec!["*".into()] };
+        let n = AtomicU64::new(0);
+        let tag = |t: u64| {
+            let tmp = d.join("tmp").join(n.fetch_add(1, Ordering::Relaxed).to_string());
+            let (etag, _) = build_summary(&app, &tmp, t, &all).unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&fs::read(&tmp).unwrap()).unwrap();
+            let gz = fs::read(gz_name(&tmp.to_string_lossy())).unwrap();
+            let mut plain = Vec::new();
+            flate2::read::GzDecoder::new(&gz[..]).read_to_end(&mut plain).unwrap();
+            assert_eq!(plain, fs::read(&tmp).unwrap(), "the gzip copy is the same file");
+            (etag, body["hosts"].as_array().unwrap().iter().map(|h| h["stale"].as_bool().unwrap()).collect::<Vec<_>>())
+        };
+        let set_seen = |u: &str, at: u64| lock(&app).status.dev.get_mut(u).unwrap().last_seen = at;
+        let (fresh, _) = tag(l + 900);
+        assert_eq!(tag(l + 900), (fresh.clone(), vec![false, false]), "the same state, the same tag");
+        // A heartbeat of dev-0001 moves only its last_seen (and the pace answered to it, `next`,
+        // which a technician does not see).
+        set_seen("dev-0001", l + 600);
+        lock(&app).status.dev.get_mut("dev-0001").unwrap().next = 301;
+        assert_eq!(tag(l + 900).0, fresh);
+        // dev-0002 is stale from l + 901 (3 × 300 s without a post): the tag changes then, not before.
+        let (stale, flags) = tag(l + 901);
+        assert_eq!(flags, [false, true]);
+        assert_ne!(stale, fresh);
+        // It posts again: back to the tag of the same state.
+        set_seen("dev-0002", l + 901);
+        assert_eq!(tag(l + 901), (fresh.clone(), vec![false, false]));
+        // The next window: a new tag even though nothing a technician sees changed (the file's
+        // last_seen values are then at most one window old).
+        assert_ne!(tag(l + 900 + 900).0, fresh);
+        drop(app);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn every_member_scope_keeps_its_summary_up_to_the_count_bound() {
+        let d = std::env::temp_dir().join(format!("tether-summary-count-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("status")).unwrap();
+        let mut s = Status { data: d.clone(), ..Default::default() };
+        for i in 0..=team::MAX_MEMBERS + 1 {
+            s.summary_slot(&format!("sbom:c{i}"));
+        }
+        assert_eq!(s.summaries.len(), team::MAX_MEMBERS + 1);
+        assert_eq!((s.summaries[0].key.as_str(), s.summaries.last().unwrap().key.clone()), ("sbom:c1", format!("sbom:c{}", team::MAX_MEMBERS + 1)));
         let _ = fs::remove_dir_all(&d);
     }
 
