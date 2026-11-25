@@ -752,6 +752,12 @@ function UpdateCheck({ last, stale }: { last: string | null; stale?: boolean }) 
   );
 }
 
+/** Control, bidi, line-separator and zero-width characters out (the backend's `invisible` set in
+ *  agent_elevated.rs, as in the desktop's AgentHere.tsx): they could reorder or hide what is read. */
+function plainText(s: string): string {
+  return s.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "");
+}
+
 /** The health agent's pre-dialog (spec 11.2): only the person here answers it (remote input never
  *  reaches this window). Like the recording consent: Escape and the first, focused button decline. */
 function AgentConsentDialog({ d, onAnswer }: { d: AgentConsent; onAnswer: (yes: boolean) => void }) {
@@ -771,22 +777,22 @@ function AgentConsentDialog({ d, onAnswer }: { d: AgentConsent; onAnswer: (yes: 
       }}
     >
       <h2 id="qs-agent-title" className="text-headline font-semibold">
-        {d.title}
+        {plainText(d.title)}
       </h2>
       <div id="qs-agent-text">
         {d.paragraphs.map((p, i) => (
           <p key={i} className="mt-2 text-callout text-ink-80">
-            {p}
+            {plainText(p)}
           </p>
         ))}
       </div>
       <div className="mt-6 flex gap-2">
         {/* First, with the focus: a key typed as the question appears must not install. */}
         <Button className="flex-1" autoFocus onClick={() => onAnswer(false)}>
-          {d.no}
+          {plainText(d.no)}
         </Button>
         <Button variant="primary" className="flex-1" onClick={() => onAnswer(true)}>
-          {d.yes}
+          {plainText(d.yes)}
         </Button>
       </div>
     </dialog>
