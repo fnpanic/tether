@@ -2094,6 +2094,18 @@ fn main() {
         eprintln!("listen {listen}: {e}");
         std::process::exit(1);
     });
+    // Software search: only with the software lists on and a signed team document in force (its
+    // `sbom` permission and customer scopes; the plain roster has neither), decided once at start.
+    if std::env::var("STATUS_SOFTWARE_SEARCH").is_ok_and(|v| v.trim() == "on") {
+        if !status::conf().sbom {
+            eprintln!("warning: STATUS_SOFTWARE_SEARCH=on needs STATUS_SBOM=on: software search stays off");
+        } else if !app.team.signed() {
+            eprintln!("warning: STATUS_SOFTWARE_SEARCH=on needs a signed team document (permission sbom, customer scopes): none is in force, software search stays off until one is published and the relay restarted");
+        } else {
+            status::SEARCH.store(true, Ordering::Relaxed);
+            eprintln!("status: software search on");
+        }
+    }
     app.maintain(); // before announcing readiness: retention applies from the first request
     match server.server_addr().to_ip() {
         Some(a) => println!("listening on {a}"),

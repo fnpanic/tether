@@ -741,8 +741,8 @@ fn busy_no_kid_answers_do_not_lock_out_the_address() {
     use std::time::Duration;
     let admin = generate_key();
     let s = start(&admin);
-    let member = generate_key();
-    assert_eq!(s.publish(&admin, &big_doc(&admin, 1, &[("Member", &member)])).status, 204);
+    let (member, old) = (generate_key(), generate_key());
+    assert_eq!(s.publish(&admin, &big_doc(&admin, 1, &[("Member", &member), ("Old", &old)])).status, 204);
     let nat = [("X-Forwarded-For", "198.51.100.30")];
     let stop = std::sync::atomic::AtomicBool::new(false);
     std::thread::scope(|sc| {
@@ -764,7 +764,8 @@ fn busy_no_kid_answers_do_not_lock_out_the_address() {
             if busy == 70 {
                 break;
             }
-            busy += usize::from(s.signed(&member, "GET", "/api/team/me", &nat, b"").status == 429);
+            // An old desktop (no kid) behind the same address.
+            busy += usize::from(s.signed(&old, "GET", "/api/team/me", &nat, b"").status == 429);
         }
         stop.store(true, Ordering::SeqCst);
         for j in junk {

@@ -255,6 +255,11 @@ impl Team {
         self.doc = Some(Doc { serial: d.serial, config });
     }
 
+    /// A signed team document is in force (one that could not be read has no members).
+    pub(crate) fn signed(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| d.serial > 0)
+    }
+
     pub fn maintain(&mut self, t: u64) {
         self.key_hits.retain(|_, (start, _)| t < *start + 60);
         self.fail_hits.retain(|_, (start, _)| t < *start + 60);
@@ -397,6 +402,8 @@ impl App {
             // Every status route sees only the devices of the member's customers: one outside them
             // answers as an unknown one (status.rs).
             ("GET", "status") => self.team_status_summary(rq, m),
+            // Hosts by installed program: `sbom` and the member's customers (status.rs).
+            ("GET", "status/software") => self.team_status_software(url, m, &key),
             ("GET", r) if r.strip_prefix("status/").is_some_and(|u| u.ends_with("/sbom")) => {
                 if !m.sbom {
                     return Err(text(403, "this member may not read software lists"));
@@ -496,6 +503,8 @@ impl App {
         let dev = |r: &str, suffix: &str| r.strip_prefix("status/")?.strip_suffix(suffix).map(str::to_owned);
         Some(match (method, rest) {
             ("GET", "audit") => ("session-audit-read", query_param(url, "device").map(|d| Target::asked(&d)).unwrap_or_default(), none),
+            // The term and version asked; the search adds the number of hits (never the hits).
+            ("GET", "status/software") => ("search", Target::default(), crate::status::search_detail(url)),
             ("GET", r) => match dev(r, "/sbom") {
                 Some(u) => ("software-list", self.audit_target(&u), none),
                 None => ("report", self.audit_target(&dev(r, "")?), none),

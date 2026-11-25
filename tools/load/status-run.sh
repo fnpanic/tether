@@ -32,7 +32,11 @@
 #                                            PLAIN_PCT=10 JUNK=32: simulated technician desktops (see
 #                                            `Members` in status-load/src/main.rs) and junk signatures;
 #                                            MEMORY_MAX=64M: tether-api in a systemd user scope with
-#                                            that MemoryMax and no swap, as in the service unit)
+#                                            that MemoryMax and no swap, as in the service unit;
+#                                            SEARCH=1 [SEARCH_S=10]: STATUS_SOFTWARE_SEARCH=on, the
+#                                            signed team document written before the start, the
+#                                            start-up scan building every sidecar, and one software
+#                                            search every SEARCH_S s from the warm-up on)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
 OUT="${1:-/tmp/status-load.txt}"
@@ -53,10 +57,12 @@ cleanup() { [ -n "$API_PID" ] && kill "$API_PID" 2>/dev/null; wait 2>/dev/null; 
 trap cleanup EXIT
 PUB="$("$LOAD_BIN" keygen "$W/admin.key")"
 MEMBERS="${MEMBERS:-0}"; SCOPED="${SCOPED:-0}"; CUSTOMERS="${CUSTOMERS:-0}"; SBOM_DEVICES="${SBOM_DEVICES:-0}"
-"$LOAD_BIN" prep "$W/data" devices="$DEVICES" enroll="$ENROLL" customers="$CUSTOMERS" sbom="$SBOM_DEVICES"
+"$LOAD_BIN" prep "$W/data" devices="$DEVICES" enroll="$ENROLL" customers="$CUSTOMERS" sbom="$SBOM_DEVICES" \
+  ${SEARCH:+members="$MEMBERS" scoped="$SCOPED" key="$W/admin.key"}
 WRAP=()
 [ -n "${MEMORY_MAX:-}" ] && WRAP=(systemd-run --user --scope -q -p "MemoryMax=$MEMORY_MAX" -p MemorySwapMax=0)
 ADMIN_PUB_KEY="$PUB" RELAY_HOST=relay.test STATUS_MAX_DEVICES=$((DEVICES + 1000)) STATUS_TRACE_LOCK="${STATUS_TRACE_LOCK:-}" STATUS_SBOM="${STATUS_SBOM:-}" STATUS_SBOM_RPS="${STATUS_SBOM_RPS:-2}" \
+  STATUS_SOFTWARE_SEARCH="${SEARCH:+on}" \
   "${WRAP[@]}" "$API_BIN" --data "$W/data" --listen 127.0.0.1:0 > "$W/api.out" 2> "$W/api.log" &
 API_PID=$!
 for _ in $(seq 300); do grep -q '^listening on' "$W/api.out" 2>/dev/null && break; sleep 0.1; done
@@ -66,6 +72,7 @@ echo "tether-api pid $API_PID on $ADDR; $DEVICES devices, warm-up $WARMUP s, bas
 set +e
 "$LOAD_BIN" run addr="$ADDR" key="$W/admin.key" pid="$API_PID" devices="$DEVICES" enroll="$ENROLL" \
   members="$MEMBERS" scoped="$SCOPED" customers="$CUSTOMERS" sbom="$SBOM_DEVICES" plain_pct="${PLAIN_PCT:-10}" junk="${JUNK:-0}" \
+  ${SEARCH:+search_s="${SEARCH_S:-10}" doc_serial=2} \
   seconds="$SECS" warmup="$WARMUP" baseline="$BASELINE" sbom_rps="$([ "${STATUS_SBOM:-}" = on ] && echo "${SBOM_UPLOAD_RPS:-${STATUS_SBOM_RPS:-2}}" || echo 0)" ${SELF_CHECK:+--self-check} | tee -a "$OUT"
 rc=${PIPESTATUS[0]}
 if [ -n "${MEMORY_MAX:-}" ]; then
@@ -73,6 +80,10 @@ if [ -n "${MEMORY_MAX:-}" ]; then
   echo "cgroup: memory.max $(cat "/sys/fs/cgroup$CG/memory.max"), memory.peak $(cat "/sys/fs/cgroup$CG/memory.peak") bytes (page cache included), events: $(paste -sd' ' "/sys/fs/cgroup$CG/memory.events"); file $(sed -n 's/^file //p' "/sys/fs/cgroup$CG/memory.stat"), anon $(sed -n 's/^anon //p' "/sys/fs/cgroup$CG/memory.stat")" | tee -a "$OUT"
 fi
 echo "team audit log: $(cat "$W"/data/team-audit/*.jsonl 2>/dev/null | wc -l) lines, $(du -sh "$W/data/team-audit" | cut -f1)" | tee -a "$OUT"
+echo "tether-api peak RSS over its life (VmHWM): $(sed -n 's/^VmHWM:\s*//p' "/proc/$API_PID/status")" | tee -a "$OUT"
+if [ -n "${SEARCH:-}" ]; then
+  echo "sidecars: $(find "$W/data/status" -name '*.sw' | wc -l) files, $(find "$W/data/status" -name '*.sw' -printf '%s\n' | awk '{s+=$1} END {printf "%.1f MB", s/1e6}'); scan: $(grep -h 'software search sidecars\|software search on\|software search stays off' "$W/api.log" | tr '\n' ' ')" | tee -a "$OUT"
+fi
 grep -v -e '^warning' -e '^status: ' -e '^lock held' -e '^team-audit: {' -e '^team-audit: head' "$W/api.log" | head -20 | sed 's/^/tether-api: /' | tee -a "$OUT"
 if [ -n "${STATUS_TRACE_LOCK:-}" ]; then
   echo "state-lock holds over 20 ms: $(grep -c '^lock held' "$W/api.log" || true)" | tee -a "$OUT"

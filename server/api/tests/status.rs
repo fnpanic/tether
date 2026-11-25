@@ -3369,3 +3369,383 @@ fn signature_limit_records_are_capped_and_carry_only_a_well_formed_kid() {
     assert!(!j.contains("EVIL"), "attacker text in the journal");
     assert!(j.lines().filter(|l| l.contains("team: failed member signatures from")).all(|l| l.contains("unverified")));
 }
+
+// ---- Software search (`GET /api/team/status/software`, `STATUS_SOFTWARE_SEARCH=on`): a sidecar
+// `<uuid>.sw` (name, version, publisher) beside each software list, searched by members with `sbom`.
+
+/// A signed team document (serial 1) written as `team/team.json` before the relay starts, as a
+/// relay that accepted it leaves it: `members` as in `publish_doc`.
+fn write_team_doc(dir: &Path, admin: &SigningKey, members: &[(&str, &SigningKey, Value)]) {
+    let m: Vec<Value> = members
+        .iter()
+        .map(|(n, k, extra)| {
+            let mut e = json!({"name": n, "key": key_to_b64(&k.verifying_key()), "sbom": true, "agent": true, "customers": ["*"]});
+            for (f, v) in extra.as_object().unwrap() {
+                e[f] = v.clone();
+            }
+            e
+        })
+        .collect();
+    let doc = serde_json::to_vec(&json!({"serial": 1, "members": m})).unwrap();
+    std::fs::create_dir_all(dir.join("team")).unwrap();
+    std::fs::write(dir.join("team/team.json"), json!({"team": tether_trust::envelope::sign(&doc, admin)}).to_string()).unwrap();
+}
+
+const SEARCH_ON: [(&str, &str); 3] = [("STATUS_SBOM", "on"), ("STATUS_SBOM_RPS", "1000"), ("STATUS_SOFTWARE_SEARCH", "on")];
+
+/// A CycloneDX list: components (name, version, publisher) with hardware properties beside them,
+/// and a device component with a serial number.
+fn cdx(comps: &[(&str, &str, &str)]) -> Vec<u8> {
+    let c: Vec<Value> = comps
+        .iter()
+        .map(|(n, v, p)| json!({"type": "application", "name": n, "version": v, "publisher": p, "purl": "pkg:generic/x", "properties": [{"name": "tether:hw.serial", "value": "SN-HW-4242"}]}))
+        .collect();
+    serde_json::to_vec(&json!({"bomFormat": "CycloneDX", "specVersion": "1.6", "metadata": {"component": {"type": "device", "name": "PC-1", "properties": [{"name": "tether:hw.serial", "value": "SN-HW-4242"}]}}, "components": c})).unwrap()
+}
+
+/// Percent-encodes everything but letters and digits.
+fn pct(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+fn search_path(q: &str, v: Option<&str>) -> String {
+    let mut p = format!("/api/team/status/software?q={}", pct(q));
+    if let Some(v) = v {
+        p.push_str(&format!("&v={}", pct(v)));
+    }
+    p
+}
+
+/// A member's search (`kid`, from an address of its own).
+fn search(s: &Srv, m: &SigningKey, q: &str, v: Option<&str>) -> Reply {
+    let p = search_path(q, v);
+    let sig = reqauth::sign_request_for_kid(m, RELAY, "GET", &p, b"", now());
+    let b = m.verifying_key().to_bytes();
+    let from = format!("10.9.{}.{}", b[0], b[1]);
+    s.req("GET", &p, &[(reqauth::HEADER, &sig), ("X-Forwarded-For", &from)], b"")
+}
+
+fn hits(r: &Reply) -> Vec<(String, String, String)> {
+    let v = r.json();
+    v["hosts"].as_array().unwrap_or_else(|| panic!("{v}")).iter().map(|h| (h["uuid"].as_str().unwrap().to_owned(), h["name"].as_str().unwrap().to_owned(), h["version"].as_str().unwrap().to_owned())).collect()
+}
+
+fn sidecar(s: &Srv, uuid: &str) -> Option<String> {
+    std::fs::read_to_string(s.dir.join(format!("status/{uuid}.sw"))).ok()
+}
+
+fn search_records(s: &Srv, admin: &SigningKey) -> Vec<Value> {
+    team_audit(s, admin, "?event=search&limit=5000")["records"].as_array().unwrap().clone()
+}
+
+/// `n` devices `dev-0001`.. as `sbom_server`, a team document with `members` written before the
+/// start, `prep` on the folder, the search switched on, and `env`.
+fn search_server(n: usize, members: &[(&str, &SigningKey, Value)], env: &[(&str, &str)], prep: impl FnOnce(&Path)) -> (Srv, SigningKey, Vec<SigningKey>) {
+    let (admin, dir) = (generate_key(), new_dir());
+    let keys: Vec<SigningKey> = (1..=n).map(|_| generate_key()).collect();
+    for (i, k) in keys.iter().enumerate() {
+        prep_device(&dir, &format!("dev-{:04}", i + 1), k, now() - 120, 5);
+    }
+    write_team_doc(&dir, &admin, members);
+    prep(&dir);
+    let mut e = SEARCH_ON.to_vec();
+    e.extend_from_slice(env);
+    (spawn_env(dir, &key_to_b64(&admin.verifying_key()), &e), admin, keys)
+}
+
+#[test]
+fn software_search_finds_programs_by_name_publisher_and_version() {
+    let (m1, m2, m3) = (generate_key(), generate_key(), generate_key());
+    let (s, admin, k) = search_server(4, &[("A", &m1, json!({})), ("B", &m2, json!({})), ("C", &m3, json!({}))], &[], |_| {});
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", &cdx(&[("7-Zip", "19.00", "Igor Pavlov"), ("Google Chrome", "120.0.6099.71", "Google LLC")])).status, 204);
+    assert_eq!(sbom_put(&s, &k[1], "dev-0002", &cdx(&[("Google Chrome", "119.0.1", "Google LLC"), ("Mozilla Firefox", "121.0", "Mozilla")])).status, 204);
+    assert_eq!(sbom_put(&s, &k[2], "dev-0003", &cdx(&[("ÜBERWACHUNG Dienst", "2.1", "Praxis\u{202e}Soft\u{1}ware")])).status, 204);
+    // The sidecar: the three fields only, control and direction characters dropped, nothing of the hardware.
+    assert_eq!(sidecar(&s, "dev-0001").unwrap(), "7-Zip\t19.00\tIgor Pavlov\nGoogle Chrome\t120.0.6099.71\tGoogle LLC\n");
+    assert_eq!(sidecar(&s, "dev-0003").unwrap(), "ÜBERWACHUNG Dienst\t2.1\tPraxisSoftware\n");
+    for u in ["dev-0001", "dev-0002", "dev-0003"] {
+        let sw = sidecar(&s, u).unwrap();
+        assert!(!sw.contains("SN-HW") && !sw.contains("tether:hw") && !sw.contains("pkg:") && !sw.contains("PC-1"), "{sw}");
+    }
+    assert!(sidecar(&s, "dev-0004").is_none(), "no list, no sidecar");
+    // Name substring in any case; the first matching program per host.
+    let r = search(&s, &m1, "CHROME", None);
+    assert_eq!(r.status, 200, "{}", r.text());
+    let v = r.json();
+    assert_eq!((v["sbom"].clone(), v["more"].clone(), v["pending"].clone(), v["partial"].clone()), (json!(true), json!(0), json!(0), json!(false)));
+    assert!(v["built"].as_u64().unwrap() >= now() - 5);
+    assert_eq!(hits(&r), [("dev-0001".into(), "Google Chrome".into(), "120.0.6099.71".into()), ("dev-0002".into(), "Google Chrome".into(), "119.0.1".into())]);
+    // Version prefix; publisher; non-ASCII lower-cased per character.
+    assert_eq!(hits(&search(&s, &m1, "chrome", Some("120."))), [("dev-0001".into(), "Google Chrome".into(), "120.0.6099.71".into())]);
+    assert_eq!(hits(&search(&s, &m1, "google llc", Some("119"))).len(), 1);
+    assert_eq!(hits(&search(&s, &m1, "  mozilla ", None)), [("dev-0002".into(), "Mozilla Firefox".into(), "121.0".into())], "trimmed");
+    assert_eq!(hits(&search(&s, &m1, "überwachung", None)).len(), 1);
+    assert_eq!(hits(&search(&s, &m1, "praxissoftware", None)).len(), 1, "the publisher as cleaned");
+    // Hostile terms are plain text.
+    for q in [".*", "chrom.", "(a|b)*", "' OR 1=1 --", "\\\\", "\"\""] {
+        let r = search(&s, &m2, q, None);
+        assert_eq!((r.status, hits(&r).len()), (200, 0), "{q}");
+    }
+    // Every search is one audit record: the term and version asked, the number of hits, never the hits.
+    let recs = search_records(&s, &admin);
+    assert_eq!(recs.len(), 12);
+    assert_eq!((recs[0]["detail"].clone(), recs[0]["result"].as_u64(), recs[0]["actor"]["name"].as_str()), (json!({"q": "CHROME", "v": null, "hits": 2}), Some(200), Some("A")));
+    assert_eq!(recs[1]["detail"], json!({"q": "chrome", "v": "120.", "hits": 1}));
+    assert!(recs.iter().all(|r| r.get("target").is_none_or(|t| t.get("uuid").is_none())), "{recs:?}");
+    let log = team_audit_files(&s);
+    assert!(!log.contains("Google Chrome") && !log.contains("dev-0001") && !log.contains("120.0.6099"), "hits in the audit log");
+    // A search the cache answers is recorded too, with its hits.
+    assert_eq!(hits(&search(&s, &m3, "chrome", None)).len(), 2);
+    let recs = search_records(&s, &admin);
+    assert_eq!((recs.len(), recs[12]["detail"]["hits"].as_u64()), (13, Some(2)));
+    assert_eq!(metric(&s, "tether_api_status_software_searches_total"), Some(12.), "the cache answered one");
+}
+
+#[test]
+fn software_search_refusals_and_limits() {
+    let (m, nosbom, other) = (generate_key(), generate_key(), generate_key());
+    let (s, admin, k) = search_server(1, &[("M", &m, json!({})), ("NoSbom", &nosbom, json!({"sbom": false})), ("O", &other, json!({}))], &[], |_| {});
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", &cdx(&[("Google Chrome", "120.0", "Google LLC")])).status, 204);
+    // q 2 to 64 characters after trimming, no control characters; v at most 32: checked first.
+    for (q, v) in [("a", None), (" a ", None), (&"x".repeat(65)[..], None), ("ab\u{1}c", None), ("ab\tc", None), ("chrome", Some(&"1".repeat(33)[..])), ("chrome", Some("1\u{7f}"))] {
+        let r = search(&s, &nosbom, q, v);
+        assert_eq!(r.status, 400, "{q:?} {v:?}: {}", r.text());
+    }
+    let r = s.req("GET", &format!("{}&x=1", search_path("chrome", None)), &[], b"");
+    assert_eq!(r.status, 401, "the signature before anything");
+    assert_eq!(search(&s, &m, &"é".repeat(64), None).status, 200, "64 characters, 128 bytes");
+    assert_eq!(signed(&s, &k[0], "dev-0001", "GET", "/api/team/status/software?q=chrome", b"").status, 401, "a device signature");
+    let r = search(&s, &nosbom, "chrome", None);
+    assert_eq!((r.status, r.text()), (403, "this member may not read software lists".into()));
+    let refused: Vec<_> = search_records(&s, &admin).iter().filter(|r| r["actor"]["name"] == "NoSbom").map(|r| (r["result"].as_u64().unwrap(), r["detail"]["q"].as_str().unwrap_or("").to_owned())).collect();
+    assert!(refused.contains(&(403, "chrome".into())), "{refused:?}");
+    assert!(refused.contains(&(400, "abc".into())), "control characters dropped in the record: {refused:?}");
+    // Six searches a minute per member key (cache hits included), then 429; another member is not affected.
+    let codes: Vec<u16> = (0..5).map(|i| search(&s, &m, &format!("term{i}"), None).status).collect();
+    assert_eq!(codes, [200; 5]);
+    let r = search(&s, &m, "chrome", None);
+    let wait: u64 = r.header("Retry-After").unwrap().parse().unwrap();
+    assert_eq!(r.status, 429, "{}", r.text());
+    assert!((1..=60).contains(&wait), "the seconds left of the member's minute: {wait}");
+    assert_eq!(search(&s, &other, "chrome", None).status, 200);
+}
+
+/// One search at a time per relay: a second one meanwhile is `429 busy` (`Retry-After: 5`), a
+/// device post and a heartbeat are answered at once (before the search ends); the time budget ends
+/// a search with a partial answer (not cached).
+#[test]
+fn software_search_runs_one_at_a_time_without_holding_up_devices() {
+    let (a, b) = (generate_key(), generate_key());
+    let (s, _admin, k) = search_server(30, &[("A", &a, json!({})), ("B", &b, json!({}))], &[("TETHER_TEST_SEARCH_DELAY_MS", "50")], |_| {});
+    for i in 0..30 {
+        assert_eq!(sbom_put(&s, &k[i], &format!("dev-{:04}", i + 1), &cdx(&[("Google Chrome", "120.0", "Google LLC")])).status, 204);
+    }
+    std::thread::scope(|sc| {
+        let long = sc.spawn(|| {
+            let r = search(&s, &a, "chrome", None);
+            (r.status, hits(&r).len(), Instant::now())
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let r = search(&s, &b, "firefox", None);
+        assert_eq!((r.status, r.text(), r.header("Retry-After")), (429, "busy".into(), Some("5".into())));
+        let t = Instant::now();
+        assert_eq!(post(&s, &k[0], "dev-0001", &heartbeat("dev-0001", 6)).status, 200);
+        let hb = r#"{"uuid":"hb-00009","id":"111222339","profile":"technician","version":"0.5.21","os":"windows 10.0.26300","serial":3}"#;
+        assert_eq!(s.req("POST", "/api/heartbeat", &[], hb.as_bytes()).status, 200);
+        let (took, done) = (t.elapsed(), Instant::now());
+        assert!(took < Duration::from_millis(200), "device requests took {took:?}");
+        let (status, n, end) = long.join().unwrap();
+        assert_eq!((status, n), (200, 30));
+        assert!(done < end, "the device requests waited for the search");
+    });
+    drop(s);
+    // The budget: 30 sidecars at 50 ms each do not fit in 400 ms.
+    let (s, _admin, k) = search_server(30, &[("A", &a, json!({}))], &[("TETHER_TEST_SEARCH_DELAY_MS", "50"), ("TETHER_TEST_SEARCH_BUDGET_MS", "400")], |_| {});
+    for i in 0..30 {
+        assert_eq!(sbom_put(&s, &k[i], &format!("dev-{:04}", i + 1), &cdx(&[("Google Chrome", "120.0", "Google LLC")])).status, 204);
+    }
+    let t = Instant::now();
+    let r = search(&s, &a, "chrome", None);
+    assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+    let v = r.json();
+    assert_eq!(v["partial"], true, "{v}");
+    assert!(hits(&r).len() < 30);
+    assert_eq!(metric(&s, "tether_api_status_software_searches_total"), Some(1.));
+    search(&s, &a, "chrome", None);
+    assert_eq!(metric(&s, "tether_api_status_software_searches_total"), Some(2.), "a partial answer is not cached");
+}
+
+
+/// 2 000 hosts at most, `more` the rest; a member of some customers sees only theirs, and a host
+/// outside its scope counts nowhere (no host, `more` or `pending`): its answer is the one for a
+/// program nobody has. The cache key holds the scope. A list without a sidecar is `pending` until
+/// the scan has built it.
+#[test]
+fn software_search_caps_at_2000_hosts_and_keeps_to_the_scope() {
+    let (all, part, none) = (generate_key(), generate_key(), generate_key());
+    let (admin, dir) = (generate_key(), new_dir());
+    prep_many(&dir, 2010, 3); // customers c0, c1, c2 in turn
+    let at = now() - 7200;
+    let set_time = |p: &Path| std::fs::File::options().write(true).open(p).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(at)).unwrap();
+    update_json(&dir.join("status/seen.json"), |m| {
+        for i in 0..2010 {
+            let u = format!("dev-{i:06}");
+            // Chrome everywhere but two c2 hosts with Visio; dev-000005's list has no sidecar yet.
+            let visio = i == 2 || i == 5;
+            let doc = if visio { cdx(&[("Microsoft Visio", "16.0", "Microsoft")]) } else { cdx(&[("Google Chrome", "120.0", "Google LLC")]) };
+            let p = dir.join(format!("status/{u}.sbom.json"));
+            std::fs::write(&p, &doc).unwrap();
+            set_time(&p);
+            if i != 5 {
+                let p = dir.join(format!("status/{u}.sw"));
+                std::fs::write(&p, if visio { "Microsoft Visio\t16.0\tMicrosoft\n" } else { "Google Chrome\t120.0\tGoogle LLC\n" }).unwrap();
+                set_time(&p);
+            }
+            m.get_mut(&u).unwrap()["sbom"] = json!({"at": at, "size": doc.len(), "sha": sha16(&doc)});
+        }
+    });
+    write_team_doc(&dir, &admin, &[("All", &all, json!({})), ("Part", &part, json!({"customers": ["c0", "c1"]})), ("None", &none, json!({"customers": []}))]);
+    // The scan waits 3 s before each sidecar it builds: dev-000005 stays pending meanwhile.
+    let s = spawn_env(dir, &key_to_b64(&admin.verifying_key()), &[SEARCH_ON[0], SEARCH_ON[1], SEARCH_ON[2], ("TETHER_TEST_SCAN_PAUSE_MS", "3000")]);
+    let counts = |r: &Reply| {
+        let v = r.json();
+        (hits(r).len(), v["more"].as_u64().unwrap(), v["pending"].as_u64().unwrap())
+    };
+    assert_eq!(counts(&search(&s, &all, "chrome", None)), (2000, 8, 1));
+    assert_eq!(counts(&search(&s, &all, "visio", None)), (1, 0, 1));
+    // Part (c0, c1): its 1 340 Chrome hosts; Visio (c2 hosts only) answers as a program nobody has.
+    assert_eq!(counts(&search(&s, &part, "chrome", None)), (1340, 0, 0));
+    let (visio, nobody) = (search(&s, &part, "visio", None).json(), search(&s, &part, "nobody-has-this", None).json());
+    let strip = |mut v: Value| {
+        v.as_object_mut().unwrap().remove("built");
+        v
+    };
+    assert_eq!(strip(visio), strip(nobody));
+    assert_eq!(strip(search(&s, &none, "chrome", None).json()), json!({"sbom": true, "hosts": [], "more": 0, "pending": 0, "partial": false}));
+    // Built by the scan: no longer pending, and found.
+    wait_for("the sidecar built by the scan", || sidecar(&s, "dev-000005").is_some());
+    assert_eq!(counts(&search(&s, &all, "visi", None)), (2, 0, 0));
+    assert_eq!(sidecar(&s, "dev-000005").unwrap(), "Microsoft Visio\t16.0\tMicrosoft\n");
+    // The answer's size at the cap (2 000 hosts of the longest names and versions: below 1 MiB).
+    let r = search(&s, &all, "google", None);
+    assert!(r.body.len() < 200_000, "{}", r.body.len());
+}
+
+/// The sidecar goes with the list: the device's DELETE of the list, the device's release of its
+/// pin, an admin's and a member's removal, expiry; and all of them when the search is switched off.
+/// A list stored before the switch was on gets its sidecar from the start-up scan.
+#[test]
+fn sidecars_go_with_their_lists_and_with_the_switch() {
+    let (m, w) = (generate_key(), generate_key());
+    let doc = cdx(&[("Google Chrome", "120.0", "Google LLC")]);
+    let old = now() - 181 * 86_400;
+    let (s, admin, k) = search_server(6, &[("M", &m, json!({})), ("W", &w, json!({"write": true}))], &[], |d| {
+        for i in 1..=6 {
+            prep_sbom(d, &format!("dev-{i:04}"), &doc, now() - 7200);
+        }
+        update_json(&d.join("status/keys.json"), |m| m.get_mut("dev-0006").unwrap()["enrolled"] = old.into());
+        update_json(&d.join("status/seen.json"), |m| m.get_mut("dev-0006").unwrap()["last_seen"] = old.into());
+        // An orphan sidecar (no list) is removed by the scan.
+        std::fs::write(d.join("status/dev-0099.sw"), "x\ty\tz\n").unwrap();
+    });
+    // Lists from before: built by the start-up scan; the expired device has neither.
+    wait_for("the start-up scan", || (1..=5).all(|i| sidecar(&s, &format!("dev-{i:04}")).is_some()) && sidecar(&s, "dev-0099").is_none());
+    assert!(sidecar(&s, "dev-0006").is_none() && sbom_file(&s, "dev-0006").is_none(), "expired with its pin");
+    assert_eq!(hits(&search(&s, &m, "chrome", None)).len(), 5);
+    assert_eq!(signed(&s, &k[0], "dev-0001", "DELETE", PUT_SBOM, b"").status, 204);
+    assert_eq!(signed(&s, &k[1], "dev-0002", "DELETE", "/api/status", b"").status, 204);
+    assert_eq!(s.admin(&admin, "DELETE", "/api/admin/status/dev-0003", b"").status, 204);
+    assert_eq!(member_req(&s, &w, "DELETE", "/api/team/status/dev-0004", None, b"").status, 204);
+    for u in ["dev-0001", "dev-0002", "dev-0003", "dev-0004"] {
+        assert!(sidecar(&s, u).is_none(), "{u}");
+    }
+    assert_eq!(sidecar(&s, "dev-0005").unwrap(), "Google Chrome\t120.0\tGoogle LLC\n");
+    // A replacement that is not a software list: an empty sidecar (it never matches).
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", br#"{"bomFormat":"CycloneDX","components":{"name":"Google Chrome"}}"#).status, 204);
+    assert_eq!(sidecar(&s, "dev-0001").unwrap(), "");
+    // Switched off (the list stays): every sidecar goes, the route says so.
+    let s = restart_env(s, &admin, &[("STATUS_SBOM", "on")], false);
+    wait_for("the sidecars removed", || sidecar(&s, "dev-0005").is_none() && sidecar(&s, "dev-0001").is_none());
+    assert!(sbom_file(&s, "dev-0005").is_some());
+    let r = search(&s, &m, "chrome", None);
+    assert_eq!((r.status, r.text()), (200, r#"{"sbom":false,"hosts":[]}"#.into()));
+    let s = restart_env(s, &admin, &SEARCH_ON, false);
+    wait_for("the sidecar built again", || sidecar(&s, "dev-0005").is_some());
+    // STATUS_SBOM off: the search is off too.
+    let s = restart_env(s, &admin, &[("STATUS_SOFTWARE_SEARCH", "on")], false);
+    assert_eq!(search(&s, &m, "chrome", None).text(), r#"{"sbom":false,"hosts":[]}"#);
+    assert!(s.journal().contains("STATUS_SOFTWARE_SEARCH=on needs STATUS_SBOM=on"), "{}", s.journal());
+}
+
+/// Without a signed team document in force at start (a plain roster has no `sbom` permission and
+/// no customer scope), the switch stays off, with one line in the journal.
+#[test]
+fn software_search_needs_a_signed_team_document_at_start() {
+    let (s, admin, k) = sbom_server(1, &SEARCH_ON, |_| {});
+    let m = member(&s, &admin);
+    assert_eq!(search(&s, &m, "chrome", None).text(), r#"{"sbom":false,"hosts":[]}"#);
+    assert_eq!(s.journal().matches("software search stays off").count(), 1, "{}", s.journal());
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", &cdx(&[("Google Chrome", "120.0", "Google LLC")])).status, 204);
+    assert!(sidecar(&s, "dev-0001").is_none(), "no sidecar while off");
+    // A document published now takes effect at the next start.
+    publish_doc(&s, &admin, 1, &[("M", &m, json!({}))]);
+    assert_eq!(search(&s, &m, "chrome", None).text(), r#"{"sbom":false,"hosts":[]}"#);
+    let s = restart_env(s, &admin, &SEARCH_ON, false);
+    wait_for("the sidecar", || sidecar(&s, "dev-0001").is_some());
+    assert_eq!(hits(&search(&s, &m, "chrome", None)).len(), 1);
+}
+
+/// Hostile documents: bounded sidecars or empty ones, never a failed upload because of them.
+#[test]
+fn hostile_software_lists_give_bounded_sidecars() {
+    let m = generate_key();
+    let (s, _admin, k) = search_server(4, &[("M", &m, json!({}))], &[("STATUS_SBOM_MAX_KB", "4096")], |_| {});
+    // 100 000 components: the first 5 000 kept.
+    let many: Vec<String> = (0..100_000).map(|i| format!(r#"{{"name":"p{i}"}}"#)).collect();
+    let doc = format!(r#"{{"components":[{}]}}"#, many.join(","));
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", doc.as_bytes()).status, 204);
+    let sw = sidecar(&s, "dev-0001").unwrap();
+    assert_eq!((sw.lines().count(), sw.lines().last()), (5000, Some("p4999\t\t")));
+    // 10 000 levels of nesting in the components: empty; 512 KiB that is no software list: empty.
+    let deep = format!(r#"{{"components":[{}{}]}}"#, "[".repeat(10_000), "]".repeat(10_000));
+    assert_eq!(sbom_put(&s, &k[1], "dev-0002", deep.as_bytes()).status, 204);
+    assert_eq!(sidecar(&s, "dev-0002").unwrap(), "");
+    assert_eq!(sbom_put(&s, &k[2], "dev-0003", &sbom_doc(512 << 10, 'a')).status, 204);
+    assert_eq!(sidecar(&s, "dev-0003").unwrap(), "");
+    // Long fields cut to 128/64/128 bytes on a character boundary.
+    let long = cdx(&[(&"ä".repeat(100), &"9".repeat(100), &"€".repeat(100))]);
+    assert_eq!(sbom_put(&s, &k[3], "dev-0004", &long).status, 204);
+    assert_eq!(sidecar(&s, "dev-0004").unwrap(), format!("{}\t{}\t{}\n", "ä".repeat(64), "9".repeat(64), "€".repeat(42)));
+    assert_eq!(hits(&search(&s, &m, "ää", None)).len(), 1);
+}
+
+/// Exactly the request the desktop sends (apps/desktop/src-tauri/src/team.rs `software_path`:
+/// letters, digits and `-._~` as they are, every other byte `%XX`, `v` only when given; signed
+/// with `kid`), and the answer field by field as its `software_answer` reads it.
+#[test]
+fn software_search_answers_the_desktop_request() {
+    let m = generate_key();
+    let (s, _admin, k) = search_server(2, &[("M", &m, json!({}))], &[], |_| {});
+    assert_eq!(sbom_put(&s, &k[0], "dev-0001", &cdx(&[("Google Chrome", "120.0.6099.71", "Google LLC"), ("Grüne Praxis-Tools", "3.2", "Ärzte & Co")])).status, 204);
+    let enc = |s: &str| s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
+    let ask = |q: &str, v: &str| {
+        let p = if v.is_empty() { format!("/api/team/status/software?q={}", enc(q)) } else { format!("/api/team/status/software?q={}&v={}", enc(q), enc(v)) };
+        let sig = reqauth::sign_request_for_kid(&m, RELAY, "GET", &p, b"", now());
+        s.req("GET", &p, &[(reqauth::HEADER, &sig)], b"")
+    };
+    let r = ask("google chrome", "120");
+    assert_eq!((r.status, r.header("Content-Type")), (200, Some("application/json".into())));
+    let v = r.json();
+    let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys.len(), 6, "{v}");
+    assert_eq!(v["sbom"], true);
+    assert!(v["built"].as_u64().is_some_and(|b| b + 5 >= now() && b <= now()));
+    assert_eq!(v["hosts"], json!([{"uuid": "dev-0001", "name": "Google Chrome", "version": "120.0.6099.71"}]));
+    assert_eq!((v["more"].as_u64(), v["pending"].as_u64(), v["partial"].as_bool()), (Some(0), Some(0), Some(false)));
+    // The summary's uuid for the same host.
+    assert!(summary_hosts(&member_req(&s, &m, "GET", "/api/team/status", None, b"")).contains(&"dev-0001".to_owned()));
+    // UTF-8 percent bytes, `&` and `=` inside the term.
+    assert_eq!(hits(&ask("ärzte & co", "")), [("dev-0001".into(), "Grüne Praxis-Tools".into(), "3.2".into())]);
+    assert_eq!(hits(&ask("grüne praxis-tools", "3.")).len(), 1);
+    assert_eq!(hits(&ask("a&v=1#", "")).len(), 0);
+}

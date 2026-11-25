@@ -397,6 +397,7 @@ Everything is in `/var/lib/tether-api/status/` (directory `0700`, files `0600`):
 | `revoked.json` | Revoked tokens: `{"<token id>": <its expiry>}`, at most 10 000; an entry is dropped once the token would have expired anyway. Written by the status writer, synced before a revocation is answered. | Revoked tokens that have not expired work again. **Back this one up.** |
 | `<uuid>.json` | The last full report, byte for byte as the agent sent it. | Shown as "No full report yet" until the device posts a full one. |
 | `<uuid>.sbom.json` | Only with `STATUS_SBOM=on` ([The software list](#the-software-list)): the device's software list, byte for byte as it was uploaded. | The list of that device, until the device uploads one again. |
+| `<uuid>.sw` | Only with `STATUS_SOFTWARE_SEARCH=on` ([Software search](#software-search)): name, version and publisher of each program of the device's software list, one line each, nothing else. | Rebuilt from the list by the next scan (at start and hourly). |
 | `<uuid>.history.jsonl` | One line per change of a check (`id`, `from`, `to`, `time`, and `at`, the relay's receive time). Kept 90 days and at most 2000 lines. | The history of that device. |
 | `seen.json` | Last post of each device: time, `seq`, the `next` it was told, the summary entry (at most 2 KiB) and, when the device has a software list, its time, size and the first 16 hex digits of its SHA-256. Written at most every 5 minutes when something changed, and at a normal stop; a hard kill loses up to 5 minutes of last-seen times. | The hosts leave the summary until each posts a full report again (a heartbeat is answered `409 send a full report`). |
 | `summary.json` | The cached team summary, rebuilt at most every 30 s. | Rebuilt on the next request. |
@@ -419,7 +420,9 @@ Reports and history are worth keeping only if you want the history across a rest
 
 A device can also upload a list of the software installed on it, as one JSON document (the
 monitoring agent that supports it sends CycloneDX 1.6). The relay stores it and hands it to team
-members; it reads no field of it. **Off by default.** `STATUS_SBOM=on` in `api.env` enables it
+members. It reads no field of it, except with the software search switched on
+([Software search](#software-search)): then it reads the programs' names, versions and publishers
+into a sidecar file. **Off by default.** `STATUS_SBOM=on` in `api.env` enables it
 (any other value leaves it off). While it is off, the upload and the team members' read answer
 `404` and the answer to a post has no `sbom` field; a device's own signed
 `DELETE /api/status/sbom` is still carried out (`204`; it has no budget and no hourly limit, so this
@@ -509,6 +512,38 @@ programs, their versions and publishers and the machine's hardware identity
 ([PRIVACY.md](../PRIVACY.md)). A device that is enrolled can store one document of its own choosing
 there, at most `STATUS_SBOM_MAX_KB`, once an hour, and nothing in it is ever run
 ([SECURITY.md](../SECURITY.md#the-software-list)).
+
+### Software search
+
+Technicians can find every computer that has a program installed (`software:chrome` in the
+Tether desktop's host search; route and answers: [api.md](api.md#get-apiteamstatussoftwareqtextvversion-prefix-member-signed)).
+The relay answers from a **sidecar** it keeps beside each stored list, `status/<uuid>.sw`: for each
+program of the list's top-level `components` its name, version and publisher, cut to 128, 64 and
+128 bytes, control and direction characters removed, at most 5 000 programs. Nothing else of the
+list goes into it: no hardware identity, serial number, hashes or other properties. A document that
+is not such a list gets an empty sidecar. So with the search on, **the relay reads the software
+lists** for this purpose: the three fields of each program, when the list is stored.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `STATUS_SOFTWARE_SEARCH` | off | `on` enables the search and its sidecars. It needs `STATUS_SBOM=on` and a signed team document in force when tether-api starts (the permission `sbom` and the members' customers apply to the search; a plain roster has neither). Without them it stays off and the journal says why in one line; a document published later takes effect at the next start. |
+
+- **Who can search.** Members with the `sbom` permission, and only over the computers of their
+  customers; a computer outside them is never looked at and counts nowhere in the answer. Every
+  search, also a refused one, is written to the team audit log with its term and the number of
+  computers found, never which ones.
+- **Limits.** One search at a time on the relay (another gets `429 busy`), 6 a minute per member,
+  the same search by members of the same customers answered from a 60 s cache, at most 2 000
+  computers in an answer, a time budget of 10 s (then the answer says it is incomplete).
+- **Lifetime.** A sidecar is written when its list is stored and goes with it (the device deletes
+  its list, the device is removed, it expires). Lists stored before the search was switched on get
+  theirs from the scan at start (one at a time, 10 ms apart, without holding up anything else);
+  until then a search counts them as `pending`. With the search switched off, the next start removes
+  every sidecar; the lists stay.
+- **What a device can do.** Make its own computer match any search (by listing any program), as it
+  can make its list show anything today. It cannot change another computer's sidecar.
+- **Cost.** Measured in [scaling.md](scaling.md) (20 000 lists of 200 programs under
+  `MemoryMax=64M`).
 
 ### Load behaviour
 

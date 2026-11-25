@@ -121,6 +121,219 @@ const HISTORY_DAYS: u64 = 90;
 /// Accepted software lists per uuid: one per this many seconds.
 const SBOM_INTERVAL: u64 = 3600;
 
+/// Software search (`GET /api/team/status/software`): `STATUS_SOFTWARE_SEARCH=on` with
+/// `STATUS_SBOM=on` and a signed team document in force at start (main.rs). Off: the route answers
+/// `{"sbom":false,"hosts":[]}`, no sidecar is written and the scan removes every one.
+pub static SEARCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn search_on() -> bool {
+    SEARCH.load(Ordering::Relaxed)
+}
+
+/// A sidecar (`<uuid>.sw`): one `name\tversion\tpublisher` line per component of the list, at most
+/// this many, each field cut to its bytes.
+const SW_LINES: usize = 5000;
+const SW_NAME: usize = 128;
+const SW_VERSION: usize = 64;
+const SW_PUBLISHER: usize = 128;
+/// Bytes of a sidecar read at most (5 000 full lines are about 1.6 MB).
+const SW_READ_MAX: u64 = 2 << 20;
+/// Hosts in one answer at most (`more`: the matching hosts left out).
+const SEARCH_HOSTS: usize = 2000;
+const SEARCH_PER_MIN: u32 = 6;
+const SEARCH_CACHE_SECS: u64 = 60;
+/// Answers kept for `SEARCH_CACHE_SECS`, all together at most this many bytes (one answer of 2 000
+/// hosts is at most about 1 MB).
+const SEARCH_CACHE_BYTES: usize = 2 << 20;
+/// A search ends after this long with what it found (`"partial":true`, not cached).
+const SEARCH_BUDGET: Duration = Duration::from_secs(10);
+
+/// Settings for tests only (`TETHER_TEST_<name>`, milliseconds): a pause per sidecar searched, the
+/// search budget, the scan's pause before each sidecar it builds.
+fn test_ms(name: &str, cell: &'static OnceLock<Option<u64>>) -> Option<Duration> {
+    cell.get_or_init(|| std::env::var(format!("TETHER_TEST_{name}")).ok().and_then(|v| v.parse().ok())).map(Duration::from_millis)
+}
+
+/// Searches run (not answered from the cache), their time, the longest (`/metrics`).
+pub static SEARCHES: AtomicU64 = AtomicU64::new(0);
+pub static SEARCH_US: AtomicU64 = AtomicU64::new(0);
+pub static SEARCH_MAX_US: AtomicU64 = AtomicU64::new(0);
+
+/// A character a sidecar and a search term leave out: control characters and those that change
+/// how text is shown (direction marks and overrides, zero-width, line and paragraph separators).
+fn hidden(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
+}
+
+/// `s` without hidden characters, at most `max` bytes (on a character boundary).
+fn clean(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    for c in s.chars().filter(|c| !hidden(*c)) {
+        if out.len() + c.len_utf8() > max {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `s` lower-cased into `buf`: ASCII as such, anything else per character (`char::to_lowercase`,
+/// Unicode's mapping without context or normalisation). Terms and sidecar text the same way.
+fn lower_into(s: &str, buf: &mut String) {
+    buf.clear();
+    if s.is_ascii() {
+        buf.push_str(s);
+        buf.make_ascii_lowercase();
+    } else {
+        buf.extend(s.chars().flat_map(char::to_lowercase));
+    }
+}
+
+fn lower(s: &str) -> String {
+    let mut b = String::new();
+    lower_into(s, &mut b);
+    b
+}
+
+/// One field of a component as a sidecar keeps it: a string, cleaned and cut to `N` bytes (no copy
+/// of the rest is made).
+struct Cut<const N: usize>(String);
+
+impl<'de, const N: usize> Deserialize<'de> for Cut<N> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<const N: usize>;
+        impl<const N: usize> Visitor<'_> for V<N> {
+            type Value = Cut<N>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a string")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Cut<N>, E> {
+                Ok(Cut(clean(s, N)))
+            }
+        }
+        d.deserialize_str(V::<N>)
+    }
+}
+
+/// A component: these three fields, every other one skipped unread (`IgnoredAny`).
+#[derive(Deserialize)]
+struct Comp {
+    name: Option<Cut<SW_NAME>>,
+    version: Option<Cut<SW_VERSION>>,
+    publisher: Option<Cut<SW_PUBLISHER>>,
+}
+
+/// Writes the sidecar lines of a software list as it is parsed: the top-level `components` only,
+/// the first `SW_LINES` with a name or publisher, everything else skipped (serde_json skips without
+/// recursion; the components themselves are within its depth limit).
+struct Sidecar<'w, W: Write> {
+    out: &'w mut W,
+    lines: usize,
+    failed: Option<io::Error>,
+}
+
+/// A map key, compared without a copy.
+struct IsComponents(bool);
+
+impl<'de> Deserialize<'de> for IsComponents {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = IsComponents;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a key")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<IsComponents, E> {
+                Ok(IsComponents(s == "components"))
+            }
+        }
+        d.deserialize_str(V)
+    }
+}
+
+impl<'de, W: Write> Visitor<'de> for &mut Sidecar<'_, W> {
+    type Value = ();
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a software list")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<(), A::Error> {
+        while let Some(IsComponents(c)) = m.next_key()? {
+            if c {
+                m.next_value_seed(Components(&mut *self))?;
+            } else {
+                m.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+struct Components<'a, 'w, W: Write>(&'a mut Sidecar<'w, W>);
+
+impl<'de, W: Write> serde::de::DeserializeSeed<'de> for Components<'_, '_, W> {
+    type Value = ();
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_seq(self)
+    }
+}
+
+impl<'de, W: Write> Visitor<'de> for Components<'_, '_, W> {
+    type Value = ();
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a list of components")
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        let sc = self.0;
+        while sc.lines < SW_LINES {
+            let Some(c) = seq.next_element::<Comp>()? else { return Ok(()) };
+            let (n, v, p) = (c.name.map(|f| f.0).unwrap_or_default(), c.version.map(|f| f.0).unwrap_or_default(), c.publisher.map(|f| f.0).unwrap_or_default());
+            if n.is_empty() && p.is_empty() {
+                continue;
+            }
+            if let Err(e) = sc.out.write_all(format!("{n}\t{v}\t{p}\n").as_bytes()) {
+                sc.failed = Some(e);
+                return Err(serde::de::Error::custom("write failed"));
+            }
+            sc.lines += 1;
+        }
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(())
+    }
+}
+
+/// The sidecar lines of `doc` written to `out`: `Ok(false)` when `doc` is not a readable software
+/// list (what was written then is to be dropped: an empty sidecar), `Err` when writing failed.
+fn sidecar_lines(doc: &[u8], out: &mut impl Write) -> io::Result<bool> {
+    let mut sc = Sidecar { out, lines: 0, failed: None };
+    let mut de = serde_json::Deserializer::from_slice(doc);
+    let ok = de.deserialize_map(&mut sc).and_then(|()| de.end()).is_ok();
+    match sc.failed {
+        Some(e) => Err(e),
+        None => Ok(ok),
+    }
+}
+
+/// Writes the sidecar of `doc` to `tmp` (new, 0600), with the list's mtime `at` (how a search and
+/// the scan tell it describes the list in place), synced.
+fn write_sidecar(tmp: &Path, doc: &[u8], at: u64) -> io::Result<()> {
+    let f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(tmp)?;
+    let r = (|| {
+        let mut w = io::BufWriter::new(&f);
+        if sidecar_lines(doc, &mut w)? {
+            w.flush()?;
+        } else {
+            let _ = w.into_parts(); // the buffer dropped unwritten
+            f.set_len(0)?;
+        }
+        f.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(at))?;
+        f.sync_data()
+    })();
+    if r.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    r
+}
+
 /// Relay settings (api.env): `STATUS=off`, `STATUS_TARGET_RPS` (default 10, at least 1),
 /// `STATUS_MAX_DEVICES` (default 20 000, the size load-tested within `MemoryMax=64M`); the
 /// software list: `STATUS_SBOM=on` (off by default), `STATUS_SBOM_MAX_KB` (default 512),
@@ -652,6 +865,20 @@ pub struct Status {
     sbom_scanned: u64,
     /// A scan's thread is running.
     sbom_scanning: bool,
+    /// Software search: searches per member key and minute; the answers of the last
+    /// `SEARCH_CACHE_SECS` (key: scope, term, version); whether a search runs (one at a time).
+    search_hits: HashMap<String, (u64, u32)>,
+    search_cache: VecDeque<Cached>,
+    searching: bool,
+}
+
+/// A search answer kept for `SEARCH_CACHE_SECS`.
+struct Cached {
+    /// `Permissions::scope_key`, term and version (lower-cased), one per line.
+    key: String,
+    built: u64,
+    body: Arc<Vec<u8>>,
+    hits: u64,
 }
 
 impl Status {
@@ -962,6 +1189,18 @@ impl Status {
         len <= old || self.sbom_bytes.saturating_sub(old) + len <= conf().sbom_total
     }
 
+    /// Keeps a search answer; the oldest go beyond `SEARCH_CACHE_BYTES`.
+    fn search_cache_put(&mut self, c: Cached) {
+        self.search_cache.retain(|x| x.key != c.key);
+        if c.body.len() > SEARCH_CACHE_BYTES {
+            return;
+        }
+        self.search_cache.push_back(c);
+        while self.search_cache.iter().map(|c| c.body.len()).sum::<usize>() > SEARCH_CACHE_BYTES {
+            self.search_cache.pop_front();
+        }
+    }
+
     /// 429 while `uuid`'s last accepted list is younger than an hour or one is being written.
     fn sbom_hour(&self, uuid: &str, t: u64) -> Result<(), Resp> {
         let last = self.dev.get(uuid).and_then(|s| s.sbom.as_ref()).map(|r| r.at).max(self.sbom_last.get(uuid).copied());
@@ -1018,11 +1257,18 @@ fn sbom_store(app: &Mutex<App>, uuid: String, sig: String, key: String, ip: Stri
         }
         a.check_space(len)?;
         a.status.sbom_writing.insert(uuid.clone());
-        crate::tmp_path(&a.data)
+        (crate::tmp_path(&a.data), search_on().then(|| crate::tmp_path(&a.data)))
     };
+    let (tmp, sw_tmp) = tmp;
     // The record's time is the file's mtime (kept by the rename), so the start-up scan can tell a
     // file that a lost record does not describe.
     let wrote = write_synced(&tmp, &raw).and_then(|()| fs::metadata(&tmp)).map(|m| mtime(&m));
+    // With the search on, the sidecar from the same bytes, parsed once, still without the lock:
+    // written as it is parsed (no copy of the list), with the list's time.
+    let sw = match (&wrote, &sw_tmp) {
+        (Ok(at), Some(p)) => write_sidecar(p, &raw, *at).is_ok(),
+        _ => false,
+    };
     let mut a = lock(app);
     a.status.sbom_writing.remove(&uuid);
     let r = wrote.map_err(crate::internal).and_then(|at| {
@@ -1040,9 +1286,20 @@ fn sbom_store(app: &Mutex<App>, uuid: String, sig: String, key: String, ip: Stri
         Ok(at) => at,
         Err(e) => {
             let _ = fs::remove_file(&tmp);
+            if let Some(p) = &sw_tmp {
+                let _ = fs::remove_file(p);
+            }
             return Err(e);
         }
     };
+    // The sidecar beside it; one that could not be written leaves none (the scan builds it).
+    if let Some(p) = &sw_tmp {
+        let dest = file(&a.data, &uuid, "sw");
+        if !sw || fs::rename(p, &dest).is_err() {
+            let _ = fs::remove_file(p);
+            let _ = fs::remove_file(&dest);
+        }
+    }
     a.status.sbom_record(&uuid, Some(Sbom { at, size: len, sha: digest[..16].to_owned() }));
     a.status.sbom_last.insert(uuid, at);
     Ok(empty(204))
@@ -1080,7 +1337,7 @@ fn claim_synced(app: &Mutex<App>, uuid: &str, (log, id): (fs::File, String)) {
 
 fn remove_files(data: &Path, uuids: &[String]) {
     for u in uuids {
-        for ext in ["json", "history.jsonl", "sbom.json"] {
+        for ext in ["json", "history.jsonl", "sbom.json", "sw"] {
             let _ = fs::remove_file(file(data, u, ext));
         }
     }
@@ -1887,7 +2144,46 @@ impl App {
         self.device_verify(rq, &sig, &uuid, "DELETE", url, raw)?;
         self.status.sbom_record(&uuid, None);
         let _ = fs::remove_file(file(&self.data, &uuid, "sbom.json"));
+        let _ = fs::remove_file(file(&self.data, &uuid, "sw"));
         Ok(empty(204))
+    }
+
+    /// `GET /api/team/status/software?q=<2-64 characters>[&v=<at most 32>]` (member-signed): the hosts
+    /// in the member's scope with a program whose name or publisher contains `q` and whose version
+    /// starts with `v` (both lower-cased, [`lower_into`]). Checked in this order: the terms (`400`),
+    /// the switch (`{"sbom":false,"hosts":[]}`), `sbom` (`403`), 6 a minute per member key (`429`),
+    /// the cache (60 s per scope, term and version), one search at a time (`429 busy`). The search
+    /// itself runs after the lock is released ([`search`]).
+    pub(crate) fn team_status_software(&mut self, url: &str, scope: &Permissions, key: &str) -> Result<Resp, Resp> {
+        let (q, v) = search_terms(url)?;
+        self.status_open()?;
+        if !search_on() {
+            return Ok(tiny_http::Response::from_data(&br#"{"sbom":false,"hosts":[]}"#[..]).with_header(hdr("Content-Type", "application/json")).boxed());
+        }
+        if !scope.sbom {
+            return Err(text(403, "this member may not read software lists"));
+        }
+        let t = now();
+        if !rate_ok(&mut self.status.search_hits, key.to_owned(), t, SEARCH_PER_MIN) {
+            // The seconds until this member's minute is over.
+            let wait = self.status.search_hits.get(key).map_or(60, |(start, _)| (start + 60).saturating_sub(t).max(1));
+            return Err(text(429, "too many searches").with_header(hdr("Retry-After", &wait.to_string())));
+        }
+        let ck = format!("{}\n{q}\n{v}", scope.scope_key());
+        if let Some(c) = self.status.search_cache.iter().find(|c| c.key == ck && t < c.built + SEARCH_CACHE_SECS) {
+            let (body, hits) = (c.body.clone(), c.hits);
+            if let Some(r) = &mut self.audit_pending {
+                r.detail["hits"] = hits.into();
+            }
+            return Ok(search_answer(&body));
+        }
+        if self.status.searching {
+            return Err(text(429, "busy").with_header(hdr("Retry-After", "5")));
+        }
+        self.status.searching = true;
+        // Its record is written by the search, with the number of hits.
+        let (rec, scope, data) = (self.audit_pending.take(), scope.clone(), self.data.clone());
+        self.defer(move |app| search(app, &data, &q, &v, &scope, ck, t, rec))
     }
 
     /// `GET /api/team/status/<uuid>/sbom`: the list as stored, its hash as the ETag. Opened under
@@ -2335,6 +2631,8 @@ impl App {
         self.status.enroll_hits.retain(|_, (start, _)| t < *start + 60);
         self.status.refused_hits.retain(|_, (start, _)| t < *start + 60);
         self.status.sbom_last.retain(|_, at| t < *at + SBOM_INTERVAL);
+        self.status.search_hits.retain(|_, (start, _)| t < *start + 60);
+        self.status.search_cache.retain(|c| t < c.built + SEARCH_CACHE_SECS);
         // Hourly, in the status writer: records and files matched up, orphans removed. The first
         // run is queued by `start_writer`.
         if t >= self.status.sbom_scanned + SBOM_INTERVAL {
@@ -2543,6 +2841,227 @@ fn sbom_scan(app: &Mutex<App>) {
         std::thread::sleep(SBOM_SCAN_PAUSE);
     }
     eprintln!("status: software lists checked: {} files, {reread} read again, {rebuilt} records rebuilt", files.len());
+    sidecar_scan(app, &data);
+}
+
+static SCAN_PAUSE_TEST: OnceLock<Option<u64>> = OnceLock::new();
+static SEARCH_DELAY_TEST: OnceLock<Option<u64>> = OnceLock::new();
+static SEARCH_BUDGET_TEST: OnceLock<Option<u64>> = OnceLock::new();
+
+/// After the records are matched up: with the search on, every list whose sidecar is missing or
+/// does not describe it (its mtime is not the record's time: a list stored before the switch, or
+/// replaced while the relay was down) gets one, read and parsed here, one at a time with
+/// `SBOM_SCAN_PAUSE` after each (so 20 000 lists from before are indexed within minutes and
+/// nothing else waits: no lock is held while reading or parsing); a sidecar without a list is
+/// removed. With the search off, every sidecar is removed. One journal line.
+fn sidecar_scan(app: &Mutex<App>, data: &Path) {
+    let (mut built, mut removed) = (0, 0);
+    if search_on() {
+        let _ = chunks(app, dev_map, |_, u, s| s.sbom.as_ref().map(|r| (u.clone(), r.at)), |buf| {
+            for (u, at) in buf.drain(..) {
+                if crate::STOP.load(Ordering::SeqCst) {
+                    return Err(io::Error::other("stopping"));
+                }
+                let sw = file(data, &u, "sw");
+                if fs::metadata(&sw).is_ok_and(|m| mtime(&m) == at) {
+                    continue;
+                }
+                if let Some(d) = test_ms("SCAN_PAUSE_MS", &SCAN_PAUSE_TEST) {
+                    std::thread::sleep(d);
+                }
+                let Ok(doc) = fs::read(file(data, &u, "sbom.json")) else { continue };
+                let tmp = crate::tmp_path(data);
+                let ok = write_sidecar(&tmp, &doc, at).is_ok();
+                drop(doc);
+                if ok {
+                    let a = lock(app);
+                    // Still the list it was read from (an upload meanwhile has another time).
+                    let cur = a.status.dev.get(&*u).and_then(|s| s.sbom.as_ref()).map(|r| r.at);
+                    if cur == Some(at) && !a.status.sbom_writing.contains(&*u) && fs::rename(&tmp, &sw).is_ok() {
+                        built += 1;
+                    } else {
+                        let _ = fs::remove_file(&tmp);
+                    }
+                }
+                std::thread::sleep(SBOM_SCAN_PAUSE);
+            }
+            Ok(())
+        });
+    }
+    if let Ok(dir) = fs::read_dir(data.join("status")) {
+        for e in dir.flatten() {
+            let Some(u) = e.file_name().to_str().and_then(|n| n.strip_suffix(".sw")).filter(|u| st::valid_uuid(u)).map(str::to_owned) else { continue };
+            let a = lock(app);
+            if !search_on() || (a.status.dev.get(u.as_str()).is_none_or(|s| s.sbom.is_none()) && !a.status.sbom_writing.contains(&u)) {
+                let _ = fs::remove_file(e.path());
+                removed += 1;
+            }
+        }
+    }
+    eprintln!("status: software search sidecars: {built} built, {removed} removed");
+}
+
+/// `q` and `v` of a search, trimmed, checked and lower-cased; `400` otherwise.
+fn search_terms(url: &str) -> Result<(String, String), Resp> {
+    let (mut q, mut v) = (None, None);
+    for kv in url.split_once('?').map_or("", |(_, q)| q).split('&').filter(|s| !s.is_empty()) {
+        let (k, val) = kv.split_once('=').unwrap_or((kv, ""));
+        match k {
+            "q" if q.is_none() => q = Some(crate::audit::unescape(val)),
+            "v" if v.is_none() => v = Some(crate::audit::unescape(val)),
+            _ => return Err(text(400, &format!("unexpected parameter {}", teamaudit_text(k)))),
+        }
+    }
+    let (q, v) = (q.unwrap_or_default(), v.unwrap_or_default());
+    let (q, v) = (q.trim(), v.trim());
+    if !(2..=64).contains(&q.chars().count()) {
+        return Err(text(400, "q must be 2 to 64 characters"));
+    }
+    if v.chars().count() > 32 {
+        return Err(text(400, "v must be at most 32 characters"));
+    }
+    if q.chars().chain(v.chars()).any(hidden) {
+        return Err(text(400, "q and v must not contain control characters"));
+    }
+    Ok((lower(q), lower(v)))
+}
+
+/// At most 32 bytes of a parameter name for an error text, without hidden characters.
+fn teamaudit_text(k: &str) -> String {
+    clean(k, 32)
+}
+
+/// The audit record's detail of a search: term and version as asked, cleaned and cut to 128 bytes.
+pub(crate) fn search_detail(url: &str) -> serde_json::Value {
+    let p = |k| crate::team::query_param(url, k).map(|s| clean(s.trim(), 128));
+    serde_json::json!({"q": p("q"), "v": p("v")})
+}
+
+fn search_answer(body: &[u8]) -> Resp {
+    // Up to about 1 MB: sent with a length, not chunked (as the other lists).
+    tiny_http::Response::from_data(body.to_vec()).with_header(hdr("Content-Type", "application/json")).with_chunked_threshold(usize::MAX).boxed()
+}
+
+/// Reads sidecars line by line with two reused buffers.
+#[derive(Default)]
+struct Matcher {
+    line: String,
+    low: String,
+}
+
+impl Matcher {
+    /// The first program in the sidecar at `path` matching `q` (name or publisher) and `v`
+    /// (version prefix): `None` when there is no sidecar describing the list of time `at`
+    /// (pending), `Some(None)` when nothing matches.
+    fn first(&mut self, path: &Path, at: u64, q: &str, v: &str) -> Option<Option<(String, String)>> {
+        let f = fs::File::open(path).ok()?;
+        if mtime(&f.metadata().ok()?) != at {
+            return None;
+        }
+        let mut r = BufReader::new(f.take(SW_READ_MAX));
+        loop {
+            self.line.clear();
+            match r.read_line(&mut self.line) {
+                Ok(0) | Err(_) => return Some(None),
+                Ok(_) => {}
+            }
+            let mut it = self.line.trim_end_matches('\n').splitn(3, '\t');
+            let (n, ver, p) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
+            if !v.is_empty() {
+                lower_into(ver, &mut self.low);
+                if !self.low.starts_with(v) {
+                    continue;
+                }
+            }
+            lower_into(n, &mut self.low);
+            let mut hit = self.low.contains(q);
+            if !hit {
+                lower_into(p, &mut self.low);
+                hit = self.low.contains(q);
+            }
+            if hit {
+                return Some(Some((n.to_owned(), ver.to_owned())));
+            }
+        }
+    }
+}
+
+/// A software search, after the state lock is released: the in-scope devices with a list are
+/// copied out `CHUNK` at a time (uuid and list time, under short lock holds), their sidecars read
+/// one at a time from disk (memory: two line buffers and the answer of at most 2 000 hosts), until
+/// done or `SEARCH_BUDGET` (then `"partial":true`, not cached). Devices outside the scope are never
+/// looked at. The audit record gets the number of hits (never the hits).
+#[allow(clippy::too_many_arguments)]
+fn search(app: &Mutex<App>, data: &Path, q: &str, v: &str, scope: &Permissions, key: String, t: u64, rec: Option<crate::teamaudit::Rec>) -> Result<Resp, Resp> {
+    struct Running<'a>(&'a Mutex<App>);
+    impl Drop for Running<'_> {
+        fn drop(&mut self) {
+            lock(self.0).status.searching = false;
+        }
+    }
+    #[derive(Serialize)]
+    struct Host {
+        uuid: Arc<str>,
+        name: String,
+        version: String,
+    }
+    #[derive(Serialize)]
+    struct Answer<'a> {
+        sbom: bool,
+        built: u64,
+        hosts: &'a [Host],
+        more: u64,
+        pending: u64,
+        partial: bool,
+    }
+    let running = Running(app);
+    let started = std::time::Instant::now();
+    let budget = test_ms("SEARCH_BUDGET_MS", &SEARCH_BUDGET_TEST).unwrap_or(SEARCH_BUDGET);
+    let delay = test_ms("SEARCH_DELAY_MS", &SEARCH_DELAY_TEST);
+    let (mut hosts, mut more, mut pending, mut partial) = (Vec::new(), 0u64, 0u64, false);
+    let mut m = Matcher::default();
+    let in_scope = |a: &App, u: &Arc<str>, s: &Seen| {
+        let at = s.sbom.as_ref()?.at;
+        scope.sees(a.status.keys.get(&**u)?.customer.as_deref()).then(|| (u.clone(), at))
+    };
+    let _ = chunks(app, dev_map, in_scope, |buf| {
+        for (u, at) in buf.drain(..) {
+            if started.elapsed() >= budget {
+                partial = true;
+                return Err(io::Error::other("search budget"));
+            }
+            if let Some(d) = delay {
+                std::thread::sleep(d);
+            }
+            match m.first(&file(data, &u, "sw"), at, q, v) {
+                None => pending += 1,
+                Some(None) => {}
+                Some(Some((name, version))) if hosts.len() < SEARCH_HOSTS => hosts.push(Host { uuid: u, name, version }),
+                Some(Some(_)) => more += 1,
+            }
+        }
+        Ok(())
+    });
+    let hits = hosts.len() as u64 + more;
+    let body = Arc::new(serde_json::to_vec(&Answer { sbom: true, built: t, hosts: &hosts, more, pending, partial }).map_err(crate::internal)?);
+    drop(hosts);
+    let us = started.elapsed().as_micros() as u64;
+    SEARCHES.fetch_add(1, Ordering::Relaxed);
+    SEARCH_US.fetch_add(us, Ordering::Relaxed);
+    SEARCH_MAX_US.fetch_max(us, Ordering::Relaxed);
+    let log = {
+        let mut a = lock(app);
+        if !partial {
+            a.status.search_cache_put(Cached { key, built: t, body: body.clone(), hits });
+        }
+        a.team_audit.clone()
+    };
+    drop(running);
+    if let Some(mut r) = rec {
+        r.detail["hits"] = hits.into();
+        log.submit(r.answered(200));
+    }
+    Ok(search_answer(&body))
 }
 
 fn tick(app: &Arc<Mutex<App>>) {
@@ -2736,6 +3255,91 @@ fn trim_file(app: &Arc<Mutex<App>>, uuid: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lines_of(doc: &str) -> (bool, String) {
+        let mut out = Vec::new();
+        let ok = sidecar_lines(doc.as_bytes(), &mut out).unwrap();
+        (ok, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn a_sidecar_holds_three_fields_of_the_top_level_components_only() {
+        let doc = r#"{"metadata":{"component":{"name":"PC-1","properties":[{"name":"tether:hw.serial","value":"SN1"}]}},
+            "components":[{"name":"A\tB\nC","version":"1","publisher":"P","hashes":[{"content":"ff"}],"components":[{"name":"inner"}],"properties":[{"name":"tether:hw.x","value":"y"}]},
+            {"version":"2"},{"publisher":"Only P"},{"name":null,"version":null}],"x":{"components":[{"name":"elsewhere"}]}}"#;
+        assert_eq!(lines_of(doc), (true, "ABC\t1\tP\n\t\tOnly P\n".to_owned()));
+        // Not a readable list: false (the caller keeps an empty sidecar).
+        for bad in [r#"[1,2]"#, r#"{"components":{"name":"x"}}"#, r#"{"components":[{"name":1}]}"#, r#"{"components":[{"name":"a","name":"b"}]}"#, r#"{"components":[{"name":"a"}]"#, r#"{"components":[{"name":"a"}]} x"#] {
+            assert!(!lines_of(bad).0, "{bad}");
+        }
+        let deep = format!(r#"{{"components":[{}{}]}}"#, "[".repeat(10_000), "]".repeat(10_000));
+        assert!(!lines_of(&deep).0);
+        // Deep nesting in a skipped field: walked without recursion, the list is read.
+        let skipped = format!(r#"{{"x":{}{},"components":[{{"name":"ok"}}]}}"#, "[".repeat(100_000), "]".repeat(100_000));
+        assert_eq!(lines_of(&skipped), (true, "ok\t\t\n".to_owned()));
+        // 100 000 components: the first 5 000 with a name or publisher.
+        let many: Vec<String> = (0..100_000).map(|i| if i % 2 == 0 { "{}".to_owned() } else { format!(r#"{{"name":"p{i}"}}"#) }).collect();
+        let (ok, s) = lines_of(&format!(r#"{{"components":[{}]}}"#, many.join(",")));
+        assert_eq!((ok, s.lines().count(), s.lines().last()), (true, 5000, Some("p9999\t\t")));
+        // Cut on a character boundary after hidden characters are dropped.
+        assert_eq!(clean(&format!("\u{202e}{}", "€".repeat(50)), 128), "€".repeat(42));
+        assert_eq!(clean("a\u{200b}b\u{7f}c\u{feff}", 128), "abc");
+    }
+
+    #[test]
+    fn search_terms_are_checked_and_lower_cased() {
+        let t = |u: &str| search_terms(u).map_err(|r| r.status_code().0);
+        assert_eq!(t("/x?q=%20Chrome%20&v=120"), Ok(("chrome".into(), "120".into())));
+        assert_eq!(t("/x?q=%C3%9Cber"), Ok(("über".into(), String::new())));
+        for bad in ["/x", "/x?q=a", "/x?q=ab&x=1", "/x?q=ab&q=cd", "/x?q=a%01b", "/x?q=ab&v=123456789012345678901234567890123", "/x?q=a%E2%80%AEb"] {
+            assert_eq!(t(bad), Err(400), "{bad}");
+        }
+        assert_eq!(t(&format!("/x?q={}", "%C3%A9".repeat(64))).map(|r| r.0.chars().count()), Ok(64));
+        assert_eq!(t(&format!("/x?q={}", "%C3%A9".repeat(65))), Err(400));
+        let mut b = String::new();
+        lower_into("ÜBERWACHUNG İx", &mut b);
+        assert_eq!(b, "überwachung i\u{307}x");
+    }
+
+    fn hwm_kb() -> (u64, u64) {
+        let s = fs::read_to_string("/proc/self/status").unwrap();
+        let f = |k: &str| s.lines().find_map(|l| l.strip_prefix(k)?.split_whitespace().next()?.parse().ok()).unwrap();
+        (f("VmRSS:"), f("VmHWM:"))
+    }
+
+    /// What a 512 KiB list adds to a PUT: the sidecar is written as the list is parsed (an 8 KiB
+    /// buffer); serde_json's scratch holds one escaped string at most (the worst case: one string
+    /// of nearly the whole document). Peak RSS measured around the parse (run alone: other tests
+    /// in the process move it; `--test-threads=1`).
+    #[test]
+    fn a_sidecar_of_512_kib_adds_little_memory() {
+        let _alone = crate::teamaudit::RSS_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let mut comps = Vec::new();
+        let mut i = 0;
+        while comps.iter().map(|c: &String| c.len() + 1).sum::<usize>() < (512 << 10) - 200 {
+            comps.push(format!(r#"{{"type":"application","name":"Example Application {i} édition","version":"{}.{}.{}","publisher":"Example Software Vendor {}","purl":"pkg:generic/example-{i}","properties":[{{"name":"x","value":"y"}}]}}"#, i % 7, i % 31, i % 997, i % 40));
+            i += 1;
+        }
+        let real = format!(r#"{{"bomFormat":"CycloneDX","components":[{}]}}"#, comps.join(","));
+        let worst = format!(r#"{{"components":[{{"name":"\n{}"}}]}}"#, "x".repeat((512 << 10) - 40));
+        let dir = std::env::temp_dir().join(format!("tether-sw-mem-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for (what, doc) in [("realistic", &real), ("one long escaped string", &worst)] {
+            assert!(doc.len() <= 512 << 10);
+            let tmp = dir.join(what.replace(' ', "-"));
+            let _ = fs::write("/proc/self/clear_refs", "5"); // resets VmHWM to the current RSS
+            let (rss, _) = hwm_kb();
+            let t = std::time::Instant::now();
+            write_sidecar(&tmp, doc.as_bytes(), 1_700_000_000).unwrap();
+            let took = t.elapsed();
+            let (_, peak) = hwm_kb();
+            let size = fs::metadata(&tmp).unwrap().len();
+            eprintln!("sidecar of a {} KiB list ({what}): {size} bytes, {took:?}, peak RSS +{} KiB", doc.len() >> 10, peak.saturating_sub(rss));
+            assert!(peak.saturating_sub(rss) < 1024, "{what}: +{} KiB", peak.saturating_sub(rss));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_failed_append_leaves_no_partial_line() {

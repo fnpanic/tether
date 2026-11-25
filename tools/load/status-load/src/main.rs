@@ -1,16 +1,24 @@
 //! Load generator for tether-api's device status store (driven by `tools/load/status-run.sh`).
 //!
 //!   status-load keygen <file>                      a throwaway admin key; prints its public key
-//!   status-load prep <data-dir> devices=N enroll=E [customers=C sbom=K]
+//!   status-load prep <data-dir> devices=N enroll=E [customers=C sbom=K members=M scoped=S key=<file>]
 //!                                                  pins devices E..N (status/keys.json, which
 //!                                                  the relay migrates) with a last full report
 //!                                                  in seen.json (customer c<i % C>; devices
-//!                                                  below K with a 60 KiB software list)
+//!                                                  below K with a 60 KiB software list of 200
+//!                                                  programs); with key=, also the signed team
+//!                                                  document (serial 1) of `run` as team/team.json,
+//!                                                  so it is in force at start (software search)
 //!   status-load run addr=<host:port> key=<file> pid=<tether-api pid> devices=N enroll=E
 //!       seconds=600 warmup=60 baseline=60 probe_ms=50 workers=16 full_pct=5
 //!       new_per_s=2 new_secs=300 summary_s=30 metrics_s=15 sbom_rps=0
 //!       members=0 scoped=0 customers=0 sbom=0 plain_pct=10 member_s=300 open_s=300 sw_s=900
-//!       member_workers=32 junk=0 [--any-address]
+//!       member_workers=32 junk=0 search_s=0 doc_serial=1 [--any-address]
+//!
+//! With `search_s` > 0 the load member searches installed software (`GET
+//! /api/team/status/software`, terms in turn) every `search_s` seconds from the start of the
+//! warm-up and prints each answer (time, hosts, more, pending, partial); `doc_serial` 2 when `prep`
+//! wrote the document with serial 1.
 //!
 //! For test relays only: `run` refuses an `addr` that is not loopback or private unless
 //! `--any-address` is given. With `members` > 0 it publishes a signed team document with that many
@@ -55,6 +63,13 @@ fn now() -> u64 {
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+/// Simulated desktop j's key (the load member: `usize::MAX`), derived from j as the device keys.
+fn member_key(j: usize) -> SigningKey {
+    let mut seed = *b"tether-load-status-member-key-00";
+    seed[..8].copy_from_slice(&(j as u64).to_le_bytes());
+    SigningKey::from_bytes(&seed)
 }
 
 fn device_key(i: usize) -> SigningKey {
@@ -173,6 +188,12 @@ fn main() {
         Some("prep") if argv.len() >= 2 => {
             let a = args(&argv[2..]);
             prep(Path::new(&argv[1]), num(&a, "devices", 20_000) as usize, num(&a, "enroll", 100) as usize, num(&a, "customers", 0) as usize, num(&a, "sbom", 0) as usize);
+            if let Some(k) = a.get("key") {
+                let sim = Members::new(&a, num(&a, "devices", 20_000) as usize);
+                let doc = sim.team_doc(&member_key(usize::MAX), &read_key(k), 1);
+                std::fs::create_dir_all(Path::new(&argv[1]).join("team")).unwrap();
+                std::fs::write(Path::new(&argv[1]).join("team/team.json"), doc).unwrap();
+            }
         }
         Some("run") => {
             SELF_CHECK.store(argv.iter().any(|a| a == "--self-check"), Ordering::Relaxed);
@@ -233,7 +254,7 @@ fn prep(data: &Path, devices: usize, enroll: usize, customers: usize, sbom: usiz
         let next = (devices as u64).div_ceil(10).clamp(300, 3600);
         let mut s = json!({"last_seen": t - 60 - (i as u64 * 7919) % next, "seq": 1, "next": next, "entry": entry});
         if i < sbom {
-            let doc = sbom_doc(&host(i));
+            let doc = sbom_doc(i);
             let p = dir.join(format!("{}.sbom.json", uuid(i)));
             std::fs::write(&p, &doc).unwrap();
             // The relay's start-up scan trusts a record whose file has its size and mtime.
@@ -244,6 +265,45 @@ fn prep(data: &Path, devices: usize, enroll: usize, customers: usize, sbom: usiz
     }
     std::fs::write(dir.join("keys.json"), serde_json::to_vec(&keys).unwrap()).unwrap();
     std::fs::write(dir.join("seen.json"), serde_json::to_vec(&seen).unwrap()).unwrap();
+}
+
+/// One search every `every_s` seconds by the load member until `stop`, terms in turn (common
+/// programs on most hosts, a pool program on a few, a version prefix, one nobody has); prints each
+/// answer with the relay's RSS and peak RSS at that moment.
+fn search_loop(addr: &str, member: &SigningKey, second: &SigningKey, every_s: u64, stop: &AtomicBool, pid: u64) -> Samples {
+    // Eight terms at `every_s` 10: a term comes again after 80 s, past the 60 s cache.
+    const TERMS: [(&str, &str); 8] = [("chrome", ""), ("example application 1234", ""), ("firefox", "11"), ("acrobat", ""), ("nobody-has-this", ""), ("7-zip", ""), ("microsoft edge", "1"), ("example vendor 7", "")];
+    let (start, mut out, mut n) = (Instant::now(), Vec::new(), 0usize);
+    while !stop.load(Ordering::Relaxed) {
+        let next = Instant::now() + Duration::from_secs(every_s);
+        let (q, v) = TERMS[n % TERMS.len()];
+        // Two members in turn: one search every 10 s stays under 6 a minute per member key.
+        let member = if n % 2 == 0 { member } else { second };
+        let enc = |s: &str| s.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
+        let mut p = format!("/api/team/status/software?q={}", enc(q));
+        if !v.is_empty() {
+            p.push_str(&format!("&v={}", enc(v)));
+        }
+        let sig = reqauth::sign_request_for_kid(member, RELAY, "GET", &p, b"", now());
+        let r = req(addr, "GET", &p, &[(reqauth::HEADER, &sig), ("X-Forwarded-For", "10.250.0.1")], b"");
+        let hwm = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default().lines().find_map(|l| l.strip_prefix("VmHWM:")?.split_whitespace().next()?.parse::<u64>().ok()).unwrap_or(0);
+        match &r {
+            Ok(r) => {
+                let v: Value = serde_json::from_str(&r.body).unwrap_or(Value::Null);
+                println!(
+                    "  search t={:>4} s q={q:?} v={v:?}: {} in {:.0} ms, {} hosts, more {}, pending {}, partial {}, {} bytes; relay RSS {:.1} MiB, peak {:.1} MiB",
+                    start.elapsed().as_secs(), r.status, r.took.as_secs_f64() * 1000., v["hosts"].as_array().map_or(0, Vec::len), v["more"], v["pending"], v["partial"], r.bytes, rss_kib(pid) as f64 / 1024., hwm as f64 / 1024.
+                );
+            }
+            Err(e) => println!("  search t={} s: {e}", start.elapsed().as_secs()),
+        }
+        out.push(sample(r));
+        n += 1;
+        while Instant::now() < next && !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    out
 }
 
 fn rss_kib(pid: u64) -> u64 {
@@ -270,24 +330,47 @@ fn full(i: usize, seq: u64) -> String {
     )
 }
 
-/// A CycloneDX-shaped software list of `host` of about 60 KiB (the relay stores any JSON object).
-fn sbom_doc(host: &str) -> String {
-    let mut comps = String::from(r#"{"type":"operating-system","name":"Windows 11 Pro","version":"10.0.26300"}"#);
+/// Programs every list has a share of: (name, publisher), the version varies by host.
+const COMMON: [(&str, &str); 6] = [("Google Chrome", "Google LLC"), ("Mozilla Firefox", "Mozilla"), ("7-Zip", "Igor Pavlov"), ("Adobe Acrobat Reader", "Adobe Inc."), ("Microsoft Edge", "Microsoft Corporation"), ("Example Practice Suite", "Example Medical Software GmbH")];
+
+/// A CycloneDX-shaped software list of host i of about 60 KiB: 200 programs (the operating system,
+/// some common ones on most hosts, the rest from a pool of 3 000), each with a `purl` and
+/// properties, as an agent's list carries them, and the hardware identity.
+fn sbom_doc(i: usize) -> String {
+    let mut comps = vec![r#"{"type":"operating-system","name":"Windows 11 Pro","version":"10.0.26300"}"#.to_owned()];
+    let pad = "x".repeat(30);
     let mut k = 0;
-    while comps.len() < 60 * 1024 - 400 {
-        comps.push_str(&format!(r#",{{"type":"application","name":"Example Application {k}","version":"{}.{}.{}","publisher":"Example Software Vendor {}"}}"#, k % 7, k % 31, k % 997, k % 40));
+    while comps.len() < 200 {
+        let (name, publisher, version) = match COMMON.get(k).filter(|_| (i + k) % 5 != 0) {
+            Some((n, p)) => (n.to_string(), p.to_string(), format!("{}.0.{}.{}", 100 + (i + k) % 30, i % 7000, k)),
+            None if k < COMMON.len() => (format!("Example Tool {}", (i + k) % 3000), format!("Example Vendor {}", k % 40), format!("{}.{}", k % 9, i % 97)),
+            None => {
+                let p = (i * 7 + k * 13) % 3000;
+                (format!("Example Application {p}"), format!("Example Software Vendor {}", p % 40), format!("{}.{}.{}", p % 7, (i + k) % 31, k % 997))
+            }
+        };
+        comps.push(format!(r#"{{"type":"application","name":"{name}","version":"{version}","publisher":"{publisher}","purl":"pkg:generic/{}@{version}","properties":[{{"name":"tether:install.location","value":"C:\\Program Files\\{name}\\{pad}"}}]}}"#, name.replace(' ', "-")));
         k += 1;
     }
-    format!(r#"{{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"metadata":{{"component":{{"type":"device","name":"{host}"}}}},"components":[{comps}]}}"#)
+    format!(r#"{{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"metadata":{{"component":{{"type":"device","name":"{}","properties":[{{"name":"tether:hw.serial","value":"SN-{i:08}"}}]}}}},"components":[{}]}}"#, host(i), comps.join(","))
+}
+
+fn read_key(path: &str) -> SigningKey {
+    let hex = std::fs::read_to_string(path).unwrap();
+    let seed: Vec<u8> = (0..32).map(|i| u8::from_str_radix(&hex.trim()[2 * i..2 * i + 2], 16).unwrap()).collect();
+    SigningKey::from_bytes(&seed.try_into().unwrap())
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn sbom_doc_is_a_json_object_of_about_60_kib() {
-        let d = super::sbom_doc("PC-LOAD-000001");
-        assert!((59 * 1024..=61 * 1024).contains(&d.len()), "{}", d.len());
-        assert!(serde_json::from_str::<serde_json::Value>(&d).unwrap().is_object());
+    fn sbom_doc_is_a_json_object_of_about_60_kib_with_200_programs() {
+        for i in [0, 1, 19_999] {
+            let d = super::sbom_doc(i);
+            assert!((50 * 1024..=70 * 1024).contains(&d.len()), "{}", d.len());
+            let v: serde_json::Value = serde_json::from_str(&d).unwrap();
+            assert_eq!(v["components"].as_array().unwrap().len(), 200);
+        }
     }
 
     #[test]
@@ -436,7 +519,7 @@ impl Members {
     fn new(a: &BTreeMap<String, String>, devices: usize) -> Members {
         let m = num(a, "members", 0) as usize;
         Members {
-            keys: (0..m).map(|_| generate_key()).collect(),
+            keys: (0..m).map(member_key).collect(),
             scoped: (num(a, "scoped", 0) as usize).min(m),
             customers: num(a, "customers", 0) as usize,
             devices,
@@ -452,11 +535,12 @@ impl Members {
         (j < self.scoped && self.customers > 0).then(|| j % self.customers)
     }
 
-    fn team_doc(&self, load: &SigningKey, admin: &SigningKey) -> Vec<u8> {
+    fn team_doc(&self, load: &SigningKey, admin: &SigningKey, serial: u64) -> Vec<u8> {
         let entry = |name: String, k: &SigningKey, customers: Value| json!({"name": name, "key": key_to_b64(&k.verifying_key()), "write": false, "audit": false, "sbom": true, "agent": true, "customers": customers, "service": false});
-        let mut members = vec![entry("load".into(), load, json!(["*"]))];
+        // The load member and a second one for the software searches (`search_loop`).
+        let mut members = vec![entry("load".into(), load, json!(["*"])), entry("load-search".into(), &member_key(usize::MAX - 1), json!(["*"]))];
         members.extend(self.keys.iter().enumerate().map(|(j, k)| entry(format!("tech-{j:04}"), k, self.customer(j).map_or(json!(["*"]), |c| json!([format!("c{c:04}")])))));
-        let doc = json!({"serial": 1, "members": members});
+        let doc = json!({"serial": serial, "members": members});
         serde_json::to_vec(&json!({"team": envelope::sign(&serde_json::to_vec(&doc).unwrap(), admin)})).unwrap()
     }
 
@@ -542,9 +626,8 @@ fn run(a: &BTreeMap<String, String>) -> bool {
     let (new_per_s, new_secs) = (num(a, "new_per_s", 2), num(a, "new_secs", 300));
     let (summary_s, metrics_s) = (num(a, "summary_s", 30), num(a, "metrics_s", 15));
     let sbom_rps = num(a, "sbom_rps", 0);
-    let hex = std::fs::read_to_string(a.get("key").expect("key=")).unwrap();
-    let seed: Vec<u8> = (0..32).map(|i| u8::from_str_radix(&hex.trim()[2 * i..2 * i + 2], 16).unwrap()).collect();
-    let admin = SigningKey::from_bytes(&seed.try_into().unwrap());
+    let admin = read_key(a.get("key").expect("key="));
+    let search_s = num(a, "search_s", 0);
 
     // A published policy, so GET /api/policy reads and sends the file as real clients get it.
     let doc = serde_json::to_vec(&envelope::sign(format!(r#"{{"serial":1,"issued_at":{}}}"#, now()).as_bytes(), &admin)).unwrap();
@@ -552,15 +635,21 @@ fn run(a: &BTreeMap<String, String>) -> bool {
     assert_eq!(r.status, 204, "publish policy: {}", r.body);
     // A throwaway roster member for the team summary; with members > 0 a signed team document
     // with it and the simulated desktops (`scoped` of them limited to one customer each).
-    let member = generate_key();
+    let member = member_key(usize::MAX);
     let sim = Members::new(a, devices);
-    let r = if sim.keys.is_empty() {
+    let r = if sim.keys.is_empty() && search_s == 0 {
         let roster = json!({"members": [{"name": "load", "key": key_to_b64(&member.verifying_key()), "write": false, "audit": false}]});
         admin_req(&addr, &admin, "PUT", "/api/admin/team", roster.to_string().as_bytes())
     } else {
-        admin_req(&addr, &admin, "PUT", "/api/admin/team", &sim.team_doc(&member, &admin))
+        admin_req(&addr, &admin, "PUT", "/api/admin/team", &sim.team_doc(&member, &admin, num(a, "doc_serial", 1)))
     };
     assert_eq!(r.status, 204, "publish roster: {}", r.body);
+    // Software searches from here on (the start-up scan is still building sidecars).
+    let search_until = Arc::new(AtomicBool::new(false));
+    let searches = (search_s > 0).then(|| {
+        let (addr, member, stop) = (addr.clone(), member.clone(), search_until.clone());
+        std::thread::spawn(move || search_loop(&addr, &member, &member_key(usize::MAX - 1), search_s, &stop, pid))
+    });
 
     // Enrolment through the API for devices 0..enroll (one IP each: 30 new pins per IP and
     // minute), then an idempotent one of the last device: its answer is the pace for everyone.
@@ -739,7 +828,7 @@ fn run(a: &BTreeMap<String, String>) -> bool {
         let stop = start + Duration::from_micros((devices as u64 * 1_000_000 / sbom_rps).min(secs * 1_000_000));
         std::thread::spawn(move || {
             every(Duration::from_micros(1_000_000 / sbom_rps), stop, |n| {
-                let body = sbom_doc(&host(n));
+                let body = sbom_doc(n);
                 let sig = reqauth::sign_device_request(&device_key(n), &uuid(n), RELAY, "PUT", "/api/status/sbom", body.as_bytes(), now());
                 let r = req(&addr, "PUT", "/api/status/sbom", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", &ip(150 + (n >> 16) as u8, n))], body.as_bytes());
                 if let Ok(r) = &r {
@@ -762,6 +851,8 @@ fn run(a: &BTreeMap<String, String>) -> bool {
         t.join().unwrap();
     }
     let junk: Samples = junk.map(|t| t.join().unwrap()).unwrap_or_default();
+    search_until.store(true, Ordering::Relaxed);
+    let searches: Samples = searches.map(|t| t.join().unwrap()).unwrap_or_default();
     let series = sampler.join().unwrap();
     let rss_end = rss_kib(pid);
     let peak = peak.load(Ordering::Relaxed).max(rss_end as usize) as u64;
@@ -805,13 +896,17 @@ fn run(a: &BTreeMap<String, String>) -> bool {
     if !junk.is_empty() {
         show("junk without kid", &stats(&junk));
     }
+    let search_stats = stats(&searches);
+    if search_s > 0 {
+        show("software searches", &search_stats);
+    }
     // The full summary once plain and once gzip (sizes), and the relay's counters.
     let sig = |p: &str| reqauth::sign_request(&member, "GET", p, b"", now());
     if let (Ok(p), Ok(g)) = (req(&addr, "GET", "/api/team/status", &[(reqauth::HEADER, &sig("/api/team/status"))], b""), req(&addr, "GET", "/api/team/status", &[(reqauth::HEADER, &sig("/api/team/status")), ("Accept-Encoding", "gzip")], b"")) {
         println!("full summary: {} bytes plain, {} bytes gzip ({:.1} x), {} hosts", p.bytes, g.bytes, p.bytes as f64 / g.bytes.max(1) as f64, serde_json::from_str::<Value>(&p.body).ok().and_then(|v| v["hosts"].as_array().map(Vec::len)).unwrap_or(0));
     }
     if let Ok(m) = req(&addr, "GET", "/metrics", &[], b"") {
-        for l in m.body.lines().filter(|l| ["tether_api_status_summary_", "tether_api_team_audit_", "tether_api_busy_rejected_total"].iter().any(|p| l.starts_with(p))) {
+        for l in m.body.lines().filter(|l| ["tether_api_status_summary_", "tether_api_status_software_", "tether_api_team_audit_", "tether_api_busy_rejected_total"].iter().any(|p| l.starts_with(p))) {
             println!("  metrics: {l}");
         }
         let codes: BTreeMap<String, u64> = m.body.lines().filter_map(|l| l.strip_prefix("tether_api_requests_total{")).filter_map(|l| {
@@ -841,6 +936,7 @@ fn run(a: &BTreeMap<String, String>) -> bool {
         ("every probe, enrolment, summary and scrape answered 200".to_owned(), [&hb_b, &hb_r, &pol_b, &pol_r, &new_s, &sum_s, &met_s].iter().all(|s| s.codes.keys().all(|c| *c == 200))),
         ("every software list upload accepted (204) or 429".to_owned(), sbom_s.codes.keys().all(|c| matches!(c, 204 | 429))),
         ("every member request answered 200 or 304 (no 429, no 5xx, no connection error)".to_owned(), member_stats.iter().all(|s| s.codes.keys().all(|c| matches!(c, 200 | 304)))),
+        ("every software search answered 200".to_owned(), search_stats.codes.keys().all(|c| *c == 200)),
         (format!("peak RSS {:.1} MiB < 48 MiB", mib(peak)), peak < 48 * 1024),
         (format!("RSS at the end within 10 % of the reference ({:.1} vs {:.1} MiB)", mib(rss_end), mib(rss_ref)), (rss_end as f64 - rss_ref as f64).abs() <= rss_ref as f64 * 0.1),
     ]);

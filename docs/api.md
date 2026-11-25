@@ -339,6 +339,7 @@ trust another admin key). The relay is trusted to enforce the permissions it ser
 | `GET /api/team/audit?device=<id or uuid>&since=<unix>&limit=<n>` | – | Session audit records of one device, same format as `GET /api/admin/audit`, newest first. Members with `audit` only (else `403`); a member without `*` only of devices in its scope (above). `device` required (`400` without); `since` default 0; `limit` 1–500, default 200; unknown parameter `400`. |
 | `GET /api/team/status` | – | The health summary of every host that has a full report (below). Any member; `ETag`, `304` on `If-None-Match`. |
 | `GET /api/team/status/<uuid>` | – | One device's last report and its history (below). Any member. `404` for an invalid or unenrolled uuid. |
+| `GET /api/team/status/software?q=<text>[&v=<version prefix>]` | – | The hosts with an installed program whose name or publisher contains `q` (below). Members with `sbom`, within their customers; off unless `STATUS_SOFTWARE_SEARCH=on`. |
 | `POST /api/team/status/<uuid>/link` | `{"tether_id":"…"}` (must equal the device's claim) | `204`: the claim is confirmed, the device's Tether ID is now that one, with the member's roster name and the time as `linked_by` and `linked_at`; the same link again is `204`. Members with `write` only (else `403`). `400` bad body or Tether ID; `404` unknown uuid; `409 tether_id is not the one this device claims`, `409 tether_id is pinned to another device`. Journal line `status: <uuid> linked to <id> by team member <name>`. |
 | `DELETE /api/team/status/<uuid>/link` | – | `204`: the link and the claim are removed and the pin gets `no_claim`: the device claims nothing again (not by enrolling, also not with the token issued for that ID after its first use, not by reports, whose `tether_id` is then ignored) until a member allows it. When such a device then releases its own pin (`DELETE /api/status`), the relay keeps its key (a `dismissed` line, 180 days, at most 10 000): enrolling again with that key and a token not issued for a Tether ID gives a pin with `no_claim` and no claim, whatever uuid or claim it names. `write` only (`403`); `404` unknown uuid. Journal line `status: … of <uuid> dismissed by team member <name>`. A new key enrolled with a valid token can always claim: revoke the token to stop that. |
 | `POST /api/team/status/<uuid>/allow-claim` | – | `204`: clears `no_claim` on this pin; the device's next enrolment or report names its claim again (still only a claim), unless another pin of the same device key is still dismissed: then allow or remove those too. `write` only (`403`); `404` unknown uuid. Journal line. |
@@ -378,6 +379,7 @@ files `0600`), also with a plain roster. Fields, in this order (absent ones left
 | `signature-limit` | any member route | `{"kid":"<16 hex>"\|null,"unverified":true}`, no `actor`, `result` `429`: an address reached 60 failed member signatures a minute; at most one record (and one journal line `team: failed member signatures from <ip> …`) per address and minute, and at most 60 such records (and lines) a minute for the whole relay: the ones left out are counted and the next record carries their number as `"more":n`; `kid` the one the refused request named (not verified), only when it has the key-id form (16 lower-case hex), else `null`; the journal line ends `(kid …, unverified)` |
 | `report` | `GET /api/team/status/<uuid>` (report and history) | – |
 | `software-list` | `GET /api/team/status/<uuid>/sbom` | – |
+| `search` | `GET /api/team/status/software` | `{"q":"<term>","v":"<version>"\|null,"hits":n}`: the term and version as asked (trimmed, control and direction characters dropped, at most 128 bytes), and for an answered search the number of matching hosts (`hosts` + `more`), never the hosts; refused searches (`400`, `403`, `429`) are recorded without `hits`, a search answered from the cache with them; no `target` |
 | `link` | `POST /api/team/status/<uuid>/link` | `{"tether_id"}` asked for |
 | `unlink`, `allow-claim` | `DELETE …/link`, `POST …/allow-claim` | – |
 | `remove` | `DELETE /api/team/status/<uuid>`, `DELETE /api/admin/status/<uuid>` | – |
@@ -646,7 +648,8 @@ relay on uninstall.
 ### `PUT /api/status/sbom` (device-signed)
 
 The device's software list: any JSON object, at most `STATUS_SBOM_MAX_KB` KiB (default 512). The
-agent sends CycloneDX 1.6; the relay reads no field of it, and a document that is valid JSON but
+agent sends CycloneDX 1.6; the relay reads no field of it (with `STATUS_SOFTWARE_SEARCH=on` it
+reads the components' names, versions and publishers into a sidecar for the search, below), and a document that is valid JSON but
 deeply nested, or not CycloneDX, is stored as it is. It is written and synced as
 `status/<uuid>.sbom.json` before the `204`. The route exists only with `STATUS_SBOM=on`
 (operator: [health.md](health.md#the-software-list)); an agent uploads only to a relay whose answer
@@ -715,6 +718,67 @@ application/vnd.cyclonedx+json` and `ETag: "<16 hex>"`, the first 16 hex digits 
 has no list, for an invalid uuid, one that is not enrolled, and while `STATUS_SBOM` is not `on`.
 `401` for a request that is not member-signed (a device key does not pass), `503` as for every
 status route. Treat the content as untrusted: it is whatever the device sent.
+
+### `GET /api/team/status/software?q=<text>[&v=<version prefix>]` (member-signed)
+
+Which hosts have a program installed, by their last uploaded software list. `q` and `v` are
+percent-encoded UTF-8 (a space `%20` or `+`); after decoding and trimming, `q` has 2 to 64
+characters and `v` at most 32, neither a control character nor a direction or zero-width mark
+(else `400`; also for a parameter other than one `q` and one `v`). A host matches when a program of
+its list has a name or publisher that contains `q` and a version that starts with `v` (no `v`: any
+version). Both sides are compared lower-cased: ASCII letters as such, any other character by
+Unicode's lower-case mapping of that one character (Rust `char::to_lowercase`; no normalisation,
+so `é` written as `e` plus a combining accent does not match `é`, and no case folding: `ß` does not
+match `ss`). Everything is plain text: `.*`, quotes or `%` match only themselves.
+
+```json
+{"sbom":true,"built":1795000000,"hosts":[{"uuid":"…","name":"Google Chrome","version":"120.0.6099.71"}],"more":0,"pending":0,"partial":false}
+```
+
+- `hosts`: at most 2 000, in uuid order, each with the first matching program of its list (`name`
+  and `version` as the sidecar holds them, below). `uuid` is the device's uuid as in the summary.
+- `more`: matching hosts left out beyond the 2 000. `pending`: hosts with a list but no sidecar
+  for it yet (a list stored before the switch was on, until the scan has read it). `built`: when the
+  search ran (a cached answer keeps its time). `partial`: `true` when the search stopped at its time
+  budget (10 s) before it read every sidecar; such an answer is not cached, and a client must not
+  treat the hosts it lacks as having no match.
+- Only hosts in the member's customers are looked at: a host outside them is not read and counts
+  nowhere (not in `hosts`, `more` or `pending`), so its answer is the one for a program nobody has.
+- The answer is at most about 1 MB (2 000 hosts with names and versions at their bounds, every
+  character escaped: 2 000 x 483 bytes, 966 KB); one of 2 000 hosts with ordinary names under 200 KB.
+
+Order of checks: the member signature (`401`), `q` and `v` (`400`), a locked or off status store
+(`503`), the switch (`200 {"sbom":false,"hosts":[]}` exactly, so a client can tell "not on this
+relay" from `404`, which a relay before 0.7.0 answers), the member's `sbom` (`403 this member may
+not read software lists`), 6 searches a minute per member key, cached answers included
+(`429 too many searches`, `Retry-After` the seconds left of that minute), the cache (60 s per
+member scope, `q` and `v`: members of different customers never share an answer), one search at
+a time for the whole relay (`429 busy`, `Retry-After: 5`). Every request that passed the signature
+leaves one `search` record in the team audit log (above).
+
+The switch is `STATUS_SOFTWARE_SEARCH=on` (default off) and needs `STATUS_SBOM=on` and a signed
+team document in force **when tether-api starts** (the plain roster has no `sbom` permission and no
+customer scope to apply); otherwise it stays off, with one journal line
+`warning: STATUS_SOFTWARE_SEARCH=on needs …: software search stays off …`. A document published
+later takes effect at the next start.
+
+**Sidecars.** With the switch on, each stored list has a sidecar `status/<uuid>.sw`: one line
+`name<TAB>version<TAB>publisher` per entry of the document's top-level `components` that has a name
+or publisher, at most 5 000 lines, each field cut to 128, 64 and 128 bytes on a character boundary,
+control and direction characters removed; nothing else of the document (hardware properties,
+hashes, `purl`, the device component) is in it. A document that is not such a list (not an
+object, `components` not an array, a field that is not a string, too deeply nested) gets an empty
+sidecar, which never matches. It is written from the uploaded bytes after the list is synced,
+outside the state lock, as the document is parsed (no copy of it), with the list's modification
+time; a search uses a sidecar only when its time is the list's. It goes with the list (the device's
+`DELETE`, the device's removal by itself, an admin or a member, expiry); the start-up and hourly
+scan builds the missing ones (one at a time, 10 ms apart) and removes those without a list, and all
+of them while the switch is off.
+
+The search runs after the state lock is released, on the requesting worker: the in-scope devices are
+copied out 1 000 at a time and their sidecars read one at a time, so memory stays flat and device
+requests do not wait. `/metrics`: `tether_api_status_software_searches_total` (searches run, cache
+answers not counted), `tether_api_status_software_search_seconds_total` and `_max`.
 
 ### `GET /api/team/status` (member-signed)
 
@@ -798,6 +862,7 @@ moved away and tether-api is restarted; the rest of the relay is not affected. D
 | `STATUS_SBOM_MAX_KB` | `512` | largest software list in KiB; more is `413` |
 | `STATUS_SBOM_RPS` | `2` | software-list uploads taken per second, all devices (at least 1); more is `429 busy` |
 | `STATUS_SBOM_MAX_TOTAL_MB` | `2048` | sum of all stored lists in MiB; an upload that would exceed it is `507` |
+| `STATUS_SOFTWARE_SEARCH` | off | `on`: the software search and its sidecars, with `STATUS_SBOM=on` and a signed team document in force at start ([above](#get-apiteamstatussoftwareqtextvversion-prefix-member-signed)) |
 
 The team audit log's settings: [Team audit log](#team-audit-log).
 
