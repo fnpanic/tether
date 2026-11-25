@@ -44,7 +44,7 @@ librustdesk = { package = "rustdesk", path = "../../../vendor/rustdesk", default
 librustdesk = { package = "rustdesk", path = "../../../vendor/rustdesk", default-features = false, features = ["vram"] }
 # Health notifications (already in the tree through vendor/rustdesk).
 tauri-winrt-notification = "0.1"
-windows-sys = { version = "0.59", features = ["Win32_UI_HiDpi", "Win32_Foundation", "Win32_Networking_WinHttp", "Win32_System_Registry", "Win32_System_Console", "Win32_System_DataExchange", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Services", "Win32_System_Pipes", "Win32_System_IO", "Win32_UI_Shell"] }
+windows-sys = { version = "0.59", features = ["Win32_UI_HiDpi", "Win32_Foundation", "Win32_Networking_WinHttp", "Win32_System_Registry", "Win32_System_Console", "Win32_System_DataExchange", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Services", "Win32_System_Pipes", "Win32_System_IO", "Win32_UI_Shell", "Win32_System_Com"] }
 
 [dev-dependencies]
 # Signs test artifacts in the health agent manager's tests (as in tether-trust's own tests).

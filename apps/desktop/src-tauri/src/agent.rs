@@ -39,7 +39,7 @@ use tether_trust::{
 };
 
 pub use crate::agent_elevated::{Action, AgentAnswer};
-use crate::agent_elevated::{active, parse_identity, tidy, AGENT_FOLDER, STAGED_EXE};
+use crate::agent_elevated::{active, download_time, parse_identity, tidy, STAGED_EXE};
 
 const STATE_FILE: &str = "health-agent.json";
 /// What Settings shows on this computer, readable by its users (the state folder is not): only
@@ -198,11 +198,6 @@ fn service_gate(first_arg: Option<&str>, local_system: bool) -> bool {
     first_arg == Some("--server") && local_system
 }
 
-/// The whole download, every source together: 2 minutes plus a second per 64 KiB of the signed
-/// size, at most 10 minutes (the manager answers `busy` meanwhile).
-fn download_time(size: u64) -> Duration {
-    Duration::from_secs((120 + size / 65_536).min(600))
-}
 
 
 fn tidied(a: AgentAnswer) -> AgentAnswer {
@@ -863,6 +858,7 @@ pub fn install_here() -> AgentAnswer {
 #[cfg(windows)]
 mod win {
     use super::*;
+    use crate::agent_elevated::AGENT_FOLDER;
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{GetLastError, LocalFree, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT};
@@ -1067,8 +1063,20 @@ mod win {
         fn removed_at(&self) -> Option<u64> {
             crate::agent_elevated::win::removed_at()
         }
-        fn installed_exe(&self) -> PathBuf {
+        fn installed_exe(&self) -> Result<PathBuf, String> {
             crate::agent_elevated::win::installed_exe()
+        }
+        fn service_image(&self) -> Result<String, String> {
+            crate::agent_elevated::win::service_image()
+        }
+        fn installed_version(&self) -> Option<String> {
+            crate::agent_elevated::win::installed_version()
+        }
+        fn uac(&self) -> crate::agent_elevated::Uac {
+            crate::agent_elevated::win::uac()
+        }
+        fn owner_window(&self) -> usize {
+            crate::app::front_main_window()
         }
         fn fetch_index(&self, channel: &str) -> Vec<(String, Vec<u8>)> {
             Real.fetch_index(channel)
@@ -1088,8 +1096,8 @@ mod win {
         fn create_pipe(&self, name: &str) -> Result<Box<dyn crate::agent_elevated::Pipe>, String> {
             crate::agent_elevated::win::create_pipe(name)
         }
-        fn launch(&self, exe: &Path, args: &[&str]) -> Result<Box<dyn crate::agent_elevated::Child>, crate::agent_elevated::Launch> {
-            crate::agent_elevated::win::launch(exe, args)
+        fn launch(&self, exe: &Path, args: &[&str], owner: usize) -> Result<Box<dyn crate::agent_elevated::Child>, crate::agent_elevated::Launch> {
+            crate::agent_elevated::win::launch(exe, args, owner)
         }
         fn consent(&self, d: &crate::agent_elevated::Dialog) -> crate::agent_elevated::Consent {
             crate::agent_elevated::ask_window(d.clone(), crate::app::show_agent_consent, crate::agent_elevated::CONSENT_WAIT)
@@ -1204,7 +1212,7 @@ mod win {
         }
 
         fn installed_exe(&self) -> PathBuf {
-            crate::agent_elevated::win::installed_exe()
+            crate::agent_elevated::win::installed_exe().unwrap_or_default()
         }
 
         fn write_public(&self, path: &Path, data: &[u8]) -> Result<(), String> {

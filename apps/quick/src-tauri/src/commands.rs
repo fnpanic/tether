@@ -112,7 +112,7 @@ fn branding() -> Branding {
 }
 
 /// This process is elevated, or the core's portable service (elevated helper) is running.
-fn elevated() -> bool {
+pub(crate) fn elevated() -> bool {
     static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
     let mut c = CACHE.lock().unwrap();
     if let Some((t, v)) = *c {

@@ -71,8 +71,21 @@ mod win {
         fn removed_at(&self) -> Option<u64> {
             win::removed_at()
         }
-        fn installed_exe(&self) -> PathBuf {
+        fn installed_exe(&self) -> Result<PathBuf, String> {
             win::installed_exe()
+        }
+        fn service_image(&self) -> Result<String, String> {
+            win::service_image()
+        }
+        fn installed_version(&self) -> Option<String> {
+            win::installed_version()
+        }
+        fn uac(&self) -> el::Uac {
+            // TetherQS elevated itself, or its elevated helper runs: runas would not prompt either.
+            el::Uac { elevated_service: crate::commands::elevated(), ..win::uac() }
+        }
+        fn owner_window(&self) -> usize {
+            crate::sink::front_main_window()
         }
         fn fetch_index(&self, channel: &str) -> Vec<(String, Vec<u8>)> {
             let Ok(client) = crate::policy::http() else { return Vec::new() };
@@ -89,9 +102,8 @@ mod win {
                 .collect()
         }
         fn download(&self, c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
-            // shortcut: each source may take up to 30 minutes (the update's own limit); a total
-            // deadline as in the desktop when a slow relay turns out to matter here.
-            crate::update::download(c, key)
+            // the dialog was answered already: the desktop's total deadline, not 30 minutes per source
+            crate::update::download_within(c, key, Some(el::download_time(c.size)))
         }
         fn prepare_stage(&self, dir: &Path) -> Result<(), String> {
             win::prepare_stage(dir)
@@ -105,8 +117,8 @@ mod win {
         fn create_pipe(&self, name: &str) -> Result<Box<dyn el::Pipe>, String> {
             win::create_pipe(name)
         }
-        fn launch(&self, exe: &Path, args: &[&str]) -> Result<Box<dyn el::Child>, el::Launch> {
-            win::launch(exe, args)
+        fn launch(&self, exe: &Path, args: &[&str], owner: usize) -> Result<Box<dyn el::Child>, el::Launch> {
+            win::launch(exe, args, owner)
         }
         fn consent(&self, d: &el::Dialog) -> el::Consent {
             el::ask_window(d.clone(), crate::sink::show_agent_consent, el::CONSENT_WAIT)

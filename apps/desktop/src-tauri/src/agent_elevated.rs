@@ -19,13 +19,19 @@
 //! The elevated agent verifies its own copy against that index before it creates its service.
 //! Removal: the installed agent's `uninstall --by-tether` (fixed path in the program folder), after
 //! the same kind of dialog.
+//!
+//! The pre-dialog is not a boundary against a technician who controls the desktop (the On-Screen
+//! Keyboard or any program run as the user can operate it); the Windows prompt on the secure desktop
+//! is. Where Windows would not prompt (this process elevated, UAC off, administrators elevated
+//! without asking, TetherQS's elevated service), a technician's install or removal is refused and
+//! only the person at the computer can start it ([`Uac::silent`]).
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
-        mpsc, Mutex,
+        atomic::{AtomicU64, AtomicU8, Ordering},
+        mpsc, Mutex, MutexGuard, TryLockError,
     },
     time::Duration,
 };
@@ -59,6 +65,23 @@ pub const EXCHANGE_WAIT: Duration = Duration::from_secs(30);
 pub const EXIT_WAIT: Duration = Duration::from_secs(240);
 /// `identity`'s line is small.
 pub const IDENTITY_MAX: usize = 512;
+/// The agent's result line (`{"ok":…,"line":…}`, its line at most 300 characters).
+pub const RESULT_MAX: usize = 2048;
+/// After a "no" (Don't install, a declined prompt, no answer) a technician's next ask waits this long.
+pub const ASK_AGAIN_AFTER: u64 = 600;
+/// A pending record younger than this may still be running: the prompt (Windows closes it after
+/// about 2 minutes), the agent's connect, the exchange and its run, and a margin.
+pub const PENDING_MAX: u64 = 120 + CONNECT_WAIT.as_secs() + EXCHANGE_WAIT.as_secs() + EXIT_WAIT.as_secs() + 60;
+/// Past [`PENDING_MAX`] by this, a record claims nothing (an agent there now may be the practice's).
+pub const ADOPT_GRACE: u64 = 86_400;
+/// The first agent with `uninstall --by-tether` (and the Apps entry that names its version).
+pub const BY_TETHER_SINCE: &str = "0.2.0";
+
+/// The whole download, every source together: 2 minutes plus a second per 64 KiB of the signed
+/// size, at most 10 minutes (the dialog was answered already; nobody should wait longer).
+pub fn download_time(size: u64) -> Duration {
+    Duration::from_secs((120 + size / 65_536).min(600))
+}
 
 // ----------------------------------------------------------------------------- shared interface
 
@@ -112,7 +135,7 @@ pub fn active(mode: &str) -> bool {
 /// from its word on; anything that could be a grant or a proof (a run of more than 64 base64
 /// characters) replaced; at most 300 characters.
 pub fn tidy(detail: &str) -> String {
-    let mut s: String = detail.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let mut s: String = detail.chars().filter(|c| c.is_control() || !invisible(*c)).map(|c| if c.is_control() { ' ' } else { c }).collect();
     let low = s.to_ascii_lowercase();
     if let Some(i) = ["\\users\\", "/users/"].iter().filter_map(|p| low.find(p)).min() {
         let start = s[..i].char_indices().rev().find(|(_, c)| c.is_whitespace()).map_or(0, |(w, c)| w + c.len_utf8());
@@ -219,6 +242,8 @@ pub struct Ask {
     pub viewer: Option<String>,
     pub org: String,
     pub relays: Vec<String>,
+    /// Windows will show its prompt (false only for the local person's own click: [`Uac::silent`]).
+    pub prompt: bool,
 }
 
 /// The pre-dialog as the window shows it: plain text only.
@@ -231,9 +256,15 @@ pub struct Dialog {
     pub no: String,
 }
 
-/// A name from the other side: no control or formatting characters, at most 64 characters.
+/// Control, bidi, line-separator and zero-width characters: they can reorder or hide what is shown.
+/// The front ends drop the same set (`plainText` in AgentHere.tsx and TetherQS's App.tsx).
+pub fn invisible(c: char) -> bool {
+    c.is_control() || matches!(c as u32, 0x061c | 0x200b..=0x200f | 0x2028..=0x202e | 0x2060..=0x2064 | 0x2066..=0x2069 | 0xfeff)
+}
+
+/// A name from the other side: no [`invisible`] characters, at most 64 characters.
 fn shown_name(s: &str) -> String {
-    let s: String = s.chars().filter(|c| !c.is_control() && !matches!(*c as u32, 0x200b..=0x200f | 0x202a..=0x202e | 0x2066..=0x2069 | 0xfeff)).take(64).collect();
+    let s: String = s.chars().filter(|c| !invisible(*c)).take(64).collect();
     s.trim().to_owned()
 }
 
@@ -241,36 +272,32 @@ fn shown_name(s: &str) -> String {
 pub fn dialog(id: u64, a: &Ask) -> Dialog {
     let org = shown_name(&a.org);
     let support = if org.is_empty() { "your organisation's support".to_owned() } else { format!("support of {org}") };
-    let who = match a.viewer.as_deref().map(shown_name) {
-        Some(n) if !n.is_empty() => format!("“{n}” ({support}; this is the name the technician's program gave, it is not verified)"),
-        Some(_) => format!("A technician ({support})"),
-        None if org.is_empty() => "Your organisation".to_owned(),
-        None => format!("Your organisation ({org})"),
+    let session = a.viewer.is_some();
+    let who = if session {
+        format!("A technician ({support})")
+    } else if org.is_empty() {
+        "Your organisation".to_owned()
+    } else {
+        format!("Your organisation ({org})")
     };
+    // On its own line, never inside a sentence it could rewrite.
+    let named = a.viewer.as_deref().map(shown_name).filter(|n| !n.is_empty()).map(|n| format!("Name given by the technician (not verified): {n}"));
     let relays: Vec<String> = a.relays.iter().map(|r| shown_name(r)).filter(|r| !r.is_empty()).collect();
     let to = if relays.is_empty() { "your organisation's servers".to_owned() } else { relays.join(", ") };
-    let next = "Windows will ask for administrator approval next.".to_owned();
-    match a.kind {
-        Kind::Install => Dialog {
-            id,
-            title: "Install the health monitoring program?".into(),
-            paragraphs: vec![
-                format!("{who} asks to install Tether Monitor."),
-                format!("It runs in the background as a Windows service, stays on this computer after this session, and sends information about the computer's state and installed software to {to}."),
-                "You can remove it at any time in Settings › Apps › Tether Monitor.".into(),
-                next,
-            ],
-            yes: "Install".into(),
-            no: "Don't install".into(),
-        },
-        Kind::Remove => Dialog {
-            id,
-            title: "Remove the health monitoring program?".into(),
-            paragraphs: vec![format!("{who} asks to remove Tether Monitor from this computer. It stops sending information."), next],
-            yes: "Remove".into(),
-            no: "Don't remove".into(),
-        },
+    let next = if a.prompt { "Windows will ask for administrator approval next." } else { "No Windows prompt will follow: this computer gives administrator rights without asking." };
+    let stays = if session { "stays on this computer after this session" } else { "stays on this computer" };
+    let (title, ask, yes, no) = match a.kind {
+        Kind::Install => ("Install the health monitoring program?", format!("{who} asks to install Tether Monitor."), "Install", "Don't install"),
+        Kind::Remove => ("Remove the health monitoring program?", format!("{who} asks to remove Tether Monitor from this computer. It stops sending information."), "Remove", "Don't remove"),
+    };
+    let mut paragraphs: Vec<String> = std::iter::once(ask).chain(named).collect();
+    if a.kind == Kind::Install {
+        paragraphs.push(format!("It runs in the background as a Windows service, {stays}, and sends information about the computer's state and installed software to {to}."));
+        paragraphs.push("What it sends is listed in Tether's privacy policy (PRIVACY.md in Tether's documentation, rows “Health report” and “Software list”).".into());
+        paragraphs.push("You can remove it at any time in Settings › Apps › Tether Monitor.".into());
     }
+    paragraphs.push(next.into());
+    Dialog { id, title: title.into(), paragraphs, yes: yes.into(), no: no.into() }
 }
 
 /// How the pre-dialog ended.
@@ -361,6 +388,28 @@ pub enum Launch {
     Failed(String),
 }
 
+/// What decides whether Windows shows its prompt for `runas` here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Uac {
+    /// This process's token is elevated (`TokenElevation`).
+    pub elevated: bool,
+    /// `EnableLUA` = 0: UAC is off.
+    pub lua_off: bool,
+    /// `ConsentPromptBehaviorAdmin` = 0: administrators are elevated without asking.
+    pub admin_silent: bool,
+    /// This user is a member of Administrators (split token, or elevated).
+    pub admin: bool,
+    /// TetherQS's elevated (portable) service runs.
+    pub elevated_service: bool,
+}
+
+impl Uac {
+    /// No prompt would appear: the pre-dialog would be the only consent.
+    pub fn silent(&self) -> bool {
+        self.elevated || self.lua_off || (self.admin_silent && self.admin) || self.elevated_service
+    }
+}
+
 /// Everything the elevated path does to the machine, the network and the window. Real on Windows,
 /// fakes in the tests.
 pub trait Machine {
@@ -370,7 +419,20 @@ pub trait Machine {
     fn agent_service(&self) -> Result<bool, String>;
     /// The practice's removal (`HKLM\SOFTWARE\Tether Monitor` `RemovedAt`; `Some(0)` unparseable).
     fn removed_at(&self) -> Option<u64>;
-    fn installed_exe(&self) -> PathBuf;
+    /// `<FOLDERID_ProgramFilesX64>\Tether Monitor\tether-monitor.exe` (never from the environment).
+    fn installed_exe(&self) -> Result<PathBuf, String>;
+    /// The agent service's configured command line (`QueryServiceConfigW`).
+    fn service_image(&self) -> Result<String, String>;
+    /// The installed agent's version from its Apps entry (`DisplayVersion`; none before 0.2.0).
+    fn installed_version(&self) -> Option<String>;
+    /// Whether Windows would prompt.
+    fn uac(&self) -> Uac;
+    /// Unix seconds now (the pending record is stamped at the launch, after the download).
+    fn clock(&self) -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    }
+    /// Brings this program's window to the front and returns its handle (0: none) to own the prompt.
+    fn owner_window(&self) -> usize;
     /// `(relay base, raw)` of `download/<channel>/monitor.json` from every relay that answered.
     fn fetch_index(&self, channel: &str) -> Vec<(String, Vec<u8>)>;
     /// The candidate's bytes, verified (size, SHA-256, minisign, trusted comment).
@@ -383,8 +445,9 @@ pub trait Machine {
     fn pipe_name(&self) -> Result<String, String>;
     /// The first and only instance of `\\.\pipe\<name>`, for this user and Administrators only.
     fn create_pipe(&self, name: &str) -> Result<Box<dyn Pipe>, String>;
-    /// `ShellExecuteExW` verb `runas`, directly by this process, with these fixed arguments.
-    fn launch(&self, exe: &Path, args: &[&str]) -> Result<Box<dyn Child>, Launch>;
+    /// `ShellExecuteExW` verb `runas`, directly by this process, with these fixed arguments, the
+    /// prompt owned by window `owner` (so it comes to the front instead of flashing in the taskbar).
+    fn launch(&self, exe: &Path, args: &[&str], owner: usize) -> Result<Box<dyn Child>, Launch>;
     /// The pre-dialog in this program's own window ([`ask_window`]).
     fn consent(&self, d: &Dialog) -> Consent;
 }
@@ -392,6 +455,34 @@ pub trait Machine {
 /// The name the agent accepts (`tether-agent-` and 32 lowercase hex digits).
 pub fn valid_pipe_name(n: &str) -> bool {
     n.strip_prefix("tether-agent-").is_some_and(|h| h.len() == 32 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
+/// `\\?\C:\x` and `C:\x` are the same path; case does not count.
+pub fn same_file_path(a: &str, b: &str) -> bool {
+    let n = |s: &str| s.trim_start_matches(r"\\?\").to_lowercase();
+    n(a) == n(b)
+}
+
+/// The program of a service's command line: the quoted first part, or up to the first space.
+pub fn service_exe(cmd: &str) -> &str {
+    let c = cmd.trim();
+    match c.strip_prefix('"') {
+        Some(r) => r.split('"').next().unwrap_or(""),
+        None => c.split(' ').next().unwrap_or(""),
+    }
+}
+
+/// The agent's result line on the pipe (the agent's usage documents it): whether it installed, and
+/// its last line, cleaned again here and with the token and proof taken out should they be in it.
+pub fn agent_result(raw: &str, secrets: &[&str]) -> Option<(bool, String)> {
+    #[derive(Deserialize)]
+    struct R {
+        ok: bool,
+        line: String,
+    }
+    let r: R = serde_json::from_str(raw.trim()).ok()?;
+    let line = secrets.iter().filter(|s| !s.is_empty()).fold(r.line, |l, s| l.replace(s, "[removed]"));
+    Some((r.ok, tidy(&line)))
 }
 
 // ----------------------------------------------------------------------------- the host
@@ -425,13 +516,47 @@ pub struct UserState {
     pub detail: String,
     /// The Tether ID the agent was linked to.
     pub tether_id: String,
+    /// Written before the launch, cleared when the outcome is known ([`Host::settle`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<Pending>,
 }
 
-/// One elevated action at a time in this process.
+/// An elevated agent this program started (it may outlive the wait, or this program).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Pending {
+    pub at: u64,
+    /// `install` or `remove`.
+    pub action: String,
+    pub by: String,
+    pub version: String,
+    pub tether_id: String,
+}
+
+/// One elevated action at a time in this process; [`DOING`] says which (1 install, 2 remove).
 static RUNNING: Mutex<()> = Mutex::new(());
+static DOING: AtomicU8 = AtomicU8::new(0);
+/// When the person here last said no (or did not answer): unix seconds, 0 none.
+static DECLINED_AT: AtomicU64 = AtomicU64::new(0);
+
+/// The action lock, None while an action runs.
+fn lock() -> Option<MutexGuard<'static, ()>> {
+    match RUNNING.try_lock() {
+        Ok(g) => Some(g),
+        Err(TryLockError::Poisoned(p)) => Some(p.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
+fn busy() -> AgentAnswer {
+    let what = if DOING.load(Ordering::Relaxed) == 2 { "removing the agent" } else { "installing the agent" };
+    AgentAnswer::only("busy", &format!("Tether is {what} (asking the person at this computer, or Windows' prompt is open); ask for the status later"))
+}
 
 const NOT_ALLOWED: &str = "not allowed by this computer's policy";
 const NO_ELEVATE: &str = "not allowed: this computer's policy does not allow administrator prompts";
+const DECLINED: &str = "Administrator approval was not given (declined, or no administrator's name and password).";
+const MAY_STILL_RUN: &str = "the agent Tether started may still be running; ask for the status again in a few minutes";
 
 pub struct Host<'a> {
     pub m: &'a dyn Machine,
@@ -443,6 +568,8 @@ enum Ended {
     /// Nothing changed (nothing is recorded); the sentence for the answer.
     Kept(String),
     Done(UserState),
+    /// The agent did not end within the wait: the pending record stays.
+    Running,
 }
 
 impl Host<'_> {
@@ -456,6 +583,11 @@ impl Host<'_> {
 
     fn save(&self, st: &UserState) {
         let p = self.state_path();
+        if *st == UserState::default() {
+            // nothing to remember (a pending record that served): no file
+            let _ = std::fs::remove_file(&p);
+            return;
+        }
         let r = std::fs::create_dir_all(self.m.user_dir()).and_then(|()| std::fs::write(&p, serde_json::to_vec(st).unwrap_or_default()));
         if let Err(e) = r {
             hbb_common::log::warn!("health agent: {}: {e}", p.display());
@@ -474,12 +606,37 @@ impl Host<'_> {
         (!self.p.elevate).then(|| AgentAnswer::only("not-allowed", NO_ELEVATE))
     }
 
-    /// What is true on this computer (reads only).
+    /// What is true on this computer: `busy` while an action of this process runs; otherwise a
+    /// pending record is settled first.
     pub fn status(&self, now: u64) -> AgentAnswer {
         if let Some(r) = self.refused() {
             return r;
         }
+        let Some(_free) = lock() else { return busy() };
+        self.settle(now);
         self.state_now(now)
+    }
+
+    /// With the action lock held (no elevated child of this process is being waited for): the
+    /// staged file goes (a running image cannot be deleted, so a still running agent keeps it), and a
+    /// pending record is settled as the service path's `adopt` does: the agent's service there
+    /// (install) or gone (remove) means it finished, installed or removed by whoever asked; a record
+    /// older than [`PENDING_MAX`] otherwise, or older than that and [`ADOPT_GRACE`], is dropped.
+    fn settle(&self, now: u64) {
+        let _ = std::fs::remove_file(self.m.user_dir().join(STAGE_DIR).join(STAGED_EXE));
+        let mut st = self.load();
+        let Some(p) = st.pending.take() else { return };
+        let Ok(svc) = self.m.agent_service() else { return };
+        if now >= p.at + PENDING_MAX + ADOPT_GRACE {
+            hbb_common::log::info!("health agent: an old pending record was dropped");
+        } else if p.action == "install" && svc {
+            st = UserState { state: "installed".into(), by: p.by, version: p.version, at: now, detail: "installed while Tether was not waiting for it".into(), tether_id: p.tether_id, pending: None };
+        } else if p.action == "remove" && !svc {
+            st = UserState { state: "removed-by-tether".into(), by: p.by, at: now, detail: "removed while Tether was not waiting for it".into(), pending: None, ..st };
+        } else if now < p.at + PENDING_MAX {
+            return; // it may still be running
+        }
+        self.save(&st);
     }
 
     fn state_now(&self, now: u64) -> AgentAnswer {
@@ -508,7 +665,8 @@ impl Host<'_> {
     }
 
     /// A technician's request (`viewer`: the name their program gave) or the local person's click
-    /// (`viewer` None, install only).
+    /// (`viewer` None). A technician's install or removal is refused where Windows would not prompt,
+    /// and for [`ASK_AGAIN_AFTER`] after the person here said no.
     pub fn request(&self, action: Action, viewer: Option<&str>, now: u64) -> AgentAnswer {
         if action == Action::Status {
             return self.status(now);
@@ -516,19 +674,40 @@ impl Host<'_> {
         if let Some(r) = self.refused() {
             return r;
         }
-        let Ok(_one) = RUNNING.try_lock() else {
-            return AgentAnswer::only("busy", "Tether is asking the person at this computer about the agent; ask for the status later");
-        };
+        let uac = self.m.uac();
+        if viewer.is_some() && uac.silent() {
+            let what = if action == Action::Install { "install" } else { "remove" };
+            return AgentAnswer::only("not-allowed", &format!("Windows would not ask for confirmation on this computer; the person at the computer can {what} it there."));
+        }
+        let since = DECLINED_AT.load(Ordering::Relaxed);
+        if viewer.is_some() && since != 0 && now < since + ASK_AGAIN_AFTER {
+            let mins = (since + ASK_AGAIN_AFTER - now).div_ceil(60);
+            return AgentAnswer::only("busy", &format!("The person at the computer said no a moment ago; ask again in {mins} minute{}.", if mins == 1 { "" } else { "s" }));
+        }
+        let Some(_one) = lock() else { return busy() };
+        DOING.store(if action == Action::Install { 1 } else { 2 }, Ordering::Relaxed);
+        self.settle(now);
+        if self.load().pending.is_some() {
+            return AgentAnswer::only("busy", MAY_STILL_RUN);
+        }
         let r = match action {
-            Action::Install => self.install(viewer, now),
-            _ => self.remove(viewer, now),
+            Action::Install => self.install(viewer, !uac.silent(), now),
+            _ => self.remove(viewer, !uac.silent(), now),
         };
+        if !matches!(r, Ok(Ended::Running)) {
+            // the outcome is known: the record has served
+            let mut st = self.load();
+            if st.pending.take().is_some() {
+                self.save(&st);
+            }
+        }
         match r {
             Ok(Ended::Done(st)) => {
                 self.save(&st);
                 AgentAnswer { detail: tidy(&st.detail), ..self.state_now(now) }
             }
             Ok(Ended::Kept(why)) => AgentAnswer { detail: why, ..self.state_now(now) },
+            Ok(Ended::Running) => AgentAnswer::only("busy", MAY_STILL_RUN),
             Err(e) => {
                 hbb_common::log::warn!("health agent (prompt): {e}");
                 let st = UserState { state: "failed".into(), detail: tidy(&e), at: now, ..self.load() };
@@ -538,17 +717,24 @@ impl Host<'_> {
         }
     }
 
-    fn ask(&self, kind: Kind, viewer: Option<&str>) -> Result<(), String> {
-        let d = dialog(next_id(), &Ask { kind, viewer: viewer.map(str::to_owned), org: self.p.org.clone(), relays: self.p.relays.clone() });
-        match self.m.consent(&d) {
-            Consent::Yes => Ok(()),
-            Consent::No => Err("The person at the computer declined.".into()),
-            Consent::NoAnswer => Err("The person at the computer did not answer.".into()),
-            Consent::NoWindow => Err("Tether's window could not be shown on that computer; nothing was done.".into()),
-        }
+    fn ask(&self, kind: Kind, viewer: Option<&str>, prompt: bool, now: u64) -> Result<(), String> {
+        let d = dialog(next_id(), &Ask { kind, viewer: viewer.map(str::to_owned), org: self.p.org.clone(), relays: self.p.relays.clone(), prompt });
+        let why = match self.m.consent(&d) {
+            Consent::Yes => return Ok(()),
+            Consent::No => "The person at the computer declined.",
+            Consent::NoAnswer => "The person at the computer did not answer.",
+            Consent::NoWindow => return Err("Tether's window could not be shown on that computer; nothing was done.".into()),
+        };
+        DECLINED_AT.store(now, Ordering::Relaxed);
+        Err(why.into())
     }
 
-    fn install(&self, viewer: Option<&str>, now: u64) -> Result<Ended, String> {
+    fn mark(&self, action: &str, by: &str, version: &str, tether_id: &str) {
+        let p = Pending { at: self.m.clock(), action: action.into(), by: by.into(), version: version.into(), tether_id: tether_id.into() };
+        self.save(&UserState { pending: Some(p), ..self.load() });
+    }
+
+    fn install(&self, viewer: Option<&str>, prompt: bool, now: u64) -> Result<Ended, String> {
         if self.p.mode == "remove" {
             return Ok(Ended::Kept("not allowed: this computer's policy removes the agent".into()));
         }
@@ -567,7 +753,7 @@ impl Host<'_> {
         if self.m.agent_service()? {
             return Ok(Ended::Kept("the agent is already installed".into()));
         }
-        if let Err(why) = self.ask(Kind::Install, viewer) {
+        if let Err(why) = self.ask(Kind::Install, viewer, prompt, now) {
             return Ok(Ended::Kept(why));
         }
         let by = if viewer.is_some() { "session" } else { "policy" };
@@ -596,7 +782,9 @@ impl Host<'_> {
             }
             let mut pipe = self.m.create_pipe(&name)?;
             let arg = format!("pipe:{name}");
-            let mut child = match self.m.launch(&exe, &["install", "--from-tether", &arg]) {
+            let owner = self.m.owner_window();
+            self.mark("install", by, &c.version, &id);
+            let mut child = match self.m.launch(&exe, &["install", "--from-tether", &arg], owner) {
                 Ok(c) => c,
                 Err(Launch::Declined) => return Ok(None),
                 Err(Launch::Failed(e)) => return Err(e),
@@ -612,42 +800,74 @@ impl Host<'_> {
                 let i = parse_identity(&pipe.read_line(IDENTITY_MAX, EXCHANGE_WAIT)?)?;
                 let proof = status::sign_agent_link(&seed, &id, &i.uuid, &i.pubkey);
                 let line = serde_json::json!({ "token": token, "tether_id": id, "proof": proof, "channel": self.p.channel, "index": index }).to_string();
-                pipe.write_all(format!("{line}\n").as_bytes(), EXCHANGE_WAIT)
+                pipe.write_all(format!("{line}\n").as_bytes(), EXCHANGE_WAIT).map(|()| proof)
             })();
+            // The agent's one result line when it ends (an older agent closes the pipe and sends none).
+            let start = std::time::Instant::now();
+            let result = sent.as_ref().ok().and_then(|proof| pipe.read_line(RESULT_MAX, EXIT_WAIT).ok().and_then(|l| agent_result(&l, &[&token, proof])));
             // Our end goes: an agent still waiting for the line gets end of file and refuses.
             drop(pipe);
-            let code = child.wait(EXIT_WAIT);
+            let code = child.wait(EXIT_WAIT.saturating_sub(start.elapsed()));
             drop(lock);
             sent?;
-            Ok(Some(code))
+            Ok(Some((code, result)))
         });
         let _ = std::fs::remove_file(&exe);
         match r? {
-            None => Ok(Ended::Kept("Administrator approval was not given (declined, or no administrator's name and password).".into())),
-            Some(Some(0)) => Ok(Ended::Done(UserState { state: "installed".into(), by: by.into(), version: c.version.clone(), at: now, detail: format!("Installed {}, linked to {id}; first report within five minutes.", c.version), tether_id: id })),
-            Some(Some(code)) => Err(format!("the agent refused (exit code {code}); nothing was installed as the agent")),
-            Some(None) => Err(format!("the agent did not finish within {} s", EXIT_WAIT.as_secs())),
+            None => {
+                DECLINED_AT.store(now, Ordering::Relaxed);
+                Ok(Ended::Kept(DECLINED.into()))
+            }
+            Some((None, _)) => Ok(Ended::Running),
+            // Exit 1 after a service whose start failed: installed all the same (the agent's line says why).
+            Some((Some(code), result)) if code == 0 || self.m.agent_service()? => {
+                let said = result.map(|(_, l)| l).filter(|l| !l.is_empty());
+                let detail = match said {
+                    Some(l) => format!("Installed {}, linked to {id}. The agent: {l}", c.version),
+                    None => format!("Installed {}, linked to {id}; first report within five minutes.", c.version),
+                };
+                Ok(Ended::Done(UserState { state: "installed".into(), by: by.into(), version: c.version.clone(), at: now, detail, tether_id: id, pending: None }))
+            }
+            Some((Some(code), result)) => Err(match result.map(|(_, l)| l).filter(|l| !l.is_empty()) {
+                Some(l) => format!("the agent refused: {l}"),
+                None => format!("the agent refused (exit code {code}); nothing was installed as the agent"),
+            }),
         }
     }
 
-    fn remove(&self, viewer: Option<&str>, now: u64) -> Result<Ended, String> {
+    fn remove(&self, viewer: Option<&str>, prompt: bool, now: u64) -> Result<Ended, String> {
         if !self.m.agent_service()? {
             return Ok(Ended::Kept("the agent is not installed".into()));
         }
-        if let Err(why) = self.ask(Kind::Remove, viewer) {
+        let old = self.m.installed_version().is_none_or(|v| tether_trust::version::compare(&v, BY_TETHER_SINCE).is_none_or(|o| o.is_lt()));
+        if old {
+            return Ok(Ended::Kept(format!("This version of the agent (older than {BY_TETHER_SINCE}) cannot be removed through Tether: remove it on the computer under Settings › Apps › Tether Monitor, or with \"tether-monitor uninstall\" in an administrator's command prompt. No prompt was started.")));
+        }
+        // The installed exe in the administrators-only program folder (no staging needed), and only
+        // when it is the program the agent's service runs.
+        let exe = self.m.installed_exe()?;
+        let image = self.m.service_image()?;
+        if !same_file_path(service_exe(&image), &exe.to_string_lossy()) {
+            return Ok(Ended::Kept("The agent's service runs another program than the one in Tether Monitor's program folder: nothing was started. Remove it on the computer under Settings › Apps.".into()));
+        }
+        if let Err(why) = self.ask(Kind::Remove, viewer, prompt, now) {
             return Ok(Ended::Kept(why));
         }
-        // The installed exe in the administrators-only program folder: no staging needed.
-        let mut child = match self.m.launch(&self.m.installed_exe(), &["uninstall", "--by-tether"]) {
+        let by = if viewer.is_some() { "session" } else { "policy" };
+        let owner = self.m.owner_window();
+        self.mark("remove", by, "", "");
+        let mut child = match self.m.launch(&exe, &["uninstall", "--by-tether"], owner) {
             Ok(c) => c,
-            Err(Launch::Declined) => return Ok(Ended::Kept("Administrator approval was not given (declined, or no administrator's name and password).".into())),
+            Err(Launch::Declined) => {
+                DECLINED_AT.store(now, Ordering::Relaxed);
+                return Ok(Ended::Kept(DECLINED.into()));
+            }
             Err(Launch::Failed(e)) => return Err(e),
         };
-        let by = if viewer.is_some() { "session" } else { "policy" };
         match child.wait(EXIT_WAIT) {
-            Some(0) => Ok(Ended::Done(UserState { state: "removed-by-tether".into(), by: by.into(), at: now, detail: "Removed: the agent's service, folders and enrolment are gone.".into(), ..self.load() })),
+            Some(0) => Ok(Ended::Done(UserState { state: "removed-by-tether".into(), by: by.into(), at: now, detail: "Removed: the agent's service, folders and enrolment are gone.".into(), pending: None, ..self.load() })),
             Some(code) => Err(format!("the agent's uninstall failed (exit code {code})")),
-            None => Err(format!("the agent's uninstall did not finish within {} s", EXIT_WAIT.as_secs())),
+            None => Ok(Ended::Running),
         }
     }
 }
@@ -679,12 +899,102 @@ pub mod win {
         s.encode_wide().chain(std::iter::once(0)).collect()
     }
 
-    pub fn program_files() -> PathBuf {
-        std::env::var_os("ProgramFiles").map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from)
+    /// The 64-bit Program Files folder from the known-folder API (HKLM): `%ProgramFiles%` is the
+    /// user's to override for the next logon.
+    pub fn program_files() -> Result<PathBuf, String> {
+        use windows_sys::Win32::System::Com::CoTaskMemFree;
+        use windows_sys::Win32::UI::Shell::{SHGetKnownFolderPath, FOLDERID_ProgramFilesX64, KF_FLAG_DEFAULT};
+        unsafe {
+            let mut p: windows_sys::core::PWSTR = null_mut();
+            let hr = SHGetKnownFolderPath(&FOLDERID_ProgramFilesX64, KF_FLAG_DEFAULT as u32, null_mut(), &mut p);
+            let r = (hr >= 0 && !p.is_null()).then(|| {
+                let n = (0..).take_while(|&i| *p.add(i) != 0).count();
+                PathBuf::from(String::from_utf16_lossy(std::slice::from_raw_parts(p, n)))
+            });
+            CoTaskMemFree(p.cast());
+            r.ok_or_else(|| format!("the Program Files folder could not be found (0x{hr:08x})"))
+        }
     }
 
-    pub fn installed_exe() -> PathBuf {
-        program_files().join(AGENT_FOLDER).join(AGENT_EXE)
+    pub fn installed_exe() -> Result<PathBuf, String> {
+        Ok(program_files()?.join(AGENT_FOLDER).join(AGENT_EXE))
+    }
+
+    /// The agent service's configured command line.
+    pub fn service_image() -> Result<String, String> {
+        use windows_sys::Win32::System::Services::{QueryServiceConfigW, QUERY_SERVICE_CONFIGW, SERVICE_QUERY_CONFIG};
+        let name = wide(std::ffi::OsStr::new(SERVICE));
+        let err = || format!("the {SERVICE} service: {}", std::io::Error::last_os_error());
+        unsafe {
+            let m = OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT);
+            if m.is_null() {
+                return Err(format!("service manager: {}", std::io::Error::last_os_error()));
+            }
+            let s = OpenServiceW(m, name.as_ptr(), SERVICE_QUERY_CONFIG);
+            let r = if s.is_null() {
+                Err(err())
+            } else {
+                // 8 KiB, aligned for the struct: the documented maximum of a configuration.
+                let mut buf = vec![0u64; 1024];
+                let mut need = 0u32;
+                let q = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
+                let r = if QueryServiceConfigW(s, q, (buf.len() * 8) as u32, &mut need) == 0 || (*q).lpBinaryPathName.is_null() {
+                    Err(err())
+                } else {
+                    let p = (*q).lpBinaryPathName;
+                    let n = (0..).take_while(|&i| *p.add(i) != 0).count();
+                    Ok(String::from_utf16_lossy(std::slice::from_raw_parts(p, n)))
+                };
+                CloseServiceHandle(s);
+                r
+            };
+            CloseServiceHandle(m);
+            r
+        }
+    }
+
+    /// A string value under HKLM (64-bit view), at most 255 characters.
+    fn hklm_text(key: &str, value: &str) -> Option<String> {
+        use windows_sys::Win32::System::Registry::RRF_RT_REG_SZ;
+        let (key, name) = (wide(std::ffi::OsStr::new(key)), wide(std::ffi::OsStr::new(value)));
+        let mut buf = [0u16; 256];
+        let mut size = std::mem::size_of_val(&buf) as u32;
+        let r = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, null_mut(), buf.as_mut_ptr().cast(), &mut size) };
+        (r == 0).then(|| String::from_utf16_lossy(&buf[..(size as usize / 2).min(buf.len())]).trim_end_matches('\0').trim().to_owned())
+    }
+
+    fn hklm_dword(key: &str, value: &str) -> Option<u32> {
+        use windows_sys::Win32::System::Registry::RRF_RT_REG_DWORD;
+        let (key, name) = (wide(std::ffi::OsStr::new(key)), wide(std::ffi::OsStr::new(value)));
+        let (mut v, mut size) = (0u32, 4u32);
+        let r = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY, null_mut(), (&mut v as *mut u32).cast(), &mut size) };
+        (r == 0).then_some(v)
+    }
+
+    /// `DisplayVersion` of the agent's Apps entry (written by install from 0.2.0 on).
+    pub fn installed_version() -> Option<String> {
+        hklm_text(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\TetherMonitor", "DisplayVersion").filter(|v| release::valid_version(v))
+    }
+
+    /// This process's token and the UAC settings (`HKLM\…\Policies\System`; absent values are the
+    /// defaults: UAC on, administrators asked).
+    pub fn uac() -> Uac {
+        use windows_sys::Win32::Security::{TokenElevation, TokenElevationType, TokenElevationTypeLimited, TOKEN_ELEVATION};
+        const POLICY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
+        let (mut elevated, mut kind) = (false, 0i32);
+        unsafe {
+            let mut tok: HANDLE = null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) != 0 {
+                let mut e: TOKEN_ELEVATION = std::mem::zeroed();
+                let mut len = 0u32;
+                elevated = GetTokenInformation(tok, TokenElevation, (&mut e as *mut TOKEN_ELEVATION).cast(), 4, &mut len) != 0 && e.TokenIsElevated != 0;
+                if GetTokenInformation(tok, TokenElevationType, (&mut kind as *mut i32).cast(), 4, &mut len) == 0 {
+                    kind = 0;
+                }
+                CloseHandle(tok);
+            }
+        }
+        Uac { elevated, lua_off: hklm_dword(POLICY, "EnableLUA") == Some(0), admin_silent: hklm_dword(POLICY, "ConsentPromptBehaviorAdmin") == Some(0), admin: elevated || kind == TokenElevationTypeLimited, elevated_service: false }
     }
 
     /// `%LOCALAPPDATA%\<app name of this process>`.
@@ -956,12 +1266,6 @@ pub mod win {
         (unsafe { QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut n) } != 0).then(|| String::from_utf16_lossy(&buf[..n as usize]))
     }
 
-    /// `\\?\C:\x` and `C:\x` are the same path; case does not count.
-    pub fn same_file_path(a: &str, b: &str) -> bool {
-        let n = |s: &str| s.trim_start_matches(r"\\?\").to_lowercase();
-        n(a) == n(b)
-    }
-
     impl Child for Elevated {
         fn pid(&self) -> u32 {
             self.pid
@@ -992,9 +1296,9 @@ pub mod win {
         }
     }
 
-    /// `ShellExecuteExW` verb `runas` on `exe` with `args` (no spaces in any of them), no window;
-    /// blocks while the prompt is open.
-    pub fn launch(exe: &Path, args: &[&str]) -> Result<Box<dyn Child>, Launch> {
+    /// `ShellExecuteExW` verb `runas` on `exe` with `args` (no spaces in any of them), no window,
+    /// the prompt owned by window `owner` (0: none); blocks while the prompt is open.
+    pub fn launch(exe: &Path, args: &[&str], owner: usize) -> Result<Box<dyn Child>, Launch> {
         if args.iter().any(|a| a.is_empty() || a.contains([' ', '"', '\t'])) {
             return Err(Launch::Failed("an argument with a space".into()));
         }
@@ -1003,6 +1307,7 @@ pub mod win {
         let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
         info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
         info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+        info.hwnd = owner as windows_sys::Win32::Foundation::HWND;
         info.lpVerb = verb.as_ptr();
         info.lpFile = file.as_ptr();
         info.lpParameters = params.as_ptr();
@@ -1073,12 +1378,15 @@ mod tests {
         Stranger,
         /// Windows started another image than the locked file.
         Swapped,
+        /// Still running when the wait ends.
+        Hangs,
+        /// Made the service, could not start it, exits 1.
+        Unstarted,
     }
 
     struct FakeChild {
         pid: u32,
-        image_ok: bool,
-        code: Option<u32>,
+        agent: Agent,
         alive: std::rc::Rc<Cell<bool>>,
         /// On a successful exit: an install made the service (only when it got the line), an uninstall removed it.
         svc: std::rc::Rc<Cell<bool>>,
@@ -1091,14 +1399,20 @@ mod tests {
             self.pid
         }
         fn runs(&self, _locked: &dyn std::any::Any) -> bool {
-            self.image_ok
+            self.agent != Agent::Swapped
         }
         fn wait(&mut self, _within: Duration) -> Option<u32> {
-            self.alive.set(false);
-            if self.code == Some(0) {
-                self.svc.set(self.install && !self.sent.borrow().is_empty());
+            match self.agent {
+                Agent::Hangs => return None,
+                Agent::Runs(0) => self.svc.set(self.install && !self.sent.borrow().is_empty()),
+                Agent::Unstarted => self.svc.set(true),
+                _ => {}
             }
-            self.code
+            self.alive.set(false);
+            Some(match self.agent {
+                Agent::Runs(c) => c,
+                _ => 1,
+            })
         }
     }
 
@@ -1106,7 +1420,8 @@ mod tests {
         client: u32,
         /// The second connection attempt on a pipe that allows one instance.
         connections: std::rc::Rc<Cell<u32>>,
-        identity: String,
+        /// What the agent writes: `identity`, then its result line (none from an older agent).
+        lines: std::collections::VecDeque<String>,
         sent: std::rc::Rc<RefCell<Vec<u8>>>,
     }
 
@@ -1116,10 +1431,11 @@ mod tests {
             Ok(self.client)
         }
         fn read_line(&mut self, max: usize, _within: Duration) -> Result<String, String> {
-            if self.identity.len() > max {
+            let l = self.lines.pop_front().ok_or("the agent closed the pipe")?;
+            if l.len() > max {
                 return Err("the agent's line is too long".into());
             }
-            Ok(self.identity.clone())
+            Ok(l)
         }
         fn write_all(&mut self, bytes: &[u8], _within: Duration) -> Result<(), String> {
             self.sent.borrow_mut().extend_from_slice(bytes);
@@ -1146,6 +1462,14 @@ mod tests {
         connections: std::rc::Rc<Cell<u32>>,
         alive: std::rc::Rc<Cell<bool>>,
         identity: RefCell<String>,
+        result: RefCell<Option<String>>,
+        uac: Cell<Uac>,
+        image: RefCell<String>,
+        version: RefCell<Option<String>>,
+        clock: Cell<u64>,
+        fronted: Cell<bool>,
+        /// The owner window the launch got, and whether the window had come to the front before it.
+        owner_at_launch: Cell<Option<(usize, bool)>>,
     }
 
     impl Machine for Fake {
@@ -1158,8 +1482,24 @@ mod tests {
         fn removed_at(&self) -> Option<u64> {
             self.removed.get()
         }
-        fn installed_exe(&self) -> PathBuf {
-            PathBuf::from(r"C:\Program Files\Tether Monitor\tether-monitor.exe")
+        fn installed_exe(&self) -> Result<PathBuf, String> {
+            Ok(PathBuf::from(r"C:\Program Files\Tether Monitor\tether-monitor.exe"))
+        }
+        fn service_image(&self) -> Result<String, String> {
+            Ok(self.image.borrow().clone())
+        }
+        fn installed_version(&self) -> Option<String> {
+            self.version.borrow().clone()
+        }
+        fn uac(&self) -> Uac {
+            self.uac.get()
+        }
+        fn clock(&self) -> u64 {
+            self.clock.get()
+        }
+        fn owner_window(&self) -> usize {
+            self.fronted.set(true);
+            0x4711
         }
         fn fetch_index(&self, _channel: &str) -> Vec<(String, Vec<u8>)> {
             self.fetches.set(self.fetches.get() + 1);
@@ -1186,20 +1526,18 @@ mod tests {
                 Agent::Stranger => 4242,
                 _ => 77,
             };
-            Ok(Box::new(FakePipe { client, connections: self.connections.clone(), identity: self.identity.borrow().clone(), sent: self.sent.clone() }))
+            let lines = std::iter::once(self.identity.borrow().clone()).chain(self.result.borrow().clone()).collect();
+            Ok(Box::new(FakePipe { client, connections: self.connections.clone(), lines, sent: self.sent.clone() }))
         }
-        fn launch(&self, exe: &Path, args: &[&str]) -> Result<Box<dyn Child>, Launch> {
+        fn launch(&self, exe: &Path, args: &[&str], owner: usize) -> Result<Box<dyn Child>, Launch> {
             self.staged_at_launch.set(exe.exists());
+            self.owner_at_launch.set(Some((owner, self.fronted.get())));
             self.launched.borrow_mut().push((exe.to_owned(), args.iter().map(|a| a.to_string()).collect()));
             if let Some(l) = self.launch.borrow().clone() {
                 return Err(l);
             }
             self.alive.set(true);
-            let code = match self.agent.get() {
-                Agent::Runs(c) => Some(c),
-                _ => Some(1),
-            };
-            Ok(Box::new(FakeChild { pid: 77, image_ok: self.agent.get() != Agent::Swapped, code, alive: self.alive.clone(), svc: self.svc.clone(), install: args[0] == "install", sent: self.sent.clone() }))
+            Ok(Box::new(FakeChild { pid: 77, agent: self.agent.get(), alive: self.alive.clone(), svc: self.svc.clone(), install: args[0] == "install", sent: self.sent.clone() }))
         }
         fn consent(&self, d: &Dialog) -> Consent {
             self.dialogs.borrow_mut().push(d.clone());
@@ -1250,7 +1588,15 @@ mod tests {
             connections: Default::default(),
             alive: Default::default(),
             identity: RefCell::new(format!("{{\"uuid\":\"{UUID}\",\"pubkey\":\"{}\"}}", agent_pubkey())),
+            result: RefCell::new(None),
+            uac: Cell::new(Uac::default()),
+            image: RefCell::new(r#""C:\Program Files\Tether Monitor\tether-monitor.exe" service"#.into()),
+            version: RefCell::new(Some("0.2.0".into())),
+            clock: Cell::new(NOW),
+            fronted: Cell::new(false),
+            owner_at_launch: Cell::new(None),
         };
+        DECLINED_AT.store(0, Ordering::Relaxed);
         let p = Inputs { mode: mode.into(), grant: token.clone(), channel: "stable".into(), admin: vec![k.admin.verifying_key()], updater_key: k.public.clone(), elevate: true, identity: Some((ID.into(), SEED)), org: "Example Support".into(), relays: vec!["relay.test".into()] };
         World { k, fake, p, token, _one: one }
     }
@@ -1299,10 +1645,15 @@ mod tests {
         // the dialog came first and said who asks, unverified
         let d = &w.fake.dialogs.borrow()[0];
         assert_eq!(d.title, "Install the health monitoring program?");
-        assert!(d.paragraphs[0].contains("“Sam at the help desk”") && d.paragraphs[0].contains("not verified") && d.paragraphs[0].contains("Example Support"), "{d:?}");
-        assert!(d.paragraphs[1].contains("stays on this computer after this session") && d.paragraphs[1].contains("relay.test"));
+        assert_eq!(d.paragraphs[0], "A technician (support of Example Support) asks to install Tether Monitor.");
+        assert_eq!(d.paragraphs[1], "Name given by the technician (not verified): Sam at the help desk");
+        assert!(d.paragraphs[2].contains("stays on this computer after this session") && d.paragraphs[2].contains("relay.test"));
+        assert!(d.paragraphs[3].contains("privacy policy") && d.paragraphs[3].contains("PRIVACY.md"), "{d:?}");
         assert!(d.paragraphs.iter().any(|p| p.contains("Settings › Apps › Tether Monitor")));
+        assert_eq!(d.paragraphs.last().unwrap(), "Windows will ask for administrator approval next.");
         assert_eq!((d.yes.as_str(), d.no.as_str()), ("Install", "Don't install"));
+        // the prompt is owned by this program's window, brought to the front first
+        assert_eq!(w.fake.owner_at_launch.get(), Some((0x4711, true)));
     }
 
     #[test]
@@ -1415,10 +1766,12 @@ mod tests {
         assert!(a.state == "installed-by-hand" && a.detail.contains("declined"), "{a:?}");
         assert!(w.fake.launched.borrow().is_empty());
         w.fake.consent.set(Consent::Yes);
-        let a = w.host().request(Action::Remove, Some("Sam"), NOW);
+        // a technician asks again only after the wait
+        let a = w.host().request(Action::Remove, Some("Sam"), NOW + ASK_AGAIN_AFTER);
         assert_eq!(a.state, "removed-by-tether", "{a:?}");
-        assert_eq!(w.fake.launched.borrow()[0], (w.fake.installed_exe(), vec!["uninstall".to_owned(), "--by-tether".into()]));
+        assert_eq!(w.fake.launched.borrow()[0], (w.fake.installed_exe().unwrap(), vec!["uninstall".to_owned(), "--by-tether".into()]));
         assert!(w.fake.dialogs.borrow()[1].title.starts_with("Remove"));
+        assert_eq!(w.fake.owner_at_launch.get(), Some((0x4711, true)));
     }
 
     #[test]
@@ -1445,7 +1798,7 @@ mod tests {
 
     #[test]
     fn the_window_answers_only_the_dialog_it_was_shown() {
-        let d = dialog(next_id(), &Ask { kind: Kind::Install, viewer: None, org: "".into(), relays: vec![] });
+        let d = dialog(next_id(), &Ask { kind: Kind::Install, viewer: None, org: "".into(), relays: vec![], prompt: true });
         assert_eq!(d.paragraphs[0], "Your organisation asks to install Tether Monitor.");
         let id = d.id;
         let t = std::thread::spawn(move || ask_window(d, || true, Duration::from_secs(5)));
@@ -1459,10 +1812,214 @@ mod tests {
         assert_eq!(t.join().unwrap(), Consent::No);
         assert!(pending().is_none());
         // no answer in time
-        let d = dialog(next_id(), &Ask { kind: Kind::Remove, viewer: Some("\u{202e}evil\u{0007}".into()), org: "Org".into(), relays: vec![] });
-        assert!(d.paragraphs[0].contains("“evil”"), "{d:?}");
+        let d = dialog(next_id(), &Ask { kind: Kind::Remove, viewer: Some("\u{202e}evil\u{0007}".into()), org: "Org".into(), relays: vec![], prompt: true });
+        assert_eq!(d.paragraphs[1], "Name given by the technician (not verified): evil", "{d:?}");
         assert_eq!(ask_window(d, || true, Duration::from_millis(50)), Consent::NoAnswer);
         assert!(pending().is_none());
+    }
+
+    #[test]
+    fn a_technician_is_refused_where_windows_would_not_prompt() {
+        let cases = [
+            Uac { elevated: true, admin: true, ..Default::default() },
+            Uac { lua_off: true, ..Default::default() },
+            Uac { admin_silent: true, admin: true, ..Default::default() },
+            Uac { elevated_service: true, ..Default::default() },
+        ];
+        for uac in cases {
+            assert!(uac.silent(), "{uac:?}");
+            let w = world("silent", "on-request");
+            w.fake.uac.set(uac);
+            let a = w.install();
+            assert_eq!((a.state.as_str(), a.detail.as_str()), ("not-allowed", "Windows would not ask for confirmation on this computer; the person at the computer can install it there."), "{uac:?}");
+            w.fake.svc.set(true);
+            let a = w.host().request(Action::Remove, Some("Sam"), NOW);
+            assert!(a.state == "not-allowed" && a.detail.contains("can remove it there"), "{a:?}");
+            assert!(w.fake.dialogs.borrow().is_empty() && w.fake.fetches.get() == 0 && w.fake.launched.borrow().is_empty(), "nothing shown or started");
+            // the person here can: their dialog says that no Windows prompt follows
+            w.fake.svc.set(false);
+            assert_eq!(w.host().request(Action::Install, None, NOW).state, "installed", "{uac:?}");
+            let d = &w.fake.dialogs.borrow()[0];
+            assert_eq!(d.paragraphs.last().unwrap(), "No Windows prompt will follow: this computer gives administrator rights without asking.");
+            assert!(!d.paragraphs.iter().any(|p| p.contains("after this session")), "{d:?}");
+        }
+        // administrators elevated without asking: a standard user is still asked for credentials
+        assert!(!Uac { admin_silent: true, ..Default::default() }.silent());
+        let w = world("prompting", "on-request");
+        w.fake.uac.set(Uac { admin_silent: true, ..Default::default() });
+        assert_eq!(w.install().state, "installed");
+    }
+
+    #[test]
+    fn a_no_holds_a_technician_off_for_ten_minutes_not_the_person_here() {
+        for (consent, launch) in [(Consent::No, None), (Consent::NoAnswer, None), (Consent::Yes, Some(Launch::Declined))] {
+            let w = world("again", "install");
+            w.fake.consent.set(consent);
+            *w.fake.launch.borrow_mut() = launch;
+            assert_eq!(w.install().state, "not-installed");
+            w.fake.consent.set(Consent::Yes);
+            *w.fake.launch.borrow_mut() = None;
+            let a = w.host().request(Action::Install, Some("Sam"), NOW + 60);
+            assert_eq!((a.state.as_str(), a.detail.as_str()), ("busy", "The person at the computer said no a moment ago; ask again in 9 minutes."), "{consent:?}");
+            assert_eq!(w.host().request(Action::Install, Some("Sam"), NOW + ASK_AGAIN_AFTER - 30).detail, "The person at the computer said no a moment ago; ask again in 1 minute.");
+            assert_eq!(w.fake.dialogs.borrow().len(), 1, "no second dialog");
+            // the person's own click is not held off
+            assert_eq!(w.host().request(Action::Install, None, NOW + 60).state, "installed");
+        }
+        // a window that could not be shown is no "no"
+        let w = world("nowindow", "install");
+        w.fake.consent.set(Consent::NoWindow);
+        w.install();
+        w.fake.consent.set(Consent::Yes);
+        assert_eq!(w.host().request(Action::Install, Some("Sam"), NOW + 1).state, "installed");
+    }
+
+    #[test]
+    fn status_is_busy_while_the_dialog_or_the_prompt_is_open() {
+        let w = world("busy", "install");
+        let held = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        DOING.store(1, Ordering::Relaxed);
+        let a = w.host().status(NOW);
+        assert!(a.state == "busy" && a.detail.contains("installing the agent"), "{a:?}");
+        DOING.store(2, Ordering::Relaxed);
+        assert!(w.host().status(NOW).detail.contains("removing the agent"));
+        assert_eq!(w.install().state, "busy");
+        drop(held);
+        assert_eq!(w.host().status(NOW).state, "not-installed");
+    }
+
+    #[test]
+    fn the_name_stands_on_its_own_line_cleaned_and_bounded() {
+        let ask = |viewer: &str| dialog(1, &Ask { kind: Kind::Install, viewer: Some(viewer.into()), org: "Org\u{2066}".into(), relays: vec!["relay\u{2028}.test".into()], prompt: true });
+        let d = ask("Sam\u{061c}\u{2028}\u{2029}\u{2060}\u{2061}\u{2064}\u{200b} says: approve");
+        assert_eq!(d.paragraphs[1], "Name given by the technician (not verified): Sam says: approve");
+        assert!(d.paragraphs[0].starts_with("A technician (support of Org)") && !d.paragraphs[0].contains("Sam"), "{d:?}");
+        assert!(d.paragraphs[2].contains("relay.test"), "{d:?}");
+        let long = ask(&"x".repeat(500));
+        assert_eq!(long.paragraphs[1].chars().filter(|c| *c == 'x').count(), 64);
+        // a name of only hidden characters: no name line
+        assert!(!ask("\u{2060}\u{202e}").paragraphs.iter().any(|p| p.starts_with("Name given")));
+        // the person here: no technician, no "after this session"
+        let d = dialog(2, &Ask { kind: Kind::Install, viewer: None, org: "Org".into(), relays: vec![], prompt: true });
+        assert_eq!(d.paragraphs[0], "Your organisation (Org) asks to install Tether Monitor.");
+        assert!(d.paragraphs[1].contains("stays on this computer,") && !d.paragraphs.iter().any(|p| p.contains("after this session")), "{d:?}");
+        assert_eq!(tidy("a\u{2028}b\u{061c}c\u{2063}d"), "abcd");
+    }
+
+    #[test]
+    fn the_agents_result_line_is_the_outcome_and_the_detail() {
+        let w = world("result", "install");
+        *w.fake.result.borrow_mut() = Some(r#"{"ok":true,"line":"installed, service running, first check cycle done"}"#.into());
+        let a = w.install();
+        assert_eq!(a.state, "installed");
+        assert_eq!(a.detail, "Installed 0.2.0, linked to 123456789. The agent: installed, service running, first check cycle done");
+        // refused: its line, never the token or the proof even if it carried them
+        drop(w);
+        let w = world("resultno", "install");
+        w.fake.agent.set(Agent::Runs(1));
+        let proof = status::sign_agent_link(&SEED, ID, UUID, &agent_pubkey());
+        *w.fake.result.borrow_mut() = Some(serde_json::json!({ "ok": false, "line": format!("enrolment refused for {} with {proof}\u{0007}", w.token) }).to_string());
+        let a = w.install();
+        assert_eq!(a.state, "failed");
+        assert!(a.detail.starts_with("the agent refused: enrolment refused for"), "{}", a.detail);
+        assert!(!a.detail.contains(&w.token) && !a.detail.contains(&proof) && !a.detail.contains('\u{0007}'), "{}", a.detail);
+        let st = std::fs::read_to_string(w.fake.dir.join(USER_STATE)).unwrap();
+        assert!(!st.contains(&w.token) && !st.contains(&proof));
+        // the service was made but did not start (exit 1): installed all the same, with its line
+        drop(w);
+        let w = world("unstarted", "install");
+        w.fake.agent.set(Agent::Unstarted);
+        *w.fake.result.borrow_mut() = Some(r#"{"ok":false,"line":"installed, but the service did not start: access denied"}"#.into());
+        let a = w.install();
+        assert!(a.state == "installed" && a.detail.contains("did not start"), "{a:?}");
+        // an older agent sends nothing, or something else: the exit code as before
+        drop(w);
+        let w = world("noline", "install");
+        w.fake.agent.set(Agent::Runs(3));
+        *w.fake.result.borrow_mut() = Some("not json".into());
+        assert!(w.install().detail.contains("exit code 3"));
+        assert_eq!(agent_result(r#"{"ok":true}"#, &[]), None);
+        // a secret too short for tidy's rule is taken out by name
+        assert_eq!(agent_result(r#"{"ok":false,"line":"refused tok-123 here"}"#, &["tok-123", ""]), Some((false, "refused [removed] here".into())));
+    }
+
+    #[test]
+    fn an_agent_still_running_after_the_wait_is_settled_later() {
+        let w = world("pending", "install");
+        w.fake.agent.set(Agent::Hangs);
+        let a = w.install();
+        assert!(a.state == "busy" && a.detail.contains("may still be running"), "{a:?}");
+        let st = w.host().load();
+        assert_eq!((st.state.as_str(), st.pending.as_ref().map(|p| (p.action.as_str(), p.by.as_str(), p.at))), ("", Some(("install", "session", NOW))), "no failure, the record kept");
+        // a second ask meanwhile: busy, nothing started
+        assert_eq!(w.host().request(Action::Install, None, NOW + 10).state, "busy");
+        assert_eq!(w.fake.launched.borrow().len(), 1);
+        assert_eq!(w.host().status(NOW + 10).state, "not-installed");
+        assert!(w.host().load().pending.is_some(), "young: kept");
+        // the agent finished meanwhile (or after Tether stopped): installed by the session, linked
+        w.fake.svc.set(true);
+        let s = w.host().status(NOW + 100);
+        assert_eq!((s.state.as_str(), s.installed_by.as_str(), s.version.as_str(), s.detail.as_str()), ("installed", "session", "0.2.0", ""));
+        assert!(w.host().load().pending.is_none() && !w.fake.dir.join(STAGE_DIR).join(STAGED_EXE).exists());
+        drop(w);
+        // a record from long ago claims nothing; one past the limits without a service is dropped
+        for (svc, later, want) in [(true, PENDING_MAX + ADOPT_GRACE, "installed-by-hand"), (false, PENDING_MAX, "not-installed")] {
+            let w = world("oldpending", "install");
+            w.host().mark("install", "policy", "0.2.0", ID);
+            w.fake.svc.set(svc);
+            assert_eq!(w.host().status(NOW + later).state, want);
+            assert!(w.host().load().pending.is_none());
+        }
+        // a removal that ended while Tether was not waiting
+        let w = world("pendingremove", "install");
+        w.host().mark("remove", "session", "", "");
+        assert_eq!(w.host().status(NOW + 5).state, "removed-by-tether");
+        // a staged file left behind goes when nothing of ours runs
+        std::fs::create_dir_all(w.fake.dir.join(STAGE_DIR)).unwrap();
+        std::fs::write(w.fake.dir.join(STAGE_DIR).join(STAGED_EXE), b"x").unwrap();
+        w.host().status(NOW + 6);
+        assert!(!w.fake.dir.join(STAGE_DIR).join(STAGED_EXE).exists());
+    }
+
+    #[test]
+    fn removal_needs_a_by_tether_agent_and_the_services_own_program() {
+        for v in [None, Some("0.1.9")] {
+            let w = world("oldagent", "install");
+            w.fake.svc.set(true);
+            *w.fake.version.borrow_mut() = v.map(str::to_owned);
+            let a = w.host().request(Action::Remove, Some("Sam"), NOW);
+            assert!(a.detail.contains("older than 0.2.0") && a.detail.contains("Settings › Apps") && a.detail.contains("No prompt was started"), "{a:?}");
+            assert!(w.fake.dialogs.borrow().is_empty() && w.fake.launched.borrow().is_empty());
+        }
+        for image in [r#""C:\Users\x\AppData\evil.exe" service"#, r"C:\Program Files\Tether Monitor\tether-monitor.exe service", ""] {
+            let w = world("image", "install");
+            w.fake.svc.set(true);
+            *w.fake.image.borrow_mut() = image.into();
+            let a = w.host().request(Action::Remove, Some("Sam"), NOW);
+            assert!(a.detail.contains("runs another program") && a.detail.contains("nothing was started"), "{image}: {a:?}");
+            assert!(w.fake.dialogs.borrow().is_empty() && w.fake.launched.borrow().is_empty());
+        }
+        assert_eq!(service_exe(r#""C:\Program Files\Tether Monitor\tether-monitor.exe" service"#), r"C:\Program Files\Tether Monitor\tether-monitor.exe");
+        assert_eq!(service_exe(r"C:\x\a.exe service"), r"C:\x\a.exe");
+        assert!(same_file_path(r"\\?\C:\Program Files\X.exe", r"c:\program files\x.exe"));
+    }
+
+    /// The program folder comes from the known-folder API, not from `%ProgramFiles%`.
+    #[cfg(windows)]
+    #[test]
+    fn the_program_folder_does_not_follow_the_environment() {
+        let real = win::program_files().unwrap();
+        let old = std::env::var_os("ProgramFiles");
+        std::env::set_var("ProgramFiles", std::env::temp_dir());
+        let seen = win::installed_exe();
+        match old {
+            Some(o) => std::env::set_var("ProgramFiles", o),
+            None => std::env::remove_var("ProgramFiles"),
+        }
+        assert_eq!(seen.unwrap(), real.join(AGENT_FOLDER).join(AGENT_EXE));
+        assert!(!real.starts_with(std::env::temp_dir()));
+        // no Tether Monitor service on this machine: its configuration cannot be read
+        assert!(win::service_image().is_err() || win::service_exists().unwrap_or(false));
     }
 
     #[test]
