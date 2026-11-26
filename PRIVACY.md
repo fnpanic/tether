@@ -14,7 +14,7 @@ What goes to those relay servers:
 | Update checks: app, channel, version | Offering signed updates | access logs of the relay |
 | Health report, only on machines where the organization installed a monitoring agent: machine name, names and versions of installed products, the state, title, value and hint of each check, agent version, time of the last report | Showing the health of supported machines to technicians | the last full report and 90 days of state changes; removed when the device is removed or after 180 days without a report |
 | Customer reference, only on machines where the organization installed a monitoring agent and its administrator put one in the enrolment token: a short label such as a customer number (set by the administrator, never by the machine) | Grouping supported machines by customer in Tether | with the device's enrolment: removed when the device is removed or after 180 days without a report |
-| Software list and hardware identity, only on machines where the organization installed a monitoring agent that collects them, and only if the relay's operator switched the storage on: names, versions and publishers of the installed programs and of the operating system, and the machine's manufacturer, model, serial number, memory and processor | Showing a machine's installed software to technicians and the organization's own inventory exports | one document per machine; removed when the device is removed or after 180 days without a report (the organization can also switch the collection off, which deletes it) |
+| Software list and hardware identity, only on machines where the organization installed a monitoring agent that collects them, and only if the relay's operator switched the storage on: names, versions and publishers of the installed programs and of the operating system, and the machine's manufacturer, model, serial number, memory and processor | Showing a machine's installed software to technicians, searching the machines for an installed program (only names, versions and publishers, where the relay's operator switched the search on), and the organization's own inventory exports | one document per machine; removed when the device is removed or after 180 days without a report (the organization can also switch the collection off, which deletes it) |
 
 Health reports come from a separate monitoring agent, not from Tether or TetherQS, and only if the
 organization installed it. On Windows, Tether and TetherQS can install that agent for the
@@ -36,6 +36,14 @@ read by the relay's operator and by every member of the organization's technicia
 What a report contains is decided by the agent; the format is described in [docs/health.md](docs/health.md).
 The software list is stored and read in the same way ([docs/health.md](docs/health.md#the-software-list)): it is not
 end-to-end encrypted, and the relay's operator and every team member can read it.
+If the relay's operator also switched the software search on, the relay reads the name, version and
+publisher of each installed program from every list and keeps them in a file next to the list (never
+the hardware identity; the file is removed with the list), so that technicians can search all
+machines for an installed program. Only team members whom the organization's signed team document
+allows to read software lists can search, and only over the machines of the customers it assigns
+them. Each search is recorded in the team's audit log with the searched text, the technician, the
+IP address and, for an answered search, the number of machines found (never which ones)
+([docs/health.md](docs/health.md#software-search)).
 An organization may also run its own alerting service that reads the relays as a team member does;
 it may keep a copy of each software list and hardware identity and write them into export files on
 the organization's own systems. Those copies and files, and the systems they are passed on to, are

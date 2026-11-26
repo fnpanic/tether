@@ -125,12 +125,13 @@ Space means AND. Every part is case-insensitive.
 | `product:records` | A detected product whose name contains the text (product names are also free text) |
 | `version:26.3` | A detected product version starting with the text. Alone: any product; next to `product:` in the same AND group (`product:records version:26.3`) the same product must match both |
 | `role:server` `client` `single` | A detected product role. Before health data this was a plain word (in tag rules it still is); `#role:server` still finds that tag |
-| `check:backup` | A check whose id contains the text is not OK |
+| `check:backup` `check:backup=crit` | A check whose id contains the text is not OK; `=crit` or `=warn`: in that state |
+| `software:garnet` `software:"garnet browser"@126` | An installed program whose name or publisher contains the text; after an `@` outside quotes a version prefix (`software:x@` = any version). Asked of the relays on Enter or 800 ms after typing, as of each computer's last upload of its list. A host without a list, or one the relay could not answer for, matches neither `software:x` nor `-software:x` ([health.md](health.md#searching-installed-software)) |
 | `agent:0.1` `agent:none` | Monitor agent version; `agent:none` as `health:none` |
 | `customer:47` `customer:none` | The customer reference set by the agent's enrolment token, starting with the text, in any case ([health.md](health.md#customer-reference)); `customer:none` is a host that reports health but has no customer reference (hosts without an agent are `health:none` and `agent:none`) |
 | `since:3d` | Warning or critical for at least that long (earliest failing check), units `m h d w` |
 
-The health terms work in the search box and in saved searches. In a tag rule they are plain words,
+The health and software terms work in the search box and in saved searches. In a tag rule they are plain words,
 as they were before health data existed (and product names are not part of a rule's free text), so
 a shared rule tags the same hosts on every app of the team, older ones included; the Rules dialog
 says so in one line. **Needs attention** in the library is

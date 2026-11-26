@@ -125,6 +125,43 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   are not a pass.
 - Checked and not checked: to be filled in at release.
 
+### Software search in the host list (for 0.7.0; off by default; not in a numbered version yet)
+
+- **Find every computer that has a program.** New search term `software:<text>[@<version
+  prefix>]` in the host list, quotes for spaces (`software:chrome`,
+  `software:"garnet browser"@126`): hosts with an installed program whose name or publisher
+  contains the text, as of each computer's last upload of its software list. It combines with every
+  other term; hosts without a list, or that a relay could not answer for, match neither
+  `software:x` nor `-software:x`. The desktop asks every relay on Enter or 800 ms after typing, one
+  term after the other per relay, retries a busy relay up to 3 times, and says every outcome in a
+  line under the search box, with a note that each search is recorded in the team's audit log.
+  Saved searches with the term run when opened; in tag rules it stays a plain word
+  ([docs/health.md](docs/health.md#searching-installed-software)).
+- **Relay (tether-api): `GET /api/team/status/software?q=&v=`** and the switch
+  `STATUS_SOFTWARE_SEARCH` (needs `STATUS_SBOM=on` and a signed team document in force at start and
+  at each search). The relay now reads three fields of each software list (program name, version,
+  publisher; no hardware identity) into a sidecar `status/<uuid>.sw`, written when the list is
+  stored, removed with it, built for older lists by the start-up and hourly scan. Members with the
+  `sbom` permission, within their customers; one `search` audit record per search with the term;
+  one search at a time relay-wide (`429 busy`, not counted against the member), 6 a minute per
+  member key, 60 s cache per scope, at most 2 000 hosts, 10 s budget. A device uuid `software` is
+  refused at enrolment. Wire: [docs/api.md](docs/api.md#get-apiteamstatussoftwareqtextvversion-prefix-member-signed);
+  what is read and who can search: [PRIVACY.md](PRIVACY.md),
+  [SECURITY.md](SECURITY.md#the-software-list).
+- **`check:<text>=crit|warn`**: the check must be in that state. With a `check:` term, hosts whose
+  summary left failing checks out (`more_faults`) are counted under the search box.
+- **Measured** (one PC, WSL2, static musl build under `MemoryMax=64M`, 20 000 devices each with a
+  60 KiB list of 200 programs, 1 000 member desktops; [docs/scaling.md](docs/scaling.md#tether-api)):
+  a search over all 19 900 sidecars takes 2.1 to 4.3 s (p50 about 2.7 s) against the plan's limit of
+  5 s, growing with list size and fleet; building the sidecars for all lists at start took about
+  350 s under load; peak memory 46.5 MiB against 42.1 MiB without the search. With one search every
+  10 s the run **FAILED the load tool's own latency checks** for heartbeats and policy (heartbeat
+  p99 3.29 ms against a limit of 3.03, p99.9 16.67 against 14.71); no `503` on device routes.
+  Relay integration tests and the desktop's unit, Rust and mock end-to-end tests (Chromium) pass.
+- **Not checked:** no real relay with real technicians and real software lists; the desktop's UI
+  test was not run in WebKit (it does not run on the build PC); the desktop app itself ran only
+  against a mock relay (the relay's tests replay the desktop's request, not the app).
+
 ### The health monitoring agent through Tether (for 0.7.0; not in a numbered version yet)
 
 - **Tether installs, upgrades and removes the agent (Windows).** Two new policy features:

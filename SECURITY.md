@@ -406,7 +406,8 @@ It is off by default; while off, its three routes answer `404`. `STATUS=off` win
 - **What an enrolled device can do.** Store one document of its own choosing: a JSON object of at
   most `STATUS_SBOM_MAX_KB` (512 KiB), one accepted upload per hour, in place of its earlier one.
   The relay checks only that it is a JSON object and stores it byte for byte, so junk, a document
-  that is not CycloneDX, and one nested very deeply are all stored. Whatever reads a list (the
+  that is not CycloneDX, and one nested very deeply are all stored (with the software search on it
+  also reads three fields of it, below). Whatever reads a list (the
   technician app, scripts, the bridge) must treat it as untrusted text and survive that. Nothing
   in a list is run or changes a policy or an access decision. A device can be made to look like it
   has software it has not, as with a report.
@@ -447,6 +448,47 @@ It is off by default; while off, its three routes answer `404`. `STATUS=off` win
   devices (`monitor-publish devices --token <id>`, `remove`) gives the room back.
 - **Lifetime.** The file is removed with the pin: the device's own removal, an administrator's or
   a member's, and the 180 days without a report. Unlinking and dismissing a claim keep it.
+
+**Software search** (`STATUS_SOFTWARE_SEARCH=on`, off by default;
+[docs/health.md](docs/health.md#software-search),
+[docs/api.md](docs/api.md#get-apiteamstatussoftwareqtextvversion-prefix-member-signed)). With it
+on, the relay reads part of each list:
+
+- **Extraction, bounded.** When a list is stored (and by the start-up and hourly scan for lists
+  stored before), the relay parses it once from the uploaded bytes, outside the state lock, and
+  writes a sidecar `status/<uuid>.sw` as it parses: only the top-level `components`, and of each
+  only `name`, `version` and `publisher` as text; every other value is skipped without being kept
+  (nested `components`, `metadata`, hardware properties, hashes, `purl` are never read).
+  serde_json's nesting limit (128) applies; fields are cut to 128, 64 and 128 bytes on a character
+  boundary with control, direction and zero-width characters removed; at most 5 000 programs. A
+  document that cannot be read this way, or one cut at 5 000, gets a marker line, and a search
+  counts such a host as `pending`, never as "does not have it". Measured: a realistic 511 KiB list
+  added no peak memory; a 511 KiB document of one escaped string added about 508 KiB for the
+  moment of parsing.
+- **What a hostile enrolled device can do.** Make its own host match any search, as it can make
+  its list show anything today. It cannot change another device's sidecar, and nothing in a
+  sidecar is run. The device uuid `software` is refused at enrolment, since the search route has
+  that path.
+- **Who can search.** Members with the `sbom` permission of the signed team document, only over
+  the devices of their customers: a device outside them is not read and counts nowhere in the
+  answer (not in the hosts, `more` or `pending`), and the cache is kept per scope, so members of
+  different customers never share an answer. The switch needs a signed team document in force when
+  tether-api starts, and each search checks again that one is in force (else it answers as
+  switched off); with a plain roster there is no search.
+- **Audit.** Every search that passed the member signature, refused ones included, is one
+  `search` record in the team audit log with the term and version as asked; an answered one also
+  with the number of hosts found, never which ones.
+- **Load (DoS) limits.** One search at a time for the whole relay (another gets `429 busy`,
+  `Retry-After: 5`; it does not count against the member), 6 searches a minute per member key
+  (`429 too many searches`), answers cached 60 s per scope, term and version (at most 2 MiB of
+  answers), at most 2 000 hosts per answer, a time budget of 10 s (then `"partial": true`, not
+  cached). The search holds no lock: it copies the devices out 1 000 at a time and reads the
+  sidecars one at a time. A member key can therefore keep at most the one search thread busy,
+  but that is enough to keep other members' searches waiting (`429 busy`; the desktop retries
+  3 times, then says so). Measured at 20 000 lists of 200 programs under `MemoryMax=64M` with one
+  search every 10 s: a search takes 2.1 to 4.3 s, and heartbeat p99 rose from 1.2 to 3.3 ms, which
+  FAILED the load tool's own latency criteria for heartbeats and policy ([docs/scaling.md](docs/scaling.md#tether-api)).
+  Not tested with real technicians on a real relay.
 
 ## Least privilege and attack surface
 

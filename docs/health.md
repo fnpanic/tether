@@ -520,9 +520,12 @@ Tether desktop's host search; route and answers: [api.md](api.md#get-apiteamstat
 The relay answers from a **sidecar** it keeps beside each stored list, `status/<uuid>.sw`: for each
 program of the list's top-level `components` its name, version and publisher, cut to 128, 64 and
 128 bytes, control and direction characters removed, at most 5 000 programs. Nothing else of the
-list goes into it: no hardware identity, serial number, hashes or other properties. A document that
-is not such a list gets an empty sidecar. So with the search on, **the relay reads the software
-lists** for this purpose: the three fields of each program, when the list is stored.
+list goes into it: no hardware identity, serial number, hashes or other properties. A document the
+relay cannot read as such a list (not an object, `components` not an array, a field that is not
+text, nested too deeply), and a list cut at 5 000 programs, get a marker line in the sidecar: a
+search that reaches it without a match counts that computer as `pending` (cannot say), never as
+"does not have it". So with the search on, **the relay reads the software lists** for this
+purpose: the three fields of each program, when the list is stored.
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -532,9 +535,13 @@ lists** for this purpose: the three fields of each program, when the list is sto
   customers; a computer outside them is never looked at and counts nowhere in the answer. Every
   search is written to the team audit log with its term; an answered one also with the number of
   computers found (never which ones), a refused one without a number.
-- **Limits.** One search at a time on the relay (another gets `429 busy`), 6 a minute per member,
-  the same search by members of the same customers answered from a 60 s cache, at most 2 000
-  computers in an answer, a time budget of 10 s (then the answer says it is incomplete).
+  The relay checks again at every search that a signed team document is in force; without one the
+  answer is "switched off" (`{"sbom":false,"hosts":[]}`).
+- **Limits.** One search at a time on the relay (another gets `429 busy` with `Retry-After: 5`; a
+  busy answer does not count against the member), 6 a minute per member key (`429 too many
+  searches`; answers from the cache count), the same search by members of the same customers
+  answered from a 60 s cache, at most 2 000 computers in an answer, a time budget of 10 s (then the
+  answer says it is incomplete, `partial`, and is not cached).
 - **Lifetime.** A sidecar is written when its list is stored and goes with it (the device deletes
   its list, the device is removed, it expires). Lists stored before the search was switched on get
   theirs from the scan at start (one at a time, 10 ms apart, without holding up anything else);
@@ -916,7 +923,8 @@ team, older ones included; the Rules dialog says so in one line.
 | `product:records` | A detected product whose name contains the text |
 | `version:26.3` | A product version starting with the text; next to `product:` the same product must match both |
 | `role:server` `client` `single` | A detected product role |
-| `check:backup` | A check whose id contains the text is not OK |
+| `check:backup` `check:backup=crit` | A check whose id contains the text is not OK; with `=crit` or `=warn` it must be in that state |
+| `software:chrome` `software:"google chrome"@120` | An installed program whose name or publisher contains the text, in any case; after `@` a version prefix (quotes for spaces; an `@` inside the quotes is part of the name). Answered by the relays, not by the summary ([below](#searching-installed-software)) |
 | `agent:0.1` `agent:none` | Agent version starting with the text; `none` = no agent |
 | `customer:47` `customer:none` | A [customer reference](#customer-reference) starting with the text, in any case (`customer:47` finds `4711`, `customer:711` does not); `none` = a host that reports health but has no customer reference (hosts without an agent are `health:none` and `agent:none`). |
 | `since:3d` | Warning or critical for at least that long (earliest failing check), units `m h d w` |
@@ -926,6 +934,45 @@ Examples: `health:crit -is:offline` (critical and online, so a connection is pos
 `product:records version:26.3 health:warn`, `agent:none os:win` (Windows hosts without an agent).
 In the search box `role:` used to be a plain word that found tags; `#role:server` still finds the
 tag. In tag rules `role:server` is still that plain word.
+
+The summary holds at most 10 failing checks per host. With a `check:` term, hosts whose summary
+left some out are counted under the search box ("3 computers have more failing checks than the
+summary holds; open them to see all"): the term may miss a check of theirs.
+
+#### Searching installed software
+
+`software:` asks every relay the host list comes from
+([Software search](#software-search); the operator switches it on, members need the `sbom`
+permission). It combines with every other term like any field (AND, `|`, brackets, `-`):
+`software:chrome@119 customer:4711 -is:offline`. A host counts as having the program when the
+relay holding its newest software list names it. Results are as of each computer's last upload of
+its list, not live.
+
+- **When it runs.** On Enter, or 800 ms after the last change to a `software:` term; never for a
+  term under 2 characters, over 64 (version over 32) or with an invisible or control character
+  (the line under the search box says why). Each relay is asked one term after the other; a relay
+  that answers `busy` (another search runs there) is asked again after its `Retry-After`, at most
+  3 more times. Answers are kept 60 s. Enter in the search box runs the search again after a
+  failure that may pass (busy, not reached) or when the result is older than 5 minutes; otherwise
+  Enter opens the selected host as before. A saved search with a `software:` term runs when it is
+  opened; the sidebar shows no count for it.
+- **Unknown is not "does not have it".** Until the relays answer, a `software:` term matches no
+  host. A host without a software list (no agent, the list switched off, a relay without the
+  feature, not uploaded yet), a host whose relay did not answer, and a host the relay could not
+  say about (`pending`, `more`, `partial`: list not indexed yet, unreadable or cut, more than 2 000
+  hosts, time budget) match neither `software:x` nor `-software:x`. So
+  `-software:"garnet browser"@126` lists the hosts that have a list without that version, and a
+  line under the search box says that the others are not shown either way. Another branch of an
+  OR still matches them (`software:x | is:online`).
+- **The lines under the search box** say what happened, one line each: "Searching installed
+  software on 2 servers… Until it answers, software terms match no computer.", then per term
+  "Installed software “chrome”: 37 computers, as of 14:05 (lists as of each computer's last upload;
+  112 computers without a list)", and for each relay that did not give a full answer why (an old
+  relay: "relay2.example.com does not support software search (needs tether-api 0.7.0)"; switched
+  off; no permission; busy; the 6-a-minute limit with the wait; still indexing; more than 2 000;
+  incomplete; not reached; overloaded). A line "Each software search is sent to the servers and
+  recorded in the team's audit log with its text." is shown whenever the query has a software
+  term.
 
 ### Needs attention
 
@@ -982,9 +1029,9 @@ sends a list only to a relay that has it on (and only when its owner has not swi
   from the app. If the relay no longer has the list, the part says "No software list on the
   server".
 
-There is no search across all hosts for a program in the app: the software lists are not part of
-the team summary the host list is built from, so a search such as "which hosts have Java 8" is not
-possible there. Everything in the table is plain text.
+To find every host that has a program, use the search term `software:` in the host list
+([Searching installed software](#searching-installed-software)); it needs a relay with the
+[software search](#software-search) on. Everything in the table is plain text.
 
 ### Export
 
@@ -1097,6 +1144,10 @@ Enrolment, the signature, the answers and the status codes: [api.md](api.md#devi
 - **The software list** (only when the relay has `STATUS_SBOM=on`) is readable by the same people
   and is as little end-to-end encrypted. A device can store one JSON document of its own choosing
   there, never run by anything ([SECURITY.md](../SECURITY.md#the-software-list)).
+- **The software search** (only with `STATUS_SOFTWARE_SEARCH=on`): the relay reads the name,
+  version and publisher of each program into a sidecar file beside the list, never the hardware
+  identity; members with the `sbom` permission search over the computers of their customers, and
+  every search is recorded in the team audit log with its term ([Software search](#software-search)).
 - **Who linked a host** (the member's roster name and the time) is stored with the pin on the
   relay and shown to the team.
 - **The relay never runs anything from a report:** `body` is stored and returned as text, and the
