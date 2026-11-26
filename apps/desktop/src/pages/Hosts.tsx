@@ -38,8 +38,8 @@ import { buildHosts, label, type Host } from "../lib/hosts/model";
 import { linkHolder } from "../lib/hosts/health";
 import { healthAlerts, type Sent } from "../lib/hosts/notify";
 import { applyRules } from "../lib/hosts/rules";
-import { parse, search, withoutSoftware } from "../lib/hosts/query";
-import { chipLines, faultsHint, lookupFor, runnable, searcher, softwareTerms, termsKey, type Results } from "../lib/hosts/software";
+import { parse, search } from "../lib/hosts/query";
+import { asOf, chipLines, faultsHint, lookupFor, NEGATED_NOTE, negatedSoftware, runnable, searcher, softwareTerms, termsKey, type SwState } from "../lib/hosts/software";
 import { actions, flush, useHosts, useReadOnly } from "../lib/hosts/store";
 import { HostTable, smartOrder, sortHosts, type Sort } from "../components/hosts/HostTable";
 import { Detail } from "../components/hosts/Detail";
@@ -149,8 +149,9 @@ export function Hosts() {
   const parsed = useMemo(() => parse(q), [q]);
 
   // software: terms ask the relays (spec 10.4): on Enter or after 800 ms without typing. Until the
-  // answer for exactly these terms is in, the list shows what the other terms match.
-  const [sw, setSw] = useState<{ key: string; results: Results | null }>({ key: "", results: null });
+  // answer for exactly these terms is in, a software term is unknown for every host: it matches
+  // nothing, with or without `-` (an OR's other branch still can).
+  const [sw, setSw] = useState<SwState>({ key: "", results: null });
   const finder = useMemo(() => searcher((c, a) => invoke(c, a), () => useHosts.getState().statusRelays, setSw), []);
   useEffect(() => () => finder.dispose(), [finder]);
   useEffect(() => finder.typed(q), [finder, q]);
@@ -159,21 +160,18 @@ export function Hosts() {
   const swTerms = useMemo(() => softwareTerms(parsed.node), [parsed]);
   const swReady = runnable(swTerms);
   const swApplied = swReady.length > 0 && sw.key === termsKey(swReady) ? sw.results : null;
-  const swRetry = !!swApplied && [...swApplied.values()].some((m) => [...m.values()].some((a) => !a.ok && (a.why === "busy" || a.why === "offline" || a.why === "error")));
+  const swRetry = !!swApplied && [...swApplied.values()].some((m) => [...m.values()].some((a) => !a.ok && ["busy", "limit", "unavailable", "offline", "error"].includes(a.why)));
+  const swBusy = swReady.length > 0 && sw.key === termsKey(swReady) ? sw.busy : undefined;
   const swLines = useMemo(() => {
     if (!swTerms.length) return [];
-    const bad = chipLines(swTerms.filter((t) => !runnable([t]).length), new Map(), hosts, st.statusRelays);
-    if (swApplied) return chipLines(swTerms, swApplied, hosts, st.statusRelays);
-    const n = st.statusRelays.length;
-    return swReady.length ? [`Searching installed software on ${n} ${n === 1 ? "server" : "servers"}… Until then the list shows what the other search terms match.`, ...bad] : bad;
-  }, [swTerms, swApplied, swReady.length, hosts, st.statusRelays]);
+    return [...chipLines(swTerms, swApplied, hosts, st.statusRelays, swBusy), ...(negatedSoftware(parsed.node) ? [NEGATED_NOTE] : [])];
+  }, [swTerms, swApplied, swBusy, hosts, st.statusRelays, parsed]);
   const checkHint = useMemo(() => faultsHint(parsed.node, hosts), [parsed, hosts]);
 
   const rows = useMemo(() => {
     const t0 = performance.now();
-    // A software term not answered yet (or not sendable) is left out rather than matching nothing.
-    const node = withoutSoftware(parsed.node, (f) => !!swApplied && runnable(softwareTerms(f)).length > 0);
-    const found = search(hosts, { ...parsed, node }, Date.now() / 1000, false, swApplied ? lookupFor(swApplied) : undefined);
+    // A software term not answered yet (or not sendable) matches nothing, with or without `-`.
+    const found = search(hosts, parsed, Date.now() / 1000, false, swApplied ? lookupFor(swApplied) : undefined);
     const r = sort.key === "smart" ? (parsed.words.length ? found : smartOrder(found)) : sortHosts(found, sort);
     perf.last = performance.now() - t0;
     perf.samples.push(perf.last);
@@ -307,8 +305,9 @@ export function Hosts() {
           e.preventDefault();
           return move(curIdx - page, e.shiftKey);
         case "Enter":
-          // In the search box Enter first searches installed software (again after a passing failure).
-          if (inSearch && swReady.length && (!swApplied || swRetry)) {
+          // In the search box Enter first searches installed software (again after a passing failure,
+          // or when the result shown is older than 5 minutes; the relay keeps answers 60 s).
+          if (inSearch && swReady.length && (!swApplied || swRetry || Date.now() - (asOf(swApplied) ?? Date.now()) > 5 * 60_000)) {
             e.preventDefault();
             return finder.enter(q);
           }

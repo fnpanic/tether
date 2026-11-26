@@ -184,13 +184,20 @@ const PROGRAMS: [string, string, string][] = [
 ];
 // The software search (team_status_software): agent-only-1's programs match by name or publisher on
 // the first relay. Tests set `window.__mockSoftware = { "<relay>": state }` for the other answers:
-// unsupported, forbidden, busy, offline, off, more, pending, partial.
+// unsupported, forbidden, busy (always, Retry-After 1), limit, notready, reportoff, offline, off, more,
+// pending, partial. As the relay, each runs one search at a time: a second one meanwhile is busy.
+const searching = new Set<string>();
 async function softwareSearch(relay: string, q: string, v: string, now: number) {
-  await new Promise((r) => setTimeout(r, 300));
+  if (searching.has(relay)) fail("busy:1: The server is busy with another search.");
+  searching.add(relay);
+  await new Promise((r) => setTimeout(r, 300)).finally(() => searching.delete(relay));
   const mode = (globalThis as { __mockSoftware?: Record<string, string> }).__mockSoftware?.[relay] ?? "";
   if (mode === "unsupported") fail("unsupported: This server does not offer software search.");
   if (mode === "forbidden") fail("forbidden: Your team membership does not allow software search.");
-  if (mode === "busy") fail("busy:5: Too many software searches.");
+  if (mode === "busy") fail("busy:1: The server is busy with another search.");
+  if (mode === "limit") fail("limit:5: Too many software searches.");
+  if (mode === "notready") fail("unavailable:5: The server is not ready: status summary not ready");
+  if (mode === "reportoff") fail("reportoff: Health reporting is switched off on this server.");
   if (mode === "offline") fail("offline: connection timed out");
   if (mode === "off") return { sbom: false, hosts: [] };
   const p = relay === "relay.example.com" ? PROGRAMS.find(([name, version, publisher]) => (name.toLowerCase().includes(q) || publisher.toLowerCase().includes(q)) && version.startsWith(v)) : undefined;

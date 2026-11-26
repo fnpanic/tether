@@ -259,35 +259,73 @@ async function run(name) {
 
   // ---- software: search terms (spec 10.4), answered by the mock relays.
   const swCalls = async () => (await calls("team_status_software")).length;
+  await setQuery("health:crit");
+  const crit = await shown();
   await clearCalls();
   await setQuery("software:g");
   await sleep(1000);
-  check(tag("software: under 2 characters is not sent and says so"), (await swCalls()) === 0 && /needs at least 2 characters/.test(await notes.textContent()) && (await shown()) === (await total()));
+  check(tag("software: under 2 characters is not sent, says so and matches nothing"), (await swCalls()) === 0 && /needs at least 2 characters \(“g”\), so it matches no computer/.test(await notes.textContent()) && (await shown()) === 0);
+  await setQuery("-software:g health:crit");
+  await sleep(1000);
+  check(tag("-software: under 2 characters matches nothing either"), (await swCalls()) === 0 && (await shown()) === 0, `${await shown()}`);
   await setQuery("software:garnet");
   await sleep(300);
   check(tag("software: waits for a pause in typing"), (await swCalls()) === 0);
-  check(tag("while it searches, the list shows the other terms' result and says so"), /Searching installed software on 2 servers/.test(await notes.textContent()) && (await shown()) === (await total()));
+  check(tag("while it searches, a software term matches nothing and the line says so"), /Searching installed software on 2 servers… Until it answers, software terms match no computer\./.test(await notes.textContent()) && (await shown()) === 0, `${await shown()}`);
   check(tag("software: is searched after 800 ms, once per relay"), await until(async () => (await swCalls()) === 2, 3000), `${await swCalls()}`);
   check(tag("software:garnet finds the host whose list has it (an unknown uuid ignored)"), await until(async () => (await shown()) === 1 && (await rows().first().textContent()).includes("LAB-ANALYZER-01")));
-  check(tag("the result says it is as of the last upload and that searches are audited"), /Installed software “garnet”: 1 computer \(lists as of each computer's last upload; [\d,]+ computers without a list\)/.test(await notes.textContent()) && /recorded in the team's audit log/.test(await notes.textContent()));
+  check(tag("the result says when it is from, that it is as of the last upload and that searches are audited"), /Installed software “garnet”: 1 computer, as of \d.*\d \(lists as of each computer's last upload; [\d,]+ computers without a list\)/.test(await notes.textContent()) && /recorded in the team's audit log/.test(await notes.textContent()));
+  check(tag("a plain software term adds no note about negation"), !/are not shown either way/.test(await notes.textContent()));
   await setQuery("-software:garnet");
   check(tag("-software: only the hosts with a list without a match, from the cache"), (await until(async () => (await shown()) === 2)) && (await swCalls()) === 2, `${await shown()}`);
+  check(tag("-software: says that hosts it cannot say anything about are left out"), /Computers without a software list, or whose list is not indexed yet or could not be read, are not shown either way\./.test(await notes.textContent()));
+  // While a negated term is searched, nothing matches through it; an OR's other branch still does.
+  await setQuery("-software:quarry | health:crit");
+  await sleep(300);
+  check(tag("while searching, -software: matches nothing, the OR's other branch still matches"), /Searching installed software/.test(await notes.textContent()) && (await shown()) === crit, `${await shown()} vs ${crit}`);
+  await until(async () => !/Searching installed software/.test(await notes.textContent()), 3000);
+  // Two terms: each relay is asked one after the other (it runs one search at a time): no busy answer, no retry.
+  await clearCalls();
+  await setQuery("software:oakham -software:thistle");
+  await search.press("Enter");
+  check(tag("two software terms: one at a time per relay, all answered without a retry"), (await until(async () => /Installed software “thistle”/.test(await notes.textContent()), 3000)) && (await swCalls()) === 4 && !/busy/.test(await notes.textContent()), `${await swCalls()} calls`);
+  // A result older than 5 minutes is asked again on Enter (the relay keeps answers 60 s).
+  await setQuery("software:garnet");
+  await until(async () => /Installed software “garnet”: 1 computer/.test(await notes.textContent()), 3000);
+  await clearCalls();
+  await p.evaluate(() => {
+    const real = Date.now;
+    window.__realNow = real;
+    Date.now = () => real() + 6 * 60_000;
+  });
+  await search.press("Enter");
+  check(tag("Enter refreshes a result older than 5 minutes"), await until(async () => (await swCalls()) === 2, 3000), `${await swCalls()} calls`);
+  await until(async () => /Installed software “garnet”: 1 computer/.test(await notes.textContent()), 3000);
+  await p.evaluate(() => (Date.now = window.__realNow));
   await setQuery('software:"garnet browser"@126 health:crit');
   await search.press("Enter");
   check(tag("Enter searches at once; quotes and @version"), (await until(async () => (await swCalls()) === 4, 600)) && (await calls("team_status_software")).at(-1).q === "garnet browser" && (await calls("team_status_software")).at(-1).v === "126");
-  const swState = async (states, q) => {
+  const swState = async (states, q, wait = 3000) => {
     await p.evaluate((s) => (window.__mockSoftware = s), states);
     await setQuery(q);
     await search.press("Enter");
-    await until(async () => !/Searching installed software/.test(await notes.textContent()), 3000);
+    await until(async () => !/Searching installed software/.test(await notes.textContent()), wait);
     return notes.textContent();
   };
   check(tag("an old relay: named, the other relay's result shown"), /relay2\.example\.com does not support software search \(needs tether-api 0\.7\.0\)/.test(await swState({ "relay2.example.com": "unsupported" }, "software:aster")) && /Results from relay\.example\.com only\./.test(await notes.textContent()));
   check(tag("switched off"), /software search is switched off on relay2\.example\.com/.test(await swState({ "relay2.example.com": "off" }, "software:birch")));
   check(tag("no permission: the reason, not an error dialog"), /your team membership does not allow software search on relay\.example\.com/.test(await swState({ "relay.example.com": "forbidden", "relay2.example.com": "forbidden" }, "software:cobalt")) && !(await p.getByRole("alertdialog").isVisible()));
-  check(tag("too many searches"), /too many software searches on relay\.example\.com: try again in 5 s/.test(await swState({ "relay.example.com": "busy" }, "software:dunmore")));
+  check(tag("too many searches of this member: the wait, no retry"), /you ran more than 6 software searches a minute on relay\.example\.com: wait 5 s, then press Enter/.test(await swState({ "relay.example.com": "limit" }, "software:dunmore")));
+  await p.evaluate(() => (window.__mockSoftware = { "relay.example.com": "busy" }));
+  await clearCalls();
+  await setQuery("software:kestrel");
+  await search.press("Enter");
+  check(tag("a relay busy with another search: tried again, and it says so"), await until(async () => /relay\.example\.com is busy with another search; trying again…/.test(await notes.textContent()), 2000));
+  check(tag("still busy after 3 more tries: a line that offers to try again"), (await until(async () => /relay\.example\.com stayed busy with other searches: press Enter to try again/.test(await notes.textContent()), 8000)) && (await calls("team_status_software")).filter((c) => c.relay === "relay.example.com").length === 4);
+  check(tag("relay not ready (503)"), /relay2\.example\.com is not ready to search yet \(it is preparing its status data\): press Enter to try again in 5 s/.test(await swState({ "relay2.example.com": "notready" }, "software:larch")));
+  check(tag("health reporting off (503)"), /health reporting is switched off on relay2\.example\.com: it holds no software lists to search/.test(await swState({ "relay2.example.com": "reportoff" }, "software:meadow")));
   check(tag("more than 2000"), /more than 2000 computers match on relay\.example\.com: refine the search/.test(await swState({ "relay.example.com": "more" }, "software:elm")));
-  check(tag("still indexing"), /relay\.example\.com is still indexing 3,400 lists/.test(await swState({ "relay.example.com": "pending" }, "software:fenwick")));
+  check(tag("still indexing"), /relay\.example\.com is still indexing 3,400 lists: until it is done, its computers that it did not name are left out/.test(await swState({ "relay.example.com": "pending" }, "software:fenwick")));
   check(tag("incomplete"), /stopped before it searched every list: the result is incomplete/.test(await swState({ "relay.example.com": "partial" }, "software:hollin")));
   check(tag("not reachable"), /relay2\.example\.com could not be reached/.test(await swState({ "relay2.example.com": "offline" }, "software:iron")));
   await p.evaluate(() => (window.__mockSoftware = {}));

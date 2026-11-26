@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildHosts, emptyStore, normTag, type Host, type StatusSummary } from "./model";
-import { cmpVersion, fuzzy, parse, search, withoutSoftware } from "./query";
+import { cmpVersion, fuzzy, parse, search } from "./query";
 import { applyRules } from "./rules";
 
 const NOW = 1_800_000_000;
@@ -233,12 +233,8 @@ describe("software and failure terms", () => {
     // Without a lookup (not searched yet) the term matches nothing, either way.
     expect(ids("software:chrome", st)).toEqual([]);
     expect(ids("-software:chrome", st)).toEqual([]);
-  });
-  it("withoutSoftware drops the software terms the lookup cannot answer yet", () => {
-    expect(withoutSoftware(parse("software:a customer:47").node)).toEqual({ k: "field", f: "customer", op: "", v: "47" });
-    expect(withoutSoftware(parse("software:a").node)).toBeNull();
-    expect(withoutSoftware(parse("-software:a | (software:b is:online)").node)).toEqual({ k: "field", f: "is", op: "", v: "online" });
-    expect(withoutSoftware(parse("software:a software:b").node, (n) => n.v === "b")).toEqual(sw("b"));
+    expect(ids("-software:chrome customer:0815", st)).toEqual([]);
+    expect(ids("software:chrome | is:offline", st)).toEqual(["222222222"]); // the other branch still matches
   });
   it("check:<text>=crit or =warn matches only that state", () => {
     const st = [sum({ uuid: "u1", tether_id: "111111111", faults: [{ id: "backup/age", state: "warn" }] }), sum({ uuid: "u2", tether_id: "222222222", faults: [{ id: "backup/age", state: "crit" }, { id: "sys/disk", state: "warn" }] })];

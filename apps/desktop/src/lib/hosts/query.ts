@@ -352,27 +352,6 @@ function m3(n: Node, h: Host, now: number, rule: boolean, sw: SoftwareLookup | u
   }
 }
 
-/** `n` without the `software:` terms `keep` refuses (default: all of them): what the list shows
- *  while the software search has not answered yet. Null when nothing is left. */
-export function withoutSoftware(n: Node | null, keep: (f: SoftwareField) => boolean = () => false): Node | null {
-  if (!n) return null;
-  switch (n.k) {
-    case "and":
-    case "or": {
-      const c = n.c.map((x) => withoutSoftware(x, keep)).filter((x): x is Node => !!x);
-      return c.length === 0 ? null : c.length === 1 ? c[0] : { k: n.k, c };
-    }
-    case "not": {
-      const c = withoutSoftware(n.c, keep);
-      return c ? { k: "not", c } : null;
-    }
-    case "field":
-      return n.f === "software" && !keep(n) ? null : n;
-    default:
-      return n;
-  }
-}
-
 /** Hosts matching `q`; with free-text words, best match first (else input order). `rule`: as a tag
  *  rule reads `q` (the Rules dialog's count). */
 export function search(hosts: Host[], q: string | Parsed, now = Date.now() / 1000, rule = false, sw?: SoftwareLookup): Host[] {

@@ -23,9 +23,9 @@ const _: () = assert!(STATUS_MAX >= 2048 * 20_000);
 const REPORT_MAX: usize = 1 << 20;
 /// A software list (SBOM): the relay keeps at most 512 KiB by default; more than 1 MiB is not shown.
 const SBOM_MAX: usize = 1 << 20;
-/// A software search answer: at most 2000 hosts of uuid (64), name (128) and version (64), about
-/// 600 KB at the worst with JSON escapes; more is refused.
-const SOFTWARE_MAX: usize = 1 << 20;
+/// A software search answer: at most 2000 hosts of uuid (64), name (128 bytes, up to 256 escaped) and
+/// version (64, up to 128 escaped), 966 KB at the relay's worst case (docs/api.md); twice that is kept.
+const SOFTWARE_MAX: usize = 2 << 20;
 /// The relay refuses larger tag documents (docs/api.md, team endpoints).
 pub const TAGS_PUT_MAX: usize = 512 * 1024;
 
@@ -361,7 +361,9 @@ fn software_path(q: &str, v: &str) -> String {
 
 /// The relay's answer as the webview may use it: unknown fields dropped, at most 2000 hosts with a
 /// valid uuid, names and versions plain text cut to the sidecar's bounds (128, 64). Refusals carry a
-/// prefix the webview tells apart: `unsupported:` (an older relay), `forbidden:`, `busy:<s>:`.
+/// prefix the webview tells apart: `unsupported:` (an older relay), `forbidden:`, `busy:<s>:` (the
+/// relay runs another search), `limit:<s>:` (this member's searches a minute), `reportoff:` and
+/// `unavailable:<s>:` (the relay's 503s).
 fn software_answer(code: u16, retry: Option<&str>, raw: &[u8]) -> R<Value> {
     #[derive(serde::Deserialize)]
     struct Hit {
@@ -390,9 +392,15 @@ fn software_answer(code: u16, retry: Option<&str>, raw: &[u8]) -> R<Value> {
         200 => {}
         404 => return Err("unsupported: This server does not offer software search.".into()),
         403 => return Err("forbidden: Your team membership does not allow software search.".into()),
-        429 => {
+        429 | 503 => {
             let s = retry.and_then(|r| r.trim().parse::<u64>().ok()).map(|s| format!(":{}", s.min(3600))).unwrap_or_default();
-            return Err(format!("busy{s}: Too many software searches."));
+            let body = String::from_utf8_lossy(raw);
+            return Err(match (code, body.trim()) {
+                (429, "busy") => format!("busy{s}: The server is busy with another search."),
+                (429, _) => format!("limit{s}: Too many software searches."),
+                (_, b) if b.starts_with("status reporting is off") => "reportoff: Health reporting is switched off on this server.".into(),
+                (_, b) => format!("unavailable{s}: The server is not ready: {}", b.chars().take(200).collect::<String>()),
+            });
         }
         _ => return Err(status_error(code, &String::from_utf8_lossy(raw))),
     }
@@ -709,12 +717,26 @@ mod tests {
         // Every refusal in a form the webview tells apart.
         assert!(software_answer(404, None, b"not found").unwrap_err().starts_with("unsupported: "));
         assert!(software_answer(403, None, b"").unwrap_err().starts_with("forbidden: "));
+        // The relay's two 429s (server/api status.rs): busy with another search, or this member's limit.
         assert!(software_answer(429, Some("5"), b"busy").unwrap_err().starts_with("busy:5: "));
-        assert!(software_answer(429, Some("junk"), b"").unwrap_err().starts_with("busy: "));
-        assert!(software_answer(429, Some("999999"), b"").unwrap_err().starts_with("busy:3600: "));
+        assert!(software_answer(429, Some("junk"), b"busy").unwrap_err().starts_with("busy: "));
+        assert!(software_answer(429, Some("42"), b"too many searches").unwrap_err().starts_with("limit:42: "));
+        assert!(software_answer(429, Some("999999"), b"too many searches").unwrap_err().starts_with("limit:3600: "));
+        assert!(software_answer(429, None, b"too many requests").unwrap_err().starts_with("limit: "));
+        // The relay's 503s get their own state, not the health list's "off:".
+        assert!(software_answer(503, Some("3600"), b"status reporting is off").unwrap_err().starts_with("reportoff: "));
+        assert!(software_answer(503, Some("5"), b"status summary not ready").unwrap_err().starts_with("unavailable:5: "));
+        assert!(software_answer(503, None, b"busy").unwrap_err().starts_with("unavailable: "));
         assert!(software_answer(500, None, b"oops").unwrap_err().contains("500"));
         assert!(software_answer(200, None, b"{not json").unwrap_err().starts_with("bad answer"));
         assert!(software_answer(200, None, br#"{"sbom":true,"hosts":"x"}"#).unwrap_err().starts_with("bad answer"));
+    }
+
+    #[test]
+    fn software_answers_fit_the_relays_worst_case() {
+        // 2000 x (35 + uuid 64 + name 128 escaped to 256 + version 64 escaped to 128): 966 KB, twice over.
+        const WORST: usize = 2000 * (35 + 64 + 256 + 128);
+        assert!(SOFTWARE_MAX >= 2 * WORST, "{SOFTWARE_MAX} < 2 x {WORST}");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildHosts, emptyStore, type Host, type StatusSummary } from "./model";
 import { parse, search } from "./query";
-import { chipLines, faultsHint, lookupFor, resetSoftwareCache, runSoftware, searcher, softwareTerms, termKey, type Call } from "./software";
+import { asOf, chipLines, faultsHint, lookupFor, NEGATED_NOTE, negatedSoftware, resetSoftwareCache, runSoftware, searcher, softwareTerms, termKey, type Call } from "./software";
 
 const NOW = 1_800_000_000;
 const sum = (uuid: string, p: Partial<StatusSummary> = {}): StatusSummary => ({
@@ -73,7 +73,8 @@ describe("runSoftware", () => {
     expect(r.calls.map((c) => c.relay).sort()).toEqual(RELAYS);
     expect(r.calls[0]).toMatchObject({ q: "garnet", v: "" });
     expect(r.ids).toEqual(["m:dev-0001"]);
-    expect(r.lines).toEqual(["Installed software “garnet”: 1 computer (lists as of each computer's last upload; 1 computer without a list)"]);
+    expect(r.lines).toHaveLength(1);
+    expect(r.lines[0]).toMatch(/^Installed software “garnet”: 1 computer, as of \d.*\d \(lists as of each computer's last upload; 1 computer without a list\)$/);
   });
   it("-software: only hosts that have a list without a match", async () => {
     const r = await run("-software:garnet", { "a.example": found(["dev-0001"]), "b.example": found([]) });
@@ -82,7 +83,7 @@ describe("runSoftware", () => {
   it("a uuid the summary does not have is ignored: the relay cannot add hosts", async () => {
     const r = await run("software:garnet", { "a.example": found(["dev-0001", "not-in-the-list-1", "__proto__"]), "b.example": found([]) });
     expect(r.ids).toEqual(["m:dev-0001"]);
-    expect(r.lines[0]).toContain(": 1 computer ");
+    expect(r.lines[0]).toContain(": 1 computer,");
   });
   it("sends the version prefix", async () => {
     const r = await run('software:"garnet browser"@126', { "a.example": (q: string, v: string) => found(q === "garnet browser" && v === "126" ? ["dev-0001"] : []), "b.example": found([]) });
@@ -100,22 +101,84 @@ describe("runSoftware", () => {
     const one = async (b: unknown) => (resetSoftwareCache(), await run("software:garnet", { "a.example": found([]), "b.example": b })).lines;
     expect(await one({ sbom: false, hosts: [] })).toContain("software search is switched off on b.example");
     expect(await one("forbidden: Your team membership does not allow software search.")).toContain("your team membership does not allow software search on b.example");
-    expect(await one("busy:5: Too many software searches.")).toContain("too many software searches on b.example: try again in 5 s");
+    expect(await one("limit:42: Too many software searches.")).toContain("you ran more than 6 software searches a minute on b.example: wait 42 s, then press Enter");
+    expect(await one("reportoff: Health reporting is switched off on this server.")).toContain("health reporting is switched off on b.example: it holds no software lists to search");
+    expect(await one("unavailable:5: The server is not ready: status summary not ready")).toContain("b.example is not ready to search yet (it is preparing its status data): press Enter to try again in 5 s");
     expect(await one("offline: connection timed out")).toContain("b.example could not be reached");
     expect(await one("The server answered 500: oops")).toContain("b.example: The server answered 500: oops");
     expect(await one(found([], { more: 120 }))).toContain("more than 2000 computers match on b.example: refine the search");
-    expect(await one(found([], { pending: 3400 }))).toContain("b.example is still indexing 3,400 lists");
+    expect(await one(found([], { pending: 3400 }))).toContain("b.example is still indexing 3,400 lists: until it is done, its computers that it did not name are left out, with or without -");
     expect(await one(found([], { partial: true }))).toContain("b.example stopped before it searched every list: the result is incomplete");
-    expect(await one(found([], { unknown_field: 1 }))).toEqual(["Installed software “garnet”: 0 computers (lists as of each computer's last upload; 1 computer without a list)"]);
+    const plain = await one(found([], { unknown_field: 1 }));
+    expect(plain).toHaveLength(1);
+    expect(plain[0]).toMatch(/^Installed software “garnet”: 0 computers, as of .* \(lists as of each computer's last upload; 1 computer without a list\)$/);
   });
-  it("a capped or partial answer leaves the hosts it did not name unknown", async () => {
+  it("a capped, partial or not fully indexed answer leaves the hosts it did not name unknown", async () => {
     expect((await run("-software:garnet", { "a.example": found(["dev-0001"], { more: 3 }), "b.example": found([]) })).ids).toEqual(["m:dev-0003"]);
+    resetSoftwareCache();
     expect((await run("-software:garnet", { "a.example": found(["dev-0001"], { partial: true }), "b.example": found([]) })).ids).toEqual(["m:dev-0003"]);
+    // The relay does not say which lists are not indexed yet: dev-2 may have it, so it is not "without".
+    resetSoftwareCache();
+    const r = await run("-software:garnet", { "a.example": found(["dev-0001"], { pending: 5 }), "b.example": found([]) });
+    expect(r.ids).toEqual(["m:dev-0003"]);
+    resetSoftwareCache();
+    expect((await run("software:garnet", { "a.example": found(["dev-0001"], { pending: 5 }), "b.example": found([]) })).ids).toEqual(["m:dev-0001"]);
+  });
+  it("asks one relay one term after the other (it runs one search at a time), the relays in parallel", async () => {
+    const running = new Set<string>();
+    const log: string[] = [];
+    const call: Call = async (_c, a) => {
+      const { relay, q } = a as { relay: string; q: string };
+      if (running.has(relay)) throw "busy:5: The server is busy with another search.";
+      running.add(relay);
+      log.push(`${relay} ${q}`);
+      await new Promise((ok) => setTimeout(ok, 5));
+      running.delete(relay);
+      return found(q === "garnet" ? ["dev-0001"] : []);
+    };
+    const terms = softwareTerms(parse("software:garnet -software:aster").node);
+    const res = await runSoftware(terms, RELAYS, call);
+    expect([...res.values()].flatMap((m) => [...m.values()]).every((a) => a.ok)).toBe(true);
+    expect(log.sort()).toEqual(["a.example aster", "a.example garnet", "b.example aster", "b.example garnet"]);
+    expect(search(fleet(), "software:garnet -software:aster", NOW, false, lookupFor(res)).map((h) => h.id)).toEqual(["m:dev-0001"]);
+  });
+  it("a relay busy with another search is asked again after Retry-After, at most 3 times, and says so", async () => {
+    vi.useFakeTimers();
+    let busyFor = 2;
+    const r = relays({ "a.example": () => (busyFor-- > 0 ? "busy:5: The server is busy with another search." : found(["dev-0001"])), "b.example": found([]) });
+    const waits: string[] = [];
+    const p = runSoftware(softwareTerms(parse("software:garnet").node), RELAYS, r.call, (relay, w) => waits.push(`${relay} ${w}`));
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(r.calls.filter((c) => c.relay === "a.example").length).toBe(1);
+    expect(chipLines(softwareTerms(parse("software:garnet").node), null, fleet(), RELAYS, ["a.example"])).toEqual([
+      "Searching installed software on 2 servers… Until it answers, software terms match no computer.",
+      "a.example is busy with another search; trying again…",
+    ]);
+    await vi.advanceTimersByTimeAsync(10_001);
+    const res = await p;
+    expect(r.calls.filter((c) => c.relay === "a.example").length).toBe(3);
+    expect(waits).toEqual(["a.example true", "a.example true", "a.example false"]);
+    expect(res.get(termKey({ q: "garnet", v: "" }))?.get("a.example")?.ok).toBe(true);
+    // Always busy: the first try and 3 more, then a line that offers to try again.
+    resetSoftwareCache();
+    const always = relays({ "a.example": "busy:5: busy", "b.example": found([]) });
+    const q = runSoftware(softwareTerms(parse("software:garnet").node), RELAYS, always.call);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const gave = await q;
+    expect(always.calls.filter((c) => c.relay === "a.example").length).toBe(4);
+    expect(chipLines(softwareTerms(parse("software:garnet").node), gave, fleet(), RELAYS)).toContain("a.example stayed busy with other searches: press Enter to try again");
+    // This member's own limit is not retried: the wait is shown.
+    resetSoftwareCache();
+    const lim = relays({ "a.example": "limit:42: Too many software searches.", "b.example": found([]) });
+    const l = runSoftware(softwareTerms(parse("software:garnet").node), RELAYS, lim.call);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await l;
+    expect(lim.calls.filter((c) => c.relay === "a.example").length).toBe(1);
   });
   it("one request per (term, relay), cached 60 s; failures that pass are asked again", async () => {
     let now = 1000;
     vi.spyOn(Date, "now").mockImplementation(() => now);
-    const r = relays({ "a.example": found(["dev-0001"]), "b.example": "busy:5: busy" });
+    const r = relays({ "a.example": found(["dev-0001"]), "b.example": "offline: timed out" });
     const terms = softwareTerms(parse("software:garnet").node);
     await Promise.all([runSoftware(terms, RELAYS, r.call), runSoftware(terms, RELAYS, r.call)]);
     expect(r.calls.map((c) => c.relay)).toEqual(["a.example", "b.example"]);
@@ -172,9 +235,54 @@ describe("searcher", () => {
   });
   it("a term too short or too long is named, not sent", () => {
     const hs = fleet();
-    expect(chipLines(softwareTerms(parse("software:g").node), new Map(), hs, RELAYS)).toEqual(["software: needs at least 2 characters (“g”)"]);
+    expect(chipLines(softwareTerms(parse("software:g").node), new Map(), hs, RELAYS)).toEqual(["software: needs at least 2 characters (“g”), so it matches no computer, with or without -"]);
     expect(chipLines(softwareTerms(parse(`software:${"x".repeat(65)}`).node), new Map(), hs, RELAYS)[0]).toMatch(/^software: at most 64 characters/);
     expect(chipLines(softwareTerms(parse(`software:ab@${"1".repeat(33)}`).node), new Map(), hs, RELAYS)[0]).toMatch(/version at most 32/);
+  });
+});
+
+describe("unknown until answered", () => {
+  it("before the answer, and for a term that cannot be sent, a software term matches nothing, plain or negated; an OR's other branch still matches", async () => {
+    const hs = fleet();
+    const ids = (q: string, res?: Map<string, Map<string, never>>) =>
+      search(hs, q, NOW, false, res && lookupFor(res))
+        .map((h) => h.id)
+        .sort();
+    for (const res of [undefined, new Map()]) {
+      expect(ids("software:garnet", res)).toEqual([]);
+      expect(ids("-software:garnet", res)).toEqual([]);
+      expect(ids("-software:g", res)).toEqual([]);
+      expect(ids("software:garnet | host:dev-0004", res)).toEqual(["m:dev-0004"]);
+      expect(ids("-software:garnet | host:dev-0004", res)).toEqual(["m:dev-0004"]);
+    }
+    // Answered for the sendable term only: the unsendable one stays unknown.
+    const r = await run("-software:garnet -software:g", { "a.example": found(["dev-0001"]), "b.example": found([]) });
+    expect(r.ids).toEqual([]);
+    expect(r.calls.map((c) => c.q)).toEqual(["garnet", "garnet"]);
+  });
+  it("trims the term as the relay does and refuses the characters it refuses, with a plain line", async () => {
+    const r = await run('software:"  garnet "', { "a.example": found(["dev-0001"]), "b.example": found([]) });
+    expect(r.calls.map((c) => c.q)).toEqual(["garnet", "garnet"]);
+    expect(r.ids).toEqual(["m:dev-0001"]);
+    expect((await run('software:" g "', {})).calls).toEqual([]);
+    for (const c of ["\u0007", "\u200B", "\u200F", "\u202A", "\u202E", "\u2060", "\u2069", "\uFEFF"]) {
+      const x = await run(`software:"gar${c}net"`, {});
+      expect(x.calls).toEqual([]);
+      expect(x.lines[0]).toMatch(/^software: “gar.net” contains an invisible or control character the server refuses; type it again\. Until then it matches no computer$/su);
+    }
+    expect((await run(`software:garnet@1\u200E`, {})).calls).toEqual([]);
+    // U+2028 ends the field in the parser: the text is a plain word, and nothing is sent either.
+    expect((await run(`software:"gar\u2028net"`, {})).calls).toEqual([]);
+  });
+  it("says when the result is from, and that a negated term leaves out what it cannot say", async () => {
+    const r = await run("software:garnet", { "a.example": found(["dev-0001"]), "b.example": found([]) });
+    expect(Math.abs((asOf(r.res) ?? 0) - Date.now())).toBeLessThan(1000);
+    expect(asOf(new Map())).toBeNull();
+    expect(negatedSoftware(parse("-software:garnet customer:47").node)).toBe(true);
+    expect(negatedSoftware(parse("-(software:a | is:online)").node)).toBe(true);
+    expect(negatedSoftware(parse("--software:a").node)).toBe(false);
+    expect(negatedSoftware(parse("software:a -customer:47").node)).toBe(false);
+    expect(NEGATED_NOTE).toBe("Computers without a software list, or whose list is not indexed yet or could not be read, are not shown either way.");
   });
 });
 
