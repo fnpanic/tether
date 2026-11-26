@@ -1,6 +1,13 @@
 // Team activity (design 12.5): records of the relays' team audit logs as the page shows and
 // exports them. activity.test.ts.
 
+// Control, format (bidi overrides, zero-width) and line/paragraph separator characters, as the
+// desktop's HIDDEN (apps/desktop/src/lib/hosts/sbom.ts): text from a relay or another person could
+// use them to look like something else.
+const HIDDEN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+/** Text from elsewhere (relay records, other people's names and notes) for display. */
+export const visible = (s: string) => s.replace(HIDDEN, "");
+
 export interface ActivityRecord {
   ts: number;
   event: string;
@@ -24,9 +31,9 @@ export interface RelayState {
   warnings: string[];
 }
 
-export const who = (r: ActivityRecord) => (r.actor ? (r.actor.upn ? `${r.actor.name} (${r.actor.upn})` : r.actor.name) : "–");
-export const targetText = (r: ActivityRecord) => [r.target?.tether_id, r.target?.uuid, r.target?.customer && `customer ${r.target.customer}`].filter(Boolean).join(" · ");
-export const detailText = (r: ActivityRecord) => (r.detail == null ? "" : typeof r.detail === "string" ? r.detail : JSON.stringify(r.detail));
+export const who = (r: ActivityRecord) => visible(r.actor ? (r.actor.upn ? `${r.actor.name} (${r.actor.upn})` : r.actor.name) : "–");
+export const targetText = (r: ActivityRecord) => visible([r.target?.tether_id, r.target?.uuid, r.target?.customer && `customer ${r.target.customer}`].filter(Boolean).join(" · "));
+export const detailText = (r: ActivityRecord) => visible(r.detail == null ? "" : typeof r.detail === "string" ? r.detail : JSON.stringify(r.detail));
 
 /** A refused request (403 and the like) or a sign-in refused. */
 export const refused = (r: ActivityRecord) => (r.result != null && r.result >= 400) || r.event === "sign-in-refused" || r.event === "admin-refused";

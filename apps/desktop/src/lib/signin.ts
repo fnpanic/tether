@@ -3,6 +3,7 @@
 // none of them reaches the webview.
 import { create } from "zustand";
 import { invoke } from "./ipc";
+import { clean } from "./hosts/sbom";
 
 export interface RelayAnswer {
   relay: string;
@@ -88,7 +89,8 @@ export function signInView(s: SignIn | undefined, member: boolean): SignInView {
     const roles = (s.roles ?? []).join(", ");
     return {
       show: true,
-      title: `Signed in as ${s.name ?? "?"}${s.upn ? ` (${s.upn})` : ""}`,
+      // The provider's name and UPN without hidden characters (bidi, zero-width): they could make one person look like another.
+      title: `Signed in as ${clean(s.name ?? "?", 128)}${s.upn ? ` (${clean(s.upn, 128)})` : ""}`,
       lines: [roles ? `Roles: ${roles}.` : "No roles named.", permissionLine(s), ...(s.exp ? [`Session until ${time(s.exp)}; renewed automatically.`] : [])],
       warn: refused,
       action: "sign-out",

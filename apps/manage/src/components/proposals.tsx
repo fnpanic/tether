@@ -2,7 +2,7 @@
 // relays serve something else now) and the sheet in which a policy editor or publisher stores one.
 import { useEffect, useState } from "react";
 import { useApp, type Proposal } from "../App";
-import { ago, host, invoke, when, type RelayResult } from "../lib/ipc";
+import { ago, host, invoke, visible, when, type RelayResult } from "../lib/ipc";
 import { RelayResults } from "./publish";
 import { Badge, Button, ErrorText, Label, Modal, TextArea } from "./ui";
 
@@ -37,7 +37,7 @@ export function Proposals({ kind, list, error, reload, review }: { kind: Proposa
       <ul className="mt-2 flex flex-col gap-2">
         {list?.map((p) => (
           <li key={Object.values(p.ids).join()} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-caption">
-            <span className="font-semibold">{p.author.name}</span>
+            <span className="font-semibold">{visible(p.author.name)}</span>
             <span className="text-muted" title={when(p.created)}>
               {ago(p.created)}
             </span>
@@ -48,7 +48,7 @@ export function Proposals({ kind, list, error, reload, review }: { kind: Proposa
               </Badge>
             )}
             {me?.upn && p.author.upn === me.upn && <Badge tone="muted">yours</Badge>}
-            {p.note && <span className="w-full select-text text-muted">“{p.note}”</span>}
+            {p.note && <span className="w-full select-text text-muted">“{visible(p.note)}”</span>}
             <span className="ml-auto flex gap-2">
               {review && (
                 <Button size="sm" variant="primary" onClick={() => review(p)}>

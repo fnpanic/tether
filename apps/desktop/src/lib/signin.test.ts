@@ -27,6 +27,10 @@ describe("sign-in part of the Team dialog", () => {
     expect(v.lines[2]).toMatch(/^Session until .+; renewed automatically\.$/);
   });
 
+  it("shows the name without hidden characters", () => {
+    expect(signInView({ ...signedIn, name: "Anna\u202e\u200bnimdA", upn: "anna@x.test\u2066" }, false).title).toBe("Signed in as AnnanimdA (anna@x.test)");
+  });
+
   it("names each relay that refused while signed in at another", () => {
     const v = signInView({ ...signedIn, relays: [...signedIn.relays, { relay: "relay2.example.com", ok: false, text: "Your account is blocked for Tether by your administrator." }] }, false);
     expect(v.warn).toEqual(["relay2.example.com: Your account is blocked for Tether by your administrator."]);

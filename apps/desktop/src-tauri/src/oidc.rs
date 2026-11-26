@@ -28,6 +28,27 @@ use tether_trust::VerifyingKey;
 
 type R<T> = Result<T, String>;
 
+/// The program's name in what the person sees (the browser page) and in the credential store:
+/// Tether Manage, or this Tether instance's own name (`Tether` in the default build).
+#[cfg(tether_manage)]
+macro_rules! product {
+    () => {
+        "Tether Manage"
+    };
+}
+#[cfg(not(tether_manage))]
+macro_rules! product {
+    () => {
+        env!("TETHER_APP_NAME")
+    };
+}
+
+/// HTTP user agent: Manage's own (as its other clients send), else this instance's name.
+#[cfg(tether_manage)]
+const USER_AGENT: &str = concat!("tether-manage/", env!("CARGO_PKG_VERSION"));
+#[cfg(not(tether_manage))]
+const USER_AGENT: &str = concat!(env!("TETHER_APP_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
 /// How long the browser has to come back (MFA and an account picker included).
 const WAIT: Duration = Duration::from_secs(300);
 /// Renew this long before the earliest relay session ends.
@@ -64,9 +85,14 @@ fn challenge(verifier: &str) -> String {
     b64url(&sha2::Sha256::digest(verifier.as_bytes()))
 }
 
-/// Text from elsewhere (provider, relay) as one plain line.
+/// Text from elsewhere (provider, relay) as one plain line: no control characters, no format
+/// characters (Unicode Cf: bidi overrides and isolates, zero-width, soft hyphen) or line separators.
 fn clip(s: &str, n: usize) -> String {
-    s.lines().next().unwrap_or_default().chars().filter(|c| !c.is_control()).take(n).collect()
+    s.lines().next().unwrap_or_default().chars().filter(|c| !hidden(*c)).take(n).collect()
+}
+
+fn hidden(c: char) -> bool {
+    c.is_control() || matches!(c as u32, 0xad | 0x600..=0x605 | 0x61c | 0x6dd | 0x70f | 0x890..=0x891 | 0x8e2 | 0x180e | 0x200b..=0x200f | 0x2028..=0x202e | 0x2060..=0x2064 | 0x2066..=0x206f | 0xfeff | 0xfff9..=0xfffb | 0x110bd | 0x110cd | 0x13430..=0x1343f | 0x1bca0..=0x1bca3 | 0x1d173..=0x1d17a | 0xe0001 | 0xe0020..=0xe007f)
 }
 
 // ----------------------------------------------------------------------------- state
@@ -199,7 +225,8 @@ fn open_browser(url: &str) -> R<()> {
 /// The refresh token in the OS credential store, split over entries of at most 2000 bytes (a
 /// Windows credential holds 2560; Entra's refresh tokens are often longer than half of that).
 mod secret {
-    const SERVICE: &str = if cfg!(tether_manage) { "Tether Manage sign-in" } else { "Tether sign-in" };
+    /// Per program and instance: two Tether instances (or Tether and Manage) never share an entry.
+    pub(super) const SERVICE: &str = concat!(product!(), " sign-in");
     const CHUNK: usize = 2000;
     const CHUNKS: usize = 8;
 
@@ -437,7 +464,7 @@ fn provider(build: impl Fn(&reqwest::blocking::Client) -> reqwest::blocking::Req
         if via_proxy && proxy.is_none() {
             continue;
         }
-        let mut b = reqwest::blocking::Client::builder().use_rustls_tls().no_proxy().redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(30)).user_agent(concat!("Tether/", env!("CARGO_PKG_VERSION")));
+        let mut b = reqwest::blocking::Client::builder().use_rustls_tls().no_proxy().redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(30)).user_agent(USER_AGENT);
         if via_proxy {
             b = b.proxy(reqwest::Proxy::all(proxy.as_deref().unwrap_or_default()).map_err(|e| e.to_string())?);
         }
@@ -462,8 +489,8 @@ struct Loopback {
     port: u16,
 }
 
-const PAGE_OK: &str = "Sign-in finished. You can close this tab and return to Tether.";
-const PAGE_FAIL: &str = "Sign-in did not finish. Return to Tether to see why.";
+const PAGE_OK: &str = concat!("Sign-in finished. You can close this tab and return to ", product!(), ".");
+const PAGE_FAIL: &str = concat!("Sign-in did not finish. Return to ", product!(), " to see why.");
 
 impl Loopback {
     fn bind() -> R<Self> {
@@ -952,12 +979,30 @@ pub fn sign_out() -> Value {
     status_json()
 }
 
+/// Manage's names (its build runs these; the desktop's tests below cover the default instance).
+#[cfg(all(test, tether_manage))]
+mod manage_tests {
+    #[test]
+    fn manage_names_itself() {
+        assert_eq!(super::secret::SERVICE, "Tether Manage sign-in");
+        assert!(super::PAGE_OK.ends_with("return to Tether Manage.") && super::PAGE_FAIL.contains("Return to Tether Manage "), "{}", super::PAGE_OK);
+        assert!(super::USER_AGENT.starts_with("tether-manage/"));
+    }
+}
+
 #[cfg(all(test, not(tether_manage)))]
 pub(crate) mod tests {
     use super::*;
 
     /// Tests that change the sign-in state, the dev API variable or the test hooks.
     pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn provider_text_loses_hidden_characters_and_names_this_instance() {
+        assert_eq!(clip("AADSTS50057:\u{202e}gpj.exe\u{200b}\u{2066} x\u{00ad}y\u{feff}z", 64), "AADSTS50057:gpj.exe xyz");
+        // the default build keeps its entry and words
+        assert_eq!((secret::SERVICE, PAGE_OK), (concat!(env!("TETHER_APP_NAME"), " sign-in"), concat!("Sign-in finished. You can close this tab and return to ", env!("TETHER_APP_NAME"), ".")));
+    }
 
     fn oidc(iss: &str) -> Oidc {
         Oidc { issuer: iss.into(), tenant: "t".into(), audience: "a".into(), client_id: "c".into(), scope: "api://x/access".into() }

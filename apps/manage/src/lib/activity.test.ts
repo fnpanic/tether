@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { activityCsv, refused, targetText, who, type ActivityRecord } from "./activity.ts";
+import { activityCsv, detailText, refused, targetText, who, type ActivityRecord } from "./activity.ts";
 
 const rec = (over: Partial<ActivityRecord>): ActivityRecord => ({ ts: 1_795_000_000, event: "report", relay: "https://r1", ...over });
 
@@ -17,4 +17,11 @@ test("the CSV quotes what a spreadsheet would run or split", () => {
   const [head, line] = csv.trimEnd().split("\r\n");
   assert.equal(head, "time (UTC),relay,person,oid,event,target,detail,result,self-reported,ip");
   assert.equal(line, `2026-11-18T11:06:40.000Z,https://r1,"'=cmd|x",,report,,"{""q"":""a,b""}",204,yes,`);
+});
+
+test("hidden characters (bidi, zero-width) are not shown", () => {
+  const r = rec({ actor: { key_fingerprint: "ab", name: "Anna\u202e\u200b", upn: "anna@example.com\u2066" }, target: { tether_id: "123\u200d456789" }, detail: "x\u202ey" });
+  assert.equal(who(r), "Anna (anna@example.com)");
+  assert.equal(targetText(r), "123456789");
+  assert.equal(detailText(r), "xy");
 });

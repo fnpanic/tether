@@ -148,6 +148,10 @@ export function ago(unix?: number | null): string {
   return `${Math.floor(s / 86400)} d ago`;
 }
 
+// Text from elsewhere without hidden characters: one helper (activity.ts, where Manage's node tests
+// can load it without this file's imports), for every page.
+export { visible } from "./activity";
+
 /** Host of a relay address, for compact labels. */
 export const host = (server: string) => server.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
 /** A publish target as shown: a relay's host, or "Cloudflare CDN" (target "CDN"). */

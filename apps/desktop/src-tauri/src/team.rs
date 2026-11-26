@@ -224,6 +224,20 @@ pub fn me() -> R<Value> {
     r
 }
 
+/// Asks the relay once (`GET /api/team/me`) when nothing is known yet (simple mode, before the
+/// Hosts page or the Team dialog loaded it, or after the last answer failed), so [`allows`] and
+/// [`audit_event`] do not take "unknown" for "no team access". Blocking. Without team access the
+/// answer fails and everything stays allowed, as before.
+pub fn learn_me() {
+    learn_me_with(me);
+}
+
+fn learn_me_with(fetch: impl FnOnce() -> R<Value>) {
+    if crate::oidc::me().is_none() && ME.lock().unwrap().is_none() {
+        *ME.lock().unwrap() = fetch().ok();
+    }
+}
+
 /// Whether this app's team permissions allow `perm` (`agent`, `sbom`, `write`, `audit`): the
 /// signed-in person's, else the roster entry's last answer; a permission an older relay does not
 /// name (`agent`, `sbom`) is allowed, as the relay's defaults (docs/api.md). Without team access: allowed.
@@ -889,6 +903,22 @@ mod tests {
         assert!(!allows("agent") && !allows("sbom") && allows("write") && !allows("audit"));
         assert_eq!(permissions(), serde_json::json!({"signed_in": false, "agent": false, "sbom": false, "write": true, "audit": false}));
         set(None);
+    }
+
+    #[test]
+    fn unknown_permissions_are_asked_for_before_they_are_read() {
+        let _g = crate::oidc::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let set = |v: Option<Value>| *ME.lock().unwrap() = v;
+        // Simple mode: nothing loaded the roster entry's answer yet; the relay says no agent.
+        set(None);
+        learn_me_with(|| Ok(serde_json::json!({"name": "Anna", "write": true, "audit": false, "agent": false})));
+        assert!(!allows("agent"));
+        // Known already: not asked again.
+        learn_me_with(|| panic!("asked again"));
+        // No team access: the answer fails, everything stays allowed and is asked again next time.
+        set(None);
+        learn_me_with(|| Err("401 unknown member".into()));
+        assert!(allows("agent") && ME.lock().unwrap().is_none());
     }
 
     #[test]

@@ -159,7 +159,7 @@ export function Hosts() {
   const sbom = usePerms((p) => p.sbom);
   useEffect(() => finder.typed(sbom ? q : ""), [finder, q, sbom]);
   /** A query chosen, not typed (saved search, library, palette): searched at once. */
-  const openQuery = useCallback((x: string) => (setQ(x), finder.enter(x)), [finder]);
+  const openQuery = useCallback((x: string) => (setQ(x), sbom && finder.enter(x)), [finder, sbom]);
   const swTerms = useMemo(() => softwareTerms(parsed.node), [parsed]);
   const swReady = runnable(swTerms);
   const swApplied = swReady.length > 0 && sw.key === termsKey(swReady) ? sw.results : null;
@@ -311,7 +311,7 @@ export function Hosts() {
         case "Enter":
           // In the search box Enter first searches installed software (again after a passing failure,
           // or when the result shown is older than 5 minutes; the relay keeps answers 60 s).
-          if (inSearch && swReady.length && (!swApplied || swRetry || Date.now() - (asOf(swApplied) ?? Date.now()) > 5 * 60_000)) {
+          if (inSearch && sbom && swReady.length && (!swApplied || swRetry || Date.now() - (asOf(swApplied) ?? Date.now()) > 5 * 60_000)) {
             e.preventDefault();
             return finder.enter(q);
           }

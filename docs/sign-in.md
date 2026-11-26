@@ -193,6 +193,11 @@ The issuer is then `https://login.microsoftonline.com/<tenant id>/v2.0`.
 5. When everyone signs in: delete the people's key entries (keep service and break-glass entries),
    then, if wanted, `oidc_only`.
 
+While a changed team document reaches the relays one after the other, the desktop shows the
+permissions of the first relay that answers (and decides by them what the session window offers,
+the agent permission included); every relay still checks its own for each request it gets. This
+lasts only until the document is on every relay.
+
 ### The team document in Tether Manage
 
 Tether Manage › **Team** is the editor of the signed team document

@@ -564,6 +564,10 @@ async function run(name) {
   await setQuery("software:garnet");
   await sleep(1200);
   check(tag("without sbom: no software search is sent, the line says why"), /Software search: Your team role does not include software lists \(sbom\)\./.test(await notes.textContent()) && (await calls("team_status_software")).length === 0, await notes.textContent());
+  await search.focus();
+  await p.keyboard.press("Enter");
+  await sleep(800);
+  check(tag("without sbom: Enter in the search box sends no software search either"), (await calls("team_status_software")).length === 0);
   await setQuery("LAB-ANALYZER-01");
   await rows().first().click();
   check(tag("without sbom: the host's Software part is replaced by the reason"), (await until(() => p.getByTestId("software-not-permitted").isVisible())) && !(await p.getByTestId("software-section").isVisible()) && (await calls("team_status_sbom")).length === 0);
