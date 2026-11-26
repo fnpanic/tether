@@ -9,12 +9,15 @@
 //! hex) of the live document it was edited from, as the relay serves it (`GET /api/policy`,
 //! `GET /api/admin/team`, the channel's release index; empty: there was none), so a proposal made
 //! stale by a later publish is recognised; `doc` the unsigned payload (policy: a `Bundle`; team: a
-//! `TeamDoc`, both validated as a publish would be; release: a JSON object). Stored with its
-//! author (the session's person, or `admin` for an admin signature), time, base, serial (the
-//! doc's). At most [`PER_KIND`] per kind. `GET` answers `{"live","proposals":[…oldest first]}`
-//! (`live`: the hash of the policy or team document served now; `null` for releases or none).
-//! `DELETE /api/admin/proposals/<kind>/<id>`: its author, a KeyHolder, or the admin signature; the
-//! record names the author's oid and `same_person` (the remover proposed it).
+//! `TeamDoc`, both validated as a publish would be; release: a JSON object of at most
+//! [`RELEASE_DOC_MAX`]). Stored with its author (the session's person, or `admin` for an admin
+//! signature), time, base, serial (the doc's). At most [`PER_KIND`] per kind. `GET` answers
+//! `{"live","proposals":[…oldest first]}` (`live`: the hash of the policy or team document served
+//! now; `null` for releases or none), each `doc` as stored (not parsed), a file that cannot be read
+//! as `{"id","unreadable":true}`; one list read at a time relay-wide (`429`, `Retry-After: 1`).
+//! `DELETE /api/admin/proposals/<kind>/<id>`: its author, a KeyHolder, or the admin signature (an
+//! unreadable one: a KeyHolder or the admin signature); the record names the author's oid and
+//! `same_person` (the remover proposed it).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,6 +38,8 @@ pub const PER_KIND: usize = 10;
 /// `PUT /api/admin/proposals/<kind>`: a team document (256 KiB) with room for the note and base.
 pub const LIMIT_PROPOSAL: u64 = 400 << 10;
 const NOTE_MAX: usize = 500;
+/// A release proposal's `doc` (file names, hashes, versions) as stored, at most.
+pub const RELEASE_DOC_MAX: usize = 64 << 10;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +64,33 @@ struct Stored {
     doc: Value,
 }
 
+/// A stored proposal as the list answers it: the document kept as its raw JSON.
+#[derive(Serialize, Deserialize)]
+struct Listed {
+    id: String,
+    kind: String,
+    author: Actor,
+    created: u64,
+    base: String,
+    note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    serial: Option<u64>,
+    doc: Box<serde_json::value::RawValue>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Item {
+    Ok(Listed),
+    Unreadable { id: String, unreadable: bool },
+}
+
+#[derive(Serialize)]
+struct Answer {
+    live: Option<String>,
+    proposals: Vec<Item>,
+}
+
 fn dir(data: &Path, kind: &str) -> PathBuf {
     data.join("proposals").join(kind)
 }
@@ -80,6 +112,7 @@ fn check(kind: &str, doc: &Value) -> Result<Option<u64>, String> {
             d.validate()?;
             Ok(Some(d.serial))
         }
+        _ if serde_json::to_vec(doc).map_or(true, |b| b.len() > RELEASE_DOC_MAX) => Err(format!("a release proposal's doc is at most {} KiB", RELEASE_DOC_MAX >> 10)),
         _ if doc.is_object() => Ok(doc["serial"].as_u64()),
         _ => Err("a release proposal is a JSON object".into()),
     }
@@ -135,21 +168,40 @@ impl App {
                     "team" => self.team_served().map(|b| sha256_hex(&b)),
                     _ => None,
                 };
+                // One at a time relay-wide: up to 3 x 10 files of 400 KiB each in memory.
+                static LISTING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let slot = crate::UploadSlot::take(&LISTING, 1).ok_or_else(|| text(429, "busy").with_header(crate::hdr("Retry-After", "1")))?;
                 self.defer(move |_| {
-                    let mut list: Vec<Stored> = ids(&d).iter().filter_map(|i| serde_json::from_slice(&fs::read(d.join(format!("{i}.json"))).ok()?).ok()).collect();
-                    list.sort_by_key(|s| s.created);
-                    Ok(json(&json!({"live": live, "proposals": list})))
+                    let _slot = slot;
+                    crate::test_pause();
+                    let mut proposals: Vec<Item> = ids(&d).into_iter().map(|i| fs::read(d.join(format!("{i}.json"))).ok().and_then(|b| serde_json::from_slice(&b).ok()).map_or(Item::Unreadable { id: i, unreadable: true }, Item::Ok)).collect();
+                    // Unreadable ones first, so they are seen.
+                    proposals.sort_by_key(|p| match p {
+                        Item::Ok(l) => l.created,
+                        Item::Unreadable { .. } => 0,
+                    });
+                    let body = serde_json::to_vec(&Answer { live, proposals }).map_err(internal)?;
+                    Ok(tiny_http::Response::from_data(body).with_header(crate::hdr("Content-Type", "application/json")).boxed())
                 })
             }
             ("DELETE", Some(id)) if valid_id(id) => {
                 let f = d.join(format!("{id}.json"));
-                let s: Stored = fs::read(&f).ok().and_then(|b| serde_json::from_slice(&b).ok()).ok_or_else(not_found)?;
+                let raw = fs::read(&f).map_err(|_| not_found())?;
+                // One that cannot be read still counts toward PER_KIND: removable, its author unknown.
+                let s: Option<Stored> = serde_json::from_slice(&raw).ok();
                 // A proposer removes their own; a key holder (after publishing or rejecting) and the admin any.
                 if let Some(w) = who {
-                    if !w.roles.contains(&ManageRole::KeyHolder) && s.author.oid.as_deref() != Some(w.oid.as_str()) {
+                    if !w.roles.contains(&ManageRole::KeyHolder) && s.as_ref().and_then(|s| s.author.oid.as_deref()) != Some(w.oid.as_str()) {
                         return Err(text(403, "only its author or a key holder may delete a proposal"));
                     }
                 }
+                let Some(s) = s else {
+                    fs::remove_file(&f).map_err(internal)?;
+                    if let Some(r) = self.audit_pending.as_mut() {
+                        r.detail = json!({"kind": kind, "id": id, "unreadable": true});
+                    }
+                    return Ok(empty(204));
+                };
                 fs::remove_file(&f).map_err(internal)?;
                 // Who proposed it and whether the remover (a key holder after publishing) is that
                 // person: publishing one's own proposal shows in the log.

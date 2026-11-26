@@ -145,6 +145,15 @@ impl Srv {
     fn journal(&self) -> String {
         self.journal.lock().unwrap().clone()
     }
+
+    /// Whether the journal gets `what` within 2 s (stderr is read by another thread).
+    fn journal_has(&self, what: &str) -> bool {
+        let t = Instant::now();
+        while !self.journal().contains(what) && t.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.journal().contains(what)
+    }
 }
 
 fn mock() -> oidc_mock::Mock {
@@ -363,18 +372,20 @@ mod with_the_mock {
         assert_eq!((ended[0]["detail"]["reason"].clone(), ended[0]["detail"]["kid"].clone(), ended[0]["actor"]["oid"].clone()), (json!("replaced"), json!(kid), json!(oid(1))));
     }
 
-    /// Refused tokens count per key (20 a minute, `429` with `Retry-After`), not against the source
-    /// address, whose limit (60 failures) refuses every team route.
+    /// Tokens refused after their signature verified (expired, wrong audience, ...) count per key
+    /// (20 a minute, `429` with `Retry-After`), not against the source address, whose limit (60
+    /// failures) refuses every team route.
     #[test]
     fn refused_tokens_count_per_key_and_not_per_address() {
         let m = mock();
         let roster = generate_key();
         let (s, _admin) = relay(&m, json!([entry("Roster Anna", &roster, json!({}))]), &[]);
+        let expired = m.token("technician@tether.test", Some("expired")).unwrap();
         // 4 keys x 18 refusals from one address: 72, over the address limit of 60.
         for _ in 0..4 {
             let k = generate_key();
             for _ in 0..18 {
-                assert_eq!(s.sign_in(&k, "not.a.token").status, 401);
+                assert_eq!(s.sign_in(&k, &expired).status, 401);
             }
         }
         assert_eq!(s.me(&roster).status, 200, "the address is not locked out");
@@ -382,12 +393,57 @@ mod with_the_mock {
         // One key: 20 refusals, then 429 with Retry-After, also for a good token; others unaffected.
         let k = generate_key();
         for _ in 0..20 {
-            assert_eq!(s.sign_in(&k, "not.a.token").status, 401);
+            assert_eq!(s.sign_in(&k, &expired).status, 401);
         }
         let r = s.sign_in(&k, &m.token("technician@tether.test", None).unwrap());
         assert_eq!((r.status, r.retry_after()), (429, Some("60".into())), "{}", r.text());
         assert_eq!(s.sign_in(&generate_key(), &m.token("technician@tether.test", None).unwrap()).status, 200);
         assert_eq!(s.me(&roster).status, 200);
+    }
+
+    /// Sign-ins with a fresh key each and a junk token (anyone may send them): nothing is kept per
+    /// request (no nonce), they count against the source address (60 a minute, then `429`), their
+    /// `sign-in-refused` records are capped relay-wide (60 a minute), and a heartbeat sent during
+    /// the flood is answered before it ends.
+    #[test]
+    fn junk_sign_ins_with_fresh_keys_stay_bounded() {
+        let m = mock();
+        let roster = generate_key();
+        let (s, admin) = relay(&m, json!([entry("Roster Anna", &roster, json!({}))]), &[]);
+        let sent = std::sync::atomic::AtomicUsize::new(0);
+        let junk = |ip: &str| {
+            sent.fetch_add(1, Ordering::SeqCst);
+            let k = generate_key();
+            let body = json!({"access_token": "not.a.token", "key": key_to_b64(&k.verifying_key())}).to_string();
+            let sig = format!("{} kid={}", reqauth::sign_request(&k, "POST", "/api/team/session", body.as_bytes(), now()), team::key_id(&k.verifying_key()));
+            s.req("POST", "/api/team/session", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", ip)], body.as_bytes()).status
+        };
+        let ips = ["198.51.100.1", "198.51.100.2", "198.51.100.3"];
+        std::thread::scope(|sc| {
+            let flood = sc.spawn(|| {
+                let got: Vec<Vec<u16>> = ips.iter().map(|ip| (0..70).map(|_| junk(ip)).collect()).collect();
+                (got, Instant::now())
+            });
+            // Early in the flood (210 requests), so it is still running when the heartbeat is answered.
+            while sent.load(Ordering::SeqCst) < 20 {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let t = Instant::now();
+            let hb = r#"{"uuid":"hb-00002","id":"111222334","profile":"technician","version":"0.5.21","os":"windows 10.0.26300","serial":3}"#;
+            assert_eq!(s.req("POST", "/api/heartbeat", &[], hb.as_bytes()).status, 200);
+            let (took, done) = (t.elapsed(), Instant::now());
+            let (got, end) = flood.join().unwrap();
+            assert!(took < Duration::from_millis(300) && done < end, "the heartbeat waited for the flood: {took:?}");
+            for (ip, g) in ips.iter().zip(&got) {
+                assert!(g[..60].iter().all(|&c| c == 401) && g[60..].iter().all(|&c| c == 429), "{ip}: {g:?}");
+            }
+        });
+        let nonces = std::fs::read_to_string(s.dir.join("nonces.log")).unwrap_or_default().lines().count() + std::fs::read(s.dir.join("nonces.json")).ok().map_or(0, |b| serde_json::from_slice::<std::collections::HashMap<String, u64>>(&b).unwrap().len());
+        assert!(nonces < 10, "{nonces} nonces stored");
+        let refused = s.records(&admin, "sign-in-refused");
+        assert!(refused.len() <= 60, "{} sign-in-refused records", refused.len());
+        assert_eq!(s.me(&roster).status, 200, "another address is not locked out");
+        assert_eq!(s.sign_in(&generate_key(), &m.token("technician@tether.test", None).unwrap()).status, 200);
     }
 
     /// An entry or field a newer relay wrote must not wipe the one-token-one-key bindings; a file
@@ -421,7 +477,7 @@ mod with_the_mock {
         std::fs::write(dir.join("team/sessions.json"), b"{\"sessions\": [").unwrap();
         let s = spawn_in(dir.clone(), &admin, &[]);
         assert_eq!(std::fs::read(dir.join("team/sessions.json.bad")).unwrap(), b"{\"sessions\": [");
-        assert!(s.journal().contains("sessions.json.bad"), "{}", s.journal());
+        assert!(s.journal_has("sessions.json.bad"), "{}", s.journal());
         assert_eq!(s.me(&a).status, 401);
     }
 
@@ -531,7 +587,7 @@ mod with_the_mock {
         let t = Instant::now();
         assert_eq!(s.sign_in(&generate_key(), &later).status, 503);
         assert!(t.elapsed() < Duration::from_millis(500), "{:?}", t.elapsed());
-        assert!(s.journal().contains("could not be fetched"), "{}", s.journal());
+        assert!(s.journal_has("could not be fetched"), "{}", s.journal());
         assert_eq!(s.me(&k).status, 200);
     }
 
@@ -603,7 +659,7 @@ mod with_the_mock {
         let r = s.sign_in(&generate_key(), &m.token("technician@tether.test", None).unwrap());
         assert_eq!((r.status, r.reason()), (503, "provider-unavailable".into()));
         assert_eq!(*asked.lock().unwrap(), ["/t/v2.0/.well-known/openid-configuration"]);
-        assert!(s.journal().contains("not on the issuer's own host"), "{}", s.journal());
+        assert!(s.journal_has("not on the issuer's own host"), "{}", s.journal());
     }
 
     #[test]

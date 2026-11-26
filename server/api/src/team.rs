@@ -315,6 +315,8 @@ pub struct Team {
     limit_noted: HashMap<String, u64>,
     /// `signature-limit` records relay-wide: (minute start, written in it, not written since the last one).
     limit_records: (u64, u32, u64),
+    /// `sign-in-refused` records without a verified person, relay-wide, the same way.
+    refused_records: (u64, u32, u64),
     /// Sign-in (the document's `oidc`, roles, deny list); `None`: no sign-in on this relay.
     signin: Option<Arc<SignIn>>,
     /// Sessions by key id; tokens bound to a key by `uti`.
@@ -471,20 +473,20 @@ impl Team {
         self.tokens.retain(|_, b| b.exp + oidc::SKEW > t);
     }
 
-    /// Whether a `signature-limit` record may be written at `t` (relay-wide cap), and how many were
-    /// left out since the last one written.
-    fn limit_record(&mut self, t: u64) -> Option<u64> {
-        let (start, n, more) = &mut self.limit_records;
-        if t >= *start + 60 {
-            (*start, *n) = (t, 0);
-        }
-        if *n >= LIMIT_RECORDS_PER_MIN {
-            *more += 1;
-            return None;
-        }
-        *n += 1;
-        Some(std::mem::take(more))
+}
+
+/// Whether a capped record (`signature-limit`, unverified `sign-in-refused`) may be written at `t`
+/// (relay-wide, `LIMIT_RECORDS_PER_MIN`), and how many were left out since the last one written.
+fn capped((start, n, more): &mut (u64, u32, u64), t: u64) -> Option<u64> {
+    if t >= *start + 60 {
+        (*start, *n) = (t, 0);
     }
+    if *n >= LIMIT_RECORDS_PER_MIN {
+        *more += 1;
+        return None;
+    }
+    *n += 1;
+    Some(std::mem::take(more))
 }
 
 /// A stored upload, checked against the keys it names (it was checked against `ADMIN_PUB_KEY`
@@ -591,8 +593,7 @@ impl App {
             if self.nonces.contains_key(&nonce) {
                 return Err(fail(self, "replayed request"));
             }
-            self.nonces.insert(nonce, t);
-            self.nonce_used();
+            self.remember_nonce(nonce, t)?;
             if s.exp <= t {
                 return Err(text(401, SESSION_EXPIRED));
             }
@@ -765,15 +766,18 @@ impl App {
             Err(Refused::Auth(e)) => return Err(fail(self, &e)),
             Ok(s) => s,
         };
-        let nonce = match &signer {
-            Signer::Key(_, _, n) | Signer::Session(_, _, n) => n.clone(),
-            Signer::SignIn(s) => s.nonce.clone(),
+        // A sign-in's nonce is kept only once its token verified: anyone may sign one with a fresh
+        // key, and a refused token changes nothing (its replay is refused the same way again).
+        let (nonce, keep) = match &signer {
+            Signer::Key(_, _, n) | Signer::Session(_, _, n) => (n.clone(), true),
+            Signer::SignIn(s) => (s.nonce.clone(), s.token.is_ok()),
         };
         if self.nonces.contains_key(&nonce) {
             return Err(fail(self, "replayed request"));
         }
-        self.nonces.insert(nonce, t);
-        self.nonce_used();
+        if keep {
+            self.remember_nonce(nonce, t)?;
+        }
         let roster = |a: &App, key: &VerifyingKey| {
             let i = a.team.members.keys.iter().position(|k| k == key)?;
             let w = &a.team.members.who[i];
@@ -834,12 +838,31 @@ impl App {
                 Ok(json(&answer))
             }
             Err((reason, actor)) => {
-                // The request was signed by the key: its refused tokens count per key, not per source
-                // address (those failures lock the address out of every team route).
-                if reason.status() == 401 {
+                // Before the token's own signature verified (any key may send junk): against the
+                // source address, whose limit refuses every team route. After: a token from the
+                // provider, refused for its claims; per key, not per address (staff behind one NAT).
+                if matches!(reason, Reason::Malformed | Reason::Alg | Reason::NoKid | Reason::UnknownKid | Reason::BadSignature | Reason::NotConfigured) {
+                    rate_ok(&mut self.team.fail_hits, crate::rate_ip(rq), t, u32::MAX);
+                } else if reason.status() == 401 {
                     rate_ok(&mut self.team.token_fail_hits, tether_trust::key_to_b64(&s.key), t, u32::MAX);
                 }
-                self.audit_pending = Some(Rec::new("sign-in-refused", Some(actor.unwrap_or(unverified)), Some(ip), Target::default(), serde_json::json!({"reason": reason.code()})));
+                let mut detail = serde_json::json!({"reason": reason.code()});
+                let actor = match actor {
+                    Some(a) => Some(a),
+                    // No verified person: capped relay-wide like `signature-limit` records.
+                    None => match capped(&mut self.team.refused_records, t) {
+                        Some(more) => {
+                            if more > 0 {
+                                detail["more"] = more.into();
+                            }
+                            Some(unverified)
+                        }
+                        None => None,
+                    },
+                };
+                if let Some(a) = actor {
+                    self.audit_pending = Some(Rec::new("sign-in-refused", Some(a), Some(ip), Target::default(), detail));
+                }
                 Err(refusal(reason))
             }
         }
@@ -991,7 +1014,7 @@ pub(crate) fn member_verify(app: &Mutex<App>, rq: &Request, body: &Body) -> Opti
             // the `kid` it tried (no actor: no signature verified).
             if a.team.limit_noted.get(&ip).is_none_or(|at| t >= at + 60) {
                 a.team.limit_noted.insert(ip.clone(), t);
-                if let Some(more) = a.team.limit_record(t) {
+                if let Some(more) = capped(&mut a.team.limit_records, t) {
                     let kid = header(rq, reqauth::HEADER).and_then(|s| reqauth::header_kid(&s).and_then(kid_form).map(str::to_owned));
                     eprintln!("team: failed member signatures from {ip} reached {FAIL_PER_MIN} per minute (kid {}, unverified)", kid.as_deref().unwrap_or("none"));
                     let mut detail = serde_json::json!({"kid": kid, "unverified": true});
@@ -1154,10 +1177,11 @@ mod tests {
     #[test]
     fn signature_limit_records_are_capped_per_minute_and_carry_the_rest() {
         let mut t = Team::default();
-        assert!((0..60).all(|_| t.limit_record(1000) == Some(0)));
-        assert_eq!((t.limit_record(1001), t.limit_record(1059)), (None, None));
-        assert_eq!(t.limit_record(1060), Some(2), "the next minute's first record carries the two left out");
-        assert_eq!(t.limit_record(1061), Some(0));
+        let c = &mut t.limit_records;
+        assert!((0..60).all(|_| capped(c, 1000) == Some(0)));
+        assert_eq!((capped(c, 1001), capped(c, 1059)), (None, None));
+        assert_eq!(capped(c, 1060), Some(2), "the next minute's first record carries the two left out");
+        assert_eq!(capped(c, 1061), Some(0));
         assert_eq!((kid_form("0123456789abcdef"), kid_form("0123456789ABCDEF"), kid_form("x;rm -rf"), kid_form("0123456789abcdef0")), (Some("0123456789abcdef"), None, None, None));
     }
 

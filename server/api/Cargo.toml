@@ -9,7 +9,7 @@ description = "Tether relay API: signed policy, heartbeat, diagnostics and relea
 tether-trust = { path = "../../crates/tether-trust" }
 tiny_http = "0.12"
 serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 libc = "0.2"
 # Already in the tree through tether-trust; hashes the status summary while it is written.
 sha2 = "0.10"

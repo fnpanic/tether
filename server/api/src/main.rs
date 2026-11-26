@@ -292,11 +292,11 @@ impl<R: Read> Read for Deadline<R> {
     }
 }
 
-/// One of the `max` slots of a pool (uploads, hbbs lookups), released on drop.
-struct UploadSlot(&'static AtomicUsize);
+/// One of the `max` slots of a pool (uploads, hbbs lookups, list reads), released on drop.
+pub(crate) struct UploadSlot(&'static AtomicUsize);
 
 impl UploadSlot {
-    fn take(pool: &'static AtomicUsize, max: usize) -> Option<Self> {
+    pub(crate) fn take(pool: &'static AtomicUsize, max: usize) -> Option<Self> {
         if pool.fetch_add(1, Ordering::SeqCst) < max {
             return Some(UploadSlot(pool));
         }
@@ -346,9 +346,11 @@ struct App {
     /// Set by a handler (`App::defer`) whose file work runs after the state lock is released.
     later: Option<Later>,
     nonces: HashMap<String, u64>,
-    /// A nonce was used since `nonces.json` was last written: `serve` writes it after the state
-    /// lock is released and before the answer goes out ([`persist_nonces`]).
-    nonces_dirty: bool,
+    /// Nonces used since they were last written: `serve` appends them to `nonces.log` after the
+    /// state lock is released and before the answer goes out ([`persist_nonces`]).
+    nonces_new: Vec<(String, u64)>,
+    /// Lines in `nonces.log`: beyond [`NONCE_LOG_MAX`] the map is written to `nonces.json` instead.
+    nonces_logged: usize,
     /// Nonces recorded since start: `serve` compares it around `route`, so only a request that
     /// recorded one waits for `nonces.json` (an unsigned request never does).
     nonces_used: u64,
@@ -626,37 +628,122 @@ pub(crate) fn traced(what: impl FnOnce() -> String, held: Duration) {
     }
 }
 
-/// Serialises the writers of `nonces.json`: the snapshot is taken inside it, so an older snapshot
-/// never replaces a newer file.
+/// Serialises the writers of `nonces.json` and `nonces.log`: what is written is taken inside it,
+/// so lines are appended in order and an older snapshot never replaces a newer file.
 static NONCE_FILE: Mutex<()> = Mutex::new(());
 
-/// Writes `nonces.json` (synced, renamed) without the state lock: the lock is held only to copy the
-/// map and clear the flag. Persisted so a restart does not reopen the replay window; called before
-/// the answer, so a nonce is durable when its request is answered. A failed write (disk full) is
-/// only logged: the nonce still blocks replays in memory, and deletes that free space must work.
+/// Nonces remembered at most (every signed request's for the replay window, 601 s; an upload's
+/// longer): a map full of live nonces refuses new signed requests `503` rather than grow.
+const NONCES_MAX: usize = 100_000;
+/// Lines appended to `nonces.log` before the whole map is written to `nonces.json` again.
+const NONCE_LOG_MAX: usize = 10_000;
+/// A `nonces.json` larger than this is not read (this relay writes at most `NONCES_MAX` entries).
+const NONCE_FILE_MAX: u64 = 16 << 20;
+
+/// `n`, or in test builds `TETHER_TEST_<name>` (`NONCES_MAX`, `NONCE_LOG_MAX`).
+fn test_or(name: &str, n: usize) -> usize {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    if let Some(n) = std::env::var(format!("TETHER_TEST_{name}")).ok().and_then(|v| v.parse().ok()) {
+        return n;
+    }
+    let _ = name;
+    n
+}
+
+fn nonces_max() -> usize {
+    test_or("NONCES_MAX", NONCES_MAX)
+}
+
+/// Writes the nonces used since the last write without the state lock: appended to `nonces.log`
+/// (synced), or, once the log has `NONCE_LOG_MAX` lines, the whole map to `nonces.json` (synced,
+/// renamed) and the log removed. The lock is held only to take the new nonces (the map is copied
+/// only for the full write). Persisted so a restart does not reopen the replay window; called
+/// before the answer, so a nonce is durable when its request is answered. A failed write (disk
+/// full) is only logged: the nonce still blocks replays in memory, and deletes that free space
+/// must work.
 fn persist_nonces(app: &Mutex<App>) {
     let _file = NONCE_FILE.lock().unwrap_or_else(|e| e.into_inner());
-    let (snap, data) = {
+    let (new, snap, data) = {
         let mut a = lock(app);
-        if !a.nonces_dirty {
+        if a.nonces_new.is_empty() {
             return; // a request that came later wrote it already, with this nonce in it
         }
-        a.nonces_dirty = false;
-        (a.nonces.clone(), a.data.clone())
+        let new = std::mem::take(&mut a.nonces_new);
+        a.nonces_logged += new.len();
+        let snap = (a.nonces_logged > test_or("NONCE_LOG_MAX", NONCE_LOG_MAX)).then(|| a.nonces.clone());
+        if snap.is_some() {
+            a.nonces_logged = 0;
+        }
+        (new, snap, a.data.clone())
     };
-    let tmp = tmp_path(&data);
-    let r = (|| {
-        let f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
-        let mut w = BufWriter::new(&f);
-        serde_json::to_writer(&mut w, &snap).map_err(io::Error::other)?;
-        w.flush()?;
-        drop(w);
-        f.sync_all()?;
-        fs::rename(&tmp, data.join("nonces.json"))
-    })();
+    let r = match snap {
+        Some(snap) => {
+            let tmp = tmp_path(&data);
+            let r = (|| {
+                let f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+                let mut w = BufWriter::new(&f);
+                serde_json::to_writer(&mut w, &snap).map_err(io::Error::other)?;
+                w.flush()?;
+                drop(w);
+                f.sync_all()?;
+                fs::rename(&tmp, data.join("nonces.json"))?;
+                // A crash before this leaves lines that are in nonces.json too: read twice, harmless.
+                match fs::remove_file(data.join("nonces.log")) {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                    _ => Ok(()),
+                }
+            })();
+            if r.is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+            r
+        }
+        None => (|| {
+            let f = OpenOptions::new().append(true).create(true).mode(0o600).open(data.join("nonces.log"))?;
+            let mut w = BufWriter::new(&f);
+            for n in &new {
+                serde_json::to_writer(&mut w, n).map_err(io::Error::other)?;
+                w.write_all(b"\n")?;
+            }
+            w.flush()?;
+            drop(w);
+            f.sync_data()
+        })(),
+    };
     if let Err(e) = r {
-        let _ = fs::remove_file(&tmp);
-        eprintln!("error: nonces.json: {e}");
+        eprintln!("error: nonces.json/nonces.log: {e}");
+    }
+}
+
+/// `nonces.json` and the lines appended to `nonces.log` since (a torn last line is skipped), the
+/// expired left out; and the number of lines in the log.
+fn load_nonces(data: &Path) -> (HashMap<String, u64>, usize) {
+    let p = data.join("nonces.json");
+    let mut m: HashMap<String, u64> = if fs::metadata(&p).is_ok_and(|m| m.len() > NONCE_FILE_MAX) {
+        eprintln!("error: nonces.json is too large; not read");
+        HashMap::new()
+    } else {
+        load_json(&p)
+    };
+    let mut lines = 0;
+    if let Ok(f) = File::open(data.join("nonces.log")) {
+        for l in io::BufRead::lines(BufReader::new(f)).map_while(Result::ok).take(2 * NONCE_LOG_MAX) {
+            lines += 1;
+            if let Ok((n, t)) = serde_json::from_str::<(String, u64)>(&l) {
+                m.insert(n, t);
+            }
+        }
+    }
+    let t = now();
+    m.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
+    (m, lines)
+}
+
+/// Tests only (`TETHER_TEST_ADMIN_READ_PAUSE`, ms): a list read holds its slot this long.
+pub(crate) fn test_pause() {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    if let Some(ms) = std::env::var("TETHER_TEST_ADMIN_READ_PAUSE").ok().and_then(|v| v.parse().ok()) {
+        std::thread::sleep(Duration::from_millis(ms));
     }
 }
 
@@ -992,6 +1079,7 @@ impl App {
                 }
             }
         }
+        let (nonces, nonces_logged) = load_nonces(&data);
         Ok(App {
             q_hits: HashMap::new(),
             audit_ip_hits: HashMap::new(),
@@ -1006,8 +1094,9 @@ impl App {
             devices: devices.into_iter().map(|d| (d.uuid.clone(), d)).collect(),
             devices_dirty: false,
             ip_hits: HashMap::new(),
-            nonces: load_json(&data.join("nonces.json")),
-            nonces_dirty: false,
+            nonces,
+            nonces_new: Vec::new(),
+            nonces_logged,
             nonces_used: 0,
             tickets: load_json(&data.join("diag/tickets.json")),
             policy_serial,
@@ -1080,15 +1169,24 @@ impl App {
         if self.nonces.contains_key(&nonce) {
             return Err(text(401, "replayed request"));
         }
-        self.nonces.insert(nonce, now() + keep);
-        self.nonce_used();
-        Ok(())
+        self.remember_nonce(nonce, now() + keep)
     }
 
-    /// A nonce was used: `nonces.json` is written before this request is answered.
-    pub(crate) fn nonce_used(&mut self) {
-        self.nonces_dirty = true;
+    /// Remembers a nonce (not seen before) as seen at `at`; it is written before this request is
+    /// answered. A map full of nonces still in their window: `503`, nothing remembered.
+    pub(crate) fn remember_nonce(&mut self, nonce: String, at: u64) -> Result<(), Resp> {
+        if self.nonces.len() >= nonces_max() {
+            let t = now();
+            self.nonces.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
+            if self.nonces.len() >= nonces_max() {
+                eprintln!("error: {} signed requests within the replay window: new ones refused until older ones expire", self.nonces.len());
+                return Err(text(503, "too many signed requests, retry later").with_header(hdr("Retry-After", "60")));
+            }
+        }
+        self.nonces_new.push((nonce.clone(), at));
+        self.nonces.insert(nonce, at);
         self.nonces_used += 1;
+        Ok(())
     }
 
     /// The checks a release upload must pass before its body is read (the signature covers the
@@ -1288,8 +1386,8 @@ impl App {
 
     /// The team audit record of an admin request that reads or changes a device's data.
     fn audit_admin(&mut self, rq: &Request, actor: teamaudit::Actor, method: &str, url: &str, rest: &str, body: &[u8]) {
-        if (method, rest) == ("GET", "status/devices") {
-            self.audit_pending = self.team.reads.read("status-device-list", actor, Some(client_ip(rq)), now());
+        if let ("GET", r @ ("status/devices" | "devices")) = (method, rest) {
+            self.audit_pending = self.team.reads.read(if r == "devices" { "device-list" } else { "status-device-list" }, actor, Some(client_ip(rq)), now());
             return;
         }
         let (event, target, detail) = match (method, rest) {
@@ -1312,9 +1410,14 @@ impl App {
     /// `GET /api/admin/team-audit?since&until&actor&device&customer&event&limit&cursor` (teamaudit.rs
     /// `read`): written into an unlinked temp file after the state lock is released, then sent.
     fn team_audit_read(&mut self, url: &str) -> Result<Resp, Resp> {
+        static READING: AtomicUsize = AtomicUsize::new(0);
         let q = teamaudit::Query::parse(url).map_err(|e| text(400, &e))?;
+        // One at a time relay-wide: each may wait 2 s for the queue and scan the whole log.
+        let slot = UploadSlot::take(&READING, 1).ok_or_else(|| text(429, "busy").with_header(hdr("Retry-After", "2")))?;
         let (log, data) = (self.team_audit.clone(), self.data.clone());
         self.defer(move |_| {
+            let _slot = slot;
+            test_pause();
             // Everything submitted before this read is in the files.
             log.flush(Duration::from_secs(2));
             let head = log.head();

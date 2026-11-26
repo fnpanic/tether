@@ -1535,8 +1535,7 @@ fn release_upload_nonce_outlives_a_slow_replay() {
     assert_eq!(put(), 204);
     assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").status, 200);
     assert_eq!(put(), 401);
-    let nonces: std::collections::HashMap<String, u64> = serde_json::from_slice(&std::fs::read(s.dir.join("nonces.json")).unwrap()).unwrap();
-    let mut seen: Vec<u64> = nonces.values().map(|t| t.saturating_sub(now())).collect();
+    let mut seen: Vec<u64> = stored_nonces(&s.dir).iter().map(|(_, t)| t.saturating_sub(now())).collect();
     seen.sort_unstable();
     // The status request's nonce: now. The upload's: the body deadline (3260 s) and the skew later.
     assert!(seen.len() == 2 && seen[0] < 5 && (3500..3600).contains(&seen[1]), "{seen:?}");
@@ -1564,7 +1563,7 @@ fn audit_read_is_cut_with_a_header() {
 #[test]
 fn unsaved_nonces_do_not_stop_admin_requests() {
     let k = generate_key();
-    let s = start_env(&key_to_b64(&k.verifying_key()), &[], |d| std::fs::create_dir(d.join("nonces.json")).unwrap());
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[], |d| ["nonces.json", "nonces.log"].iter().for_each(|f| std::fs::create_dir(d.join(f)).unwrap()));
     let sig = reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now());
     assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 200);
     assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 401);
@@ -1631,5 +1630,119 @@ fn every_admin_change_is_in_the_team_audit_log() {
     let log: String = std::fs::read_dir(s.dir.join("team-audit")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl")).map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
     for secret in ["<p>", &key_to_b64(&member.verifying_key()), &tok, "\"note\""] {
         assert!(!log.contains(secret), "{secret} in the log");
+    }
+}
+
+/// The nonces on disk: `nonces.json` (the last full write) and the lines appended to `nonces.log` since.
+fn stored_nonces(dir: &std::path::Path) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = std::fs::read(dir.join("nonces.json")).ok().map(|b| serde_json::from_slice::<std::collections::HashMap<String, u64>>(&b).unwrap().into_iter().collect()).unwrap_or_default();
+    v.extend(std::fs::read_to_string(dir.join("nonces.log")).unwrap_or_default().lines().map(|l| serde_json::from_str::<(String, u64)>(l).unwrap()));
+    v
+}
+
+/// A signed request appends its nonce to `nonces.log` (synced before the answer) instead of
+/// rewriting the whole nonce map in `nonces.json`; a restart reads both.
+#[test]
+fn nonces_are_appended_not_rewritten() {
+    let (s, k) = admin_server();
+    let sigs: Vec<String> = (0..3).map(|_| reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now())).collect();
+    for sig in &sigs {
+        assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, sig)], b"").status, 200);
+    }
+    assert!(!s.dir.join("nonces.json").exists(), "the whole map is not rewritten per request");
+    assert_eq!(stored_nonces(&s.dir).len(), 3);
+    for sig in &sigs {
+        assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, sig)], b"").status, 401, "replay");
+    }
+}
+
+/// Past `NONCE_LOG_MAX` lines the whole map goes to `nonces.json` and the log starts again; a
+/// restart reads both.
+#[test]
+fn the_nonce_log_is_compacted_into_nonces_json() {
+    let k = generate_key();
+    let keys = key_to_b64(&k.verifying_key());
+    let s = start_env(&keys, &[("TETHER_TEST_NONCE_LOG_MAX", "2")], |_| {});
+    let sigs: Vec<String> = (0..4).map(|_| reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now())).collect();
+    let get = |s: &Srv, sig: &String| s.req("GET", "/api/admin/status", &[(reqauth::HEADER, sig)], b"").status;
+    for sig in &sigs[..3] {
+        assert_eq!(get(&s, sig), 200);
+    }
+    assert!(!s.dir.join("nonces.log").exists());
+    assert_eq!(stored_nonces(&s.dir).len(), 3, "all three in nonces.json");
+    assert_eq!(get(&s, &sigs[3]), 200);
+    assert_eq!(std::fs::read_to_string(s.dir.join("nonces.log")).unwrap().lines().count(), 1);
+    // Another relay on a copy of both files (as after a restart).
+    let s2 = start_env(&keys, &[], |d| {
+        for f in ["nonces.json", "nonces.log"] {
+            std::fs::copy(s.dir.join(f), d.join(f)).unwrap();
+        }
+    });
+    for sig in &sigs {
+        assert_eq!(get(&s2, sig), 401, "replay after a restart");
+    }
+}
+
+/// The nonce map has a hard bound: when it is full of nonces still inside the replay window, a
+/// new signed request is refused `503` with `Retry-After` rather than the map growing.
+#[test]
+fn the_nonce_map_is_bounded() {
+    let k = generate_key();
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[("TETHER_TEST_NONCES_MAX", "5")], |_| {});
+    for i in 0..5 {
+        assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").status, 200, "request {i}");
+    }
+    let r = s.admin(&k, "GET", "/api/admin/status", b"");
+    assert_eq!((r.status, r.header("Retry-After")), (503, Some("60")));
+    assert_eq!(stored_nonces(&s.dir).len(), 5);
+}
+
+/// `GET /api/admin/devices` (heartbeats with addresses) is recorded, folded per actor and hour.
+#[test]
+fn the_admin_device_list_is_recorded() {
+    let (s, k) = admin_server();
+    for _ in 0..2 {
+        assert_eq!(s.admin(&k, "GET", "/api/admin/devices", b"").status, 200);
+    }
+    let recs: Vec<serde_json::Value> = team_audit_records(&s, &k).into_iter().filter(|r| r["event"] == "device-list").collect();
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    assert_eq!(recs[0]["actor"]["name"], "admin");
+}
+
+/// A release proposal's document is at most 64 KiB; the list keeps each document as stored and
+/// names a file that cannot be read by its id (it counts toward the limit), which DELETE removes.
+#[test]
+fn proposals_list_raw_documents_and_unreadable_files() {
+    let (s, k) = admin_server();
+    let put = |doc: serde_json::Value| s.admin(&k, "PUT", "/api/admin/proposals/release", serde_json::json!({"note": "n", "doc": doc}).to_string().as_bytes());
+    assert_eq!(put(serde_json::json!({"files": "x".repeat(70_000)})).status, 400);
+    let r = put(serde_json::json!({"serial": 3, "files": [{"name": "a.exe", "sha256": "ab"}], "z": 1.50}));
+    assert_eq!(r.status, 200);
+    let id = r.json()["id"].as_str().unwrap().to_owned();
+    std::fs::write(s.dir.join("proposals/release/0123456789abcdef.json"), b"{not json").unwrap();
+    let list = s.admin(&k, "GET", "/api/admin/proposals/release", b"").json();
+    let p = list["proposals"].as_array().unwrap();
+    assert_eq!(p.len(), 2, "{list}");
+    assert_eq!(p[0], serde_json::json!({"id": "0123456789abcdef", "unreadable": true}));
+    assert_eq!((p[1]["id"].as_str(), p[1]["doc"]["files"][0]["name"].as_str()), (Some(id.as_str()), Some("a.exe")));
+    assert_eq!(s.admin(&k, "DELETE", "/api/admin/proposals/release/0123456789abcdef", b"").status, 204);
+    assert_eq!(s.admin(&k, "DELETE", "/api/admin/proposals/release/0123456789abcdef", b"").status, 404);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/proposals/release", b"").json()["proposals"].as_array().unwrap().len(), 1);
+}
+
+/// One proposal list and one team-audit read at a time relay-wide: another is `429` with `Retry-After`.
+#[test]
+fn one_proposal_list_and_one_team_audit_read_at_a_time() {
+    let k = generate_key();
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[("TETHER_TEST_ADMIN_READ_PAUSE", "1500")], |_| {});
+    for (path, retry) in [("/api/admin/proposals/policy", "1"), ("/api/admin/team-audit?limit=10", "2")] {
+        std::thread::scope(|sc| {
+            let first = sc.spawn(|| s.admin(&k, "GET", path, b"").status);
+            std::thread::sleep(Duration::from_millis(500));
+            let r = s.admin(&k, "GET", path, b"");
+            assert_eq!((r.status, r.header("Retry-After")), (429, Some(retry)), "{path}");
+            assert_eq!(first.join().unwrap(), 200, "{path}");
+        });
+        assert_eq!(s.admin(&k, "GET", path, b"").status, 200, "{path} after the first");
     }
 }
