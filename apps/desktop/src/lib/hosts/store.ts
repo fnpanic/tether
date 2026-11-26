@@ -7,12 +7,16 @@ import { errorText } from "../policy";
 import { mergeStatus, statusNote } from "./health";
 import { cleanTags, emptyStore, MAX_NAME, MAX_NOTES, storeId, shared, applyShared, STORE_VERSION, type HostEntry, type OrgDevice, type Peer, type SharedDoc, type StatusSummary, type Store } from "./model";
 import { merge3, readShared } from "./sync";
+import { loadPerms, type SignIn } from "../signin";
 
 export type OnlineState = "idle" | "loading" | "ok" | "unsupported" | "error";
 
 export interface TeamInfo {
   identity?: { key: string; fingerprint: string };
-  me?: { name: string; write: boolean; audit: boolean } | null;
+  /** `GET /api/team/me`: the signed-in person's or the roster entry's permissions (`sbom`, `agent`
+   *  and `customers` only from relays with a signed team document). */
+  me?: { name: string; write: boolean; audit: boolean; sbom?: boolean; agent?: boolean; customers?: string[] } | null;
+  signin?: SignIn;
   error?: string;
   syncing?: boolean;
 }
@@ -126,6 +130,22 @@ function edit(ids: string[], f: (e: HostEntry, id: string) => HostEntry, sharedC
   commit({ ...s, hosts }, sharedChange && !ro);
 }
 
+/** Sign-in, sign-out and cancel (the backend runs the browser flow); then the team view again. */
+async function signInCall(cmd: "team_sign_in" | "team_sign_out" | "team_signin_cancel") {
+  const t = get().team;
+  set({ team: { ...t, signin: t.signin && { ...t.signin, busy: cmd === "team_sign_in" } } });
+  let signin: SignIn | undefined;
+  try {
+    signin = await invoke<SignIn>(cmd);
+  } catch {
+    // The reason is in the state's note.
+    signin = await invoke<SignIn>("team_signin_status", { check: false }).catch(() => undefined);
+  }
+  set({ team: { ...get().team, signin: signin ?? get().team.signin } });
+  if (get().store.team?.enabled) await actions.teamRefresh();
+  else void loadPerms();
+}
+
 export const actions = {
   async load() {
     const [file, peers] = await Promise.all([
@@ -195,19 +215,26 @@ export const actions = {
     const s = get().store;
     commit({ ...s, team: { enabled: false, ...s.team, ...p } }, false);
   },
+  signIn: () => signInCall("team_sign_in"),
+  signOut: () => signInCall("team_sign_out"),
+  signInCancel: () => signInCall("team_signin_cancel"),
   /** Identity, membership and org devices; then a tag sync. */
   async teamRefresh() {
     const team: TeamInfo = { ...get().team, error: undefined };
     try {
       team.identity ??= await invoke<{ key: string; fingerprint: string }>("team_identity");
+      // The relays' sign-in settings first (also takes up a stored sign-in), then who this app is.
+      team.signin = (await invoke<SignIn>("team_signin_status", { check: true }).catch(() => undefined)) ?? team.signin;
       team.me = await invoke<TeamInfo["me"]>("team_me");
     } catch (e) {
       team.me = null;
-      team.error = errorText(e).replace(/^(not-member|unsupported): /, "");
+      team.error = errorText(e).replace(/^(not-member|unsupported|expired): /, "");
       set({ team, org: [], status: [], statusRelays: [], statusError: undefined });
+      void loadPerms();
       return;
     }
     set({ team });
+    void loadPerms();
     if (get().store.team?.showOrg !== false) {
       const org = await invoke<OrgDevice[]>("team_devices").catch(() => null);
       if (org) set({ org });

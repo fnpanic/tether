@@ -39,6 +39,7 @@ import { HealthDot, HEALTH_LABEL } from "../components/hosts/bits";
 import { HealthSection, useStatusHost } from "../components/hosts/Health";
 import { AgentDialog } from "../components/AgentDialog";
 import { AGENT_MENU, agentMenu } from "../lib/agent";
+import { loadPerms, usePerms } from "../lib/signin";
 import { ADMIN_ON, elevationError, hostNote, NOTE_TEXT, UAC_SETTLE_MS, uacOutcome, type HostNote } from "../lib/elevation";
 
 interface Display {
@@ -731,6 +732,10 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
 
   const name = info?.hostname || formatId(peer);
   const connected = phase.kind === "connected";
+  const agentAllowed = usePerms((p) => p.agent);
+  useEffect(() => {
+    if (connected) void loadPerms();
+  }, [connected]);
   const delay = quality.delay;
   const latencyColor = delay == null ? "bg-muted" : delay < 40 ? "bg-ok" : delay < 120 ? "bg-warn" : "bg-danger";
 
@@ -898,7 +903,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
             onCad={() => act(invoke("session_ctrl_alt_del", { key }))}
             onElevate={() => act(invoke("session_elevate", { key }))}
             onAsk={(a) => (setAgentOpen(false), setAsk(a))}
-            agent={agentMenu(viewOnly, controlOff)}
+            agent={agentMenu(viewOnly, controlOff, agentAllowed)}
             onAgent={() => (setAsk(null), setAgentOpen(true))}
           />
           <Sep />

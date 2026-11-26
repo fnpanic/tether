@@ -57,7 +57,11 @@ export function SoftwarePart({ h }: { h: Host }) {
   const save = () => {
     setSaved("");
     saveFile(exportName(s.host, new Date().toISOString().slice(0, 10)), raw!, "application/vnd.cyclonedx+json").then(
-      (ok) => ok && setSaved("Exported."),
+      (ok) => {
+        if (!ok) return;
+        setSaved("Exported.");
+        void invoke("team_audit_export", { what: "sbom", rows: n, uuid: s.uuid }).catch(() => {});
+      },
       (e) => setSaved(clip(errorText(e), 200)),
     );
   };

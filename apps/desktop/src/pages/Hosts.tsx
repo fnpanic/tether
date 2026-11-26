@@ -41,6 +41,7 @@ import { applyRules } from "../lib/hosts/rules";
 import { parse, search } from "../lib/hosts/query";
 import { asOf, chipLines, faultsHint, lookupFor, NEGATED_NOTE, negatedSoftware, runnable, searcher, softwareTerms, termsKey, type SwState } from "../lib/hosts/software";
 import { actions, flush, useHosts, useReadOnly } from "../lib/hosts/store";
+import { PERM_TEXT, usePerms } from "../lib/signin";
 import { HostTable, smartOrder, sortHosts, type Sort } from "../components/hosts/HostTable";
 import { Detail } from "../components/hosts/Detail";
 import { Palette, type Cmd } from "../components/hosts/Palette";
@@ -154,7 +155,9 @@ export function Hosts() {
   const [sw, setSw] = useState<SwState>({ key: "", results: null });
   const finder = useMemo(() => searcher((c, a) => invoke(c, a), () => useHosts.getState().statusRelays, setSw), []);
   useEffect(() => () => finder.dispose(), [finder]);
-  useEffect(() => finder.typed(q), [finder, q]);
+  // Without the sbom permission nothing is sent (the relay would refuse it); the line says why.
+  const sbom = usePerms((p) => p.sbom);
+  useEffect(() => finder.typed(sbom ? q : ""), [finder, q, sbom]);
   /** A query chosen, not typed (saved search, library, palette): searched at once. */
   const openQuery = useCallback((x: string) => (setQ(x), finder.enter(x)), [finder]);
   const swTerms = useMemo(() => softwareTerms(parsed.node), [parsed]);
@@ -164,8 +167,9 @@ export function Hosts() {
   const swBusy = swReady.length > 0 && sw.key === termsKey(swReady) ? sw.busy : undefined;
   const swLines = useMemo(() => {
     if (!swTerms.length) return [];
+    if (!sbom) return [`Software search: ${PERM_TEXT.sbom.missing}`];
     return [...chipLines(swTerms, swApplied, hosts, st.statusRelays, swBusy), ...(negatedSoftware(parsed.node) ? [NEGATED_NOTE] : [])];
-  }, [swTerms, swApplied, swBusy, hosts, st.statusRelays, parsed]);
+  }, [swTerms, swApplied, swBusy, hosts, st.statusRelays, parsed, sbom]);
   const checkHint = useMemo(() => faultsHint(parsed.node, hosts), [parsed, hosts]);
 
   const rows = useMemo(() => {
@@ -579,8 +583,13 @@ export function Hosts() {
               <div key={l}>{l}</div>
             ))}
             {checkHint && <div>{checkHint}</div>}
-            {swTerms.length > 0 && <div className="text-footnote text-muted">Each software search is sent to the servers and recorded in the team's audit log with its text.</div>}
+            {swTerms.length > 0 && sbom && <div className="text-footnote text-muted">Each software search is sent to the servers and recorded in the team's audit log with its text.</div>}
           </div>
+          {st.team.signin?.alarm && (
+            <div role="alert" className="mx-4 mb-2 shrink-0 rounded-xl bg-danger/10 px-3 py-2 text-caption font-semibold text-danger" data-testid="signin-alarm-banner">
+              {st.team.signin.alarm}
+            </div>
+          )}
           {st.saveError && (
             <div role="alert" className="mx-4 mb-2 shrink-0 rounded-xl bg-danger/10 px-3 py-2 text-caption text-danger">
               {st.saveError}

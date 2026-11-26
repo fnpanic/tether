@@ -323,6 +323,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 
 [[package]]
+name = "ascii"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
+
+[[package]]
 name = "asn1-rs"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1273,6 +1279,12 @@ dependencies = [
  "wasm-bindgen",
  "windows-link 0.1.1",
 ]
+
+[[package]]
+name = "chunked_transfer"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
 
 [[package]]
 name = "cidr-utils"
@@ -4168,6 +4180,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "humantime"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4789,6 +4807,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyring"
+version = "3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
+dependencies = [
+ "byteorder",
+ "log",
+ "security-framework 2.10.0",
+ "security-framework 3.5.1",
+ "windows-sys 0.60.2",
+ "zeroize",
+]
+
+[[package]]
 name = "kurbo"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4802,6 +4834,9 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+dependencies = [
+ "spin",
+]
 
 [[package]]
 name = "lazycell"
@@ -5693,6 +5728,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint-dig"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e661dda6640fad38e827a6d4a310ff4763082116fe217f279885c97f511bb0b7"
+dependencies = [
+ "lazy_static",
+ "libm",
+ "num-integer",
+ "num-iter",
+ "num-traits 0.2.19",
+ "rand 0.8.5",
+ "smallvec",
+ "zeroize",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5730,6 +5781,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-iter"
+version = "0.1.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c92800bd69a1eac91786bcfe9da64a897eb72911b8dc3095decbd07429e8048b"
+dependencies = [
+ "num-integer",
+ "num-traits 0.2.19",
+]
+
+[[package]]
 name = "num-rational"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5756,6 +5817,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg 1.3.0",
+ "libm",
 ]
 
 [[package]]
@@ -6332,6 +6394,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "oidc-mock"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "rsa",
+ "serde 1.0.228",
+ "serde_json 1.0.154",
+ "sha2",
+ "tiny_http",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6867,6 +6943,17 @@ dependencies = [
  "atomic-waker",
  "fastrand 2.5.0",
  "futures-io",
+]
+
+[[package]]
+name = "pkcs1"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
+dependencies = [
+ "der",
+ "pkcs8",
+ "spki",
 ]
 
 [[package]]
@@ -7840,6 +7927,27 @@ dependencies = [
  "libc",
  "rtoolbox",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rsa"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
+dependencies = [
+ "const-oid",
+ "digest",
+ "num-bigint-dig",
+ "num-integer",
+ "num-traits 0.2.19",
+ "pkcs1",
+ "pkcs8",
+ "rand_core 0.6.4",
+ "sha2",
+ "signature 2.2.0",
+ "spki",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -9878,15 +9986,20 @@ name = "tether"
 version = "0.6.3"
 dependencies = [
  "base",
+ "base64 0.22.1",
  "flate2",
+ "getrandom 0.2.15",
  "hbb_common",
+ "keyring",
  "lzma-rs",
  "minisign",
+ "oidc-mock",
  "rdev",
  "reqwest 0.12.28",
  "rustdesk",
  "serde 1.0.228",
  "serde_json 1.0.154",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-deep-link",
@@ -10076,6 +10189,16 @@ dependencies = [
  "libloading 0.8.4",
  "pkg-config",
  "tracing",
+]
+
+[[package]]
+name = "tiny_http"
+version = "0.12.0"
+dependencies = [
+ "ascii",
+ "chunked_transfer",
+ "httpdate",
+ "log",
 ]
 
 [[package]]

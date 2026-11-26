@@ -74,7 +74,10 @@ fn store_new(path: &std::path::Path, k: SigningKey) -> R<SigningKey> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    // One temp file per call: two threads of this process may create the key at once (sign-in
+    // posts to every relay in parallel), and must not write into each other's file.
+    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = path.with_extension(format!("{}.{}.tmp", std::process::id(), CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -98,8 +101,19 @@ fn store_new(path: &std::path::Path, k: SigningKey) -> R<SigningKey> {
 }
 
 fn key() -> R<SigningKey> {
-    key_at(&Config::path("team-key"))
+    key_at(&data_path("team-key"))
 }
+
+/// A file in Tether's config folder (a test's own folder in tests).
+pub(crate) fn data_path(name: &str) -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(d) = TEST_DIR.lock().unwrap().as_ref() {
+        return d.join(name);
+    }
+    Config::path(name)
+}
+#[cfg(test)]
+pub(crate) static TEST_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
 /// `{key, fingerprint}`: what the technician gives the admin, and reads out to compare.
 pub fn identity() -> R<Value> {
@@ -125,6 +139,7 @@ fn status_error(code: u16, body: &str) -> String {
         // know its own name, refuses every member: say so instead of "not in the team".
         401 if body.contains("unsupported signature version") => "This server must be updated before team features work with this version of Tether.".into(),
         401 if body.contains("RELAY_HOST") || body.contains("signed for another relay") => "The server is not set up for this version of Tether yet (RELAY_HOST).".into(),
+        401 if body.starts_with("session expired") => "expired: Your sign-in has ended. Sign in again.".into(),
         401 => "not-member: This app is not in your organisation's team. Send its key to your administrator.".into(),
         403 => "Your team membership does not allow this.".into(),
         404 => "unsupported: The server does not offer team access yet.".into(),
@@ -136,6 +151,15 @@ fn status_error(code: u16, body: &str) -> String {
     }
 }
 
+/// [`status_error`] without the prefix the webview tells states apart by.
+pub(crate) fn error_text(code: u16, body: &str) -> String {
+    let e = status_error(code, body);
+    match e.split_once(": ") {
+        Some((tag, rest)) if ["not-member", "unsupported", "off", "expired"].contains(&tag) => rest.to_owned(),
+        _ => e,
+    }
+}
+
 /// One signed request to the first reachable relay, or to the first reachable of `hosts`.
 /// `path` includes the query string (it is part of the signature). Answers status, ETag, body.
 fn call_via(hosts: Option<&[String]>, method: &str, path: &str, body: Option<&[u8]>, headers: &[(&str, String)], limit: usize) -> R<(u16, Option<String>, Vec<u8>)> {
@@ -144,12 +168,18 @@ fn call_via(hosts: Option<&[String]>, method: &str, path: &str, body: Option<&[u
 
 /// [`call_via`] answering the header `want` instead of the ETag.
 fn call_for(hosts: Option<&[String]>, method: &str, path: &str, body: Option<&[u8]>, headers: &[(&str, String)], limit: usize, want: &str) -> R<(u16, Option<String>, Vec<u8>)> {
+    call_signed(false, hosts, method, path, body, headers, limit, want)
+}
+
+/// [`call_for`]; `kid`: always name the key (else only to relays known to take it, [`crate::oidc::sends_kid`]).
+#[allow(clippy::too_many_arguments)]
+fn call_signed(kid: bool, hosts: Option<&[String]>, method: &str, path: &str, body: Option<&[u8]>, headers: &[(&str, String)], limit: usize, want: &str) -> R<(u16, Option<String>, Vec<u8>)> {
     let k = key()?;
     let body = body.unwrap_or_default().to_vec();
     let build = |c: &reqwest::blocking::Client, base: &str| {
         // A fresh signature (and nonce) per attempt: the relay rejects a replayed one, and each
         // is made for the relay it goes to.
-        let sig = reqauth::sign_request_for(&k, base, method, path, &body, now());
+        let sig = if kid || crate::oidc::sends_kid(base) { reqauth::sign_request_for_kid(&k, base, method, path, &body, now()) } else { reqauth::sign_request_for(&k, base, method, path, &body, now()) };
         let url = format!("{base}{path}");
         let rq = c.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET), url);
         let rq = if body.is_empty() { rq } else { rq.header("Content-Type", "application/json").body(body.clone()) };
@@ -184,9 +214,89 @@ fn json_ok(code: u16, raw: &[u8]) -> R<Value> {
     serde_json::from_slice(raw).map_err(|e| format!("bad answer from the server: {e}"))
 }
 
+/// The last `GET /api/team/me` answer of this run (the session's or the roster entry's permissions).
+pub(crate) static ME: Mutex<Option<Value>> = Mutex::new(None);
+
 pub fn me() -> R<Value> {
     let (c, b) = call("GET", "/api/team/me", None, &[], 4096)?;
-    json_ok(c, &b)
+    let r = json_ok(c, &b);
+    *ME.lock().unwrap() = r.as_ref().ok().cloned();
+    r
+}
+
+/// Whether this app's team permissions allow `perm` (`agent`, `sbom`, `write`, `audit`): the
+/// signed-in person's, else the roster entry's last answer; a permission an older relay does not
+/// name (`agent`, `sbom`) is allowed, as the relay's defaults (docs/api.md). Without team access: allowed.
+pub fn allows(perm: &str) -> bool {
+    let me = crate::oidc::me().or_else(|| ME.lock().unwrap().clone());
+    me.and_then(|m| m.get(perm).and_then(Value::as_bool)).unwrap_or(true)
+}
+
+/// `{signed_in, agent, sbom, write, audit}` for a session window.
+pub fn permissions() -> Value {
+    serde_json::json!({ "signed_in": crate::oidc::signed_in(), "agent": allows("agent"), "sbom": allows("sbom"), "write": allows("write"), "audit": allows("audit") })
+}
+
+/// `GET /api/team/config` of one relay (public, not signed by this app): status and body.
+pub(crate) fn config_get(relay: &str) -> R<(u16, Vec<u8>)> {
+    let r = crate::policy::api_via(&[relay.to_owned()], |c, base| c.get(format!("{base}/api/team/config")))?;
+    let code = r.status().as_u16();
+    Ok((code, tether_trust::read_limited(r, 64 << 10)?))
+}
+
+/// `POST /api/team/session` on `relay`: the access token and this app's public key, signed by it with `kid`.
+pub(crate) fn session_post(relay: &str, access_token: &str) -> R<(u16, Vec<u8>)> {
+    let body = serde_json::json!({ "access_token": access_token, "key": tether_trust::key_to_b64(&key()?.verifying_key()) }).to_string();
+    call_signed(true, Some(&[relay.to_owned()]), "POST", "/api/team/session", Some(body.as_bytes()), &[], 4096, "ETag").map(|(c, _, b)| (c, b))
+}
+
+/// `DELETE /api/team/session` on `relay` (with `kid`): ends this key's session there.
+pub(crate) fn session_delete(relay: &str) -> R<(u16, Vec<u8>)> {
+    call_signed(true, Some(&[relay.to_owned()]), "DELETE", "/api/team/session", None, &[], 4096, "ETag").map(|(c, _, b)| (c, b))
+}
+
+/// A self-reported audit event (`POST /api/team/audit-event`, docs/api.md), sent in the background
+/// to the first reachable relay, only when this app is known to be a member (a non-member's
+/// request would count as a failed signature at the relay). Failures are not shown.
+pub fn audit_event(ev: Value) {
+    if !crate::oidc::signed_in() && ME.lock().unwrap().is_none() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let _ = call("POST", "/api/team/audit-event", Some(ev.to_string().as_bytes()), &[], 4096);
+    });
+}
+
+/// `export` (`what`: `hosts`, `failing`, `sbom`; `rows`; a host's `uuid` for `sbom`).
+pub fn audit_export(what: &str, rows: u64, uuid: Option<&str>) -> R<()> {
+    if !["hosts", "failing", "sbom"].contains(&what) || rows > 10_000_000 || uuid.is_some_and(|u| !tether_trust::status::valid_uuid(u)) {
+        return Err("invalid export event".into());
+    }
+    let mut ev = serde_json::json!({ "event": "export", "what": what, "rows": rows });
+    if let Some(u) = uuid {
+        ev["uuid"] = u.into();
+    }
+    audit_event(ev);
+    Ok(())
+}
+
+/// `session-start` with the host's Tether ID.
+pub fn audit_session_start(tether_id: &str) {
+    if tether_trust::status::valid_tether_id(tether_id) {
+        audit_event(serde_json::json!({ "event": "session-start", "tether_id": tether_id }));
+    }
+}
+
+/// `agent-request` (`install` | `remove`) with the host's answer state as the outcome.
+pub fn audit_agent_request(tether_id: &str, action: &str, outcome: &str) {
+    let outcome: String = outcome.chars().filter(|c| c.is_ascii_lowercase() || *c == '-').take(32).collect();
+    if tether_trust::status::valid_tether_id(tether_id) && ["install", "remove"].contains(&action) {
+        let mut ev = serde_json::json!({ "event": "agent-request", "tether_id": tether_id, "action": action });
+        if !outcome.is_empty() {
+            ev["outcome"] = outcome.into();
+        }
+        audit_event(ev);
+    }
 }
 
 pub fn devices() -> R<Value> {
@@ -523,7 +633,13 @@ mod tests {
         assert_eq!(store_new(&p, k1.clone()).unwrap().to_bytes(), k1.to_bytes());
         assert_eq!(store_new(&p, k2).unwrap().to_bytes(), k1.to_bytes());
         assert_eq!(key_at(&p).unwrap().to_bytes(), k1.to_bytes());
-        assert!(!p.with_extension(format!("{}.tmp", std::process::id())).exists());
+        let temps = || std::fs::read_dir(p.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&*p.file_name().unwrap().to_string_lossy()) && e.file_name().to_string_lossy().ends_with(".tmp")).count();
+        assert_eq!(temps(), 0);
+        // Created by several threads at once (sign-in posts to every relay in parallel): one key for all.
+        let _ = std::fs::remove_file(&p);
+        let keys: Vec<_> = std::thread::scope(|s| (0..8).map(|_| s.spawn(|| key_at(&p).unwrap().to_bytes())).collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect());
+        assert!(keys.iter().all(|k| *k == keys[0]) && key_at(&p).unwrap().to_bytes() == keys[0]);
+        assert_eq!(temps(), 0);
         // A damaged file in the way is reported and left alone.
         std::fs::write(&p, "nonsense").unwrap();
         assert!(store_new(&p, tether_trust::generate_key()).is_err());
@@ -746,6 +862,32 @@ mod tests {
         // 2000 x (35 + uuid 64 + name 128 escaped to 256 + version 64 escaped to 128): 966 KB, twice over.
         const WORST: usize = 2000 * (35 + 64 + 256 + 128);
         assert!(SOFTWARE_MAX >= 2 * WORST, "{SOFTWARE_MAX} < 2 x {WORST}");
+    }
+
+    #[test]
+    fn permissions_read_as_the_relay_defaults_them() {
+        let _g = crate::oidc::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let set = |v: Option<Value>| *ME.lock().unwrap() = v;
+        // No team access: nothing hidden (today's behaviour).
+        set(None);
+        assert!(allows("agent") && allows("sbom") && allows("write"));
+        // A plain roster's answer names write and audit only: sbom and agent stay allowed.
+        set(Some(serde_json::json!({"name": "Anna", "write": false, "audit": true})));
+        assert!(allows("agent") && allows("sbom") && !allows("write") && allows("audit"));
+        set(Some(serde_json::json!({"name": "Anna", "write": true, "audit": false, "sbom": false, "agent": false, "customers": ["47*"], "service": false})));
+        assert!(!allows("agent") && !allows("sbom") && allows("write") && !allows("audit"));
+        assert_eq!(permissions(), serde_json::json!({"signed_in": false, "agent": false, "sbom": false, "write": true, "audit": false}));
+        set(None);
+    }
+
+    #[test]
+    fn audit_events_are_checked_and_need_membership() {
+        for (what, rows, uuid) in [("hosts", 10_000_001, None), ("list", 1, None), ("sbom", 1, Some("../x"))] {
+            assert!(audit_export(what, rows, uuid).is_err(), "{what}");
+        }
+        assert!(audit_export("failing", 3, None).is_ok() && audit_export("sbom", 200, Some("dev-0001")).is_ok());
+        assert_eq!(error_text(401, "session expired: sign in again"), "Your sign-in has ended. Sign in again.");
+        assert!(status_error(401, "session expired: sign in again").starts_with("expired:"));
     }
 
     #[test]

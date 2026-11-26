@@ -13,6 +13,7 @@ mod hosts;
 mod instance;
 mod keys;
 mod netpolicy;
+mod oidc;
 mod policy;
 mod recording;
 mod security;

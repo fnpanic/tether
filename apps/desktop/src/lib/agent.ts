@@ -2,6 +2,7 @@
 // practice's Settings line say. Everything in an answer comes from the other computer: the state
 // picks the sentence, `detail` is only an added line, every field is clipped plain text.
 import { clean } from "./hosts/sbom";
+import { PERM_TEXT } from "./signin";
 
 /** `session_agent` (and the local status): `at` is unix seconds of the last change, 0 for none. */
 export interface AgentAnswer {
@@ -125,8 +126,10 @@ export function agentConfirm(offer: Exclude<AgentOffer, "again">, a: AgentAnswer
   return { title: "Install the health monitoring agent?", text: INSTALL_TEXT, button: "Install", action: "install" };
 }
 
-/** The session menu item: the host takes the message only with control of mouse and keyboard. */
-export function agentMenu(viewOnly: boolean, controlOff: boolean): { disabled: boolean; hint: string } {
+/** The session menu item: the host takes the message only with control of mouse and keyboard; the
+ *  team's `agent` permission is the viewer's to keep (the host cannot check it, design 12.4). */
+export function agentMenu(viewOnly: boolean, controlOff: boolean, allowed = true): { disabled: boolean; hint: string } {
+  if (!allowed) return { disabled: true, hint: PERM_TEXT.agent.missing };
   if (viewOnly) return { disabled: true, hint: "Not in a view-only session: it needs control of the remote computer." };
   if (controlOff) return { disabled: true, hint: "Needs control: the person at the remote computer has turned off mouse and keyboard." };
   return { disabled: false, hint: "Install or remove it on the remote computer" };

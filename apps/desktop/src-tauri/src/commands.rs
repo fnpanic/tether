@@ -257,6 +257,7 @@ fn session_start(
         login_from.as_deref(),
     );
     core::session_set_webcodecs(&key, &webcodecs);
+    team::audit_session_start(&peer);
     Ok(())
 }
 
@@ -485,8 +486,21 @@ async fn ask_agent(peer: &impl AgentPeer, action: &str, status_wait: std::time::
 #[tauri::command]
 async fn session_agent(key: String, action: String) -> R<crate::agent::AgentAnswer> {
     let s = core::session(&key).ok_or_else(|| "Not connected to the remote device.".to_owned())?;
-    ask_agent(&s, &action, AGENT_STATUS_WAIT).await
+    let change = matches!(action.as_str(), "install" | "remove");
+    let peer = s.lc.read().unwrap().get_id().to_owned();
+    // The team's `agent` permission (design 12.4) is the viewer's to keep: the host cannot check it.
+    if change && !team::allows("agent") {
+        team::audit_agent_request(&peer, &action, "not-permitted");
+        return Err(AGENT_NOT_PERMITTED.to_owned());
+    }
+    let a = ask_agent(&s, &action, AGENT_STATUS_WAIT).await?;
+    if change {
+        team::audit_agent_request(&peer, &action, &a.state);
+    }
+    Ok(a)
 }
+
+const AGENT_NOT_PERMITTED: &str = "Your team role does not allow installing or removing the health monitoring agent.";
 
 /// Settings › this computer's agent (spec 7.3): whether its service is there, who installed it and
 /// when; never a secret (agent.rs `local_status`).
@@ -874,6 +888,12 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         team_status_unlink,
         team_status_remove,
         team_status_allow_claim,
+        team_permissions,
+        team_audit_export,
+        team_signin_status,
+        team_sign_in,
+        team_sign_out,
+        team_signin_cancel,
         health_notify,
     ]
 }
@@ -942,6 +962,43 @@ async fn hosts_import(app: AppHandle) -> R<Option<String>> {
 #[tauri::command]
 async fn team_identity() -> R<Value> {
     blocking(team::identity).await?
+}
+
+/// What this app's team permissions allow (`agent`, `sbom`, `write`, `audit`), for any window.
+#[tauri::command]
+fn team_permissions() -> Value {
+    team::permissions()
+}
+
+/// A host list, failing-checks or SBOM export was saved: the self-reported audit event.
+#[tauri::command]
+fn team_audit_export(what: String, rows: u64, uuid: Option<String>) -> R<()> {
+    team::audit_export(&what, rows, uuid.as_deref())
+}
+
+/// Staff sign-in state; `check`: ask the relays for their sign-in settings first (and take up a
+/// stored sign-in again).
+#[tauri::command]
+async fn team_signin_status(check: bool) -> R<Value> {
+    blocking(move || crate::oidc::status(check)).await
+}
+
+#[tauri::command]
+async fn team_sign_in(window: tauri::WebviewWindow) -> R<Value> {
+    main_only(&window)?;
+    blocking(crate::oidc::sign_in).await?
+}
+
+#[tauri::command]
+async fn team_sign_out(window: tauri::WebviewWindow) -> R<Value> {
+    main_only(&window)?;
+    blocking(crate::oidc::sign_out).await
+}
+
+#[tauri::command]
+fn team_signin_cancel(window: tauri::WebviewWindow) -> R<Value> {
+    main_only(&window)?;
+    Ok(crate::oidc::cancel())
 }
 
 #[tauri::command]

@@ -8,6 +8,7 @@ import { exportCsv, exportFaultsCsv, exportJson, mergeImport, parseImport, type 
 import { parse, search } from "../../lib/hosts/query";
 import { actions, teamSync, useHosts, useReadOnly } from "../../lib/hosts/store";
 import { errorText } from "../../lib/policy";
+import { signInView, type SignIn } from "../../lib/signin";
 import { ago, Kbd, TagChip, TagDot, TagInput } from "./bits";
 
 const H = ({ children }: { children: React.ReactNode }) => <h2 className="text-headline font-semibold">{children}</h2>;
@@ -171,6 +172,12 @@ export function Rules({ hosts, store, onClose }: { hosts: Host[]; store: Store; 
   );
 }
 
+/** Rows of an export, for the team audit log (self-reported, design 12.5): hosts in a JSON file, lines after the header of a CSV. */
+export function exportRows(fmt: "json" | "csv" | "faults", content: string): number {
+  if (fmt === "json") return Object.keys((JSON.parse(content) as { hosts?: object }).hosts ?? {}).length;
+  return Math.max(0, content.trimEnd().split("\n").length - 1);
+}
+
 export async function saveFile(name: string, content: string, type: string): Promise<boolean> {
   if (inTauri) return invoke<boolean>("hosts_export", { name, content });
   const a = document.createElement("a");
@@ -214,6 +221,7 @@ export function Export({
     const day = new Date().toISOString().slice(0, 10);
     try {
       if (await saveFile(fmt === "faults" ? `tether-health-faults-${day}.csv` : `tether-hosts-${day}.${fmt}`, content, fmt === "json" ? "application/json" : "text/csv")) {
+        if (useHosts.getState().store.team?.enabled) void invoke("team_audit_export", { what: fmt === "faults" ? "failing" : "hosts", rows: exportRows(fmt, content) }).catch(() => {});
         onToast("Hosts exported");
         onClose();
       }
@@ -341,6 +349,11 @@ export function Team({ onClose, onToast }: { onClose: () => void; onToast: (m: s
   useEffect(() => {
     if (!team.identity) invoke<{ key: string; fingerprint: string }>("team_identity").then((identity) => useHosts.setState({ team: { ...useHosts.getState().team, identity } }), () => {});
   }, [team.identity]);
+  // Whether the relays offer sign-in (also with team sync off: signing in is how a person joins).
+  useEffect(() => {
+    if (!team.signin) invoke<SignIn>("team_signin_status", { check: true }).then((signin) => signin && useHosts.setState({ team: { ...useHosts.getState().team, signin } }), () => {});
+  }, [team.signin]);
+  const sv = signInView(team.signin, !!team.me && !team.signin?.signed_in);
   const enable = (v: boolean) => {
     actions.setTeam({ enabled: v });
     if (v) void actions.teamRefresh();
@@ -365,6 +378,45 @@ export function Team({ onClose, onToast }: { onClose: () => void; onToast: (m: s
           Fingerprint <span className="font-mono text-ink">{team.identity?.fingerprint ?? "…"}</span> · read it out to your administrator to compare.
         </div>
       </div>
+      {team.signin?.alarm && (
+        <div role="alert" className="mt-3 rounded-xl bg-danger/10 px-4 py-3 text-caption font-semibold text-danger" data-testid="signin-alarm">
+          {team.signin.alarm}
+        </div>
+      )}
+      {sv.show && (
+        <div className="mt-3 rounded-xl bg-parchment px-4 py-3" data-testid="signin">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-caption font-semibold">{sv.title}</div>
+              {sv.lines.map((l) => (
+                <div key={l} className="mt-0.5 text-footnote text-muted">
+                  {l}
+                </div>
+              ))}
+            </div>
+            {sv.action === "sign-in" && (
+              <Button size="sm" variant="primary" className="shrink-0" onClick={() => void actions.signIn()}>
+                Sign in
+              </Button>
+            )}
+            {sv.action === "sign-out" && (
+              <Button size="sm" variant="pearl" className="shrink-0" onClick={() => void actions.signOut()}>
+                Sign out
+              </Button>
+            )}
+            {sv.action === "cancel" && (
+              <Button size="sm" variant="pearl" className="shrink-0" onClick={() => void actions.signInCancel()}>
+                Cancel
+              </Button>
+            )}
+          </div>
+          {sv.warn.map((w) => (
+            <div key={w} className="mt-1 text-footnote text-warn">
+              {w}
+            </div>
+          ))}
+        </div>
+      )}
       <div className="mt-5 space-y-3">
         <div className="flex items-center justify-between gap-4">
           <div>

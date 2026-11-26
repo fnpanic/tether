@@ -9,6 +9,7 @@ import { checksOf, clip, groupChecks, healthText, linkedText, linkState, pick } 
 import { label, type CheckState, type Host, type ReportCheck, type StatusHostReply, type StatusSummary } from "../../lib/hosts/model";
 import { actions, useHosts } from "../../lib/hosts/store";
 import { SoftwarePart } from "./Software";
+import { PERM_TEXT, usePerms } from "../../lib/signin";
 import { ago, day, Fold, HealthDot } from "./bits";
 
 type Lang = "de" | "en";
@@ -210,6 +211,7 @@ export function HealthSection({ h, reply, lang, nameOf, holderOf }: { h: Host; r
   const [copied, setCopied] = useState(false);
   const [ask, setAsk] = useState<Ask | null>(null);
   const write = useHosts((st) => !!st.team.me?.write);
+  const sbom = usePerms((p) => p.sbom);
   const flip = (k: string) => setOpen((o) => ({ ...o, [k]: !o[k] }));
   const checks = useMemo(() => checksOf(reply), [reply]);
   const view = useMemo(() => groupChecks(checks), [checks]);
@@ -311,7 +313,7 @@ export function HealthSection({ h, reply, lang, nameOf, holderOf }: { h: Host; r
         </div>
       )}
 
-      {s.sbom && <SoftwarePart key={s.uuid} h={h} />}
+      {s.sbom && (sbom ? <SoftwarePart key={s.uuid} h={h} /> : <div className="mt-3 border-t border-hairline pt-2 text-footnote text-muted" data-testid="software-not-permitted">Software: {PERM_TEXT.sbom.missing}</div>)}
 
       {rep && (
         <div className="mt-3 border-t border-hairline pt-2">

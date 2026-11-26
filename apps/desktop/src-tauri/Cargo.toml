@@ -34,6 +34,12 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 url = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
+# Staff sign-in (oidc.rs): PKCE values; all three already in the tree.
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.2"
+# The sign-in's refresh token in the OS credential store (Windows Credential Manager, macOS Keychain).
+keyring = { version = "3.6", default-features = false, features = ["windows-native", "apple-native"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Finder file copy-paste with Windows peers (cliprdr): the core's macOS pasteboard code (libs/clipboard/src/platform/unix/macos).
@@ -49,12 +55,16 @@ windows-sys = { version = "0.59", features = ["Win32_UI_HiDpi", "Win32_Foundatio
 [dev-dependencies]
 # Signs test artifacts in the health agent manager's tests (as in tether-trust's own tests).
 minisign = "0.10"
+# The mock OpenID provider for the sign-in tests (oidc.rs).
+oidc-mock = { path = "../../../tools/oidc-mock" }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 
 # Keep in sync with vendor/rustdesk/Cargo.toml: patches only apply at the workspace root.
 [patch.crates-io]
+# The relay's tiny_http, as tools/oidc-mock uses it (a dev-dependency only).
+tiny_http = { path = "../../../server/api/patched/tiny_http" }
 libxdo-sys = { path = "../../../vendor/rustdesk/libs/libxdo-sys-stub" }
 tungstenite = { git = "https://github.com/rustdesk-org/tungstenite-rs", rev = "efce47e5364f00a63302cf07ab1fb13ded478914" }
 webrtc = { git = "https://github.com/rustdesk-org/webrtc", rev = "49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63" }
@@ -69,6 +79,12 @@ strip = true
 
 [profile.dev]
 debug = 1
+
+# RSA key generation in the mock OpenID provider (tests) takes seconds unoptimised.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3
 
 [workspace]
 

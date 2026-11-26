@@ -408,6 +408,7 @@ async function run(name) {
   await until(async () => /\.cdx\.json$/.test((await p.evaluate(() => window.__lastExport?.name)) ?? ""));
   const sx = await p.evaluate(() => window.__lastExport);
   check(tag("Export SBOM saves the document as <host>-<date>.cdx.json, unchanged"), /^LAB-ANALYZER-01-\d{4}-\d{2}-\d{2}\.cdx\.json$/.test(sx?.name ?? "") && JSON.parse(sx.content).bomFormat === "CycloneDX" && sx.content.includes('"Aster Notes"'), sx?.name);
+  check(tag("Export SBOM is reported to the team audit log (rows, host)"), await until(async () => (await calls("team_audit_export")).some((c) => c.what === "sbom" && c.rows === 226 && typeof c.uuid === "string")), JSON.stringify(await calls("team_audit_export")));
   await shot("software");
   await setQuery("SCAN-STATION-02");
   await rows().first().click();
@@ -501,6 +502,7 @@ async function run(name) {
   await edlg.getByRole("button", { name: "Export…" }).click();
   const fx = await p.evaluate(() => window.__lastExport);
   const lines = fx?.content.trim().split("\r\n") ?? [];
+  check(tag("failing checks export reported to the team audit log"), await until(async () => (await calls("team_audit_export")).some((c) => c.what === "failing" && c.rows === lines.length - 1)), JSON.stringify(await calls("team_audit_export")));
   check(tag("export: failing checks CSV"), /^tether-health-faults-\d{4}-\d{2}-\d{2}\.csv$/.test(fx?.name ?? "") && lines[0] === "id,name,uuid,check,state,since" && lines.length - 1 >= ncrit && lines.some((l) => l.includes(",app/db-service,crit,")), `${fx?.name} ${lines.length - 1} rows, ${ncrit} hosts`);
   await setQuery("");
   // Team dialog: the notification switch.
@@ -532,6 +534,54 @@ async function run(name) {
   await rows().first().click();
   await until(() => p.getByTestId("health-section").locator("li[data-check]").first().isVisible());
   check(tag("read-only member: no Unlink or Remove on a linked host"), !(await p.getByRole("button", { name: "Unlink" }).isVisible()) && !(await p.getByRole("button", { name: "Remove from health monitoring…" }).isVisible()));
+
+  // ---- Staff sign-in (mock relays offer it): Sign in in the Team dialog, the person, roles and
+  // permissions; without sbom no Software part and no software search, each with the reason; the
+  // alarm when a relay saw the sign-in used by another key; Sign out; no role.
+  const signinPage = async (qs) => {
+    await p.goto(`${base}?hosts=5000&${qs}#/`);
+    await search.waitFor({ timeout: 60000 });
+    await until(async () => (await total()) > 4000, 30000);
+  };
+  const si = p.getByTestId("signin");
+  const openTeam = async () => {
+    await p.getByRole("button", { name: "Team", exact: true }).click();
+    await until(() => si.isVisible());
+  };
+  await signinPage("perm=write,audit,sbom,agent");
+  await p.getByRole("button", { name: "Team", exact: true }).click();
+  await sleep(500);
+  check(tag("no relay offers sign-in: no sign-in part, the key roster as before"), !(await si.isVisible()) && /Signed in as Anna \(Helpdesk\)/.test(await p.getByTestId("team-status").textContent()));
+  await p.keyboard.press("Escape");
+  await signinPage("signin=offered&perm=agent");
+  await openTeam();
+  check(tag("sign-in offered: Sign in, and that the roster key works without it"), (await si.getByRole("button", { name: "Sign in" }).isVisible()) && /Not signed in/.test(await si.textContent()) && /key is on your team's list/.test(await si.textContent()));
+  await si.getByRole("button", { name: "Sign in" }).click();
+  check(tag("signed in: the person, roles, what the role allows and not, the expiry, Sign out"), (await until(async () => /Signed in as Software Technician \(software@tether\.test\)/.test(await si.textContent()))) && /Roles: Tether\.Technician, Tether\.Agent\./.test(await si.textContent()) && /Not: change shared tags and links, read a computer's session log, software lists and software search\./.test(await si.textContent()) && /Session until .+; renewed automatically\./.test(await si.textContent()) && (await si.getByRole("button", { name: "Sign out" }).isVisible()), await si.textContent());
+  check(tag("the team status names the signed-in person"), await until(async () => /Signed in as Software Technician \(read only\)/.test(await p.getByTestId("team-status").textContent())));
+  await p.keyboard.press("Escape");
+  await clearCalls();
+  await setQuery("software:garnet");
+  await sleep(1200);
+  check(tag("without sbom: no software search is sent, the line says why"), /Software search: Your team role does not include software lists \(sbom\)\./.test(await notes.textContent()) && (await calls("team_status_software")).length === 0, await notes.textContent());
+  await setQuery("LAB-ANALYZER-01");
+  await rows().first().click();
+  check(tag("without sbom: the host's Software part is replaced by the reason"), (await until(() => p.getByTestId("software-not-permitted").isVisible())) && !(await p.getByTestId("software-section").isVisible()) && (await calls("team_status_sbom")).length === 0);
+  await openTeam();
+  await si.getByRole("button", { name: "Sign out" }).click();
+  check(tag("Sign out: back to Sign in, says signed out"), (await until(() => si.getByRole("button", { name: "Sign in" }).isVisible())) && /Signed out\./.test(await si.textContent()));
+  await p.keyboard.press("Escape");
+  await signinPage("signin=alarm");
+  await openTeam();
+  await si.getByRole("button", { name: "Sign in" }).click();
+  check(tag("a sign-in used by another key: the alarm in the Team dialog, and the relay's line"), (await until(() => p.getByTestId("signin-alarm").isVisible())) && /already used at relay2\.example\.com: someone may have your sign-in\. Sign out and tell your administrator\./.test(await p.getByTestId("signin-alarm").textContent()) && /relay2\.example\.com: This sign-in was already used/.test(await si.textContent()));
+  await p.keyboard.press("Escape");
+  check(tag("the alarm also above the host list"), await p.getByTestId("signin-alarm-banner").isVisible());
+  await signinPage("signin=noroles");
+  await openTeam();
+  await si.getByRole("button", { name: "Sign in" }).click();
+  check(tag("no role: refused, with the reason per relay, still Sign in"), (await until(async () => /no Tether role/.test(await si.textContent()))) && (await si.getByRole("button", { name: "Sign in" }).isVisible()));
+  await p.keyboard.press("Escape");
 
   check(tag("no page errors"), errors.length === 0, errors.join(" | "));
   await browser.close();

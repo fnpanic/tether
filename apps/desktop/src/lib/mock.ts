@@ -20,6 +20,25 @@ let fleetCache: Promise<import("./mock-fleet").Fleet> | null = null;
 const fleet = () => (fleetCache ??= import("./mock-fleet").then((m) => m.fleet()));
 const team = { rev: 0, doc: null as unknown, by: "", at: 0 };
 
+// Staff sign-in (`?signin=offered|alarm|noroles`; none: no relay offers it). `?perm=sbom,agent,write,audit`:
+// what the signed-in person (or, without sign-in, the roster key) may do; default: everything.
+const signin = { signed: false, note: null as string | null };
+const q = (k: string) => new URLSearchParams(location.search).get(k);
+function perms() {
+  const p = q("perm");
+  const has = (x: string) => p === null || p.split(",").includes(x);
+  return { write: has("write") && q("team") !== "ro", audit: has("audit"), sbom: has("sbom"), agent: has("agent") };
+}
+function signinState() {
+  const mode = q("signin");
+  if (!mode) return { offered: false, busy: false, signed_in: false, relays: [] };
+  const relays = signin.signed ? [{ relay: "relay.example.com", ok: true, text: "Signed in." }, mode === "alarm" ? { relay: "relay2.example.com", ok: false, text: "This sign-in was already used at relay2.example.com: someone may have your sign-in. Sign out and tell your administrator." } : { relay: "relay2.example.com", ok: true, text: "Signed in." }] : [];
+  const s = { offered: true, busy: false, signed_in: signin.signed, relays, note: signin.note, alarm: signin.signed && mode === "alarm" ? relays[1].text : null };
+  if (!signin.signed) return s;
+  const roles = ["Tether.Technician", ...(perms().sbom ? ["Tether.Software"] : []), ...(perms().agent ? ["Tether.Agent"] : [])];
+  return { ...s, name: "Software Technician", upn: "software@tether.test", roles, exp: Math.floor(Date.now() / 1000) + 3600, customers: ["*"], ...perms() };
+}
+
 function emit(event: string, name: string, payload: unknown) {
   for (const cb of listeners[event] ?? []) cb({ name, payload });
 }
@@ -135,9 +154,29 @@ export const mock = {
       case "team_identity":
         return { key: "q2o5n0d6m7m3l1k8p4g2b7r9x0c5v8z1a3s6d9f2g4h=", fingerprint: "9F3A-12B0-C4D1-77E2" } as T;
       case "team_me":
+        if (signin.signed) return { name: "Software Technician", ...perms(), customers: ["*"], service: false } as T;
         if (new URLSearchParams(location.search).get("team") === "none") throw "not-member: This app is not in your organisation's team. Send its key to your administrator.";
         // `?team=ro`: a member without write permission.
-        return { name: "Anna (Helpdesk)", write: new URLSearchParams(location.search).get("team") !== "ro", audit: true } as T;
+        return { name: "Anna (Helpdesk)", write: new URLSearchParams(location.search).get("team") !== "ro", audit: true, ...(q("perm") === null ? {} : { sbom: perms().sbom, agent: perms().agent }) } as T;
+      case "team_permissions":
+        return { signed_in: signin.signed, ...perms() } as T;
+      case "team_audit_export":
+        return undefined as T;
+      case "team_signin_status":
+        return signinState() as T;
+      case "team_sign_in":
+        await new Promise((r) => setTimeout(r, 300));
+        if (q("signin") === "noroles") {
+          signin.note = "relay.example.com: Your account has no Tether role. Ask your administrator to assign one. · relay2.example.com: Your account has no Tether role. Ask your administrator to assign one.";
+          throw signin.note;
+        }
+        Object.assign(signin, { signed: true, note: null });
+        return signinState() as T;
+      case "team_sign_out":
+        Object.assign(signin, { signed: false, note: "Signed out." });
+        return signinState() as T;
+      case "team_signin_cancel":
+        return signinState() as T;
       case "team_devices":
         return (await fleet()).org as T;
       case "team_status":
