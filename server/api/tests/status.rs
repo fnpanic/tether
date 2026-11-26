@@ -3626,8 +3626,10 @@ fn software_search_caps_at_2000_hosts_and_keeps_to_the_scope() {
     wait_for("the sidecar built by the scan", || sidecar(&s, "dev-000005").is_some());
     assert_eq!(counts(&search(&s, &all, "visi", None)), (2, 0, 0));
     assert_eq!(sidecar(&s, "dev-000005").unwrap(), "Microsoft Visio\t16.0\tMicrosoft\n");
-    // The answer's size at the cap (2 000 hosts of the longest names and versions: below 1 MiB).
+    // The answer's size at the cap: 2 000 hosts with these short uuids and names stay under 200 KB
+    // (the worst case, every name and version at its cut and escaped, is under 1 MiB: docs/api.md).
     let r = search(&s, &all, "google", None);
+    assert_eq!(hits(&r).len(), 2000);
     assert!(r.body.len() < 200_000, "{}", r.body.len());
 }
 
@@ -3660,9 +3662,9 @@ fn sidecars_go_with_their_lists_and_with_the_switch() {
         assert!(sidecar(&s, u).is_none(), "{u}");
     }
     assert_eq!(sidecar(&s, "dev-0005").unwrap(), "Google Chrome\t120.0\tGoogle LLC\n");
-    // A replacement that is not a software list: an empty sidecar (it never matches).
+    // A replacement that is not a software list: a sidecar that says nothing is known (pending).
     assert_eq!(sbom_put(&s, &k[0], "dev-0001", br#"{"bomFormat":"CycloneDX","components":{"name":"Google Chrome"}}"#).status, 204);
-    assert_eq!(sidecar(&s, "dev-0001").unwrap(), "");
+    assert_eq!(sidecar(&s, "dev-0001").unwrap(), "\x01\n");
     // Switched off (the list stays): every sidecar goes, the route says so.
     let s = restart_env(s, &admin, &[("STATUS_SBOM", "on")], false);
     wait_for("the sidecars removed", || sidecar(&s, "dev-0005").is_none() && sidecar(&s, "dev-0001").is_none());
@@ -3671,9 +3673,10 @@ fn sidecars_go_with_their_lists_and_with_the_switch() {
     assert_eq!((r.status, r.text()), (200, r#"{"sbom":false,"hosts":[]}"#.into()));
     let s = restart_env(s, &admin, &SEARCH_ON, false);
     wait_for("the sidecar built again", || sidecar(&s, "dev-0005").is_some());
-    // STATUS_SBOM off: the search is off too.
+    // STATUS_SBOM off: the search is off too, and the sidecars go.
     let s = restart_env(s, &admin, &[("STATUS_SOFTWARE_SEARCH", "on")], false);
     assert_eq!(search(&s, &m, "chrome", None).text(), r#"{"sbom":false,"hosts":[]}"#);
+    wait_for("the sidecars removed with STATUS_SBOM off", || sidecar(&s, "dev-0005").is_none() && sidecar(&s, "dev-0001").is_none());
     assert!(s.journal().contains("STATUS_SOFTWARE_SEARCH=on needs STATUS_SBOM=on"), "{}", s.journal());
 }
 
@@ -3700,16 +3703,17 @@ fn software_search_needs_a_signed_team_document_at_start() {
 fn hostile_software_lists_give_bounded_sidecars() {
     let m = generate_key();
     let (s, _admin, k) = search_server(4, &[("M", &m, json!({}))], &[("STATUS_SBOM_MAX_KB", "4096")], |_| {});
-    // 100 000 components: the first 5 000 kept.
+    // 100 000 components: the first 5 000 kept, and the line that says the list was cut.
     let many: Vec<String> = (0..100_000).map(|i| format!(r#"{{"name":"p{i}"}}"#)).collect();
     let doc = format!(r#"{{"components":[{}]}}"#, many.join(","));
     assert_eq!(sbom_put(&s, &k[0], "dev-0001", doc.as_bytes()).status, 204);
     let sw = sidecar(&s, "dev-0001").unwrap();
-    assert_eq!((sw.lines().count(), sw.lines().last()), (5000, Some("p4999\t\t")));
-    // 10 000 levels of nesting in the components: empty; 512 KiB that is no software list: empty.
+    assert_eq!((sw.lines().count(), sw.lines().nth(4999), sw.lines().last()), (5001, Some("p4999\t\t"), Some("\x01")));
+    // 10 000 levels of nesting in the components: only the line that says nothing is known of the
+    // list. 512 KiB of an object without components: a list without programs, empty.
     let deep = format!(r#"{{"components":[{}{}]}}"#, "[".repeat(10_000), "]".repeat(10_000));
     assert_eq!(sbom_put(&s, &k[1], "dev-0002", deep.as_bytes()).status, 204);
-    assert_eq!(sidecar(&s, "dev-0002").unwrap(), "");
+    assert_eq!(sidecar(&s, "dev-0002").unwrap(), "\x01\n");
     assert_eq!(sbom_put(&s, &k[2], "dev-0003", &sbom_doc(512 << 10, 'a')).status, 204);
     assert_eq!(sidecar(&s, "dev-0003").unwrap(), "");
     // Long fields cut to 128/64/128 bytes on a character boundary.
@@ -3717,6 +3721,65 @@ fn hostile_software_lists_give_bounded_sidecars() {
     assert_eq!(sbom_put(&s, &k[3], "dev-0004", &long).status, 204);
     assert_eq!(sidecar(&s, "dev-0004").unwrap(), format!("{}\t{}\t{}\n", "ä".repeat(64), "9".repeat(64), "€".repeat(42)));
     assert_eq!(hits(&search(&s, &m, "ää", None)).len(), 1);
+    // A cut list without a match among the lines kept, and an unreadable one, are not known to be
+    // without the program: pending (the desktop's negated search leaves them out), not "no match".
+    let pend = |q: &str| {
+        let r = search(&s, &m, q, None);
+        (hits(&r).into_iter().map(|h| h.0).collect::<Vec<_>>(), r.json()["pending"].as_u64().unwrap())
+    };
+    assert_eq!(pend("p99999"), (vec![], 2));
+    assert_eq!(pend("p4999"), (vec!["dev-0001".to_owned()], 1), "a match among the lines kept counts");
+    assert_eq!(pend("nobody-has-this"), (vec![], 2));
+}
+
+/// A `429 busy` (another search runs) does not use up one of the member's six searches a minute:
+/// only a search that runs, or an answer from the cache, counts.
+#[test]
+fn software_search_busy_answers_do_not_use_up_searches() {
+    let (a, b) = (generate_key(), generate_key());
+    let (s, _admin, k) = search_server(10, &[("A", &a, json!({})), ("B", &b, json!({}))], &[("TETHER_TEST_SEARCH_DELAY_MS", "150")], |_| {});
+    for i in 0..10 {
+        assert_eq!(sbom_put(&s, &k[i], &format!("dev-{:04}", i + 1), &cdx(&[("Google Chrome", "120.0", "Google LLC")])).status, 204);
+    }
+    std::thread::scope(|sc| {
+        let long = sc.spawn(|| search(&s, &a, "chrome", None).status);
+        std::thread::sleep(Duration::from_millis(300));
+        for _ in 0..8 {
+            let r = search(&s, &b, "firefox", None);
+            assert_eq!((r.status, r.text()), (429, "busy".into()));
+        }
+        assert_eq!(long.join().unwrap(), 200);
+    });
+    // B's six: one search, five from the cache; the seventh is over the limit.
+    for i in 0..6 {
+        assert_eq!(search(&s, &b, "firefox", None).status, 200, "search {i}");
+    }
+    assert_eq!(search(&s, &b, "firefox", None).text(), "too many searches");
+}
+
+/// The uuid `software` would be shadowed by the search route: refused at enrolment.
+#[test]
+fn the_uuid_software_is_refused_at_enrolment() {
+    let (s, admin) = server();
+    let dev = generate_key();
+    let tok = status::make_token("t", now() + 3600, None, None, false, &admin).unwrap().0;
+    let r = enroll(&s, &dev, "software", None, &tok);
+    assert_eq!((r.status, r.text()), (400, "bad uuid".into()));
+    assert_eq!(enroll(&s, &dev, "software-1", None, &tok).status, 200);
+}
+
+/// A production build (no `test-hooks`, no debug assertions) reads no `TETHER_TEST_*` setting:
+/// a search budget of 0 ms would end every search at once with a partial answer.
+#[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+#[test]
+fn production_build_ignores_test_settings() {
+    let m = generate_key();
+    let (s, _admin, k) = search_server(3, &[("M", &m, json!({}))], &[("TETHER_TEST_SEARCH_BUDGET_MS", "0"), ("TETHER_TEST_SUMMARY_CACHE_BYTES", "1")], |_| {});
+    for i in 0..3 {
+        assert_eq!(sbom_put(&s, &k[i], &format!("dev-{:04}", i + 1), &cdx(&[("Google Chrome", "120.0", "Google LLC")])).status, 204);
+    }
+    let r = search(&s, &m, "chrome", None);
+    assert_eq!((r.json()["partial"].clone(), hits(&r).len()), (json!(false), 3));
 }
 
 /// Exactly the request the desktop sends (apps/desktop/src-tauri/src/team.rs `software_path`:

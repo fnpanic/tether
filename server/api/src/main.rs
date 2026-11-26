@@ -38,6 +38,9 @@ use tether_trust::{custom, envelope, policy::Bundle, release, reqauth, serverkey
 use tiny_http::{Header, Request, Response, Server};
 
 const DAY: u64 = 86_400;
+/// Test-only settings (`TETHER_TEST_*`) are compiled in: debug builds and the `test-hooks` feature
+/// (`scripts/test-relay.sh`), never a production build (`cargo build --release`).
+pub(crate) const TEST_HOOKS: bool = cfg!(any(debug_assertions, feature = "test-hooks"));
 /// Devices kept (oldest seen dropped first). 10 000 users plus reinstalls within DEVICE_TTL need
 /// headroom; 50 000 is ~7 MB of devices.json and ~30 MB of memory, 40 MB at the peak while
 /// loading (measured, docs/scaling.md; MemoryMax=64M).
@@ -2061,6 +2064,9 @@ fn main() {
     }
     if sig_relay().hosts.is_empty() {
         eprintln!("warning: RELAY_HOST is not set; v2 request signatures (current apps) are refused");
+    }
+    if TEST_HOOKS && !cfg!(debug_assertions) {
+        eprintln!("warning: built with the test-hooks feature (test-only settings): not a production build");
     }
     // AUDIT_RETENTION_DAYS (default 90, 0 = do not store) and AUDIT_MAX_MB (default 50), api.env.
     let env_num = |k: &str, d: u64| match std::env::var(k) {

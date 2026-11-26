@@ -530,8 +530,8 @@ lists** for this purpose: the three fields of each program, when the list is sto
 
 - **Who can search.** Members with the `sbom` permission, and only over the computers of their
   customers; a computer outside them is never looked at and counts nowhere in the answer. Every
-  search, also a refused one, is written to the team audit log with its term and the number of
-  computers found, never which ones.
+  search is written to the team audit log with its term; an answered one also with the number of
+  computers found (never which ones), a refused one without a number.
 - **Limits.** One search at a time on the relay (another gets `429 busy`), 6 a minute per member,
   the same search by members of the same customers answered from a 60 s cache, at most 2 000
   computers in an answer, a time budget of 10 s (then the answer says it is incomplete).

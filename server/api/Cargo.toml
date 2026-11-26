@@ -16,6 +16,11 @@ sha2 = "0.10"
 # gzip copy of the team summary (written once per rebuild): pure-Rust deflate (miniz_oxide), no C code.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
+[features]
+# Test-only settings (`TETHER_TEST_*`) in a release build, for scripts/test-relay.sh. Debug builds
+# have them anyway; a production build (`cargo build --release`, scripts/build-relay.sh) never.
+test-hooks = []
+
 [profile.release]
 lto = true
 codegen-units = 1

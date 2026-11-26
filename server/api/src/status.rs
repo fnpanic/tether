@@ -31,7 +31,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -63,10 +63,15 @@ const SUMMARY_WAITERS: usize = 4;
 const SUMMARY_WAIT_TRIES: u32 = 100;
 
 /// `SUMMARY_CACHE_BYTES`, or `TETHER_TEST_SUMMARY_CACHE_BYTES` (tests only: scopes that evict
-/// each other without 20 000 devices).
+/// each other without 20 000 devices; read only in test builds, [`crate::TEST_HOOKS`]).
 fn summary_cache_bytes() -> u64 {
-    static B: OnceLock<u64> = OnceLock::new();
-    *B.get_or_init(|| std::env::var("TETHER_TEST_SUMMARY_CACHE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(SUMMARY_CACHE_BYTES))
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    {
+        static B: OnceLock<u64> = OnceLock::new();
+        *B.get_or_init(|| std::env::var("TETHER_TEST_SUMMARY_CACHE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(SUMMARY_CACHE_BYTES))
+    }
+    #[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+    SUMMARY_CACHE_BYTES
 }
 
 /// One scope's cached summary, in `status/<file>`: `summary.json` for the default scope (every
@@ -133,6 +138,10 @@ fn search_on() -> bool {
 /// A sidecar (`<uuid>.sw`): one `name\tversion\tpublisher` line per component of the list, at most
 /// this many, each field cut to its bytes.
 const SW_LINES: usize = 5000;
+/// The line a sidecar ends with when its list was cut at `SW_LINES`, and its only line when the list
+/// could not be read: a control character, which no kept field contains. A search that reaches it
+/// without a match counts the host as pending (not known), not as one without the program.
+const INCOMPLETE: &[u8] = b"\x01\n";
 const SW_NAME: usize = 128;
 const SW_VERSION: usize = 64;
 const SW_PUBLISHER: usize = 128;
@@ -149,9 +158,16 @@ const SEARCH_CACHE_BYTES: usize = 2 << 20;
 const SEARCH_BUDGET: Duration = Duration::from_secs(10);
 
 /// Settings for tests only (`TETHER_TEST_<name>`, milliseconds): a pause per sidecar searched, the
-/// search budget, the scan's pause before each sidecar it builds.
+/// search budget, the scan's pause before each sidecar it builds. Only in test builds
+/// ([`crate::TEST_HOOKS`]): a production relay never reads them.
 fn test_ms(name: &str, cell: &'static OnceLock<Option<u64>>) -> Option<Duration> {
-    cell.get_or_init(|| std::env::var(format!("TETHER_TEST_{name}")).ok().and_then(|v| v.parse().ok())).map(Duration::from_millis)
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    return cell.get_or_init(|| std::env::var(format!("TETHER_TEST_{name}")).ok().and_then(|v| v.parse().ok())).map(Duration::from_millis);
+    #[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+    {
+        let _ = (name, cell);
+        None
+    }
 }
 
 /// Searches run (not answered from the cache), their time, the longest (`/metrics`).
@@ -296,7 +312,15 @@ impl<'de, W: Write> Visitor<'de> for Components<'_, '_, W> {
             }
             sc.lines += 1;
         }
-        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        // Cut at `SW_LINES`: what follows is not known, so the sidecar says so (a search counts the
+        // host as pending unless one of the lines kept matches).
+        if seq.next_element::<IgnoredAny>()?.is_some() {
+            if let Err(e) = sc.out.write_all(INCOMPLETE) {
+                sc.failed = Some(e);
+                return Err(serde::de::Error::custom("write failed"));
+            }
+            while seq.next_element::<IgnoredAny>()?.is_some() {}
+        }
         Ok(())
     }
 }
@@ -324,6 +348,8 @@ fn write_sidecar(tmp: &Path, doc: &[u8], at: u64) -> io::Result<()> {
         } else {
             let _ = w.into_parts(); // the buffer dropped unwritten
             f.set_len(0)?;
+            // Not a readable list: nothing is known of it (an empty sidecar would say "no match").
+            std::os::unix::fs::FileExt::write_all_at(&f, INCOMPLETE, 0)?;
         }
         f.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(at))?;
         f.sync_data()
@@ -833,7 +859,7 @@ pub struct Status {
     summaries: Vec<Summary>,
     building: bool,
     /// Requests waiting for a scope's build (at most `SUMMARY_WAITERS`).
-    summary_waiters: usize,
+    summary_waiters: Arc<AtomicUsize>,
     /// uuids whose full report is being written (outside the lock), and whose history is being
     /// trimmed.
     writing: HashSet<String>,
@@ -869,7 +895,39 @@ pub struct Status {
     /// `SEARCH_CACHE_SECS` (key: scope, term, version); whether a search runs (one at a time).
     search_hits: HashMap<String, (u64, u32)>,
     search_cache: VecDeque<Cached>,
-    searching: bool,
+    searching: Arc<AtomicBool>,
+}
+
+/// Raised while a search runs; lowered when dropped (also when the deferred search never runs).
+pub(crate) struct Flag(Arc<AtomicBool>);
+
+impl Flag {
+    fn raise(f: &Arc<AtomicBool>) -> Flag {
+        f.store(true, Ordering::SeqCst);
+        Flag(f.clone())
+    }
+}
+
+impl Drop for Flag {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// One of the `SUMMARY_WAITERS` places; given back when dropped (also when the wait never runs).
+struct Waiter(Arc<AtomicUsize>);
+
+impl Waiter {
+    fn take(n: &Arc<AtomicUsize>) -> Waiter {
+        n.fetch_add(1, Ordering::SeqCst);
+        Waiter(n.clone())
+    }
+}
+
+impl Drop for Waiter {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// A search answer kept for `SEARCH_CACHE_SECS`.
@@ -1626,7 +1684,8 @@ impl App {
         }
         let t = now();
         let req: st::EnrollRequest = serde_json::from_slice(body).map_err(|e| text(400, &e.to_string()))?;
-        if !st::valid_uuid(&req.uuid) {
+        // `software` would be shadowed by the search route (`/api/team/status/software`).
+        if !st::valid_uuid(&req.uuid) || req.uuid == "software" {
             return Err(text(400, "bad uuid"));
         }
         tether_trust::key_from_b64(&req.pubkey).map_err(|_| text(400, "bad pubkey"))?;
@@ -2151,39 +2210,42 @@ impl App {
     /// `GET /api/team/status/software?q=<2-64 characters>[&v=<at most 32>]` (member-signed): the hosts
     /// in the member's scope with a program whose name or publisher contains `q` and whose version
     /// starts with `v` (both lower-cased, [`lower_into`]). Checked in this order: the terms (`400`),
-    /// the switch (`{"sbom":false,"hosts":[]}`), `sbom` (`403`), 6 a minute per member key (`429`),
-    /// the cache (60 s per scope, term and version), one search at a time (`429 busy`). The search
-    /// itself runs after the lock is released ([`search`]).
-    pub(crate) fn team_status_software(&mut self, url: &str, scope: &Permissions, key: &str) -> Result<Resp, Resp> {
+    /// the switch and a signed team document in force (else `{"sbom":false,"hosts":[]}`), `sbom`
+    /// (`403`), then the cache (60 s per scope, term and version) or one search at a time (`429
+    /// busy`), and only for an answer from the cache or a search that runs: 6 a minute per member
+    /// key (`429`). The search itself runs after the lock is released ([`search`]).
+    pub(crate) fn team_status_software(&mut self, url: &str, scope: &Permissions, key: &str, signed: bool) -> Result<Resp, Resp> {
         let (q, v) = search_terms(url)?;
         self.status_open()?;
-        if !search_on() {
+        if !search_on() || !signed {
             return Ok(tiny_http::Response::from_data(&br#"{"sbom":false,"hosts":[]}"#[..]).with_header(hdr("Content-Type", "application/json")).boxed());
         }
         if !scope.sbom {
             return Err(text(403, "this member may not read software lists"));
         }
         let t = now();
+        let ck = format!("{}\n{q}\n{v}", scope.scope_key());
+        let cached = self.status.search_cache.iter().find(|c| c.key == ck && t < c.built + SEARCH_CACHE_SECS).map(|c| (c.body.clone(), c.hits));
+        // A `429 busy` does not use up one of the member's searches.
+        if cached.is_none() && self.status.searching.load(Ordering::SeqCst) {
+            return Err(text(429, "busy").with_header(hdr("Retry-After", "5")));
+        }
         if !rate_ok(&mut self.status.search_hits, key.to_owned(), t, SEARCH_PER_MIN) {
             // The seconds until this member's minute is over.
             let wait = self.status.search_hits.get(key).map_or(60, |(start, _)| (start + 60).saturating_sub(t).max(1));
             return Err(text(429, "too many searches").with_header(hdr("Retry-After", &wait.to_string())));
         }
-        let ck = format!("{}\n{q}\n{v}", scope.scope_key());
-        if let Some(c) = self.status.search_cache.iter().find(|c| c.key == ck && t < c.built + SEARCH_CACHE_SECS) {
-            let (body, hits) = (c.body.clone(), c.hits);
+        if let Some((body, hits)) = cached {
             if let Some(r) = &mut self.audit_pending {
                 r.detail["hits"] = hits.into();
             }
             return Ok(search_answer(&body));
         }
-        if self.status.searching {
-            return Err(text(429, "busy").with_header(hdr("Retry-After", "5")));
-        }
-        self.status.searching = true;
+        // The guard exists before the search is deferred: a closure dropped unrun frees the flag too.
+        let running = Flag::raise(&self.status.searching);
         // Its record is written by the search, with the number of hits.
         let (rec, scope, data) = (self.audit_pending.take(), scope.clone(), self.data.clone());
-        self.defer(move |app| search(app, &data, &q, &v, &scope, ck, t, rec))
+        self.defer(move |app| search(app, &data, &q, &v, &scope, ck, t, rec, running))
     }
 
     /// `GET /api/team/status/<uuid>/sbom`: the list as stored, its hash as the ETag. Opened under
@@ -2513,18 +2575,12 @@ impl App {
         // No summary of this scope yet, and a build runs (of this scope or another): wait for it,
         // if a waiter's place is free.
         let not_ready = || text(503, "status summary not ready").with_header(hdr("Retry-After", "5"));
-        if self.status.summary_waiters >= SUMMARY_WAITERS {
+        if self.status.summary_waiters.load(Ordering::SeqCst) >= SUMMARY_WAITERS {
             return Err(not_ready());
         }
-        self.status.summary_waiters += 1;
-        struct Waiter<'a>(&'a Mutex<App>);
-        impl Drop for Waiter<'_> {
-            fn drop(&mut self) {
-                lock(self.0).status.summary_waiters -= 1;
-            }
-        }
+        // Counted before the wait is deferred: a closure dropped unrun gives its place back too.
+        let waiter = Waiter::take(&self.status.summary_waiters);
         self.defer(move |app| {
-            let waiter = Waiter(app);
             for _ in 0..SUMMARY_WAIT_TRIES {
                 {
                     let mut a = lock(app);
@@ -2863,7 +2919,9 @@ fn sidecar_scan(app: &Mutex<App>, data: &Path) {
                     return Err(io::Error::other("stopping"));
                 }
                 let sw = file(data, &u, "sw");
-                if fs::metadata(&sw).is_ok_and(|m| mtime(&m) == at) {
+                // An empty one was written for an unreadable list before INCOMPLETE existed: rebuilt
+                // (a list without programs gets an empty one again, a few bytes an hour).
+                if fs::metadata(&sw).is_ok_and(|m| mtime(&m) == at && m.len() > 0) {
                     continue;
                 }
                 if let Some(d) = test_ms("SCAN_PAUSE_MS", &SCAN_PAUSE_TEST) {
@@ -2907,8 +2965,8 @@ fn search_terms(url: &str) -> Result<(String, String), Resp> {
     for kv in url.split_once('?').map_or("", |(_, q)| q).split('&').filter(|s| !s.is_empty()) {
         let (k, val) = kv.split_once('=').unwrap_or((kv, ""));
         match k {
-            "q" if q.is_none() => q = Some(crate::audit::unescape(val)),
-            "v" if v.is_none() => v = Some(crate::audit::unescape(val)),
+            "q" if q.is_none() => q = Some(strict_unescape(val).ok_or_else(bad_encoding)?),
+            "v" if v.is_none() => v = Some(strict_unescape(val).ok_or_else(bad_encoding)?),
             _ => return Err(text(400, &format!("unexpected parameter {}", teamaudit_text(k)))),
         }
     }
@@ -2924,6 +2982,31 @@ fn search_terms(url: &str) -> Result<(String, String), Resp> {
         return Err(text(400, "q and v must not contain control characters"));
     }
     Ok((lower(q), lower(v)))
+}
+
+fn bad_encoding() -> Resp {
+    text(400, "q and v must be percent-encoded UTF-8")
+}
+
+/// A query value percent-decoded (`+` is a space), strictly: `None` for a `%` not followed by two
+/// hex digits, or decoded bytes that are not UTF-8 (a term must not be searched as something else).
+fn strict_unescape(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let h = b.get(i + 1..i + 3).filter(|h| h.iter().all(u8::is_ascii_hexdigit))?;
+                out.push(u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok()?);
+                i += 2;
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).ok()
 }
 
 /// At most 32 bytes of a parameter name for an error text, without hidden characters.
@@ -2951,8 +3034,9 @@ struct Matcher {
 
 impl Matcher {
     /// The first program in the sidecar at `path` matching `q` (name or publisher) and `v`
-    /// (version prefix): `None` when there is no sidecar describing the list of time `at`
-    /// (pending), `Some(None)` when nothing matches.
+    /// (version prefix): `None` when there is no sidecar describing the list of time `at`, or the
+    /// sidecar says its list was cut or unreadable before a match ([`INCOMPLETE`]) (pending),
+    /// `Some(None)` when nothing matches.
     fn first(&mut self, path: &Path, at: u64, q: &str, v: &str) -> Option<Option<(String, String)>> {
         let f = fs::File::open(path).ok()?;
         if mtime(&f.metadata().ok()?) != at {
@@ -2964,6 +3048,9 @@ impl Matcher {
             match r.read_line(&mut self.line) {
                 Ok(0) | Err(_) => return Some(None),
                 Ok(_) => {}
+            }
+            if self.line.as_bytes() == INCOMPLETE {
+                return None;
             }
             let mut it = self.line.trim_end_matches('\n').splitn(3, '\t');
             let (n, ver, p) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
@@ -2992,13 +3079,7 @@ impl Matcher {
 /// done or `SEARCH_BUDGET` (then `"partial":true`, not cached). Devices outside the scope are never
 /// looked at. The audit record gets the number of hits (never the hits).
 #[allow(clippy::too_many_arguments)]
-fn search(app: &Mutex<App>, data: &Path, q: &str, v: &str, scope: &Permissions, key: String, t: u64, rec: Option<crate::teamaudit::Rec>) -> Result<Resp, Resp> {
-    struct Running<'a>(&'a Mutex<App>);
-    impl Drop for Running<'_> {
-        fn drop(&mut self) {
-            lock(self.0).status.searching = false;
-        }
-    }
+fn search(app: &Mutex<App>, data: &Path, q: &str, v: &str, scope: &Permissions, key: String, t: u64, rec: Option<crate::teamaudit::Rec>, running: Flag) -> Result<Resp, Resp> {
     #[derive(Serialize)]
     struct Host {
         uuid: Arc<str>,
@@ -3014,7 +3095,6 @@ fn search(app: &Mutex<App>, data: &Path, q: &str, v: &str, scope: &Permissions, 
         pending: u64,
         partial: bool,
     }
-    let running = Running(app);
     let started = std::time::Instant::now();
     let budget = test_ms("SEARCH_BUDGET_MS", &SEARCH_BUDGET_TEST).unwrap_or(SEARCH_BUDGET);
     let delay = test_ms("SEARCH_DELAY_MS", &SEARCH_DELAY_TEST);
@@ -3280,10 +3360,33 @@ mod tests {
         // 100 000 components: the first 5 000 with a name or publisher.
         let many: Vec<String> = (0..100_000).map(|i| if i % 2 == 0 { "{}".to_owned() } else { format!(r#"{{"name":"p{i}"}}"#) }).collect();
         let (ok, s) = lines_of(&format!(r#"{{"components":[{}]}}"#, many.join(",")));
-        assert_eq!((ok, s.lines().count(), s.lines().last()), (true, 5000, Some("p9999\t\t")));
+        assert_eq!((ok, s.lines().count(), s.lines().nth(4999), s.lines().last()), (true, 5001, Some("p9999\t\t"), Some("\x01")), "cut: marked");
+        // Exactly 5 000: complete, not marked.
+        let exact: Vec<String> = (0..5000).map(|i| format!(r#"{{"name":"p{i}"}}"#)).collect();
+        assert_eq!(lines_of(&format!(r#"{{"components":[{}]}}"#, exact.join(","))).1.lines().count(), 5000);
+        // Unreadable: the sidecar written holds only the marker.
+        let tmp = std::env::temp_dir().join(format!("sw-unreadable-{}", std::process::id()));
+        let _ = fs::remove_file(&tmp);
+        write_sidecar(&tmp, br#"{"components":{"name":"x"}}"#, 1_700_000_000).unwrap();
+        assert_eq!(fs::read(&tmp).unwrap(), INCOMPLETE);
+        let mut m = Matcher::default();
+        assert_eq!(m.first(&tmp, 1_700_000_000, "x", ""), None, "pending, not no-match");
+        fs::remove_file(&tmp).unwrap();
         // Cut on a character boundary after hidden characters are dropped.
         assert_eq!(clean(&format!("\u{202e}{}", "€".repeat(50)), 128), "€".repeat(42));
         assert_eq!(clean("a\u{200b}b\u{7f}c\u{feff}", 128), "abc");
+    }
+
+    /// The search flag and a summary waiter's place are held by guards made before the work is
+    /// deferred: a deferred closure dropped without running gives them back.
+    #[test]
+    fn guards_made_before_deferring_are_freed_by_a_closure_never_run() {
+        let (searching, waiters) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+        let (f, w) = (Flag::raise(&searching), Waiter::take(&waiters));
+        assert!(searching.load(Ordering::SeqCst) && waiters.load(Ordering::SeqCst) == 1);
+        let never_run: Box<dyn FnOnce() + Send> = Box::new(move || drop((f, w)));
+        drop(never_run);
+        assert!(!searching.load(Ordering::SeqCst) && waiters.load(Ordering::SeqCst) == 0);
     }
 
     #[test]
@@ -3291,7 +3394,9 @@ mod tests {
         let t = |u: &str| search_terms(u).map_err(|r| r.status_code().0);
         assert_eq!(t("/x?q=%20Chrome%20&v=120"), Ok(("chrome".into(), "120".into())));
         assert_eq!(t("/x?q=%C3%9Cber"), Ok(("über".into(), String::new())));
-        for bad in ["/x", "/x?q=a", "/x?q=ab&x=1", "/x?q=ab&q=cd", "/x?q=a%01b", "/x?q=ab&v=123456789012345678901234567890123", "/x?q=a%E2%80%AEb"] {
+        assert_eq!(t("/x?q=50%25+off"), Ok(("50% off".into(), String::new())));
+        // A `%` without two hex digits, and bytes that are not UTF-8, are refused (not kept or replaced).
+        for bad in ["/x", "/x?q=a", "/x?q=ab&x=1", "/x?q=ab&q=cd", "/x?q=a%01b", "/x?q=ab&v=123456789012345678901234567890123", "/x?q=a%E2%80%AEb", "/x?q=ab%zz", "/x?q=ab%4", "/x?q=ab%", "/x?q=%ff%feab", "/x?q=ab&v=%C3", "/x?q=50%25%"] {
             assert_eq!(t(bad), Err(400), "{bad}");
         }
         assert_eq!(t(&format!("/x?q={}", "%C3%A9".repeat(64))).map(|r| r.0.chars().count()), Ok(64));

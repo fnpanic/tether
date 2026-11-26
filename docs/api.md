@@ -724,7 +724,8 @@ status route. Treat the content as untrusted: it is whatever the device sent.
 Which hosts have a program installed, by their last uploaded software list. `q` and `v` are
 percent-encoded UTF-8 (a space `%20` or `+`); after decoding and trimming, `q` has 2 to 64
 characters and `v` at most 32, neither a control character nor a direction or zero-width mark
-(else `400`; also for a parameter other than one `q` and one `v`). A host matches when a program of
+(else `400`; also for a parameter other than one `q` and one `v`, a `%` not followed by two hex
+digits, and percent-encoded bytes that are not UTF-8). A host matches when a program of
 its list has a name or publisher that contains `q` and a version that starts with `v` (no `v`: any
 version). Both sides are compared lower-cased: ASCII letters as such, any other character by
 Unicode's lower-case mapping of that one character (Rust `char::to_lowercase`; no normalisation,
@@ -737,8 +738,11 @@ match `ss`). Everything is plain text: `.*`, quotes or `%` match only themselves
 
 - `hosts`: at most 2 000, in uuid order, each with the first matching program of its list (`name`
   and `version` as the sidecar holds them, below). `uuid` is the device's uuid as in the summary.
-- `more`: matching hosts left out beyond the 2 000. `pending`: hosts with a list but no sidecar
-  for it yet (a list stored before the switch was on, until the scan has read it). `built`: when the
+- `more`: matching hosts left out beyond the 2 000. `pending`: hosts for which the relay cannot
+  say whether they have the program: a list without a sidecar for it yet (stored before the switch
+  was on, until the scan has read it), a list that could not be read as a software list, and a list
+  cut at 5 000 programs where none of those kept matches. A client must not count these hosts as
+  having no match (a negated search leaves them out). `built`: when the
   search ran (a cached answer keeps its time). `partial`: `true` when the search stopped at its time
   budget (10 s) before it read every sidecar; such an answer is not cached, and a client must not
   treat the hosts it lacks as having no match.
@@ -749,12 +753,15 @@ match `ss`). Everything is plain text: `.*`, quotes or `%` match only themselves
 
 Order of checks: the member signature (`401`), `q` and `v` (`400`), a locked or off status store
 (`503`), the switch (`200 {"sbom":false,"hosts":[]}` exactly, so a client can tell "not on this
-relay" from `404`, which a relay before 0.7.0 answers), the member's `sbom` (`403 this member may
-not read software lists`), 6 searches a minute per member key, cached answers included
-(`429 too many searches`, `Retry-After` the seconds left of that minute), the cache (60 s per
-member scope, `q` and `v`: members of different customers never share an answer), one search at
-a time for the whole relay (`429 busy`, `Retry-After: 5`). Every request that passed the signature
-leaves one `search` record in the team audit log (above).
+relay" from `404`, which a relay before 0.7.0 answers; also when no signed team document is in
+force), the member's `sbom` (`403 this member may not read software lists`), one search at a time
+for the whole relay unless the answer is in the cache (`429 busy`, `Retry-After: 5`; it does not
+count against the member), 6 searches a minute per member key, cached answers included
+(`429 too many searches`, `Retry-After` the seconds left of that minute), then the cache (60 s per
+member scope, `q` and `v`: members of different customers never share an answer) or the search.
+Every request that passed the signature leaves one `search` record in the team audit log (above).
+
+A device uuid `software` is refused at enrolment (`400 bad uuid`): the search route has that path.
 
 The switch is `STATUS_SOFTWARE_SEARCH=on` (default off) and needs `STATUS_SBOM=on` and a signed
 team document in force **when tether-api starts** (the plain roster has no `sbom` permission and no
@@ -766,9 +773,12 @@ later takes effect at the next start.
 `name<TAB>version<TAB>publisher` per entry of the document's top-level `components` that has a name
 or publisher, at most 5 000 lines, each field cut to 128, 64 and 128 bytes on a character boundary,
 control and direction characters removed; nothing else of the document (hardware properties,
-hashes, `purl`, the device component) is in it. A document that is not such a list (not an
-object, `components` not an array, a field that is not a string, too deeply nested) gets an empty
-sidecar, which never matches. It is written from the uploaded bytes after the list is synced,
+hashes, `purl`, the device component) is in it. A list with more entries gets a last line holding
+only the control character U+0001 after the 5 000; a document that is not such a list (not an
+object, `components` not an array, a field that is not a string, too deeply nested) gets a sidecar
+of that one line. A search that reaches that line without a match counts the host as `pending`.
+An object without `components` is a list without programs (an empty sidecar). Empty sidecars from
+a relay before this rule are rebuilt by the scan. It is written from the uploaded bytes after the list is synced,
 outside the state lock, as the document is parsed (no copy of it), with the list's modification
 time; a search uses a sidecar only when its time is the list's. It goes with the list (the device's
 `DELETE`, the device's removal by itself, an admin or a member, expiry); the start-up and hourly

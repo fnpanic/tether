@@ -279,8 +279,22 @@ API_BIN=~/ha-build/bin/tether-api DEVICES=20000 SECS=600 WARMUP=60 BASELINE=60 M
   41.2 ms with the search, 0.51 / 1.22 / 18.9 / 134.8 ms without; device posts p99 29.7 ms vs
   13.8 ms. The p99 rise is the disk: reading 234 MB every 10 s inside the 64 MiB scope (91 420
   `max` reclaim events against 4 797). No state-lock hold over 20 ms came from the search or the scan.
-  One search every 10 s is far above what technicians do; on a real server, the first thing to
-  check is the disk.
+  On a real server, the first thing to check is the disk.
+- **The run with the search FAILED the load tool's own latency checks** for heartbeats and policy
+  reads (the limits are derived from the baseline minute before the load): heartbeat p99 3.29 ms
+  against a limit of 3.03 ms (1.2 x 0.86 + 2), p99.9 16.67 ms against 14.71 ms (1.5 x 6.47 + 5);
+  policy p99 3.28 ms against 3.10 ms, p99.9 17.15 ms against 14.77 ms: 0.2 to 0.3 ms over at p99,
+  2 to 2.4 ms over at p99.9. The slowest-request check passed. (The reference run without the
+  search failed other checks, listed in its raw output.)
+- **Search time against the plan's limit**: 2.1 to 4.3 s per search once all sidecars were built,
+  against the 5 s the plan set. It grows with the size of the lists (this run had 200 programs per
+  machine; several hundred more per machine pass 5 s) and with the number of machines; past the
+  10 s budget a search answers `"partial": true`.
+- **Under contention**: one search runs at a time relay-wide, so at this size about 20 searches a
+  minute can run at all. Members with a customer scope do not share cached answers with each other
+  or with unscoped members (the cache key holds the scope). When many technicians search at once,
+  most are answered `429 busy` and their desktop retries a few times before it says the relay is
+  busy.
 
 Disk writes of the status store at 20 000 devices: `seen.json` (about 22 MB, *estimated* from the
 entry sizes) is rewritten at most every 5 minutes, about 6 GB a day; a hard kill loses at most 5

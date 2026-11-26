@@ -403,7 +403,10 @@ impl App {
             // answers as an unknown one (status.rs).
             ("GET", "status") => self.team_status_summary(rq, m),
             // Hosts by installed program: `sbom` and the member's customers (status.rs).
-            ("GET", "status/software") => self.team_status_software(url, m, &key),
+            ("GET", "status/software") => {
+                let signed = self.team.signed();
+                self.team_status_software(url, m, &key, signed)
+            }
             ("GET", r) if r.strip_prefix("status/").is_some_and(|u| u.ends_with("/sbom")) => {
                 if !m.sbom {
                     return Err(text(403, "this member may not read software lists"));

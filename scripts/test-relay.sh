@@ -7,5 +7,7 @@ source "$HOME/.cargo/env"
 export CC_x86_64_unknown_linux_musl=musl-gcc
 T=x86_64-unknown-linux-musl
 (cd "$OUT/rustdesk-server" && cargo test --release --target $T --lib --bin hbbr)
-(cd "$OUT/server/api" && cargo test --release --target $T)
+# test-hooks: the test-only settings the tests use; then the tests of a production build alone.
+(cd "$OUT/server/api" && cargo test --release --target $T --features test-hooks)
+(cd "$OUT/server/api" && cargo test --release --target $T -- production_build)
 bash "$(dirname "$0")/test-relay-backup.sh" "$OUT"
