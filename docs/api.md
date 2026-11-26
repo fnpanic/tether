@@ -329,10 +329,10 @@ address (as the per-IP limits count it); at most two more wait for a slot (at mo
 up to 1 s, and then get `429 busy` with `Retry-After: 1`; any request beyond that gets the same `429`
 at once, so a burst from one address holds at most two of the relay's 32 workers. A `429 busy` is
 not a failed signature (none was checked): several old desktops behind one address never lock it
-out. Requests with `kid` are not limited by this. Send `kid` only to relays of 0.7 or later: an older relay refuses the header as
+out. Requests with `kid` are not limited by this. Send `kid` only to relays with the relay update of release 0.7.0 (they answer `GET /api/team/config`): an older relay refuses the header as
 malformed (`401`).
 
-**The signed team document** (0.7) replaces the roster. Tether Manage publishes an upload
+**The signed team document** (relay update of release 0.7.0) replaces the roster. Tether Manage publishes an upload
 (`tether_trust::team::Upload`, unknown fields rejected everywhere):
 ```json
 {"team":{"payload":"<b64 of the document>","sig":"…","key":"<admin key>"},
@@ -957,7 +957,7 @@ match `ss`). Everything is plain text: `.*`, quotes or `%` match only themselves
 
 Order of checks: the member signature (`401`), `q` and `v` (`400`), a locked or off status store
 (`503`), the switch (`200 {"sbom":false,"hosts":[]}` exactly, so a client can tell "not on this
-relay" from `404`, which a relay before 0.7.0 answers; also when no signed team document is in
+relay" from `404`, which a relay without the relay update of release 0.7.0 answers; also when no signed team document is in
 force), the member's `sbom` (`403 this member may not read software lists`), one search at a time
 for the whole relay unless the answer is in the cache (`429 busy`, `Retry-After: 5`; it does not
 count against the member), 6 searches a minute per member key, cached answers included

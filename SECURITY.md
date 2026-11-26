@@ -316,7 +316,7 @@ that runs only the organisation's signed agent and opens no port either.
   accepts new IDs freely, someone who registers many IDs can enrol many agents for them, up to 30 new
   pins a minute per IP and `STATUS_MAX_DEVICES`, the same exposure as a leaked unbound token. Remedy:
   **Revoke** in Tether Manage (or `monitor-publish revoke`), remove the devices (`monitor-publish
-  devices --token <grant id>`, `remove`), renew. A relay before 0.7.0 refuses grants (fails closed).
+  devices --token <grant id>`, `remove`), renew. A relay without the relay update of release 0.7.0 refuses grants (fails closed).
 - **What a token holder can do.** Enrol devices until the token expires or is revoked: any uuid
   that is not pinned yet, up to 30 new pins per minute per IP and `STATUS_MAX_DEVICES` in total;
   with a token issued for a Tether ID, one device with that ID. A token is valid 1 to 30 days and
