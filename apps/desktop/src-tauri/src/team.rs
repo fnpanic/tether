@@ -267,6 +267,17 @@ pub fn audit_event(ev: Value) {
     });
 }
 
+/// [`audit_event`] to every reachable relay, in the background, also when this app is in no team: a
+/// sign-in token used with another key must reach every relay's record, the one that took it included.
+pub(crate) fn audit_event_everywhere(ev: Value) {
+    let relays: Vec<String> = crate::policy::relay_bases().into_iter().map(|(h, _)| h).collect();
+    std::thread::spawn(move || {
+        for r in relays {
+            let _ = call_via(Some(&[r]), "POST", "/api/team/audit-event", Some(ev.to_string().as_bytes()), &[], 4096);
+        }
+    });
+}
+
 /// `export` (`what`: `hosts`, `failing`, `sbom`; `rows`; a host's `uuid` for `sbom`).
 pub fn audit_export(what: &str, rows: u64, uuid: Option<&str>) -> R<()> {
     if !["hosts", "failing", "sbom"].contains(&what) || rows > 10_000_000 || uuid.is_some_and(|u| !tether_trust::status::valid_uuid(u)) {

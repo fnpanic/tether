@@ -4,7 +4,7 @@
 //! relay in `team-config-floors.json`); every relay that answers must name the same provider.
 //! Authorization code with PKCE (S256) in the system browser; the redirect goes to
 //! `http://localhost:<port>/` (what the app registration names; only the port may vary) and is taken
-//! on `127.0.0.1` and `[::1]` only, one request, within a few minutes. The access token lives only in
+//! on `127.0.0.1` and `[::1]` only, the one request with this sign-in's `state`, within a few minutes. The access token lives only in
 //! this process's memory while it is posted (not kept after), the refresh token only in the OS
 //! credential store (Windows Credential Manager, macOS Keychain). The token is posted to every relay
 //! at once, signed with this app's team key and `kid`, and renewed before the relays' sessions end;
@@ -28,8 +28,12 @@ type R<T> = Result<T, String>;
 const WAIT: Duration = Duration::from_secs(300);
 /// Renew this long before the earliest relay session ends.
 const RENEW_BEFORE: u64 = 300;
-/// A failed renewal (provider or relays not reached) is tried again after this long.
+/// A failed renewal (provider or relays not reached, a temporary refusal) is tried again after this
+/// long, doubling up to ten times as long.
+#[cfg(not(test))]
 const RETRY: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const RETRY: Duration = Duration::from_secs(1);
 const PROVIDER_MAX: usize = 64 << 10;
 /// Debug builds take `http://` on a loopback host (the mock provider); release builds only public `https://`.
 const RELEASE: bool = !cfg!(debug_assertions);
@@ -117,10 +121,10 @@ pub fn signed_in() -> bool {
     state().live.is_some()
 }
 
-/// Whether a request to `base` names its key with `kid`: always with a session (the relay finds a
-/// session key only by `kid`), else for relays known to take it (an older relay refuses the header).
+/// Whether a request to `base` names its key with `kid`: only for relays known to take it (they serve
+/// `/api/team/config` or took the session; an older relay refuses the header, also while signed in).
 pub fn sends_kid(base: &str) -> bool {
-    signed_in() || KID_RELAYS.lock().unwrap().contains(&tether_trust::reqauth::host_of(base))
+    KID_RELAYS.lock().unwrap().contains(&tether_trust::reqauth::host_of(base))
 }
 
 /// The signed-in person's permissions (the relay's session answer), if signed in.
@@ -199,26 +203,41 @@ mod secret {
         format!("refresh-token {client_id} {i}")
     }
 
+    /// Part 0 starts with `<number of parts>:`; parts above that number (an older, longer token's) are deleted.
     pub fn store(client_id: &str, token: &str) -> Result<(), String> {
-        delete(client_id);
-        if token.len() > CHUNK * CHUNKS {
+        if token.is_empty() || token.len() > CHUNK * CHUNKS {
+            delete(client_id);
             return Err("the sign-in is too large for the credential store".into());
         }
-        for (i, c) in token.as_bytes().chunks(CHUNK).enumerate() {
+        let parts: Vec<&[u8]> = token.as_bytes().chunks(CHUNK).collect();
+        let mut first = format!("{}:", parts.len()).into_bytes();
+        first.extend_from_slice(parts[0]);
+        for (i, c) in parts.iter().enumerate().skip(1) {
             set(&user(client_id, i), c).inspect_err(|_| delete(client_id))?;
+        }
+        set(&user(client_id, 0), &first).inspect_err(|_| delete(client_id))?;
+        for i in parts.len()..CHUNKS {
+            del(&user(client_id, i));
         }
         Ok(())
     }
 
+    /// Exactly the parts part 0 names; a missing or unreadable part is no token, and everything is deleted.
     pub fn load(client_id: &str) -> Option<String> {
-        let mut out = Vec::new();
-        for i in 0..CHUNKS {
-            match get(&user(client_id, i)) {
-                Some(c) => out.extend(c),
-                None => break,
+        let first = get(&user(client_id, 0))?;
+        let r = (|| {
+            let at = first.iter().position(|&b| b == b':')?;
+            let n = std::str::from_utf8(&first[..at]).ok()?.parse::<usize>().ok().filter(|n| (1..=CHUNKS).contains(n))?;
+            let mut out = first[at + 1..].to_vec();
+            for i in 1..n {
+                out.extend(get(&user(client_id, i))?);
             }
+            String::from_utf8(out).ok().filter(|s| !s.is_empty())
+        })();
+        if r.is_none() {
+            delete(client_id);
         }
-        String::from_utf8(out).ok().filter(|s| !s.is_empty())
+        r
     }
 
     pub fn delete(client_id: &str) {
@@ -320,6 +339,7 @@ fn read_offer(code: u16, body: &[u8], keys: &[VerifyingKey], floor: &mut u64) ->
     match code {
         200 => {}
         404 if body.starts_with(b"no sign-in configured") => return Ok((None, true)),
+        // An older relay without the route; other codes never reach here (see [`agree`]).
         _ => return Ok((None, false)),
     }
     let payload = tether_trust::envelope::open_json(body, keys).map_err(|e| format!("its sign-in settings are not signed by your organisation ({e})"))?;
@@ -333,12 +353,13 @@ fn read_offer(code: u16, body: &[u8], keys: &[VerifyingKey], floor: &mut u64) ->
 }
 
 /// Every relay's answer to its provider: the one provider all that answered name (None: none offers
-/// sign-in); relays not reached are left out. Refused when a relay's document is unsigned, older
+/// sign-in); relays not reached, or answering anything but 200 or 404 (a relay restarting behind its
+/// proxy, 503, 429), are left out. Refused when a relay's document is unsigned, older
 /// than before, or names another provider, or when one offers sign-in and another does not.
 fn agree(answers: &[(String, R<(u16, Vec<u8>)>)], keys: &[VerifyingKey], floors: &mut BTreeMap<String, u64>) -> R<(Option<Oidc>, Vec<String>)> {
     let (mut with, mut without, mut kid) = (Vec::<(String, Oidc)>::new(), Vec::new(), Vec::new());
     for (relay, r) in answers {
-        let Ok((code, body)) = r else { continue };
+        let Some((code, body)) = r.as_ref().ok().filter(|(c, _)| matches!(c, 200 | 404)) else { continue };
         let floor = floors.entry(relay.clone()).or_insert(0);
         let (o, k) = read_offer(*code, body, keys, floor).map_err(|e| format!("Sign-in refused: the server {relay}: {e}."))?;
         if k {
@@ -442,10 +463,26 @@ const PAGE_FAIL: &str = "Sign-in did not finish. Return to Tether to see why.";
 
 impl Loopback {
     fn bind() -> R<Self> {
+        Self::bind_with(|port| TcpListener::bind(("::1", port)))
+    }
+
+    /// Tries a few ports until `127.0.0.1` and `[::1]` (`bind6`) bind on the same one (the browser may
+    /// resolve `localhost` to either); only then IPv4 alone.
+    fn bind_with(bind6: impl Fn(u16) -> std::io::Result<TcpListener>) -> R<Self> {
         let err = |e: std::io::Error| format!("Tether cannot wait for the sign-in: {e}");
-        let v4 = TcpListener::bind("127.0.0.1:0").map_err(err)?;
-        let port = v4.local_addr().map_err(err)?.port();
-        let v6 = TcpListener::bind(("::1", port)).ok();
+        let mut tries = 0;
+        let (v4, port, v6) = loop {
+            let v4 = TcpListener::bind("127.0.0.1:0").map_err(err)?;
+            let port = v4.local_addr().map_err(err)?.port();
+            match bind6(port) {
+                Ok(l) => break (v4, port, Some(l)),
+                Err(e) if tries == 4 => {
+                    hbb_common::log::warn!("sign-in: [::1]:{port} cannot be bound ({e}); waiting for the browser on 127.0.0.1 only");
+                    break (v4, port, None);
+                }
+                Err(_) => tries += 1,
+            }
+        };
         v4.set_nonblocking(true).map_err(err)?;
         if let Some(l) = &v6 {
             l.set_nonblocking(true).map_err(err)?;
@@ -457,8 +494,10 @@ impl Loopback {
         format!("http://localhost:{}/", self.port)
     }
 
-    /// The code from the browser's redirect. Only a `GET /` counts (other paths get 404, a
-    /// connection that sends nothing is dropped); it ends the wait and the listeners close.
+    /// The code from the browser's redirect. Only a `GET /` with this sign-in's `state` counts and ends
+    /// the wait (then the listeners close); another path gets 404, another `state` 400 (another local
+    /// user or a web page probing loopback ports must not end the sign-in), and a connection that sends
+    /// nothing is dropped.
     fn wait(self, state: &str, deadline: Instant, alive: impl Fn() -> bool) -> R<String> {
         loop {
             if !alive() {
@@ -478,6 +517,10 @@ impl Loopback {
                 continue;
             };
             let q: BTreeMap<String, String> = url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
+            if q.get("state").map(String::as_str) != Some(state) {
+                answer(&mut s, "400 Bad Request", PAGE_FAIL);
+                continue;
+            }
             let r = callback(&q, state);
             answer(&mut s, "200 OK", if r.is_ok() { PAGE_OK } else { PAGE_FAIL });
             return r;
@@ -550,8 +593,12 @@ struct Tokens {
     refresh: Option<String>,
 }
 
-/// `Err((final, text))`: `final` when the provider refused (account disabled, consent revoked, an
-/// unknown or expired refresh token); otherwise the provider was not reached or answered garbage.
+/// Provider errors after which a stored sign-in cannot work again (account disabled, consent revoked,
+/// an unknown or expired refresh token, the person must sign in again); anything else is retried.
+const PROVIDER_FINAL: [&str; 4] = ["invalid_grant", "interaction_required", "consent_required", "login_required"];
+
+/// `Err((final, text))`: `final` for a [`PROVIDER_FINAL`] refusal; otherwise the provider was not
+/// reached, answered garbage or refused for a while (`temporarily_unavailable`, 429, 5xx).
 fn token(ep: &Endpoints, form: &[(&str, &str)]) -> Result<Tokens, (bool, String)> {
     let (code, body) = provider(|c| c.post(&ep.token).form(form)).map_err(|e| (false, e))?;
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
@@ -560,7 +607,7 @@ fn token(ep: &Endpoints, form: &[(&str, &str)]) -> Result<Tokens, (bool, String)
         (200, Some(access)) => Ok(Tokens { access, refresh: s("refresh_token") }),
         (400 | 401, _) if s("error").is_some() => {
             let d = s("error_description").map(|d| clip(&d, 200)).unwrap_or_default();
-            Err((true, format!("The sign-in provider refused: {}{}", clip(&s("error").unwrap_or_default(), 64), if d.is_empty() { String::new() } else { format!(" ({d})") })))
+            Err((PROVIDER_FINAL.contains(&s("error").unwrap_or_default().as_str()), format!("The sign-in provider refused: {}{}", clip(&s("error").unwrap_or_default(), 64), if d.is_empty() { String::new() } else { format!(" ({d})") })))
         }
         _ => Err((false, format!("provider: The sign-in provider answered {code}."))),
     }
@@ -586,24 +633,42 @@ fn reason_text(reason: &str, relay: &str) -> String {
     }
 }
 
-/// One relay's answer to the posted session: its session (`name`, permissions, `exp`) or why not.
-fn relay_answer(relay: &str, r: R<(u16, Vec<u8>)>) -> (RelayAnswer, Option<Value>, bool) {
-    let (ok, text, me, used) = match r {
+/// A relay's refusal that holds until the account or the team document changes (C5's reasons); any
+/// other (`provider-unavailable`, `too-many-sessions`, `config-changed`, 5xx, 429, not reached) is retried.
+fn final_refusal(code: u16, reason: &str) -> bool {
+    matches!(code, 401 | 403 | 409) && (["no-role", "denied", "token-used", "overage", "v1-token"].contains(&reason) || reason.starts_with("wrong-"))
+}
+
+/// One relay's answer to the posted session (for [`establish`]).
+struct Posted {
+    answer: RelayAnswer,
+    /// Its session (`name`, permissions, `exp`).
+    me: Option<Value>,
+    /// `409 token-used`.
+    used: bool,
+    /// A [`final_refusal`].
+    fin: bool,
+}
+
+/// One relay's answer to the posted session: its session or why not.
+fn relay_answer(relay: &str, r: R<(u16, Vec<u8>)>) -> Posted {
+    let (ok, text, me, reason, code) = match r {
         Ok((200, b)) => match serde_json::from_slice::<Value>(&b) {
-            Ok(v) if v.get("name").is_some_and(Value::is_string) && v.get("exp").is_some_and(Value::is_u64) => (true, "Signed in.".to_owned(), Some(v), false),
-            _ => (false, "The server's answer cannot be read.".to_owned(), None, false),
+            Ok(v) if v.get("name").is_some_and(Value::is_string) && v.get("exp").is_some_and(Value::is_u64) => (true, "Signed in.".to_owned(), Some(v), None, 200),
+            _ => (false, "The server's answer cannot be read.".to_owned(), None, None, 200),
         },
         Ok((code, b)) => match serde_json::from_slice::<Value>(&b).ok().and_then(|v| v.get("reason").and_then(Value::as_str).map(str::to_owned)) {
-            Some(reason) => (false, reason_text(&reason, relay), None, reason == "token-used"),
-            None => (false, crate::team::error_text(code, &String::from_utf8_lossy(&b)), None, false),
+            Some(reason) => (false, reason_text(&reason, relay), None, Some(reason), code),
+            None => (false, crate::team::error_text(code, &String::from_utf8_lossy(&b)), None, None, code),
         },
-        Err(e) => (false, format!("Not reached: {}", e.trim_start_matches("offline: ")), None, false),
+        Err(e) => (false, format!("Not reached: {}", e.trim_start_matches("offline: ")), None, None, 0),
     };
-    (RelayAnswer { relay: relay.to_owned(), ok, text }, me, used)
+    let reason = reason.unwrap_or_default();
+    Posted { answer: RelayAnswer { relay: relay.to_owned(), ok, text }, me, used: reason == "token-used", fin: final_refusal(code, &reason) }
 }
 
 /// Posts the token to every relay at once (each with this app's key and `kid`).
-fn post_all(access: &str) -> Vec<(RelayAnswer, Option<Value>, bool)> {
+fn post_all(access: &str) -> Vec<Posted> {
     let relays: Vec<String> = crate::policy::relay_bases().into_iter().map(|(h, _)| h).collect();
     std::thread::scope(|s| {
         let hs: Vec<_> = relays.iter().map(|r| s.spawn(move || crate::team::session_post(r, access))).collect();
@@ -636,17 +701,51 @@ fn set_viewer_name(name: Option<&str>) {
     };
 }
 
-/// Posts fresh tokens to the relays and makes them the live session. Err: no relay took them.
-fn establish(gen: u64, cfg: Oidc, ep: Endpoints, t: Tokens) -> R<()> {
+/// The client id whose refresh token was last stored (not secret): sign-out deletes its token even
+/// when nothing is live and the last check reached no relay, so the next start resumes no one.
+fn client_path() -> std::path::PathBuf {
+    crate::team::data_path("sign-in-client")
+}
+
+/// Stores the refresh token in the credential store, and its client id in [`client_path`].
+fn keep(client_id: &str, refresh: &str) -> R<()> {
+    let _ = crate::policy::write_atomic(&client_path(), client_id.as_bytes());
+    secret::store(client_id, refresh)
+}
+
+/// Deletes the stored refresh token of `client_id` and of the last client id stored.
+fn forget(client_id: Option<&str>) {
+    for id in client_id.map(str::to_owned).into_iter().chain(std::fs::read_to_string(client_path()).ok()) {
+        secret::delete(&id);
+    }
+}
+
+/// Posts fresh tokens to the relays and makes them the live session. `Err((final, text))`: no relay
+/// took them; `final` when every relay refused with a [`final_refusal`].
+fn establish(gen: u64, cfg: Oidc, ep: Endpoints, t: Tokens) -> Result<(), (bool, String)> {
     let answers = post_all(&t.access);
-    let used: Vec<String> = answers.iter().filter(|a| a.2).map(|a| a.0.relay.clone()).collect();
-    let accepted: Vec<&Value> = answers.iter().filter_map(|a| a.1.as_ref()).collect();
+    let used: Vec<String> = answers.iter().filter(|a| a.used).map(|a| a.answer.relay.clone()).collect();
+    for relay in &used {
+        // A relay refused the token as used by another key: the person's own record of it, at every
+        // relay (the one that took the token may be among them), also when none took the sign-in.
+        crate::team::audit_event_everywhere(json!({"event": "token-used", "relay": relay}));
+    }
+    let accepted: Vec<&Value> = answers.iter().filter_map(|a| a.me.as_ref()).collect();
     let exp = accepted.iter().filter_map(|v| v["exp"].as_u64()).min();
     let me = accepted.first().map(|v| (*v).clone());
-    let relays: Vec<RelayAnswer> = answers.iter().map(|a| a.0.clone()).collect();
+    let relays: Vec<RelayAnswer> = answers.iter().map(|a| a.answer.clone()).collect();
+    // A relay that took the session takes `kid`.
+    KID_RELAYS.lock().unwrap().extend(answers.iter().filter(|a| a.me.is_some()).map(|a| tether_trust::reqauth::host_of(&a.answer.relay)));
     let mut s = state();
     if s.gen != gen {
-        return Err("cancelled: Sign-in cancelled.".into());
+        // Signed out or cancelled while posting: end what the relays just took, unless another
+        // sign-in runs or lives now (its session is this same key's).
+        let undo = !accepted.is_empty() && s.live.is_none() && !s.busy;
+        drop(s);
+        if undo {
+            delete_all();
+        }
+        return Err((false, "cancelled: Sign-in cancelled.".into()));
     }
     s.relays = relays.clone();
     if !used.is_empty() {
@@ -654,20 +753,16 @@ fn establish(gen: u64, cfg: Oidc, ep: Endpoints, t: Tokens) -> R<()> {
     }
     let (Some(me), Some(exp)) = (me, exp) else {
         drop(s);
-        return Err(relays.iter().map(|a| format!("{}: {}", a.relay, a.text)).collect::<Vec<_>>().join(" · "));
+        let fin = !answers.is_empty() && answers.iter().all(|a| a.fin);
+        return Err((fin, relays.iter().map(|a| format!("{}: {}", a.relay, a.text)).collect::<Vec<_>>().join(" · ")));
     };
     if let Some(rt) = &t.refresh {
-        if let Err(e) = secret::store(&cfg.client_id, rt) {
+        if let Err(e) = keep(&cfg.client_id, rt) {
             s.note = Some(format!("Signed in, but {e}: sign in again when this session ends."));
         }
     }
     set_viewer_name(me.get("name").and_then(Value::as_str));
     s.live = Some(Live { cfg, ep, exp, me });
-    drop(s);
-    for relay in used {
-        // A relay that refused the token as used by another key: the person's own record of it.
-        crate::team::audit_event(json!({"event": "token-used", "relay": relay}));
-    }
     Ok(())
 }
 
@@ -712,7 +807,7 @@ pub fn sign_in() -> R<Value> {
         let code = lb.wait(&st, Instant::now() + WAIT, || alive(gen))?;
         let sc = scope(&cfg);
         let t = token(&ep, &[("grant_type", "authorization_code"), ("client_id", &cfg.client_id), ("code", &code), ("redirect_uri", &redirect), ("code_verifier", &verifier), ("scope", &sc)]).map_err(|(_, e)| e)?;
-        establish(gen, cfg, ep, t)
+        establish(gen, cfg, ep, t).map_err(|(_, e)| e)
     })();
     finish(gen, &r);
     if r.is_ok() {
@@ -738,8 +833,11 @@ fn renew(gen: u64, cfg: Oidc, ep: Endpoints) -> Result<(), (bool, String)> {
     let rt = secret::load(&cfg.client_id).ok_or((true, "No stored sign-in to renew.".to_owned()))?;
     let sc = scope(&cfg);
     let t = token(&ep, &[("grant_type", "refresh_token"), ("client_id", &cfg.client_id), ("refresh_token", &rt), ("scope", &sc)])?;
-    // Relays not reached: try again; every reached relay refusing (no role, deny list): final.
-    establish(gen, cfg, ep, t).map_err(|e| (!e.contains("Not reached") || e.contains("cancelled"), e))
+    // A rotated refresh token is kept even when no relay takes the new access token now: the retry needs it.
+    if let Some(r) = &t.refresh {
+        let _ = keep(&cfg.client_id, r);
+    }
+    establish(gen, cfg, ep, t)
 }
 
 /// Ends the live session of generation `gen` with `why` (shown), ending it on the relays too.
@@ -754,7 +852,7 @@ fn end(gen: u64, why: String, forget: bool) {
     drop(s);
     set_viewer_name(None);
     if let (true, Some(c)) = (forget, &cfg) {
-        secret::delete(&c.client_id);
+        self::forget(Some(&c.client_id));
     }
     let relays = delete_all();
     state().relays = relays;
@@ -762,6 +860,7 @@ fn end(gen: u64, why: String, forget: bool) {
 
 /// Renews before the earliest relay session ends, until signed out or a renewal is refused.
 fn renew_loop(gen: u64) {
+    let mut wait = RETRY;
     loop {
         let live = {
             let s = state();
@@ -775,12 +874,13 @@ fn renew_loop(gen: u64) {
             }
         }
         match renew(gen, cfg, ep) {
-            Ok(()) => {}
+            Ok(()) => wait = RETRY,
             Err((true, e)) => return end(gen, format!("Your sign-in ended: {e}"), true),
             Err((false, e)) if now() >= exp => return end(gen, format!("Your sign-in expired and could not be renewed: {}", e.trim_start_matches("provider: ")), false),
             Err(_) => {
-                let until = Instant::now() + RETRY;
-                while Instant::now() < until {
+                let until = Instant::now() + wait;
+                wait = (wait * 2).min(RETRY * 10);
+                while Instant::now() < until && now() < exp {
                     std::thread::sleep(Duration::from_secs(1));
                     if !alive(gen) {
                         return;
@@ -814,7 +914,7 @@ fn resume(cfg: Oidc) {
     let r = discover(&cfg.issuer).map_err(|e| (false, e)).and_then(|ep| renew(gen, cfg.clone(), ep));
     let shown = r.clone().map_err(|(fin, e)| if fin { format!("Your sign-in ended: {e}") } else { format!("Your sign-in could not be taken up again: {}", e.trim_start_matches("provider: ")) });
     if let Err((true, _)) = &r {
-        secret::delete(&cfg.client_id);
+        forget(Some(&cfg.client_id));
     }
     finish(gen, &shown);
     if r.is_ok() {
@@ -833,9 +933,7 @@ pub fn sign_out() -> Value {
     (s.note, s.alarm) = (Some("Signed out.".into()), None);
     drop(s);
     set_viewer_name(None);
-    if let Some(c) = &cfg {
-        secret::delete(&c.client_id);
-    }
+    forget(cfg.as_ref().map(|c| c.client_id.as_str()));
     let relays = delete_all();
     state().relays = relays;
     if let Some(u) = live.and_then(|l| l.ep.logout) {
@@ -918,6 +1016,12 @@ pub(crate) mod tests {
         // one not reached is left out.
         let (o, kid) = agree(&[("r1".to_owned(), Ok((404, b"no sign-in configured".to_vec()))), ("r2".to_owned(), Ok((404, b"not found".to_vec()))), ("r3".to_owned(), Err("offline: x".into()))], &keys, &mut floors).unwrap();
         assert_eq!((o, kid), (None, vec!["r1".to_owned()]));
+        // A relay restarting behind its proxy, overloaded or rate-limiting is left out like one not
+        // reached: it does not count as a relay without sign-in.
+        for code in [502, 503, 429, 500] {
+            let (o, kid) = agree(&[("r1".to_owned(), ok(signed(&admin, 7, "https://idp.example.org/t/v2.0"))), ("r2".to_owned(), Ok((code, b"Bad Gateway".to_vec())))], &keys, &mut floors).unwrap();
+            assert_eq!((o.unwrap().issuer.as_str(), kid), ("https://idp.example.org/t/v2.0", vec!["r1".to_owned()]), "{code}");
+        }
         // A release build refuses a loopback or http issuer even when signed.
         if RELEASE {
             assert!(agree(&[("r9".to_owned(), ok(signed(&admin, 1, "http://127.0.0.1:1/t/v2.0")))], &keys, &mut BTreeMap::new()).is_err());
@@ -949,14 +1053,20 @@ pub(crate) mod tests {
         assert_eq!(t.join().unwrap().unwrap(), "c0de");
         // The listeners are closed after the one request.
         assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
-        // Another state: refused, and the page says to go back to Tether.
+        // Another state, or none (another local user, a web page probing loopback ports): 400, and the
+        // wait goes on; the good one after it still signs in.
         let lb = Loopback::bind().unwrap();
         let port = lb.port;
         let t = std::thread::spawn(move || lb.wait("st4te", Instant::now() + Duration::from_secs(20), || true));
-        assert!(get(port, false, "/?code=c0de&state=other").contains(PAGE_FAIL));
-        assert!(t.join().unwrap().unwrap_err().contains("(state)"));
-        // The provider's refusal, as words; a deadline; a cancel.
+        for bad in ["/?code=c0de&state=other", "/?error=access_denied", "/"] {
+            let page = get(port, false, bad);
+            assert!(page.starts_with("HTTP/1.1 400") && page.contains(PAGE_FAIL), "{bad}: {page}");
+        }
+        assert!(get(port, false, "/?code=g00d&state=st4te").contains(PAGE_OK));
+        assert_eq!(t.join().unwrap().unwrap(), "g00d");
         let q = |s: &str| url::form_urlencoded::parse(s.as_bytes()).into_owned().collect::<BTreeMap<String, String>>();
+        assert!(callback(&q("code=c&state=other"), "s").unwrap_err().contains("(state)"));
+        // The provider's refusal, as words; a deadline; a cancel.
         let e = callback(&q("error=access_denied&error_description=AADSTS50057%3A+User+account+is+disabled.%0D%0ATrace+ID%3A+x&state=s"), "s").unwrap_err();
         assert_eq!(e, "provider: The sign-in provider refused: access_denied (AADSTS50057: User account is disabled.)");
         assert!(callback(&q("state=s"), "s").unwrap_err().contains("no code"));
@@ -965,32 +1075,116 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn relay_refusals_read_as_sentences() {
-        let (a, _, used) = relay_answer("relay.example", Ok((409, br#"{"reason":"token-used","message":"x"}"#.to_vec())));
-        assert!(!a.ok && used && a.text == "This sign-in was already used at relay.example: someone may have your sign-in. Sign out and tell your administrator.", "{a:?}");
-        for (code, reason, words) in [(403, "no-role", "no Tether role"), (403, "denied", "blocked"), (401, "overage", "too many groups"), (503, "provider-unavailable", "try again in a minute"), (401, "v1-token", "requestedAccessTokenVersion"), (401, "bad-signature", "(bad-signature)")] {
-            let (a, me, used) = relay_answer("r", Ok((code, format!(r#"{{"reason":"{reason}","message":"m"}}"#).into_bytes())));
-            assert!(!a.ok && me.is_none() && !used && a.text.contains(words), "{reason}: {a:?}");
+    fn ipv6_is_retried_on_another_port_before_ipv4_alone() {
+        if TcpListener::bind("[::1]:0").is_err() {
+            return; // no IPv6 loopback on this machine
         }
-        let (a, me, _) = relay_answer("r", Ok((200, br#"{"name":"Anna","exp":5,"sbom":true}"#.to_vec())));
-        assert!(a.ok && me.unwrap()["name"] == "Anna");
-        assert!(relay_answer("r", Err("offline: refused".into())).0.text.starts_with("Not reached: refused"));
-        assert!(relay_answer("r", Ok((401, b"kid must name the key in the body".to_vec()))).0.text.contains("not in your organisation's team"));
+        // [::1] taken on the first two ports: a third port with both.
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        let lb = Loopback::bind_with(|p| if n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 2 { Err(std::io::ErrorKind::AddrInUse.into()) } else { TcpListener::bind(("::1", p)) }).unwrap();
+        assert_eq!(lb.v6.as_ref().unwrap().local_addr().unwrap().port(), lb.port);
+        assert_eq!(lb.v4.local_addr().unwrap().port(), lb.port);
+        // Never: IPv4 alone after a few tries.
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        let lb = Loopback::bind_with(|_| {
+            n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(std::io::ErrorKind::AddrInUse.into())
+        })
+        .unwrap();
+        assert!(lb.v6.is_none() && n.into_inner() == 5);
+    }
+
+    #[test]
+    fn relay_refusals_read_as_sentences() {
+        let p = relay_answer("relay.example", Ok((409, br#"{"reason":"token-used","message":"x"}"#.to_vec())));
+        assert!(!p.answer.ok && p.used && p.fin && p.answer.text == "This sign-in was already used at relay.example: someone may have your sign-in. Sign out and tell your administrator.", "{:?}", p.answer);
+        // `fin`: the refusals a renewal ends on; the others are retried (the session and stored token kept).
+        for (code, reason, words, fin) in [(403, "no-role", "no Tether role", true), (403, "denied", "blocked", true), (401, "overage", "too many groups", true), (401, "wrong-tenant", "another organisation", true), (401, "wrong-client", "another organisation", true), (401, "wrong-audience", "audience", true), (503, "provider-unavailable", "try again in a minute", false), (503, "too-many-sessions", "too many sessions", false), (503, "config-changed", "changed just now", false), (401, "v1-token", "requestedAccessTokenVersion", true), (401, "bad-signature", "(bad-signature)", false)] {
+            let p = relay_answer("r", Ok((code, format!(r#"{{"reason":"{reason}","message":"m"}}"#).into_bytes())));
+            assert!(!p.answer.ok && p.me.is_none() && !p.used && p.fin == fin && p.answer.text.contains(words), "{reason}: {:?}", p.answer);
+        }
+        let p = relay_answer("r", Ok((200, br#"{"name":"Anna","exp":5,"sbom":true}"#.to_vec())));
+        assert!(p.answer.ok && p.me.unwrap()["name"] == "Anna");
+        for r in [Err("offline: refused".into()), Ok((502, b"Bad Gateway".to_vec())), Ok((429, b"slow down".to_vec())), Ok((500, vec![]))] {
+            let p = relay_answer("r", r);
+            assert!(!p.answer.ok && !p.fin, "{:?}", p.answer);
+        }
+        assert!(relay_answer("r", Err("offline: refused".into())).answer.text.starts_with("Not reached: refused"));
+        assert!(relay_answer("r", Ok((401, b"kid must name the key in the body".to_vec()))).answer.text.contains("not in your organisation's team"));
+    }
+
+    /// A server that answers every request with `code` and `body`.
+    fn fixed(code: u16, body: String) -> String {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                let _ = request_target(&mut s);
+                let _ = write!(s, "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn only_a_lasting_provider_refusal_is_final() {
+        let t = |code, body| {
+            let ep = Endpoints { authorize: String::new(), token: format!("{}/token", fixed(code, body)), logout: None };
+            token(&ep, &[("grant_type", "refresh_token")]).err().unwrap()
+        };
+        for e in ["invalid_grant", "interaction_required", "consent_required", "login_required"] {
+            let (fin, text) = t(400, format!(r#"{{"error":"{e}","error_description":"AADSTS50057: x"}}"#));
+            assert!(fin && text.contains(e), "{e}: {text}");
+        }
+        for (code, body) in [(400, r#"{"error":"temporarily_unavailable"}"#), (400, r#"{"error":"invalid_request"}"#), (503, ""), (429, r#"{"error":"x"}"#), (502, "<html>")] {
+            assert!(!t(code, body.to_owned()).0, "{code} {body}");
+        }
+    }
+
+    #[test]
+    fn stored_token_parts_are_counted() {
+        let id = "parts-test";
+        let long = "L".repeat(4500);
+        secret::store(id, &long).unwrap();
+        assert_eq!(secret::load(id).as_deref(), Some(long.as_str()));
+        let part = |i: usize| format!("Tether sign-in/refresh-token {id} {i}");
+        let old = secret::TEST.lock().unwrap().get(&part(1)).cloned().unwrap();
+        // A shorter token: the older one's higher parts are deleted, and a leftover is not read.
+        secret::store(id, "short").unwrap();
+        assert!(!secret::TEST.lock().unwrap().contains_key(&part(1)) && !secret::TEST.lock().unwrap().contains_key(&part(2)));
+        secret::TEST.lock().unwrap().insert(part(1), old);
+        assert_eq!(secret::load(id).as_deref(), Some("short"));
+        // A missing part: no token, and every part deleted.
+        secret::store(id, &long).unwrap();
+        secret::TEST.lock().unwrap().remove(&part(1));
+        assert_eq!(secret::load(id), None);
+        assert!(!secret::TEST.lock().unwrap().keys().any(|k| k.contains(id)));
+    }
+
+    #[test]
+    fn kid_only_to_relays_that_take_it() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        KID_RELAYS.lock().unwrap().insert("new.example".into());
+        state().live = Some(Live { cfg: oidc("https://idp.example.org"), ep: Endpoints { authorize: String::new(), token: String::new(), logout: None }, exp: now() + 60, me: json!({"name": "x"}) });
+        // Signed in: still no kid to an old relay (it refuses the header).
+        assert!(sends_kid("https://new.example") && !sends_kid("https://old.example"));
+        state().live = None;
     }
 
     type Log = std::sync::Arc<Mutex<Vec<(String, String, String)>>>;
-    type Flag = std::sync::Arc<std::sync::atomic::AtomicBool>;
+    /// A refusal a stand-in relay gives every posted session: status and reason.
+    type Refuse = std::sync::Arc<Mutex<Option<(u16, &'static str)>>>;
     type Secs = std::sync::Arc<std::sync::atomic::AtomicU64>;
 
     /// A stand-in relay of 0.7: the signed config, sessions (signature and `kid` checked; the token's
     /// claims read without a check, which is server/api's own test), `me`, and every request in the
-    /// log (`"METHOD path"`, `Tether-Sig`, body). The flag: it answers `409 token-used`; the seconds:
-    /// how long its sessions last.
-    fn stand_in_relay(config: Vec<u8>) -> (String, Log, Flag, Secs) {
+    /// log (`"METHOD path"`, `Tether-Sig`, body). The refusal: what it answers to a posted session
+    /// (`409 token-used`, `503 provider-unavailable`); the seconds: how long its sessions last.
+    fn stand_in_relay(config: Vec<u8>) -> (String, Log, Refuse, Secs) {
         use std::sync::atomic::Ordering::Relaxed;
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", l.local_addr().unwrap());
-        let (log, used, life): (Log, Flag, Secs) = Default::default();
+        let (log, used, life): (Log, Refuse, Secs) = Default::default();
         life.store(3600, Relaxed);
         let (log2, used2, life2) = (log.clone(), used.clone(), life.clone());
         std::thread::spawn(move || {
@@ -1022,8 +1216,8 @@ pub(crate) mod tests {
                         let roles: Vec<&str> = claims["roles"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
                         if fields != ["access_token", "key"] || kid != tether_trust::team::key_id(&key) || signed.is_err() {
                             (401, b"kid must name the key in the body".to_vec())
-                        } else if used2.load(Relaxed) {
-                            (409, br#"{"reason":"token-used","message":"this token is in use with another key"}"#.to_vec())
+                        } else if let Some((code, reason)) = *used2.lock().unwrap() {
+                            (code, format!(r#"{{"reason":"{reason}","message":"m"}}"#).into_bytes())
                         } else if !roles.contains(&"Tether.Technician") {
                             (403, br#"{"reason":"no-role","message":"none of your roles is mapped"}"#.to_vec())
                         } else {
@@ -1147,6 +1341,17 @@ pub(crate) mod tests {
         until("a renewal at both relays", || posts(&log_a).len() >= 3 && posts(&log_b).len() >= 3);
         assert_ne!(posts(&log_a)[0].2, posts(&log_a)[2].2, "a new access token");
         assert_ne!(secret::load(&cfg.client_id), Some(rt), "the stored refresh token was replaced");
+        // A temporary refusal at both relays (the provider unreachable behind them): the renewal is
+        // retried with backoff; the session and the stored token stay, and nothing is ended.
+        let n = (posts(&log_a).len(), posts(&log_b).len());
+        *used_a.lock().unwrap() = Some((503, "provider-unavailable"));
+        *used_b.lock().unwrap() = Some((503, "provider-unavailable"));
+        until("two refused renewals", || posts(&log_a).len() >= n.0 + 3 && posts(&log_b).len() >= n.1 + 3);
+        assert!(signed_in() && secret::load(&cfg.client_id).is_some());
+        assert_eq!((deletes(&log_a), deletes(&log_b)), (0, 0));
+        *used_a.lock().unwrap() = None;
+        *used_b.lock().unwrap() = None;
+        until("renewed again", || status_json()["relays"].as_array().unwrap().iter().all(|r| r["ok"] == true));
         // The account disabled: the next renewal is refused; the session ends with the reason, everywhere.
         m.control("user", json!({"upn": "software@tether.test", "disabled": true})).unwrap();
         until("the session ended", || !signed_in());
@@ -1170,18 +1375,32 @@ pub(crate) mod tests {
         assert!(opened.lock().unwrap().last().unwrap().contains("/logout"));
         // Every DELETE names the key too.
         assert!(log_a.lock().unwrap().iter().filter(|(r, _, _)| r.starts_with("DELETE")).all(|(_, s, _)| s.contains(" kid=")));
+        // Nothing live and no provider known (the session expired, the last check reached no relay):
+        // sign-out still deletes the stored token, so the next start resumes no one.
+        sign_in().unwrap();
+        {
+            let mut s = state();
+            (s.live, s.offered) = (None, None);
+        }
+        sign_out();
+        assert_eq!(secret::load(&cfg.client_id), None);
 
         // One relay says the token was used with another key: signed in at the other, with the alarm,
-        // and the person's own record of it posted.
-        used_b.store(true, Relaxed);
+        // and the person's own record of it posted at both relays (the one that took it included).
+        let events = |log: &Log| log.lock().unwrap().iter().filter(|(r, _, body)| r == "POST /api/team/audit-event" && body.contains("token-used")).count();
+        *used_b.lock().unwrap() = Some((409, "token-used"));
         let v = sign_in().unwrap();
         let alarm = v["alarm"].as_str().unwrap();
         assert!(alarm.starts_with(&format!("This sign-in was already used at {b}")) && alarm.contains("tell your administrator"), "{v}");
         assert!(v["relays"].as_array().unwrap().iter().any(|r| r["relay"] == b.as_str() && r["ok"] == false));
-        until("the token-used event", || log_a.lock().unwrap().iter().chain(log_b.lock().unwrap().iter()).any(|(r, _, body)| r == "POST /api/team/audit-event" && body.contains("token-used")));
+        until("the token-used event at both relays", || events(&log_a) == 1 && events(&log_b) == 1);
         sign_out();
-        used_b.store(false, Relaxed);
-        assert!(!used_a.load(Relaxed));
+        // Both say so: no relay took the sign-in, and the record is still posted, at both, for both.
+        *used_a.lock().unwrap() = Some((409, "token-used"));
+        assert!(sign_in().unwrap_err().contains("already used"));
+        until("the token-used events with no sign-in", || events(&log_a) == 3 && events(&log_b) == 3);
+        *used_a.lock().unwrap() = None;
+        *used_b.lock().unwrap() = None;
 
         // No role: refused with the reason at each relay, nothing stored.
         m.control("login", json!({"user": "noroles@tether.test"})).unwrap();
@@ -1189,6 +1408,17 @@ pub(crate) mod tests {
         assert!(e.contains("no Tether role") && e.contains(&a) && e.contains(&b), "{e}");
         assert!(!signed_in() && secret::load(&cfg.client_id).is_none());
         assert!(status_json()["note"].as_str().unwrap().contains("no Tether role"));
+
+        // Signed out while a renewal posts: what the relays took then is ended at once.
+        let d = (deletes(&log_a), deletes(&log_b));
+        let gen = state().gen;
+        state().gen += 1;
+        let claims = json!({"roles": ["Tether.Technician"], "name": "Late", "oid": "o", "preferred_username": "late@tether.test"});
+        let t = Tokens { access: format!("e30.{}.s", b64url(claims.to_string().as_bytes())), refresh: None };
+        let ep = Endpoints { authorize: String::new(), token: String::new(), logout: None };
+        assert!(establish(gen, cfg.clone(), ep, t).unwrap_err().1.starts_with("cancelled:"));
+        assert_eq!((deletes(&log_a), deletes(&log_b)), (d.0 + 1, d.1 + 1));
+        assert!(!signed_in());
 
         std::env::remove_var("TETHER_DEV_API");
         *crate::team::ME.lock().unwrap() = None;
