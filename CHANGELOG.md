@@ -195,6 +195,14 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   state lock. Measured at 20 000 devices and 1 000 desktops under `MemoryMax=64M` (one PC, WSL2,
   loopback): heartbeat p99 0.91 ms against 0.84 ms without members, peak RSS 40.3 MiB, one
   unexplained 10 s stall in a repeat run ([docs/scaling.md](docs/scaling.md#tether-api)).
+- **Bounds against anonymous sign-ins** (final review): a refused sign-in keeps no nonce; tokens
+  refused before their own signature verified count against the source address; `sign-in-refused`
+  records without a verified person are capped at 60 a minute relay-wide. The nonce set holds at
+  most 100 000 (then `503`) and is appended to `nonces.log` per request instead of rewriting
+  `nonces.json` under the lock. One proposal list (`429`, `Retry-After: 1`) and one team-audit read
+  (`429`, `Retry-After: 2`) at a time; proposals listed without parsing their documents, a release
+  proposal at most 64 KiB, an unreadable one listed and deletable by id; `GET /api/admin/devices`
+  recorded as `device-list`.
 - **Checked**: relay tests with the mock provider `tools/oidc-mock` (every refused token shape,
   sessions, deny list, `oidc_only`, Manage roles at the admin routes, audit records); desktop and
   Tether Manage unit tests against the mock and stand-in relays; one run by hand of the desktop

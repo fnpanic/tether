@@ -168,7 +168,8 @@ Rolled out on 2026-11-10 to Oracle relay 2 (backup) and then Hetzner (primary), 
 `scripts/deploy-relay-update.sh` rolls it out, one relay at a time, the backup first (its `RELAYS` default names both nodes and their SSH keys):
 
 ```bash
-# from the PC, Git Bash, in C:\installemote-support
+# from the PC, Git Bash, in C:\install
+emote-support
 bash scripts/deploy-relay-update.sh            # HBBR=1 also replaces hbbr (ends relayed sessions on that node)
 ```
 
@@ -211,6 +212,12 @@ key of the Tether ID (`GET /peer-pk/<id>` on hbbs's health port) and checks the 
   the policy with `health.agent`. A relay before 0.7.0 refuses to store that policy (`400 unknown
   feature "health.agent"`), the grant and the proof field; an hbbs before 0.7.0 answers `404` to
   every lookup (`409 tether id unknown to this relay`). Details: [updates.md](updates.md#relay-deploy-notes).
+- **Rollback after a signed team document.** When a relay accepts the first signed team document
+  it deletes `team/roster.json` (the plain roster is never read again). tether-api 0.6 knows only
+  that file: rolled back to 0.6 after a signed document was published, the relay admits no member at
+  all. Before publishing the first signed team document, back up `/var/lib/tether-api/team/roster.json`
+  on every relay; to roll back, stop tether-api, put that copy back (owner `tether-api`, mode
+  `0600`), install 0.6 and start it. Members added since then are not in it.
 - **Check.** On the relay, `curl -s localhost:21122/peer-pk/<a Tether ID registered there>` prints
   the key; from another address the same request gets `404`.
 - **Not tried yet:** none of this has been deployed to these relays or run against a real

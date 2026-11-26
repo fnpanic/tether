@@ -199,9 +199,15 @@ fall back to v1 by themselves. **Rollout order:** first every relay, with `RELAY
 host name(s) entered for it in Tether Manage; then Tether Manage and the apps; last
 `TETHER_SIG_V1=off` on every relay.
 
-Used nonces are stored in `nonces.json`, so a restart does not reopen the replay window. When that
-file cannot be written (disk full) the request still succeeds and the error is logged; the nonce
-keeps blocking replays in memory.
+Used nonces are stored, so a restart does not reopen the replay window: each request's nonce is
+appended to `nonces.log` (synced before the answer), and after 10 000 lines the whole set is
+written to `nonces.json` and the log starts again (a restart reads both; a `nonces.json` over
+16 MiB is not read). When they cannot be written (disk full) the request still succeeds and the
+error is logged; the nonce keeps blocking replays in memory. At most 100 000 nonces are kept (every
+signed request's for 601 s, an upload's longer): when that many are still inside their window, a
+new admin, member or session request is refused `503 too many signed requests, retry later` with
+`Retry-After: 60` rather than the set growing. A sign-in (`POST /api/team/session`) leaves its nonce
+only once its token verified.
 
 | Method & path | Body | Result |
 | --- | --- | --- |
@@ -221,7 +227,7 @@ keeps blocking replays in memory.
 | `GET /api/admin/releases` | – | `[{channel,path,size,modified}]` |
 | `PUT /api/admin/download-page` | HTML (≤ 512 KiB) | `204`, stored as `download/index.html` |
 | `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>` | – | Session audit records (above), newest first. All optional: `since` (default 0), `limit` 1–5000 (default 1000), `device` matches `id` or `uuid` exactly (URL-encoded). Unknown parameter or bad value: `400`. One answer holds at most about 8 MiB of records; when older ones were left out for that, it carries the header `X-Audit-Truncated: 1` (the Sessions page of Tether Manage then names the relay). |
-| `GET /api/admin/team-audit?since&until&actor&device&customer&event&limit&cursor` | – | The team audit log, oldest first, with the current chain head and the chain problems found: see [Team audit log](#team-audit-log). |
+| `GET /api/admin/team-audit?since&until&actor&device&customer&event&limit&cursor` | – | The team audit log, oldest first, with the current chain head and the chain problems found: see [Team audit log](#team-audit-log). One read at a time for the whole relay: another meanwhile gets `429 busy` with `Retry-After: 2`. |
 | `GET /api/admin/status` | – | `{version, disk_free, devices, policy_serial, server_keys_serial, release_generation, release_indexes: {<channel>: {serial, expires}}, uptime, last_prune: {time, files, bytes} \| null}` |
 | `DELETE /api/admin/status/<uuid>` | – | `204`: the device's pin (with its link or claim), last report and history are removed (journal line `status: pin of <uuid> removed by an admin`). `404` for an invalid or unknown uuid. `503` while `STATUS=off` or the status store is locked. See [Device status](#device-status-health-reports). |
 | `POST /api/admin/status/revoke` | `{"id":"<token id>","exp":<the token's exp>}` | `204`, also when the id is revoked already (the later `exp` is kept). `400 exp has passed` when `exp` is not in the future (an expired token is refused anyway; nothing is stored). The relay refuses that token from then on (`401 token revoked`); devices that enrolled with it stay enrolled. Kept in `status/revoked.json` until `exp`. `400` for a bad id or body, `507 too many revoked tokens` with 10 000 kept (expired ones leave within a minute), `503` as above. |
@@ -229,9 +235,9 @@ keeps blocking replays in memory.
 | `GET /api/admin/status/devices[?token=<id>][&after=<uuid>]` | – | The pins, sorted by uuid: `{"devices":[{"uuid","token","label","tether_id","claimed_id","linked_by","linked_at","linked_token","no_claim","customer","host","enrolled","last_seen"}],"next":"<uuid>" \| null}`; `customer` is `null` when none. Each request looks at no more than 1000 pins: `token` keeps only the pins enrolled with that token among them, so a page can be short or empty while `next` is set. `next`: pass it as `after` for the next page; `null` when no pin follows. `host` (the last full report's) and `last_seen` are `null` before the first post; `token` is `null` for pins from before token ids. `400` for an unknown parameter or a bad value. |
 | `PUT /api/admin/team` | a signed team document upload (≤ 360 KiB) or a plain team roster (≤ 64 KiB, below) | `204`. A signed upload: verified against `ADMIN_PUB_KEY` (`401` when not signed by one of its keys or the signature does not match), validated (`400`), serial above the stored one (`409 serial must be greater than the current team document's`); stored atomically as `team/team.json` (0600) exactly as received, and `team/roster.json` is deleted. A plain roster: validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600); `{"members":[]}` turns team access off; refused with `409` once a signed document was accepted (below). |
 | `GET /api/admin/team` | – | the plain roster (`{"members":[]}` when none), or the signed upload exactly as published |
-| `PUT /api/admin/proposals/<kind>` | `{"base":"<sha256 hex or empty>","note":"…","doc":<payload>}` (≤ 400 KiB) | A proposal ([below](#tether-manage-sessions-on-admin-routes)): `200 {"id":"<16 hex>"}`. `<kind>` `policy`, `team` or `release` (else `404`). `400` for a bad body, a `base` that is not 64 lower-case hex digits or empty, a `note` over 500 characters or with control characters other than line breaks, or a `doc` that would not pass a publish (`not a valid <kind>: …`); `409 10 <kind> proposals are waiting: delete one first`. |
-| `GET /api/admin/proposals/<kind>` | – | `{"live":"<sha256 hex of what the relay serves now>" \| null,"proposals":[…oldest first]}`; each `{"id","kind","author":{"key_fingerprint","name","oid"?,"upn"?},"created","base","note","serial"?,"doc"}` |
-| `DELETE /api/admin/proposals/<kind>/<id>` | – | `204`; `404` unknown; `403 only its author or a key holder may delete a proposal` |
+| `PUT /api/admin/proposals/<kind>` | `{"base":"<sha256 hex or empty>","note":"…","doc":<payload>}` (≤ 400 KiB) | A proposal ([below](#tether-manage-sessions-on-admin-routes)): `200 {"id":"<16 hex>"}`. `<kind>` `policy`, `team` or `release` (else `404`). `400` for a bad body, a `base` that is not 64 lower-case hex digits or empty, a `note` over 500 characters or with control characters other than line breaks, or a `doc` that would not pass a publish (`not a valid <kind>: …`; a release `doc` over 64 KiB as stored); `409 10 <kind> proposals are waiting: delete one first`. |
+| `GET /api/admin/proposals/<kind>` | – | `{"live":"<sha256 hex of what the relay serves now>" \| null,"proposals":[…oldest first]}`; each `{"id","kind","author":{"key_fingerprint","name","oid"?,"upn"?},"created","base","note","serial"?,"doc"}` (`doc` as stored, not parsed again), a file that cannot be read `{"id","unreadable":true}` (first). One list read at a time for the whole relay: another meanwhile gets `429 busy` with `Retry-After: 1`. |
+| `DELETE /api/admin/proposals/<kind>/<id>` | – | `204`; `404` unknown; `403 only its author or a key holder may delete a proposal` (an unreadable one: a key holder or the admin signature) |
 | `POST /api/admin/audit-event` | `{"event":"export","what":"team-activity"\|"sessions"\|"devices","rows":<≤ 10 000 000>}` | `204`: Tether Manage's own export, written to the team audit log marked `self_reported`; `400` for anything else |
 
 The server refuses uploads that would leave less than 2 GiB free on the disk (`507`).
@@ -265,16 +271,18 @@ verified with the session's key before the relay's lock and then refused the sam
 never signs anything: what is live still changes only with an admin-signed publish.
 
 **Proposals** are drafts a person without the keys stores for a key holder: a policy (a `Bundle`),
-a team document (a `TeamDoc`), both validated as a publish would be, or a release (any JSON object;
-Tether Manage puts `{channel, app, platform, version, notes, where, files:[{name, sha256}]}`, never
+a team document (a `TeamDoc`), both validated as a publish would be, or a release (any JSON object
+of at most 64 KiB; Tether Manage puts `{channel, app, platform, version, notes, where, files:[{name, sha256}]}`, never
 the files). Stored unsigned in `proposals/<kind>/<id>.json` (`0600`) with the author (the session's
 person, or `admin` for an admin signature, which is accepted too), the time, `base` and the
 document's `serial`; at most 10 per kind. A proposal is never served as live and never applied.
 `base` is the SHA-256 of what the relay served when the proposal was made (`GET /api/policy`,
 `GET /api/admin/team`; empty: nothing); `live` in the `GET` answer is the same hash now, so a
 proposal whose `base` differs is stale. `DELETE`: its author (by `oid`), a KeyHolder session or the
-admin signature. Records: `proposal-put` (`{"kind","id","serial"}`), `proposal-delete`
-(`{"kind","id","serial","author_oid","same_person"}`: whether the remover proposed it).
+admin signature. A file that cannot be read still counts toward the 10; the list names it by id
+and a key holder or the admin signature can delete it. Records: `proposal-put`
+(`{"kind","id","serial"}`), `proposal-delete` (`{"kind","id","serial","author_oid","same_person"}`:
+whether the remover proposed it; `{"kind","id","unreadable":true}` for an unreadable file).
 
 ## Team (technician) endpoints
 
@@ -452,12 +460,17 @@ the API scope), `wrong-issuer`, `wrong-tenant`, `wrong-client`, `expired`, `not-
 `not-configured` (no `oidc` in the document); `409`: `token-used`; `503` with `Retry-After`:
 `provider-unavailable` (the provider's keys cannot be fetched), `provider-address` (the provider's
 name resolves to a loopback or private address: a production build never connects there),
-`config-changed` (the document changed during the check; retry), `too-many-sessions`. Once the
-request signature has verified, a token refused with a `401` counts against the signing key, not
-the address (which would refuse every team route to an office behind one NAT with skewed clocks):
-the 21st within a minute from one key gets `429 too many refused tokens from this key` with
-`Retry-After: 60`, also for a good token. Failures before the signature check (and replays) still
-count 60 a minute per address.
+`config-changed` (the document changed during the check; retry), `too-many-sessions`. Any key may
+sign a sign-in, so what a refused one leaves is bounded: its nonce is not kept (only a sign-in
+whose token verified keeps it; a replay of a refused one is refused the same way again). A token
+refused before its own signature verified (`malformed`, `alg`, `no-kid`, `unknown-kid`,
+`bad-signature`) and `not-configured` count against the source address like a failed request
+signature (60 a minute, then `429 too many failed requests` on every team route from that address).
+A token refused with a `401` after its signature verified (a token from the provider refused for
+its claims) counts against the signing key, not the address (which would refuse every team route
+to an office behind one NAT with skewed clocks): the 21st within a minute from one key gets
+`429 too many refused tokens from this key` with `Retry-After: 60`, also for a good token. Replays
+and failed request signatures count per address.
 
 **What is trusted from where.** Issuer, tenant, audience and client id come only from the
 admin-signed team document, never from the request or the provider. From the provider's discovery
@@ -487,7 +500,8 @@ that answer.
 
 **Audit** (team audit log): `sign-in` (`actor` with `oid` and `upn`, `detail` `{"roles","exp"}`),
 `sign-in-refused` (`detail` `{"reason"}`; `actor` only the key id and `"name":"-"` unless the token
-was verified: then the person), `sign-out`, `session-ended` (`detail` `{"reason":"deny-list"|
+was verified: then the person; those without a verified person at most 60 a minute for the whole
+relay, the ones left out counted as `"more":n` in the next one written), `sign-out`, `session-ended` (`detail` `{"reason":"deny-list"|
 "no-role"|"document-changed","serial"}`; `{"reason":"replaced","kid"}` when a person's ninth key
 replaced the oldest session, `kid` the key that lost its session). Never the token. Every other record of a signed-in
 member names the person (`actor.oid`, `actor.upn`) and the key id.
@@ -519,7 +533,7 @@ files `0600`), also with a plain roster. Fields, in this order (absent ones left
 | Event | Route | `detail` |
 |---|---|---|
 | `summary` | `GET /api/team/status` | `{"reads":n}`: one record for the first read of an hour, with `n` the reads since the member's previous summary record, this one included; reads after it are written by the relay's hourly maintenance (and at a clean stop) as a record without `result`, whose `ip` is the address of the last of those reads only. A hard kill loses at most an hour of such counts |
-| `device-list`, `status-device-list` | `GET /api/team/devices`, `GET /api/admin/status/devices` | `{"reads":n}`, folded per reader and hour as `summary` |
+| `device-list`, `status-device-list` | `GET /api/team/devices` and `GET /api/admin/devices` (heartbeats with addresses), `GET /api/admin/status/devices` | `{"reads":n}`, folded per reader and hour as `summary` |
 | `signature-limit` | any member route | `{"kid":"<16 hex>"\|null,"unverified":true}`, no `actor`, `result` `429`: an address reached 60 failed member signatures a minute; at most one record (and one journal line `team: failed member signatures from <ip> …`) per address and minute, and at most 60 such records (and lines) a minute for the whole relay: the ones left out are counted and the next record carries their number as `"more":n`; `kid` the one the refused request named (not verified), only when it has the key-id form (16 lower-case hex), else `null`; the journal line ends `(kid …, unverified)` |
 | `report` | `GET /api/team/status/<uuid>` (report and history) | – |
 | `software-list` | `GET /api/team/status/<uuid>/sbom` | – |
@@ -603,7 +617,9 @@ team members `401`):
 all optional, exact matches; unknown parameter or bad value `400`. Answer, oldest first:
 `{"head":"<hash>","records":[…],"next":"<cursor>"|null,"problems":[{"day","at":<byte offset>,"problem"}]}`.
 Read from the files line by line (never a whole day in memory), at most `limit` records and about
-8 MiB of records per answer and 256 MiB of log read; `next` continues there. Every line read is
+8 MiB of records per answer and 256 MiB of log read; `next` continues there. One read at a time
+for the whole relay (each may wait up to 2 s for the writer's queue): another meanwhile gets
+`429 busy` with `Retry-After: 2`. Every line read is
 checked against the chain (`problems`, at most 100): `prev-mismatch` (the line before was changed or
 removed, or this one inserted), `unreadable`, `truncated`, `starts-after-removed-day` (the oldest
 line follows one no longer kept: retention or the size cap, not a break), `head-not-found` (the
@@ -999,7 +1015,9 @@ only from that scope's hosts, with its own ETag; at most 2 001 scopes (one per p
 and gzip copies), least recently used dropped first, one build at a time for all scopes. A request
 whose scope has no file (its first build, or dropped by the 256 MiB bound) waits for a build; at
 most 4 such requests wait at once for the whole relay, each at most 5 s; any other, and a waiter
-whose 5 s are over, gets `503 status summary not ready` with `Retry-After: 5`. `If-None-Match: *`
+whose 5 s are over, gets `503 status summary not ready` with `Retry-After: 5`. A scope without a
+file whose last build failed less than 30 s ago gets the same answer at once with `Retry-After: 30`
+(no build is tried before then). `If-None-Match: *`
 answers `304` when the scope has a summary.
 A host whose device has a software list (with `STATUS_SBOM=on`) also has `"sbom":{"at":<unix time>,"sha":"<16 hex>"}` (`at` is the modification time of the stored file, which is when it was uploaded), outside the 2 KiB entry; the list itself is
 `GET /api/team/status/<uuid>/sbom`.

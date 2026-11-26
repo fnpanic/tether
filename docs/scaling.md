@@ -195,6 +195,9 @@ from one address. The reference run is the same without members and junk (`MEMBE
 - **Summary size**: 20 257 KB plain, 1 756 KB gzip for 19 954 hosts (11.5 ×; the design's
   estimate was 8 to 10 ×). Writing the gzip copy takes about 0.19 s and 0.25 MB of memory (RSS
   +0.25 MB, peak +0.44 MB, flate2 1.1.11 with miniz_oxide 0.9.1, measured on its own on that file).
+- **Desktops before 0.7 and large fleets**: a 0.6 desktop reads at most 16 MiB of unpacked
+  summary, so its full host list fails above roughly 16 000 hosts in the member's scope (about
+  1 KB per host, from the size above); 0.7 desktops read up to 48 MiB.
 - **Bytes out for summaries**: 6.0 MB/s at 3.33 summaries a second: the 10 % of old desktops
   without gzip took 3.4 of them (200 answers of 15.2 MB on average), the 90 % with gzip 2.6 MB/s.
   All with gzip would be about 2.9 MB/s, all without about 34 MB/s (*computed* from these answers).
