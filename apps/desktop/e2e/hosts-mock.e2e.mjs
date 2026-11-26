@@ -312,7 +312,7 @@ async function run(name) {
     await until(async () => !/Searching installed software/.test(await notes.textContent()), wait);
     return notes.textContent();
   };
-  check(tag("an old relay: named, the other relay's result shown"), /relay2\.example\.com does not support software search \(needs tether-api 0\.7\.0\)/.test(await swState({ "relay2.example.com": "unsupported" }, "software:aster")) && /Results from relay\.example\.com only\./.test(await notes.textContent()));
+  check(tag("an old relay: named, the other relay's result shown"), /relay2\.example\.com does not support software search \(needs the relay update of release 0.7.0\)/.test(await swState({ "relay2.example.com": "unsupported" }, "software:aster")) && /Results from relay\.example\.com only\./.test(await notes.textContent()));
   check(tag("switched off"), /software search is switched off on relay2\.example\.com/.test(await swState({ "relay2.example.com": "off" }, "software:birch")));
   check(tag("no permission: the reason, not an error dialog"), /your team membership does not allow software search on relay\.example\.com/.test(await swState({ "relay.example.com": "forbidden", "relay2.example.com": "forbidden" }, "software:cobalt")) && !(await p.getByRole("alertdialog").isVisible()));
   check(tag("too many searches of this member: the wait, no retry"), /you ran more than 6 software searches a minute on relay\.example\.com: wait 5 s, then press Enter/.test(await swState({ "relay.example.com": "limit" }, "software:dunmore")));
