@@ -821,6 +821,27 @@ pub fn posted(body: &[u8]) -> Result<(&'static str, Target, Value), String> {
     Ok((event, Target { uuid: p.uuid, tether_id: p.tether_id, customer: None }, detail))
 }
 
+/// `POST /api/admin/audit-event`: what Tether Manage reports it did that no relay sees, an export
+/// (`{"event":"export","what":"team-activity"|"sessions"|"devices","rows":n}`). Event and detail.
+pub fn manage_posted(body: &[u8]) -> Result<(&'static str, Value), String> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct M {
+        event: String,
+        what: String,
+        rows: u64,
+    }
+    let m: M = serde_json::from_slice(body).map_err(|e| e.to_string())?;
+    if m.event != "export" {
+        return Err("unknown event".into());
+    }
+    let what = ["team-activity", "sessions", "devices"].into_iter().find(|w| *w == m.what).ok_or("bad what")?;
+    if m.rows > 10_000_000 {
+        return Err("rows: at most 10000000".into());
+    }
+    Ok(("export", json!({"what": what, "rows": m.rows})))
+}
+
 /// Tests that measure the process's RSS hold this, and so do tests that allocate many MB.
 #[cfg(test)]
 pub(crate) static RSS_TEST: Mutex<()> = Mutex::new(());

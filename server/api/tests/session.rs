@@ -746,6 +746,15 @@ mod with_the_mock {
         assert!(other.iter().any(|r| r["detail"]["route"] == "GET /api/admin/custom" && r["actor"]["oid"] == oid(5)), "{other:?}");
         let del = s.records(&admin, "proposal-delete");
         assert_eq!(del.iter().map(|r| r["result"].as_u64().unwrap()).collect::<Vec<_>>(), [204, 403, 204]);
+        // Manage's own exports, self-reported by any role (and the admin signature); nothing else.
+        let ev = |k: &SigningKey, kid: bool, b: Value| s.signed(k, kid, "POST", "/api/admin/audit-event", b.to_string().as_bytes()).status;
+        assert_eq!(ev(&auditor, true, json!({"event": "export", "what": "team-activity", "rows": 12})), 204);
+        assert_eq!(ev(&admin, false, json!({"event": "export", "what": "sessions", "rows": 3})), 204);
+        assert_eq!(ev(&auditor, true, json!({"event": "export", "what": "hosts", "rows": 1})), 400);
+        assert_eq!(ev(&auditor, true, json!({"event": "policy-publish", "what": "devices", "rows": 1})), 400);
+        assert_eq!(ev(&tech, true, json!({"event": "export", "what": "devices", "rows": 1})), 401, "a team key is no admin");
+        let ex = s.records(&admin, "export");
+        assert_eq!(ex.iter().map(|r| (r["actor"]["name"].as_str().unwrap().to_owned(), r["self_reported"] == true, r["detail"].clone(), r["result"].as_u64().unwrap())).collect::<Vec<_>>(), [("Manage Auditor".to_owned(), true, json!({"what": "team-activity", "rows": 12}), 204), ("admin".to_owned(), true, json!({"what": "sessions", "rows": 3}), 204)]);
         // A document that drops the Manage role takes it away at once.
         let doc2 = team_doc(&admin, 2, json!([]), json!({"oidc": oidc_of(&m), "roles": roles()}));
         assert_eq!(s.publish(&admin, &doc2).status, 204);

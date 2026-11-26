@@ -889,7 +889,7 @@ fn session_may(method: &str, rest: &str, roles: &[tether_trust::team::ManageRole
     use tether_trust::team::ManageRole::{KeyHolder, Operator, PolicyEditor, Publisher};
     let any = |set: &[tether_trust::team::ManageRole]| roles.iter().any(|r| set.contains(r));
     match (method, rest) {
-        ("GET", "status" | "devices" | "status/devices" | "status/revoked" | "audit" | "team-audit" | "policy-history" | "releases") => !roles.is_empty(),
+        ("GET", "status" | "devices" | "status/devices" | "status/revoked" | "audit" | "team-audit" | "policy-history" | "releases") | ("POST", "audit-event") => !roles.is_empty(),
         ("GET", r) if r.starts_with("policy-history/") => !roles.is_empty(),
         ("GET", "diag") | ("POST", "diag-ticket" | "status/revoke") => any(&[Operator]),
         ("GET" | "POST" | "DELETE", r) if r.starts_with("diag/") => any(&[Operator]),
@@ -1381,6 +1381,7 @@ impl App {
             ("DELETE", r) if r.starts_with("status/") => LIMIT_SMALL,
             ("POST", "status/revoke") | ("GET", "status/revoked" | "status/devices") => LIMIT_SMALL,
             ("PUT", r) if r.starts_with("proposals/") => proposals::LIMIT_PROPOSAL,
+            ("POST", "audit-event") => LIMIT_SMALL,
             ("GET" | "DELETE", r) if r.starts_with("proposals/") => LIMIT_SMALL,
             _ => return Err(not_found()),
         };
@@ -1407,6 +1408,12 @@ impl App {
         self.audit_admin(rq, actor.clone(), method, url, rest, body);
         match (method, rest) {
             (m, r) if r.starts_with("proposals/") => self.proposals(m, &r["proposals/".len()..], body, &actor, session.as_ref()),
+            // What Tether Manage did on its own (an export): recorded as it says, marked self-reported.
+            ("POST", "audit-event") => {
+                let (event, detail) = teamaudit::manage_posted(body).map_err(|e| text(400, &e))?;
+                self.audit_pending = Some(teamaudit::Rec { self_reported: true, ..teamaudit::Rec::new(event, Some(actor), Some(client_ip(rq)), teamaudit::Target::default(), detail) });
+                Ok(empty(204))
+            }
             ("PUT", "policy") => self.put_policy(body),
             ("PUT", "server-keys") => self.put_server_keys(body),
             ("PUT", "team") => self.put_team(body),
