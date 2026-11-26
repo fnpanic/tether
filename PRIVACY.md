@@ -14,6 +14,7 @@ What goes to those relay servers:
 | Update checks: app, channel, version | Offering signed updates | access logs of the relay |
 | Health report, only on machines where the organization installed a monitoring agent: machine name, names and versions of installed products, the state, title, value and hint of each check, agent version, time of the last report | Showing the health of supported machines to technicians | the last full report and 90 days of state changes; removed when the device is removed or after 180 days without a report |
 | Customer reference, only on machines where the organization installed a monitoring agent and its administrator put one in the enrolment token: a short label such as a customer number (set by the administrator, never by the machine) | Grouping supported machines by customer in Tether | with the device's enrolment: removed when the device is removed or after 180 days without a report |
+| Staff access record (team audit log), about the organization's technicians and other support staff, not about the supported machine's users: the staff member's name, user name and directory id, the time, the device and customer concerned, the search term of a software search, the staff member's IP address, the kind of access and its result; never what was shown or returned (no report or list contents, no search hits) | Accountability of staff access to supported machines' data (shown in Tether Manage › Team activity) | daily files on each relay, 90 days or 2 GB by default (the organization sets both) |
 | Software list and hardware identity, only on machines where the organization installed a monitoring agent that collects them, and only if the relay's operator switched the storage on: names, versions and publishers of the installed programs and of the operating system, and the machine's manufacturer, model, serial number, memory and processor | Showing a machine's installed software to technicians, searching the machines for an installed program (only names, versions and publishers, where the relay's operator switched the search on), and the organization's own inventory exports | one document per machine; removed when the device is removed or after 180 days without a report (the organization can also switch the collection off, which deletes it) |
 
 Health reports come from a separate monitoring agent, not from Tether or TetherQS, and only if the
@@ -32,10 +33,10 @@ Tether Monitor* (or with `tether-monitor uninstall`); Tether then never installs
 policy. A computer's administrator can refuse it for good with the machine policy
 `{"health.agent":{"state":"locked","value":"manual"}}` in `HKLM\SOFTWARE\Policies\Tether` (value
 `PolicyJson`, also by Group Policy). Details: [docs/health.md](docs/health.md#installing-the-agent-through-tether). They go to the same relay servers, are not end-to-end encrypted, and can be
-read by the relay's operator and by every member of the organization's technician team in Tether.
+read by the relay's operator and by the organization's support staff whose role allows it (see below).
 What a report contains is decided by the agent; the format is described in [docs/health.md](docs/health.md).
 The software list is stored and read in the same way ([docs/health.md](docs/health.md#the-software-list)): it is not
-end-to-end encrypted, and the relay's operator and every team member can read it.
+end-to-end encrypted, and the relay's operator and the support staff whose role includes software lists can read it.
 If the relay's operator also switched the software search on, the relay reads the name, version and
 publisher of each installed program from every list and keeps them in a file next to the list (never
 the hardware identity; the file is removed with the list), so that technicians can search all
@@ -51,6 +52,20 @@ covered by that organization's privacy statement.
 When a technician links a monitoring agent to a host in Tether, the relay stores that technician's
 name (as in the team roster) and the time with the device's enrolment; every team member sees it,
 and it is removed with the device.
+
+**Who at the support organization sees a machine's data, and how that is recorded.** The
+organization's support staff see health reports and software lists through Tether only if they are
+in its team: signed in with the organization's account and given a role in its directory (for
+example Microsoft Entra ID), or holding a key the organization added. The organization's signed
+team document decides what each role may read, and it can limit staff to the machines of certain
+customers (by the customer reference above); without such a limit, staff with a role see every
+machine. Every access to a machine's data is recorded on the relay that served it: who (name, user
+name, directory id), when, which device and customer, the search term of a software search, and the
+staff member's IP address, never what was shown. The records are kept for the retention the
+organization sets (90 days by default) and can be read only by the organization's administrators
+and the staff it gives a Tether Manage role, not by technicians. A customer can ask the support
+organization which of its staff accessed its machines. Details:
+[docs/api.md](docs/api.md#team-audit-log), [docs/sign-in.md](docs/sign-in.md).
 
 Session recordings are made only when recording is switched on and are saved on the technician's
 computer. They are uploaded only if the organization's signed policy sets an upload target

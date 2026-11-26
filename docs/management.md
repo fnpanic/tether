@@ -29,7 +29,9 @@ a feature of this policy. Update the relay first, then publish again."
 | Status and relays | The relay list (every publish goes to all of them) with per-relay health; live policy vs draft |
 | Policy | Edit the draft, compare it with the live policy on every relay, history |
 | Devices | Every app that sent a heartbeat to any relay in the last 180 days; filters; group assignment |
-| Team | Technicians who may read the device list and shared tags with their own key |
+| Sessions | The session audit log the hosts reported |
+| Team activity | What staff did on every relay: the team audit log, with chain checks |
+| Team | The signed team document: staff sign-in, directory roles, deny list, key entries |
 | Releases | What each relay publishes vs the latest upload; sign and publish installers and `TetherQS.exe` |
 | Download page | Generate and publish the page at `https://<relay>/` |
 | Custom apps | Branded TetherQS downloads (name, logo, colour, settings) behind private, expiring links |
@@ -60,6 +62,99 @@ the same way:
 3. **Result per relay:** ✓ with what is live now, or the error. A relay that failed can be brought
    up to date later (policy: the bar's **Bring … up to date**; releases: **Publish to missing
    relays**).
+
+## Sign-in and roles
+
+From 0.7.0, when the relays' team document has sign-in settings, staff can open Tether Manage with
+their organisation's account instead of the keys: "Sign in with your organisation" on the unlock
+screen ("Without the keys: what your Tether Manage role allows (read, operate, propose). Signing and
+publishing stay with a key holder's keys."). The set-up in Microsoft Entra ID and in Tether:
+[sign-in.md](sign-in.md). The person's **Tether Manage roles** come from the directory's app roles,
+mapped in the team document ([Team](#team)): a role entry with `manage` set to `auditor`,
+`operator`, `policy-editor`, `publisher` or `key-holder` gives that role and no team access in the
+desktop app.
+
+**The keys stay with the key holders.** The admin and updater keys are in the vault on a key
+holder's PC, as before; a sign-in never brings them to anyone else. Signed-in requests to the relays
+are signed with a key Tether Manage makes for the run (in memory only) and name it (`kid`); the
+relay takes them as that person's session and allows the admin routes of the person's roles
+([api.md](api.md#tether-manage-sessions-on-admin-routes)). Everything that signs or publishes
+(policy, team document, server keys, releases, the download page, custom apps) still needs the
+admin key: a relay answers a session's attempt with `403` ("your Tether Manage role does not allow
+this; signing and publishing need a key holder's Tether Manage with its keys unlocked") and records
+it.
+
+| | Auditor | Operator | Policy editor | Publisher | Key holder |
+|---|---|---|---|---|---|
+| Read Status and relays, Policy (live, history), Devices, Sessions, Team activity, Releases; export CSV | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Diagnostics tickets (open, read, close, delete); remove devices; revoke enrolment tokens and grants | – | ✓ | – | – | – |
+| Read the team document (Team page) | – | – | ✓ | – | ✓ |
+| Propose policy and team document changes | – | – | ✓ | – | – |
+| Propose a release | – | – | – | ✓ | – |
+| Read and remove proposals | – | – | policy, team | release | all |
+| Unlock the keys, sign and publish (also Keys, Download page, Custom apps) | – | – | – | – | ✓, on their own PC |
+
+Roles add up. The navigation shows only the pages the roles allow; the policy bar shows
+**Publish…** (the keys sign), **Propose…** (a policy editor) or **Read only**. Some controls a role
+cannot use stay visible (rollout and halt on the read-only Releases page); Tether Manage and the
+relay refuse them.
+
+- **Key holder.** Signed in with the KeyHolder role, **Unlock the keys** at the foot of the
+  navigation opens the vault with its passphrase; then the vault signs. Before it signs, Tether
+  Manage asks a relay for the person's roles now (`GET /api/team/me`, an answer at most 30 s old):
+  when no relay confirms the session, it signs nothing. While someone is signed in **without**
+  KeyHolder, an unlocked vault does not sign: "Your Tether Manage role does not include KeyHolder, so
+  this app does not sign with the keys while you are signed in. A key holder signs and publishes; to
+  use the keys alone (break-glass), sign out first." (under the navigation: "Signed in without the
+  KeyHolder role: the keys do not sign.").
+- **Break-glass.** Without a sign-in, Tether Manage works with the unlocked vault exactly as before
+  0.7.0: every page, every signature. Use it when the provider or the sign-in does not work. A
+  publish made so is recorded in the team audit log under the admin key only, with no person named
+  ([Team](#team), "Who signed").
+- The sign-in itself works as in the desktop app ([sign-in.md](sign-in.md#how-it-works)): the
+  system browser, the refresh token in the credential store under "Tether Manage sign-in", the
+  session renewed before it ends. Tether Manage checks the sign-in settings against the compiled-in
+  admin keys and the vault's admin key. After a restart it takes up the stored sign-in with a new
+  run key.
+
+## Proposals
+
+People without the keys prepare changes as **proposals**, stored unsigned on every relay
+(`PUT /api/admin/proposals/<kind>`, kinds `policy`, `team`, `release`; at most 10 per kind and
+relay; [api.md](api.md#tether-manage-sessions-on-admin-routes)). A proposal is never live: nothing
+changes for devices or staff until a key holder reviews it, signs it with the vault and publishes
+it. **Propose…** opens a sheet with the changes against what is live and a "Note for the key
+holder" (at most 500 characters): "Stored on the relays unsigned, with your name; nothing changes
+for devices or staff until a key holder reviews, signs and publishes it."
+
+**Review.** On the Policy, Team and Releases pages, "Proposals waiting for a key holder" lists
+them with the author, the age, the serial they were based on and the note; "stale on <relays>"
+when what those relays serve changed since the proposal was made. **Review…** (a key holder) loads
+the proposal as the draft; the publish sheet then lists its changes against what is live now, not
+against what the proposer saw. **Security-relevant changes come first**, marked "security": for a
+policy the relay servers (`servers.list`), `settings.server`, `security.*`, `health.*`,
+`update.channel`, `update.enabled`, `permission.tunnel`, `customer.elevate`, `connect.incoming` and
+the recording upload target and token; for a team document the sign-in settings, `oidc_only`, the
+deny list, every role with a Tether Manage role, any role or entry that gains `write`, `sbom`,
+`agent`, `*` or a customer, and service switches. Publishing then needs a tick: for a policy that
+changes `servers.list` or `settings.server` "I checked the relay servers above: the devices of this
+policy connect through them."; for a team document that changes the sign-in settings or a
+KeyHolder mapping "I checked the sign-in settings and the KeyHolder mapping above: they decide who
+can sign in and who signs for the organisation." After the publish, Tether Manage removes the
+proposal from the relays. **Remove** deletes one (its author, a key holder, or the admin key).
+
+**The same person may propose and sign.** A key holder can publish directly anyway, so Tether
+Manage does not forbid it: it names the proposer and warns "you proposed it yourself (no second
+person checks it)", and the relay's `proposal-delete` record says whether the person removing it
+after the publish is the proposer (`same_person`). The two-person rule therefore binds only people
+without the keys.
+
+**Release proposals carry no files.** A publisher names the channel, app, platform, version, notes,
+where the files are, and each file's name and SHA-256 (Tether Manage hashes the chosen files);
+staff sessions never write into the relays' download folder. The key holder's **Review…** fills in
+the release form and says "The proposal carries no files: choose them below. Tether Manage signs a
+file only if its SHA-256 is one the proposal names (…)"; then it signs, uploads and publishes as
+in [Releases](#releases).
 
 ## Data folder
 
@@ -494,45 +589,99 @@ The records are posted without a device key: anyone who can reach a relay can ad
 them as a log of what hosts reported, not as proof (SECURITY.md). Retention on the relays: 90 days
 or 50 MB (`AUDIT_RETENTION_DAYS`, `AUDIT_MAX_MB` in `/etc/tether/api.env`).
 
+## Team activity
+
+What staff did, read from the team audit log of **every** relay (`GET /api/admin/team-audit`,
+[api.md](api.md#team-audit-log)) and merged newest first: sign-ins and refused sign-ins, summary
+and host reads, software lists and searches, links, removals, exports, and every Tether Manage
+action (publishes, proposals, revocations, tickets, refused attempts). Every Tether Manage role may
+read it (and the keys without a sign-in); team members with `audit` do not (it is staff personal
+data). The records stay on the relays; "this PC keeps only each relay's last chain head".
+
+Filters: **Last 24 hours / 7 days / 30 days / 90 days**, Person ("Name, user name, oid or key id"),
+Device ("Tether ID or uuid"), Customer, Event ("e.g. sign-in, report, search, policy-publish").
+Columns: Time, Relay, Person, Event, Device, Detail, Result; records an app reported about itself
+carry a badge ("Reported by the person's app, not seen by the relay"). **Export CSV…** saves the
+rows shown (cells a spreadsheet would run as a formula are quoted) and is itself recorded on the
+relays, as is the Sessions export.
+
+**The stored chain head.** Each record carries the hash of the record before it. For each relay,
+Tether Manage keeps the newest record it checked (`team-audit-heads.json` in its data folder: the
+hash and the time, nothing else) and at the next read checks, over the exact bytes the relay sent,
+that every record since then follows the one before it, up to the relay's current head. Only a
+checked chain moves the stored head. What its warnings mean:
+
+| Warning | Meaning | What to do |
+| --- | --- | --- |
+| "<relay>: the log no longer continues from the point this PC last read (<head>…): records were removed or rewritten since. Compare with a copy kept elsewhere (the relay's journal), then accept the new state." | The records after the stored head were changed, removed or rewritten, or the relay's log was restored from a backup | Compare with the relay's journal (or the SIEM that receives it) and find out who could write the relay's data folder. **Accept the relay's state…** takes the rewritten log as the new starting point for good (it asks first) |
+| "<relay>: too many records since the last read to find where the log continues from the point this PC last checked (<head>…); that point is kept. Read further back, or accept the relay's current state." | More records since the last read than one check reads (10 pages of 5 000) | **Read further back** (100 pages); accept only with another reason to trust the relay |
+| "<relay>: the log continues as far as read, but more records since the last check remain; read again to check the rest." | Checked part of the way; the stored head moved as far as checked | Read again |
+| "<relay>: the log shows a line does not follow the one before it (changed, removed or inserted) (<day> at byte <n>)." and the like | The relay's own check of its files found a break, an unreadable or cut line, or newest lines that are not the ones it wrote last | As for a rewritten log; a cut line can also come from a crash of the relay |
+| "<relay>: records were dropped (…)." | The relay could not write some records (queue full, log at its size cap, write error) and says how many | Check the relay's disk and `TEAM_AUDIT_MAX_MB`; the requests themselves were served |
+| "<relay>: the relay found a gap in its chain at start (…)." | At start its files no longer reached the head it had written | As for a rewritten log |
+
+The chain shows a change only to someone who kept an earlier head: whoever controls a relay can
+rewrite its whole log after the last head anyone kept, or stop logging. Tether Manage keeps one head
+per relay on the PC where it read; forwarding each relay's journal to a separate SIEM keeps a copy
+the relay cannot change ([SECURITY.md](../SECURITY.md#team-access)). The check reads from an hour
+before the stored head's time, so a record answered more than an hour after its request came in
+would read as a break.
+
 ## Team
 
-Technicians who do not hold the admin key can still see the organisation's devices and share
-device tags: each technician app has its own key, and the **team roster** on the relays lists the
-keys allowed in ([api.md](api.md), "Team (technician) endpoints"; security: SECURITY.md, "Team
-access").
+Tether Manage › **Team** edits the **signed team document** the relays admit staff by
+([api.md](api.md#team-technician-endpoints), "The signed team document"; security:
+[SECURITY.md](../SECURITY.md#team-access)): "The signed team document: staff sign-in, what each
+directory role may do, the deny list, and key entries for services and break-glass." Key holders
+and policy editors read it; a key holder signs and publishes it (**Sign and publish…**), a policy
+editor proposes changes (**Propose…**, [Proposals](#proposals)).
 
-The page loads the roster from every relay (`GET /api/admin/team`), shows the first relay's and
-names any relay whose roster differs or that does not answer.
+The page loads the document from every relay (`GET /api/admin/team`), checks its signature, shows
+the newest and names a relay that serves an older one ("<relay> serves an older team document.
+Publish to bring every relay to the one below.") or does not answer. Unpublished changes are kept
+while Tether Manage is open; **Reload from the relays** asks before it discards them.
 
-| Column | Meaning |
+- **Staff sign-in**: the provider's settings (issuer, tenant, audience, client id, scope) and
+  **Sign-in only**; what to enter: [sign-in.md](sign-in.md#the-team-document-in-tether-manage).
+- **Directory roles**: app role values of the directory and what each grants: team permissions
+  (`write`, `audit`, `sbom`, `agent`, customers) or one Tether Manage role ([Sign-in and
+  roles](#sign-in-and-roles)). **Add the standard roles**, **Add role**. Grants of a person's roles
+  add up; with no roles nobody can sign in.
+- **Deny list**: object ids (`oid`) refused a sign-in; their sessions end on each relay as soon as
+  it gets the document.
+- **Key entries**: apps that work with their own key instead of signing in: services (the bridge,
+  scripts; **Service entry**, which keeps working with sign-in only), break-glass technicians, and
+  the technicians of the old roster until everyone signs in. Columns: Name, Fingerprint (first 16
+  hex digits of the key's SHA-256, e.g. `630D-CD29-66C4-3366`), write, audit, sbom, agent,
+  Customers, Service. **Add key entry**: paste the public key the app shows under Team, with a
+  name, and compare the fingerprint with the one the person reads out from their app (on the
+  phone, not through the channel the key came by). A new entry gets `sbom` and every customer
+  (`*`), nothing else.
+
+| Permission | Allows (relay-enforced unless marked) |
 | --- | --- |
-| Name | Shown to the team as the author of tag changes |
-| Fingerprint | First 16 hex digits of the SHA-256 of the key, e.g. `630D-CD29-66C4-3366` |
-| Can edit shared tags | May replace the shared tag document (`write`) |
-| Can read session history | May read the session audit log of one device at a time (`audit`) |
+| (member) | Host list, health summary, reports and history, shared tags (read) |
+| `write` | Change the shared tags; link and unlink agents, allow a claim, remove a device |
+| `audit` | Read the session audit log of one device at a time |
+| `sbom` | Software lists and the software search (the app hides them without it) |
+| `agent` | Install or remove the health monitoring agent in a session (checked by the technician's app; the remote computer decides by its own policy) |
+| customers | Only devices with these customer references (`4711`, `47*`; `*`: every device, also those without one) on every status route, in the summary and the search, and in the session history. The device list and the shared tags stay the whole team's |
 
-Unpublished changes to the roster are kept while Tether Manage is open, also while another page is
-shown ("Not published yet. The changes are kept until you publish or reload; closing Tether Manage
-discards them."). **Reload from the relays** asks before it discards them.
+**From a plain roster.** While the relays still serve the plain roster of a Tether Manage before
+0.7, the page shows the document it becomes ("The relays still use a plain roster. Below is the
+first team document it becomes (every entry keeps today's rights); signing and publishing it
+switches the relays to signed documents for good."): every entry with `sbom`, `agent` and every
+customer, and the review lists every entry and role as added. Once a relay has accepted a signed
+document it refuses plain rosters (`409`), also after a restart. A relay before 0.7 refuses the
+signed document: update the relays first ([sign-in.md](sign-in.md#release-order)).
 
-**Add technician**: the technician copies the public key from their app and sends it; paste it
-with a name. The page checks that it is a 32-byte base64 key and shows its fingerprint: compare it
-with the fingerprint the technician reads out from their app (on the phone, not through the channel
-the key came by). Adding, removing and changing flags only change the local draft; **Publish…**
-sends the roster to every relay (review sheet, result per relay, as for everything else). A
-technician removed from the roster is locked out at once on every relay that got the new roster; a
-relay that missed the publish still lets them in, so publish again until every relay has it. An
-empty roster turns team access off.
-
-**Signed team document (relays of 0.7).** A relay of 0.7 also takes an admin-signed team document
-in place of this plain roster: per member also software lists (`sbom`), the agent menu (`agent`),
-the customers whose devices the member sees (`customers`, e.g. `47*`), service entries, and the
-sign-in settings. Once a relay has accepted one it refuses the plain roster this page publishes
-today (`409`), also after a restart. Publishing the signed document from Tether Manage comes with
-its sign-in release; until then this page and the plain roster work as described above. Wire format
-and rules: [api.md](api.md), "The signed team document". Every entry names all its permissions
-(nothing is assumed for a signed entry). A member limited to some customers also sees session
-history only of their devices; the device list and the shared tags stay the whole team's.
+The review before publishing lists the changes in words, security-relevant ones first, and needs a
+tick for a change of the sign-in settings or of a KeyHolder mapping ([Proposals](#proposals)). The
+serial is one above the highest live one. The result is shown per relay as for everything else:
+"Each relay only knows the document it was given: a relay that does not get this one keeps the old
+entries and roles." A removed key entry, and a person on the deny list, is locked out at once on
+every relay that got the document; a relay that missed the publish still lets them in, so publish
+again until every relay has it.
 
 What the admin signature does: other relays, technician apps and Tether Manage can check the
 document against the admin key, so nobody can hand them a forged one, and a relay never goes back

@@ -111,7 +111,7 @@ If Tether is useful to you, a star helps others find it.
   [docs/connection-resilience.md](docs/connection-resilience.md).
 - **Management:** Tether Manage (`apps/manage`) signs policies and releases; the relay API
   serves them. Customer module TetherQS (`apps/quick`): portable, no admin rights. See
-  [docs/management.md](docs/management.md), [docs/policy.md](docs/policy.md),
+  [docs/management.md](docs/management.md), [docs/sign-in.md](docs/sign-in.md) (staff sign-in), [docs/policy.md](docs/policy.md),
   [docs/updates.md](docs/updates.md), [docs/quick-support.md](docs/quick-support.md),
   [docs/recording.md](docs/recording.md), [docs/cli.md](docs/cli.md),
   [docs/troubleshooting.md](docs/troubleshooting.md), [docs/api.md](docs/api.md),

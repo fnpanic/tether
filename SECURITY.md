@@ -31,7 +31,7 @@ is left.
 2. **Endpoint ↔ relay node** (Caddy/nginx, hbbs, hbbr, TURN, tether-api): TLS on 443. The relay
    sees metadata, not content. hbbs is trusted to vouch for host keys (it signs them with the
    server key), which is the one place a relay node is trusted with more than availability.
-3. **Admin PC ↔ everything**: the admin key signs policies, server key lists, team rosters and
+3. **Admin PC ↔ everything**: the admin key signs policies, server key lists, team documents and
    custom apps; the updater key signs code. Clients verify both against compiled-in public keys.
 4. **Local user ↔ Tether processes**: the local IPC and config folder; Tether's own windows are
    guarded against remote input ([below](#tethers-own-windows-are-for-the-local-user-only-056)).
@@ -44,16 +44,17 @@ is left.
 | Malicious technician (legitimate session) | Everything the session permissions allow, as the logged-in user | Click or type into Tether's own windows (`own_ui_guard`); read or change Tether's config/install folders via file transfer; use Tether's own recorder without the host user's consent; change host settings remotely (this build has no remote path for that); open the camera view or the remote terminal (`enable-camera`, `enable-terminal` forced `N`) | Full control of the OS as that user by design: start programs (a command prompt included), files outside the guarded folders, admin rights if UAC is approved. Windows Mouse Keys and the On-Screen Keyboard still reach a Tether window ([below](#tethers-own-windows-are-for-the-local-user-only-056), W18). Recording with any other tool (screen recorder, modified viewer) is not prevented: the consent gate is enforced by the honest viewer. Where the host's policy `health.agent` is `on-request` or `install` and Tether's service runs, the session (any approval, control on) can have the organisation's signed health monitoring agent installed as a LocalSystem service even when the signed-in user is no administrator, or removed; visible in the connection window and the session audit log, blocked by machine policy `manual` ([Device status](#device-status-health-reports)) |
 | Malicious customer (host side) | Show fake content; record their own screen; keep what the technician sends (files, clipboard); put content into the technician's clipboard while clipboard sync is on | Inject keyboard or mouse input into the technician's PC (input messages flow from viewer to host only); read files the technician does not send | The host is the trusted endpoint for what it shows; treat files and clipboard from a host as untrusted |
 | Compromised relay host **without** the server key (hbbr only, Caddy, TURN) | See IPs, timing, sizes, host IDs; drop or delay traffic; serve stale downloads | Decrypt or alter session content (session keys are sealed to the host's ephemeral key; [docs/encryption.md §8](docs/encryption.md#8-who-can-decrypt-who-can-attack)); forge policies, key lists or updates (admin/updater signatures) | Denial of service; metadata; legacy TCP tunnels (W2) and version-0 sessions with non-Tether peers (W1) are readable |
-| Compromised tether-api (or the relay's data folder) | Withhold or falsify what it serves: policy, release and monitor indexes it can only withhold or replay within their signed validity; refuse or accept enrolments, link or unlink devices in its own store and show false health; with control of its hbbs lookup answer, make any Tether proof pass there, so an attacker's agent shows on a host row that has no agent yet | Make a client install or run anything not in an admin-signed index and signed with the updater key; start an agent install where the signed policy does not ask for it; forge or replay the session message (it is end to end in the session) | False health on its own rows; denial of service ([Device status](#device-status-health-reports)) |
+| Compromised tether-api (or the relay's data folder) | Withhold or falsify what it serves: policy, release and monitor indexes it can only withhold or replay within their signed validity; refuse or accept enrolments, link or unlink devices in its own store and show false health; with control of its hbbs lookup answer, make any Tether proof pass there, so an attacker's agent shows on a host row that has no agent yet; admit anyone as a team member on itself; replay a staff sign-in token it received at another relay of the deployment within the token's lifetime ([Team access](#team-access)) | Give anyone team rights at another relay (the team document is admin-signed); make a client install or run anything not in an admin-signed index and signed with the updater key; start an agent install where the signed policy does not ask for it; forge or replay the session message (it is end to end in the session) | False health on its own rows; denial of service ([Device status](#device-status-health-reports)) |
 | Compromised hbbs **with** the server key | Everything above, plus sign any key for any ID | Decrypt past or running sessions (forward secrecy) | **Undetected man-in-the-middle of new sessions** by impersonating hosts: no host-key pinning and no viewer authentication ([docs/encryption.md](docs/encryption.md#active-attacks-with-the-server-key)). Mitigated only by keeping the key secret, hardening and monitoring the relays, and rotating the key on suspicion ([key rotation](docs/key-rotation.md)) |
 | Network attacker (Wi-Fi, ISP, LAN) | See IPs, timing, TLS record sizes, SNI; block traffic | Read rendezvous or session data (TLS with verified certificates, no unverified fallback, then end-to-end encryption); answer as a LAN host without its signed key | Denial of service |
 | TLS-inspecting corporate proxy | Read the rendezvous signalling (IDs, machine uuids, device public keys, connect requests) and the clear handshake at the start of each relay stream | Decrypt session content (except W1, W2) or swap the host key without the server key | With a stolen server key, the MITM above. Clients behind one proxy share an IP as hbbs sees it, which matters for the `RegisterPk` key replacement in [docs/encryption.md](docs/encryption.md#related-replacing-a-hosts-key-at-hbbs-without-the-server-key) |
 | Local malware on the host | Read the screen and input like any program; read the config (device key, permanent password hash, which is password-equivalent); use Tether's IPC as the user; sign Tether proofs for this user's own Tether ID (it can read the key); without Tether's service, swap the staged agent before the elevation prompt or break the install over the pipe | – (endpoint security is out of scope). It cannot get an elevated program started without someone approving the Windows prompt, which then shows the swapped file's (other or missing) publisher, and the genuine agent installs only its own verified copy | Full compromise of that host's sessions |
 | Local malware on a Mac host with unattended access, running as an `admin`-group user | Replace `/Applications/Tether.app` (no password needed), which the root LaunchDaemon and the login-window host then run: root on that Mac | – (macOS lets the admin group change `/Applications`; an update signed by Tether must stay installable without a prompt) | Root on that Mac. Only where *Install as service* was used ([docs/unattended.md](docs/unattended.md#macos)) |
 | Local malware on the viewer | Read the session, inject input into it, read remembered passwords | – | Full compromise of that viewer's sessions |
-| Stolen technician laptop | Remembered peer passwords (obfuscated with the machine uid, so readable), trusted-device tokens, the team member key | Admin actions: the technician app has no admin key; if Tether Manage is on the same laptop, its vault still needs the passphrase | Unattended access to remembered hosts until their passwords change; remove the team key from the roster ([Team access](#team-access)) |
+| Stolen technician laptop | Remembered peer passwords (obfuscated with the machine uid, so readable), trusted-device tokens, the team member key | Admin actions: the technician app has no admin key; if Tether Manage is on the same laptop, its vault still needs the passphrase | Unattended access to remembered hosts until their passwords change; the team key: its key entry's rights until removed from the team document, or a signed-in person's session until it ends (sign-out, deny list; [Team access](#team-access)) |
 | Malicious update server (compromised relay serving `/download/`) | Withhold updates; serve an old copy of the signed release index (a device that already accepted a newer serial refuses it) | Make a client run code not signed by the updater key (minisign key `1AD0C3FBDCA3B4EA`, verified before install); change version, minimum version or rollout (the release index is signed by the admin key; the unsigned `latest.json` is not read by builds with `REQUIRE_SIGNED_INDEX`); offer an older signed build under a higher version (the signed trusted comment names file and version) | Denial of service: no updates while the device reaches no other source (after 30 days the app warns that the update information is out of date). Builds before the signed index: W9 |
 | Holder of an enrolment grant (public: it is in the policy) | Enrol agents for Tether IDs whose identity key it holds, up to 30 new pins a minute per IP and `STATUS_MAX_DEVICES` | Enrol or link anything without a Tether proof by the key hbbs holds for the ID named; read anything | Many fake agents for IDs it registered itself (hbbs accepts new IDs freely): revoke the grant, remove their devices, renew |
+| Person with a Tether Manage role (signed in, no keys) | Read what the role allows on the relays' admin routes; an Operator removes devices, revokes tokens and handles diagnostics tickets; store unsigned proposals | Sign or publish anything (the relays refuse a session on every signing route; the vault does not sign while someone without KeyHolder is signed in) | A key holder may publish their own proposal without a second person (recorded as `same_person`) |
 | Holder of the admin and updater keys | Change policy within the floor, trust another server key, ship signed code; set `health.agent`, which makes Tether's service install or remove the signed agent on every machine the policy reaches | Turn off TLS verification or end-to-end encryption by policy (`FLOOR`) | Fully trusted: guard the vault and passphrase |
 | Mac build runner sender | Run signed jobs on the build Mac | Run unsigned jobs, act as another sender, replay jobs ([docs/mac-build-runner.md](docs/mac-build-runner.md#security-model)) | A job is arbitrary code as the Mac user |
 
@@ -127,35 +128,118 @@ Every host reports its incoming connections to the first relay of its build
 
 ### Team access
 
-Technicians get an org-scoped identity without the admin key: each technician app generates its own
-Ed25519 key, the admin adds its public key to the team roster in Tether Manage and publishes the
-roster to the relays (`PUT /api/admin/team`, admin-signed). Member requests (`/api/team/*`) are
-signed with the member key in the admin request format (relay host name, method, path with query,
-timestamp, nonce, body hash; ±300 s; replayed nonces rejected, same persisted cache as admin
-requests; v1 without the host name as for admin requests, W14). The member key file is generated
-only when it is missing (an unreadable or damaged file is reported, never replaced). It is written
-to a temp file, `0600` on Unix, and linked into place without replacing, so an existing key is
-never replaced (`apps/desktop/src-tauri/src/team.rs::key_at`).
+Technicians and other staff get an org-scoped identity without the admin key. Each technician app
+(and each run of Tether Manage) has its own Ed25519 key, and every member request (`/api/team/*`) is
+signed with it in the admin request format (relay host name, method, path with query, timestamp,
+nonce, body hash; ±300 s; replayed nonces rejected, same persisted cache as admin requests; v1
+without the host name as for admin requests, W14), naming the key with `kid`. The desktop's key file
+is generated only when it is missing (an unreadable or damaged file is reported, never replaced),
+written to a temp file, `0600` on Unix (on Windows only the profile folder's permissions), and
+linked into place without replacing (`apps/desktop/src-tauri/src/team.rs::key_at`). Who a key
+belongs to, and what it may do, comes from one of two places:
 
-- **What a member can read**: the device list without IP addresses or policy serials (uuid, ID,
-  profile, version, OS, last seen), the shared tag document, and only with the `audit` flag the
-  session audit records of one device at a time (names, IPs and paths are personal data, so the
-  flag is off by default). A member cannot change policies, releases, the roster or anything else
-  admin-signed; a member key is never accepted as an admin key.
-- **What a member can write**: with `write`, the shared tag document (one JSON object, ≤ 512 KiB,
-  replaced as a whole with optimistic concurrency on `rev`). The relay does not interpret it, and
-  it must not be used for any security decision. Tags are **not secrets**: every member reads them;
-  never put passwords or keys in tags.
-- **Key theft**: a stolen member key gives its holder that member's rights until the admin removes
-  it from the roster and publishes; that takes effect at once on each relay that gets the roster.
-  Only the admin key changes the roster. Compare the fingerprint with the technician out of band
-  before adding a key.
-- **The roster is per relay**: each relay authorises against the roster it was given. A relay that
-  missed a publish still accepts a removed key, so publish to every relay (Tether Manage names relays
-  with a different roster).
-- **Limits**: 120 requests/min per member key, 60 failed signatures/min per IP (a failure tries every
-  roster key, at most 500, under the state lock), body limits 64 KiB (roster) and 512 KiB (tags);
-  `team/roster.json` and `team/tags.json` are `0600`.
+- **A sign-in session** (0.7.0; [docs/sign-in.md](docs/sign-in.md)). The person signs in with the
+  organisation's identity provider (Microsoft Entra ID is the documented one) in the system browser
+  (authorization code with PKCE). The app posts the access token, signed with its key, to every
+  relay (`POST /api/team/session`). Each relay checks the token itself: RS256 against the provider's
+  keys (fetched over HTTPS from the issuer's host, compiled-in web PKI roots, no proxy), `ver` 2.0,
+  issuer, tenant, audience, client, time with 300 s skew, at most 28 h lifetime, no groups overage,
+  `oid` not on the deny list, and only the `roles` claim mapped through the signed document. It then
+  binds a session to **that key**: the person's later requests are ordinary signed requests, so a
+  stolen access or refresh token alone cannot make them, and a token (`uti`) binds one key per
+  relay (`409 token-used`). The session ends at the token's expiry or `TEAM_SESSION_MAX_MINUTES`
+  (default 60), whichever is first; permissions are recomputed from the document in force on every
+  request. The refresh token is kept only in the OS credential store, the access token only in
+  memory while it is posted, neither in files or logs (`apps/desktop/src-tauri/src/oidc.rs`,
+  `server/api/src/oidc.rs`).
+- **A key entry** in the team document: services (the bridge, scripts) and break-glass staff, and,
+  until everyone signs in, technicians as before 0.7.0. The administrator adds the public key with
+  a name after comparing its fingerprint out of band. With `oidc_only` only entries marked as a
+  service keep working.
+
+**The signed mapping.** Who is a member and with what rights (`write`, `audit`, `sbom`, `agent`,
+`customers`), which directory roles map to which rights or Tether Manage roles, the deny list and the
+provider's issuer, tenant, audience and client id are one **admin-signed team document**
+(`tether_trust::team`), published by a key holder (`PUT /api/admin/team`; serial must rise).
+Clients read the sign-in settings (`GET /api/team/config`) and verify them against the compiled-in
+admin key, never trusting the relay's word; each relay verifies the document it is given. A relay
+operator who can only change configuration cannot grant rights through it. Customer scope is
+enforced by the relay: a device outside a member's customers answers exactly as an unknown one.
+
+**A compromised relay** (tether-api or its data folder) can and cannot:
+
+- It **can** treat anyone as a member on itself, or serve false data: it holds that relay's data
+  anyway. Whoever can write its data folder or `ADMIN_PUB_KEY` decides who is a member there (put
+  back an older document, trust another admin key).
+- It **cannot** give itself or anyone rights at **another** relay through the team document (that
+  is admin-signed, and its serial cannot go back by a publish), make a client or Tether Manage trust
+  other sign-in settings (they verify them with the admin key), or sign anything with the admin or
+  updater key (Tether Manage sessions never sign; [Central management](#central-management-03)).
+- It **can replay a token it received** at another relay of the deployment within the token's
+  lifetime: all relays share one API registration, so a valid access token is accepted by each of
+  them once, bound to the first key that presents it there. The same holds for anyone who obtains a
+  valid token elsewhere (a log, a compromised desktop). Bound: the token's lifetime and the session
+  bound (60 minutes). Mitigation: the desktop posts the token to every relay at once, so a replay
+  meets `409 token-used` where the person's session is already open, and raises an alarm and a
+  `token-used` audit record. Accepted for this release because one organisation runs all relays of a
+  deployment; later: a key-bound token or one API registration per relay.
+
+**Leavers.** Disabling the account in the provider stops renewal: access ends at the latest when
+the current session ends, at most `TEAM_SESSION_MAX_MINUTES` (60 by default) later; a role removed
+in the directory likewise takes effect at the next renewal. At once: the person's `oid` on the
+document's deny list, effective on each relay as soon as it gets the document (remove the person's
+key entry too, if there is one). A key entry removed from the document is locked out at once on
+every relay that gets it; a relay that missed a publish still accepts the old entries and roles, so
+publish to every relay (Tether Manage names relays that serve an older document). A stolen key
+entry's key gives its holder that entry's rights until it is removed; a stolen desktop key alone
+gives no rights once people's key entries are gone, but with a valid token it gives the person's
+rights until the session ends.
+
+**What members can do.** Read the health summary, reports and history (within their customers),
+software lists and the software search with `sbom`, the session audit records of one device at a
+time with `audit` (names, IPs and paths are personal data, so it is off by default), the device
+list without IP addresses or policy serials and the shared tag document (fleet-wide). With `write`:
+the shared tags (one JSON object, ≤ 512 KiB, replaced as a whole with optimistic concurrency on
+`rev`; the relay does not interpret it and it must not be used for any security decision; tags are
+**not secrets**, never put passwords or keys in them) and linking, unlinking and removing devices.
+`agent` is checked by the viewer's app only (the host decides by its own policy). A member cannot
+change policies, releases, the team document or anything else admin-signed; a member key is never
+accepted as an admin key.
+
+**Tether Manage roles.** A person signed in to Tether Manage with a Tether Manage role (Auditor,
+Operator, PolicyEditor, Publisher, KeyHolder) reaches the relay's admin routes that only read or
+operate (devices, status, session and team audit, policy history, releases; diagnostics tickets,
+device removal and token revocation for an Operator) and stores **proposals** (unsigned, never
+live). Everything that signs or publishes needs the admin key, which stays in the vault on a key
+holder's PC under the passphrase; while someone without KeyHolder is signed in, Tether Manage's
+vault does not sign. The same person may propose and sign (a key holder can publish alone anyway);
+the record says so (`same_person`). A publish without a sign-in (break-glass) is recorded under the
+admin key only, naming no person ([docs/management.md](docs/management.md#sign-in-and-roles)).
+
+**The team audit log.** Every member and admin request that reads or changes a device's data,
+every sign-in (and refusal) and every admin change is one JSON line in
+`team-audit/<day>.jsonl` on the relay that served it (`0600`): time, person (name, `oid`, user name,
+key id), IP address, event, device, a short detail, result; never report or list contents, search
+hits or tokens. Events the desktop reports about itself (exports, session starts, agent requests)
+are marked `self_reported`. One writer thread with a bounded queue: a full queue or a write error
+drops records, counted in the log, the metrics and the journal; the relay keeps serving (fails
+open) and refuses to start without a writable audit folder. **Tamper limits:** each line carries
+the SHA-256 of the line before (`prev`), so an edited, removed or inserted line shows as a break,
+but only to someone who kept a later head: whoever controls the relay can rewrite the whole log
+after the last head anyone kept, or stop logging. Tether Manage's **Team activity** stores each
+relay's last checked head and warns when the log no longer continues from it; forwarding the
+journal (each line and the head every 10 minutes) to a separate SIEM is the only copy a relay
+cannot change afterwards (journald drops lines above its rate limit unless
+`LogRateLimitIntervalSec=0`). No route lets a member change the log. Retention: 90 days and 2 GB
+(`TEAM_AUDIT_RETENTION_DAYS`, `TEAM_AUDIT_MAX_MB`). Readable with the admin key or a Tether Manage
+role, not by team members with `audit` (it is staff personal data). Details:
+[docs/api.md](docs/api.md#team-audit-log).
+
+**Limits**: 120 requests/min per member key, 60 failed signatures/min per IP (IPv6 per /64), 20
+refused tokens a minute per key; requests without `kid` (desktops before 0.7.0) are checked against
+every key entry outside the state lock, at most two at a time (`429 busy` beyond); at most 2 000
+entries and 256 KiB per document (a plain roster 500 and 64 KiB), 5 000 sessions; body limit 512 KiB
+(tags); `team/team.json`, `team/sessions.json` and `team/tags.json` are `0600`.
 
 ### Device status (health reports)
 
@@ -254,9 +338,10 @@ that runs only the organisation's signed agent and opens no port either.
   it had none) gets it (journal: `status: customer of <uuid> set to <customer> by token <id>`; the
   pin keeps the token it first enrolled with), and knowing a device's uuid and public key is not
   enough to create a pin for it either, also where a relay has none (removed, dropped after 180
-  days without a report, or never enrolled there). Every roster member sees every device whatever its customer: the customer
-  groups devices inside one deployment, and organisations that must not see each other's machines
-  need separate deployments ([docs/several-organisations.md](docs/several-organisations.md)).
+  days without a report, or never enrolled there). With a plain roster every member sees every device whatever its customer; with a signed team
+  document the relay limits each member to its `customers` ([Team access](#team-access)). The
+  customer limits what staff see, not who can enrol: organisations that must not share relays,
+  operators or admin keys need separate deployments ([docs/several-organisations.md](docs/several-organisations.md)).
 - **What a token holder cannot do.** Read any report, summary or history (those routes need a
   roster member's key). Replace or change an existing pin (its customer included, above), post as another device, remove a pin,
   link a Tether ID, set or change the Tether ID of a pinned device (a report cannot), sign an
@@ -268,9 +353,10 @@ that runs only the organisation's signed agent and opens no port either.
   is a JSON object in valid UTF-8, stores it byte for byte (64 KiB at most) and returns it as it
   is. The technician app shows every text from a report as plain text, shortened to fit. Nothing a
   report says changes a device, a policy or an access decision.
-- **Who can read reports.** The relay operator, who can read `status/`, and every member of the
-  team roster (no `write` or `audit` flag needed; linking, unlinking and removing a device need
-  `write`, refused with `403` otherwise). Reports are readable on the relay, not
+- **Who can read reports.** The relay operator, who can read `status/`, and the team members:
+  with a signed team document those whose `customers` cover the device, with a plain roster every
+  member (no `write` or `audit` flag needed; linking, unlinking and removing a device need
+  `write`, refused with `403` otherwise). Every read is recorded in the team audit log. Reports are readable on the relay, not
   end-to-end encrypted: machine name, installed product names and versions, check titles, values
   and hints ([PRIVACY.md](PRIVACY.md)). An unauthenticated caller can tell whether a uuid is
   enrolled (`401 unknown device` against `401 signature does not match`); uuids are not secrets.
@@ -321,7 +407,7 @@ machine yet; the statements below are from the code and its tests.
   | Who | Can | Needs |
   | --- | --- | --- |
   | Holder of the admin key (Tether Manage) | Install or remove by policy | Every machine whose resolved policy says `install` or `remove` (profile or group; a group reaches Tether's service only after a user opened Tether there) and that has Tether's service. No prompt is ever started by policy alone |
-  | Technician in a session | Install or remove on that machine | An approved remote-control session with control on (the menu is shown to every team member; the remote computer checks control and its own policy `on-request` or `install`; `remove` allows only removal). Without Tether's service also the person at the computer's yes and an approved Windows prompt |
+  | Technician in a session | Install or remove on that machine | An approved remote-control session with control on (the viewer's app disables the menu without the `agent` permission; the remote computer checks control and its own policy `on-request` or `install`; `remove` allows only removal). Without Tether's service also the person at the computer's yes and an approved Windows prompt |
   | The person at the computer | Install through the card (Tether without its service, policy `install`), remove in *Settings › Apps*, refuse for good by machine policy | Administrator rights, or an administrator's name and password, for the Windows prompt |
   | The computer's own administrator | `{"health.agent":{"state":"locked","value":"manual"}}` in `HKLM\SOFTWARE\Policies\Tether` `PolicyJson` (GPO) | Blocks policy installs and every session request on that machine, also on the prompt path and in TetherQS |
   | Anyone else, a team member without a session | Nothing on the machine | — |
@@ -398,8 +484,9 @@ With `STATUS_SBOM=on` a device can also upload a list of its installed software
 ([docs/health.md](docs/health.md#the-software-list), [docs/api.md](docs/api.md#put-apistatussbom-device-signed)).
 It is off by default; while off, its three routes answer `404`. `STATUS=off` wins over it.
 
-- **Who can read it.** The relay operator, who can read `status/`, and every member of the team
-  roster (no `write` or `audit` flag needed), as for reports. It is not end-to-end encrypted. It
+- **Who can read it.** The relay operator, who can read `status/`, and team members with the
+  `sbom` permission of the signed team document within their customers (with a plain roster every
+  member). It is not end-to-end encrypted. It
   names the installed programs with their versions and publishers and the machine's hardware
   identity, which is more than a report holds ([PRIVACY.md](PRIVACY.md)). A device key and a
   member key do not pass on each other's routes, as for reports.
@@ -778,13 +865,21 @@ Report vulnerabilities privately to the maintainers. Do not open a public issue.
 - While a relay accepts v1 request signatures, a captured admin or team request can be replayed at
   another relay within ±300 s. Remedy: update the relays first (with `RELAY_HOST`), then the apps,
   then set `TETHER_SIG_V1=off` (W14).
+- Staff sign-in: a valid access token is accepted once by every relay of the deployment, so whoever
+  obtains one (a relay that received it, a log, a compromised desktop) can open a session as that
+  person at a relay that has not seen it, for at most the token's lifetime and the session bound;
+  disabling an account or removing a role takes effect at the next renewal (at most 60 minutes by
+  default), the deny list at once. The Entra ID set-up was tested against a mock provider only
+  ([docs/sign-in.md](docs/sign-in.md#what-was-checked)).
+- The team audit log shows changes only against a chain head kept elsewhere: whoever controls a
+  relay can rewrite or stop its log ([Team access](#team-access)).
 - A device's Tether ID in the health view rests on a Tether proof (which rests on hbbs's record of
   the ID's key, W8), or on a token issued for that ID or a technician's confirmation, both the word
   of a trusted person ([Device status](#device-status-health-reports)). On a machine with Tether's
   service a remote session, where the policy allows it, can have the organisation's signed agent
   installed as a LocalSystem service without the signed-in user being an administrator
   ([Installing the agent through Tether](#installing-the-agent-through-tether)). Reports are readable
-  by the relay operator and every team member, not end-to-end encrypted. The same holds for the
+  by the relay operator and the team members their permissions allow, not end-to-end encrypted. The same holds for the
   software list ([The software list](#the-software-list)), which also holds the hardware identity.
 - A custom app's settings apply above the policy profile, except for features the profile locks:
   it can add restrictions and defaults, and its branding (title, accent, welcome text) applies,

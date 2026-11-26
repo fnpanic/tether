@@ -210,7 +210,9 @@ Connect with control of mouse and keyboard, open **Remote actions** › **Health
 The item is disabled in a view-only session ("Not in a view-only session: it needs control of the
 remote computer.") and when the person at the computer has turned off mouse and keyboard; the remote
 computer accepts the request only from a logged-in remote-control connection whose control is on.
-Every team member sees the item; the remote computer's policy decides. The dialog first asks the
+For a member without the `agent` permission of the signed team document the item is disabled ("Your
+team role does not allow installing or removing the health monitoring agent (agent).") and the app
+refuses the request; otherwise the remote computer's policy decides. The dialog first asks the
 remote computer and shows its answer; under the sentence a line "The remote computer says: “…”" may
 give the remote computer's own words (for `busy` and `not-allowed` always its reason).
 
@@ -506,8 +508,9 @@ place, not added to, so the total does not grow with the number of uploads. A lo
 uploads: [scaling.md](scaling.md). Back up `status/` with the rest of `/var/lib/tether-api`
 ([Storage and backup](#storage-and-backup)); a lost list returns when the device uploads it again.
 
-**Who can read it.** Every member of the team roster (no `write` or `audit` flag needed) and the
-relay operator, who can read `status/`. It is not encrypted end to end. A list names the installed
+**Who can read it.** Team members with the `sbom` permission, only for devices of their customers
+(with a plain roster: every member), and the relay operator, who can read `status/`
+([Who may read what](#who-may-read-what)). It is not encrypted end to end. A list names the installed
 programs, their versions and publishers and the machine's hardware identity
 ([PRIVACY.md](../PRIVACY.md)). A device that is enrolled can store one document of its own choosing
 there, at most `STATUS_SBOM_MAX_KB`, once an hour, and nothing in it is ever run
@@ -773,8 +776,10 @@ A relay stores software lists only when its operator set `STATUS_SBOM=on`
 ([The software list](#the-software-list)); a device uploads one only to a relay whose answer to
 its posts says `"sbom": true`. To remove the list of one device without removing the device, that
 device sends `DELETE /api/status/sbom` (an agent does so when its owner switches the list off);
-removing the device removes the list with it. A list is read through the member routes: any
-member of the roster can fetch any device's list, whatever its customer.
+removing the device removes the list with it. A list is read through the member routes: with a
+signed team document only by members with `sbom`, and only of devices of their customers
+([Who may read what](#who-may-read-what)); with a plain roster any member can fetch any device's
+list, whatever its customer.
 
 ### Customer reference
 
@@ -807,8 +812,10 @@ A relay from before the customer reference refuses a token that names one
 (`401 enrollment token: not an enrollment token`). Update tether-api on every relay before you
 issue such tokens.
 
-The customer reference is not a security boundary: every team member sees every device, whatever
-its customer, and whoever holds a valid token can enrol new devices under that token's customer.
+The customer reference limits what team members see only through a signed team document that
+gives them `customers` ([Who may read what](#who-may-read-what)); with a plain roster every team
+member sees every device, whatever its customer. It does not limit enrolment: whoever holds a valid
+token can enrol new devices under that token's customer.
 An existing device moves to another customer only with its own key
 ([SECURITY.md](../SECURITY.md#device-status-health-reports)). For
 organisations whose technicians must not see each other's machines, see
@@ -816,12 +823,38 @@ organisations whose technicians must not see each other's machines, see
 
 ## For the technician
 
-Health needs the technician to be in the team roster ([management.md](management.md)), because
-the reads are member-signed; no `write` or `audit` permission is needed to read. Linking,
-unlinking and removing an agent need `write`. The host list reads the
+Health needs the technician to be a team member, signed in with the organisation's account or
+with the app's key on the team list ([management.md](management.md#team)), because the reads are
+member-signed; no `write` or `audit` permission is needed to read. Linking, unlinking and removing
+an agent need `write`. The host list reads the
 summary from every relay when it opens and every 5 minutes while it is open, and **Sync now** in
 the team dialog reads it too. Search terms and the Needs attention view are also described in
 [advanced.md](advanced.md#query-syntax).
+
+### Who may read what
+
+With a plain team roster every member reads every device's summary, report, history and software
+list. With a signed team document (relays of 0.7.0) the relay enforces each member's permissions,
+from the member's key entry or, for a person signed in, from the directory roles the document maps
+([sign-in.md](sign-in.md)):
+
+| Status route | Needs |
+| --- | --- |
+| `GET /api/team/status` (summary), `GET /api/team/status/<uuid>` (report and history) | Any member; only devices of the member's customers |
+| `GET /api/team/status/<uuid>/sbom` (software list) | `sbom` (`403 this member may not read software lists`), and the device in the member's customers |
+| `GET /api/team/status/software` (software search) | `sbom`; searches only the member's customers' devices |
+| Link, unlink, allow a claim, remove (`POST`/`DELETE …/link`, `…/allow-claim`, `DELETE /api/team/status/<uuid>`) | `write`, and the device in the member's customers |
+| `GET /api/team/audit` (session history of one device) | `audit`; a member without `*` only of devices in its customers |
+| `GET /api/team/devices` (the Tether device list), shared tags | Any member, fleet-wide (heartbeats carry no customer) |
+
+**Customer scope.** `customers` lists customer references (`4711`), prefixes (`47*`) or `*`. A
+device whose customer reference no pattern covers, or that has none while the member lacks `*`,
+answers exactly as an unknown device (`404 not found`) on every route, is left out of the summary
+and is never looked at by a search; `customers: []` sees no device. A person's customers are the
+union of their directory roles' customers, every customer when no role names one. Without `sbom`
+the summary has no software fields and the app hides the Software part and the software search;
+the session menu's agent item needs `agent` ([In a session](#in-a-session-technician)). Every
+read is recorded in the relay's team audit log ([api.md](api.md#team-audit-log)).
 
 ### The Health column
 
@@ -1118,7 +1151,10 @@ Enrolment, the signature, the answers and the status codes: [api.md](api.md#devi
 ## Privacy and security
 
 - **Who can read a report:** the relay operator (the files are readable by the tether-api user
-  and root) and every member of the team roster. Reports are not encrypted end to end. They
+  and root) and the team members: with a signed team document only those whose customers cover the
+  device, people signed in with the organisation's account by their directory roles
+  ([Who may read what](#who-may-read-what)); with a plain roster every member. Every read is
+  recorded with the person in the relay's team audit log. Reports are not encrypted end to end. They
   contain the machine's name, the names and versions of installed products, and the titles, values
   and hints the agent writes; keep personal data out of them. See [PRIVACY.md](../PRIVACY.md).
 - **Who can write:** only a device with a key that was pinned with a valid enrolment token (a grant

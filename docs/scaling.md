@@ -252,6 +252,16 @@ signed in through an identity provider (sessions), uploads of software
 lists during the member load, the fleet's real rate of health changes (which decides the 304 share
 of whole-fleet members).
 
+**Staff sign-in** (0.7.0; *measured* by hand, 2026-11-25, static musl build): the HTTPS client that
+fetches the provider's keys made `tether-api` 1.89 MB larger (3 085 408 to 4 973 808 bytes) and its
+RSS after start 0.7 MB larger (2 584 to 3 320 kB); one real key fetch from Microsoft's public
+endpoint (discovery and keys, 330 ms) raised the peak RSS by 0.8 MB. A session is about 300 to 400
+bytes in memory (*estimated*), at most 5 000 of them; a token is verified once per person, relay and
+renewal (about once an hour), not per request. Member lookup over 2 000 key entries: about 105 ms
+for the last key without `kid` (release build, outside the state lock), about 3 ms with `kid`.
+*Not measured*: a load run with 1 000 signed-in desktops, renewals at scale, the provider's answer
+times from a real relay.
+
 **Software search** (*measured*, 2026-11-25, same PC and build, `MemoryMax=64M`; raw output in
 `tools/load/results/status-search-2026-11-25-*.txt`). The run above with every one of the 20 000
 devices holding a stored list (60 KiB, 200 programs each, with install paths and a hardware serial),

@@ -162,6 +162,50 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
   test was not run in WebKit (it does not run on the build PC); the desktop app itself ran only
   against a mock relay (the relay's tests replay the desktop's request, not the app).
 
+### Staff sign-in, roles and the team audit log (for 0.7.0; not in a numbered version yet)
+
+- **Sign-in with the organisation's account (OpenID Connect; Microsoft Entra ID documented).**
+  The desktop app and Tether Manage sign in through the system browser (authorization code with
+  PKCE, redirect `http://localhost:<port>/`) and post the access token, signed with the app's own
+  key, to every relay (`POST /api/team/session`). Each relay checks the token itself (RS256 against
+  the provider's keys, `ver` 2.0, issuer, tenant, audience, client, time, no groups overage) and
+  opens a session bound to that key for at most the token's life and `TEAM_SESSION_MAX_MINUTES`
+  (60). The refresh token only in the OS credential store; renewal five minutes before the end;
+  sign-out on every relay. The relays need outbound HTTPS to the provider (no proxy). Off until a
+  team document with sign-in settings is published. Set-up for a tenant administrator and residual
+  risks: [docs/sign-in.md](docs/sign-in.md).
+- **Signed team document** replaces the plain roster: admin-signed, serial must rise; per member
+  `write`, `audit`, `sbom`, `agent`, `customers`, `service`; directory roles mapped to permissions
+  or Tether Manage roles; a deny list; `oidc_only`; up to 2 000 entries. The relay enforces `sbom`
+  and the customer scope on every status route, the summary (one cached summary per scope) and the
+  search; a device outside a member's customers answers as unknown. `kid` in `Tether-Sig` selects
+  one key ([docs/api.md](docs/api.md#team-technician-endpoints)).
+- **Tether Manage roles** Auditor, Operator, PolicyEditor, Publisher, KeyHolder: signed-in staff
+  read and operate through the relay's admin routes, store unsigned **proposals** (policy, team
+  document, release with file names and hashes only) for a key holder to review, sign and publish;
+  the keys stay in the key holder's vault; the review lists security-relevant changes first. The
+  Team page is the team document editor; new **Team activity** page with a chain check per relay
+  ([docs/management.md](docs/management.md#sign-in-and-roles)).
+- **Team audit log** on every relay (`team-audit/<day>.jsonl`, hash chain, journal copy; 90 days /
+  2 GB): sign-ins, reads, searches, changes, every admin change, with person, time, device,
+  customer and IP address, never contents ([docs/api.md](docs/api.md#team-audit-log),
+  [PRIVACY.md](PRIVACY.md)).
+- **Load**: the summary is also served gzip-compressed (20.3 MB plain, 1.76 MB gzip at 20 000
+  devices) with a weak ETag that ignores `last_seen` churn; no-`kid` signature checks outside the
+  state lock. Measured at 20 000 devices and 1 000 desktops under `MemoryMax=64M` (one PC, WSL2,
+  loopback): heartbeat p99 0.91 ms against 0.84 ms without members, peak RSS 40.3 MiB, one
+  unexplained 10 s stall in a repeat run ([docs/scaling.md](docs/scaling.md#tether-api)).
+- **Checked**: relay tests with the mock provider `tools/oidc-mock` (every refused token shape,
+  sessions, deny list, `oidc_only`, Manage roles at the admin routes, audit records); desktop and
+  Tether Manage unit tests against the mock and stand-in relays; one run by hand of the desktop
+  code against the mock and two real relays (debug builds, WSL); one TLS key fetch by hand from
+  Microsoft's public endpoint.
+- **Not checked**: no real Entra tenant (registrations, group assignment, MFA, Conditional Access,
+  real lifetimes, key rollover); the real Windows Credential Manager and macOS Keychain (tests use
+  an in-memory store); no test of the desktop sign-in or of Tether Manage in a real window with a
+  real browser; no load run with signed-in sessions. The list of checks a real tenant must pass:
+  [docs/sign-in.md](docs/sign-in.md#what-was-checked).
+
 ### The health monitoring agent through Tether (for 0.7.0; not in a numbered version yet)
 
 - **Tether installs, upgrades and removes the agent (Windows).** Two new policy features:

@@ -229,8 +229,52 @@ keeps blocking replays in memory.
 | `GET /api/admin/status/devices[?token=<id>][&after=<uuid>]` | – | The pins, sorted by uuid: `{"devices":[{"uuid","token","label","tether_id","claimed_id","linked_by","linked_at","linked_token","no_claim","customer","host","enrolled","last_seen"}],"next":"<uuid>" \| null}`; `customer` is `null` when none. Each request looks at no more than 1000 pins: `token` keeps only the pins enrolled with that token among them, so a page can be short or empty while `next` is set. `next`: pass it as `after` for the next page; `null` when no pin follows. `host` (the last full report's) and `last_seen` are `null` before the first post; `token` is `null` for pins from before token ids. `400` for an unknown parameter or a bad value. |
 | `PUT /api/admin/team` | a signed team document upload (≤ 360 KiB) or a plain team roster (≤ 64 KiB, below) | `204`. A signed upload: verified against `ADMIN_PUB_KEY` (`401` when not signed by one of its keys or the signature does not match), validated (`400`), serial above the stored one (`409 serial must be greater than the current team document's`); stored atomically as `team/team.json` (0600) exactly as received, and `team/roster.json` is deleted. A plain roster: validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600); `{"members":[]}` turns team access off; refused with `409` once a signed document was accepted (below). |
 | `GET /api/admin/team` | – | the plain roster (`{"members":[]}` when none), or the signed upload exactly as published |
+| `PUT /api/admin/proposals/<kind>` | `{"base":"<sha256 hex or empty>","note":"…","doc":<payload>}` (≤ 400 KiB) | A proposal ([below](#tether-manage-sessions-on-admin-routes)): `200 {"id":"<16 hex>"}`. `<kind>` `policy`, `team` or `release` (else `404`). `400` for a bad body, a `base` that is not 64 lower-case hex digits or empty, a `note` over 500 characters or with control characters other than line breaks, or a `doc` that would not pass a publish (`not a valid <kind>: …`); `409 10 <kind> proposals are waiting: delete one first`. |
+| `GET /api/admin/proposals/<kind>` | – | `{"live":"<sha256 hex of what the relay serves now>" \| null,"proposals":[…oldest first]}`; each `{"id","kind","author":{"key_fingerprint","name","oid"?,"upn"?},"created","base","note","serial"?,"doc"}` |
+| `DELETE /api/admin/proposals/<kind>/<id>` | – | `204`; `404` unknown; `403 only its author or a key holder may delete a proposal` |
+| `POST /api/admin/audit-event` | `{"event":"export","what":"team-activity"\|"sessions"\|"devices","rows":<≤ 10 000 000>}` | `204`: Tether Manage's own export, written to the team audit log marked `self_reported`; `400` for anything else |
 
 The server refuses uploads that would leave less than 2 GiB free on the disk (`507`).
+
+### Tether Manage sessions on admin routes
+
+A person signed in with a Tether Manage role ([staff sign-in](#staff-sign-in-sessions-postdelete-apiteamsession),
+roles with `manage` in the team document) reaches some admin routes without the admin key. Tether
+Manage signs such a request with the key the session is bound to, in the same `Tether-Sig` format,
+and names it with `kid`. A relay that has a live session for that `kid` checks the request as that
+session: the signature with that one key, the nonce, the session's life (`401 session expired: sign
+in again`), 120 requests a minute per key, failures counted against the address as on member
+routes, and the person's Tether Manage roles from the document in force. Any other request is
+checked against the admin keys as before.
+
+| Admin route | Auditor | Operator | PolicyEditor | Publisher | KeyHolder |
+| --- | --- | --- | --- | --- | --- |
+| `GET` `status`, `devices`, `status/devices`, `status/revoked`, `audit`, `team-audit`, `policy-history[/<serial>]`, `releases`; `POST audit-event` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `GET diag`, `GET diag/<ticket>`, `POST diag-ticket`, `POST diag/<ticket>/close`, `DELETE diag/<ticket>`, `DELETE status/<uuid>`, `POST status/revoke` | – | ✓ | – | – | – |
+| `GET team` | – | – | ✓ | – | ✓ |
+| `PUT proposals/policy`, `PUT proposals/team` | – | – | ✓ | – | – |
+| `GET`, `DELETE proposals/policy`, `proposals/team` | – | – | ✓ | – | ✓ |
+| `PUT proposals/release` | – | – | – | ✓ | – |
+| `GET`, `DELETE proposals/release` | – | – | – | ✓ | ✓ |
+| everything else (`PUT policy`, `team`, `server-keys`, `download-page`, `custom/…`, `release/…`; `DELETE custom/…`, `release/…`; `POST releases/prune`; `GET custom`) | – | – | – | – | – |
+
+A session's request for a route its roles do not allow gets `403 your Tether Manage role does not
+allow this; signing and publishing need a key holder's Tether Manage with its keys unlocked` and is
+recorded (as the route's own event, else `admin-refused` with the route). A release upload is
+verified with the session's key before the relay's lock and then refused the same way. A session
+never signs anything: what is live still changes only with an admin-signed publish.
+
+**Proposals** are drafts a person without the keys stores for a key holder: a policy (a `Bundle`),
+a team document (a `TeamDoc`), both validated as a publish would be, or a release (any JSON object;
+Tether Manage puts `{channel, app, platform, version, notes, where, files:[{name, sha256}]}`, never
+the files). Stored unsigned in `proposals/<kind>/<id>.json` (`0600`) with the author (the session's
+person, or `admin` for an admin signature, which is accepted too), the time, `base` and the
+document's `serial`; at most 10 per kind. A proposal is never served as live and never applied.
+`base` is the SHA-256 of what the relay served when the proposal was made (`GET /api/policy`,
+`GET /api/admin/team`; empty: nothing); `live` in the `GET` answer is the same hash now, so a
+proposal whose `base` differs is stale. `DELETE`: its author (by `oid`), a KeyHolder session or the
+admin signature. Records: `proposal-put` (`{"kind","id","serial"}`), `proposal-delete`
+(`{"kind","id","serial","author_oid","same_person"}`: whether the remover proposed it).
 
 ## Team (technician) endpoints
 
@@ -279,8 +323,8 @@ malformed (`401`).
 The document (payload ≤ 256 KiB):
 ```json
 {"serial":7,
- "oidc":{"issuer":"https://login.microsoftonline.com/<tenant id>/v2.0","tenant":"<tenant id>","audience":"api://tether","client_id":"<id>","scope":"api://tether/access"},
- "roles":{"Tether.Software":{"sbom":true},"Tether.Customer.4711":{"customers":["4711"]}},
+ "oidc":{"issuer":"https://login.microsoftonline.com/<tenant id>/v2.0","tenant":"<tenant id>","audience":"<API client id>","client_id":"<apps client id>","scope":"api://<API client id>/access"},
+ "roles":{"Tether.Technician":{},"Tether.Software":{"sbom":true},"Tether.Customer.4711":{"customers":["4711"]},"Tether.Manage.Auditor":{"manage":"auditor"}},
  "deny":["<object id>"], "oidc_only":false,
  "members":[{"name":"Bridge","key":"<b64>","write":false,"audit":false,"sbom":true,"agent":false,"customers":["47*"],"service":true}]}
 ```
@@ -299,7 +343,12 @@ at most 64 per member or role. `oidc_only` true needs `oidc` (`400`): then only 
 keep their keys and people sign in ([below](#staff-sign-in-sessions-postdelete-apiteamsession)).
 `oidc.issuer` must be `https://`, in normal form, and not `localhost` or a loopback, private or
 link-local address (`400`; only debug and `test-hooks` builds also take `http://` on loopback, for
-the mock provider). `roles` and `deny` apply to sign-in sessions; `deny` does not affect key members. Once a relay has accepted a signed document it refuses plain rosters
+the mock provider). `oidc.audience` is the API registration's client id (a v2.0 token's `aud`; its
+App ID URI is not accepted); the set-up: [sign-in.md](sign-in.md). `roles` maps app role values (1–128
+printable ASCII characters) to what they grant: `write`, `audit`, `sbom`, `agent` (missing: false)
+and `customers` (missing or empty: names none), or `manage`, one Tether Manage role (`auditor`,
+`operator`, `policy-editor`, `publisher`, `key-holder`), which grants no team permission (a role
+with `manage` and any team permission: `400`). `roles` and `deny` apply to sign-in sessions; `deny` does not affect key members. Once a relay has accepted a signed document it refuses plain rosters
 (`409`) for as long as `team/team.json` exists, also after a restart; an unreadable `team.json`
 leaves nobody admitted (and plain rosters still refused) until a new document is published. The
 stored document is checked against the key it names at start, so it stays in force across an admin
@@ -318,9 +367,11 @@ agent (no pin, so no customer: `*` only), answers exactly as an unknown device (
 an ID that a device outside the member's scope holds answers `409 tether_id is not the one this device
 claims`, as for a wrong ID. Fleet-wide by design (and recorded in the team audit log as
 `device-list`): the device list (`/api/team/devices`, from heartbeats, which carry no customer) and the shared tags (one document for the whole team). `agent`
-is meant for the viewer's desktop (the session menu **Health monitoring agent…**), not the relay;
-the desktop does not check it yet, so every member sees that menu item, and the host decides by its
-policy ([health.md](health.md#in-a-session-technician)).
+is checked by the viewer's desktop, not the relay: without it the session menu item **Health
+monitoring agent…** is disabled and the desktop refuses the request; the host decides by its own
+policy ([health.md](health.md#in-a-session-technician)). A sign-in session with only Tether Manage
+roles gets `403 this sign-in has only Tether Manage roles` on every team route but `GET
+/api/team/me` and sign-out.
 
 **What the signature on the team document protects.** The document is signed with an admin key, not
 trusted because of the request that carries it: another relay, or a desktop or Manage reading
@@ -335,7 +386,7 @@ trust another admin key). The relay is trusted to enforce the permissions it ser
 | `GET /api/team/config` | no signature | The `config` envelope of the signed document as published (`{"payload","sig","key"}`, payload `{"serial","oidc"}`); verify it with the admin key, not the relay. `ETag: "<serial>"`, `304` on `If-None-Match`. `404 no sign-in configured` without a document with `oidc`. |
 | `POST /api/team/session` | `{"access_token":"<JWT>","key":"<std base64 of the member key>"}` (≤ 32 KiB), signed with that key, the header naming its `kid` | Staff sign-in ([below](#staff-sign-in-sessions-postdelete-apiteamsession)): `200` the session as `me` answers it; a refusal `{"reason","message"}` |
 | `DELETE /api/team/session` | – | Sign-out: the signing key's session ends (an expired one too), `204`; a roster key without a session: `204`, nothing changes |
-| `GET /api/team/me` | – | `{"name":…, "write":bool, "audit":bool}`; with a signed document also `"sbom","agent":bool, "customers":[…], "service":bool`; signed in: `{"name","write","audit","sbom","agent","customers","service":false,"oid","upn","exp":<unix>,"roles":[…]}` |
+| `GET /api/team/me` | – | `{"name":…, "write":bool, "audit":bool}`; with a signed document also `"sbom","agent":bool, "customers":[…], "service":bool`; signed in: `{"name","write","audit","sbom","agent","customers","service":false,"oid","upn","exp":<unix>,"roles":[…],"manage":[…]}` (`roles`: the token's roles the document maps; `manage`: the Tether Manage roles, left out when none) |
 | `GET /api/team/devices` | – | `[{uuid,id,profile,version,os,last_seen}]` newest first, from the heartbeats (no IP, no serials) |
 | `GET /api/team/tags` | – | `{"rev":<u64>,"doc":<JSON or null>,"updated_by":"<name>","updated_at":<unix>}`; `rev` 0, `doc` null, `updated_by` "" and `updated_at` 0 when none was stored |
 | `PUT /api/team/tags` | a JSON object (≤ 512 KiB), header `If-Match: <rev>` (decimal, quotes tolerated) | `200 {"rev":<new>}`. Member without `write`: `403`. Missing or bad `If-Match`, body not a JSON object: `400`. `rev` is not the current one: `409` with the current `{"rev","doc","updated_by","updated_at"}`. Too large: `413`. Stored atomically as `team/tags.json` (0600) with `rev + 1`, `updated_by` = the member's roster name. The relay does not look inside the document. |
@@ -444,14 +495,15 @@ member names the person (`actor.oid`, `actor.upn`) and the key id.
 ## Team audit log
 
 Every request of a team member or an admin that reads or changes a device's data is recorded, with
-refused ones (`403` for a missing permission, `404` for an unknown or out-of-scope device), one JSON
-line per request in `/var/lib/tether-api/team-audit/<YYYY-MM-DD>.jsonl` (UTC day; folder `0700`,
+refused ones (`403` for a missing permission, `404` for an unknown or out-of-scope device), and so
+are staff sign-ins and every admin change (below), one JSON line per request in `/var/lib/tether-api/team-audit/<YYYY-MM-DD>.jsonl` (UTC day; folder `0700`,
 files `0600`), also with a plain roster. Fields, in this order (absent ones left out):
 
 `{"ts":<unix>,"event":"…","actor":{"key_fingerprint":"<16 hex>","name":"…"},"ip":"…","target":{"uuid","tether_id","customer"},"detail":{…},"result":<HTTP status>,"self_reported":true,"prev":"<64 hex>"}`
 
 - `actor`: the member's name in the roster or team document and the id of the key that signed
-  (`tether_trust::team::key_id`, the `kid`); the admin as `"name":"admin"` with its key's id. The
+  (`tether_trust::team::key_id`, the `kid`), and for a signed-in person also `oid` and `upn`; the
+  admin as `"name":"admin"` with its key's id. The
   writer's own records (`dropped`, `chain-gap`) and `signature-limit` have none. `ip`: the client
   address (design 12.5).
 - `target`: the uuid as the request named it (at most 128 bytes); for an answer below `400` also
@@ -484,9 +536,35 @@ files `0600`), also with a plain roster. Fields, in this order (absent ones left
 
 Posted events: `{"event":"export","what":…,"rows":<≤ 10 000 000>,"uuid"?}`,
 `{"event":"session-start","tether_id","uuid"?}`, `{"event":"agent-request","tether_id","action","outcome"?,"uuid"?}`, `{"event":"token-used","relay"}`
-(`outcome` `[a-z-]{1,32}`); nothing else is accepted. The relay accepts them; no Tether app
-posts them yet (the host's own record of an agent install or remove is the session audit
-`alarm` of type 30 above).
+(`outcome` `[a-z-]{1,32}`); nothing else is accepted. The desktop app (0.7.0) posts them: `export`
+when it exports the host list, the failing checks or a software list (SBOM), `session-start` when it
+starts a session to a host, `agent-request` when the session's agent install or removal is asked
+(also when the app refused it, outcome `not-permitted`), `token-used` when a relay answered `409
+token-used` to the person's sign-in. They go in the background to the first relay it reaches
+(`token-used` to every relay), only while the app is a member; they are what the app says it did, not something the relay saw (the host's own record of an
+agent install or remove is the session audit `alarm` of type 30 above). Tether Manage's own
+exports go to `POST /api/admin/audit-event` (`export` with `what` `team-activity`, `sessions` or
+`devices`).
+
+**Admin and Tether Manage records.** Every admin change is recorded with what changed (serials,
+ids, paths), never the documents, with the admin key (`"name":"admin"`) or the signed-in person as
+`actor`, refused ones too:
+
+| Event | Route | `detail` |
+|---|---|---|
+| `policy-publish`, `server-keys-publish` | `PUT /api/admin/policy`, `server-keys` | `{"serial"}` |
+| `team-publish` | `PUT /api/admin/team` | `{"serial"}`; a plain roster `{"plain_roster":true,"members":n}` |
+| `download-page-publish` | `PUT /api/admin/download-page` | `{"bytes"}` |
+| `diag-ticket`, `diag-close`, `diag-delete`, `diag-download` | `POST diag-ticket`, `POST diag/<t>/close`, `DELETE diag/<t>`, `GET diag/<t>` | `{"ticket"}` |
+| `release-prune` | `POST /api/admin/releases/prune` | `{"dry_run"}` |
+| `custom-app-publish`, `custom-app-delete` | `PUT`, `DELETE /api/admin/custom/<id>` | `{"id","channel","expires"}` (never the link token); `{"id"}` |
+| `release-upload`, `release-index-publish`, `release-delete` | `PUT`, `DELETE /api/admin/release/<path>` | `{"path"}`; an index `{"channel","file","serial","expires"}` (rollouts and halts are in the index); `{"path"}` |
+| `proposal-put`, `proposal-delete` | `PUT /api/admin/proposals/<kind>`, `DELETE …/<kind>/<id>` | [above](#tether-manage-sessions-on-admin-routes) |
+| `admin-refused` | a route a session's roles do not allow and that has no event of its own | `{"route"}` |
+| `export` | `POST /api/admin/audit-event` (`self_reported`) | `{"what","rows"}` |
+
+Sign-in records (`sign-in`, `sign-in-refused`, `sign-out`, `session-ended`):
+[above](#staff-sign-in-sessions-postdelete-apiteamsession).
 
 **Writing.** One writer thread takes records from a queue of 10 000; a request never waits for it.
 When the queue is full, today's file alone reaches `TEAM_AUDIT_MAX_MB`, or a line cannot be written
@@ -519,8 +597,9 @@ kept elsewhere shows that. `GET /api/admin/team-audit` returns the current head:
 a script) should store it and check that the next read still reaches it; forwarding the journal to
 a separate SIEM keeps a copy of every line and head the relay cannot change afterwards.
 
-**Reading** (`GET /api/admin/team-audit`, admin-signed; members `401`):
-`?since=<unix>&until=<unix>&actor=<name or key id>&device=<uuid or Tether ID>&customer=<ref>&event=<event>&limit=<1–5000, default 1000>&cursor=<next>`,
+**Reading** (`GET /api/admin/team-audit`, admin-signed or a session with any Tether Manage role;
+team members `401`):
+`?since=<unix>&until=<unix>&actor=<name, key id, oid or upn>&device=<uuid or Tether ID>&customer=<ref>&event=<event>&limit=<1–5000, default 1000>&cursor=<next>`,
 all optional, exact matches; unknown parameter or bad value `400`. Answer, oldest first:
 `{"head":"<hash>","records":[…],"next":"<cursor>"|null,"problems":[{"day","at":<byte offset>,"problem"}]}`.
 Read from the files line by line (never a whole day in memory), at most `limit` records and about
