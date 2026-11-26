@@ -1697,6 +1697,100 @@ fn the_nonce_map_is_bounded() {
     assert_eq!(stored_nonces(&s.dir).len(), 5);
 }
 
+/// Publishes a roster of members `(name, key)` with the admin key `k`.
+fn members(s: &Srv, k: &SigningKey, m: &[(&str, &SigningKey)]) {
+    let m: Vec<serde_json::Value> = m.iter().map(|(n, key)| serde_json::json!({"name": n, "key": key_to_b64(&key.verifying_key()), "write": false, "audit": false})).collect();
+    assert_eq!(s.admin(k, "PUT", "/api/admin/team", serde_json::json!({"members": m}).to_string().as_bytes()).status, 204);
+}
+
+/// `GET /api/team/me` signed by a member key, from source address `ip`.
+fn member_me(s: &Srv, key: &SigningKey, ip: &str) -> Reply {
+    let sig = reqauth::sign_request(key, "GET", "/api/team/me", b"", now());
+    s.req("GET", "/api/team/me", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", ip)], b"")
+}
+
+/// A member key over its limit (120 a minute) is refused before its nonce is kept: it holds at
+/// most its share of the nonce map, and another member's request still gets through.
+#[test]
+fn one_member_key_holds_at_most_its_share_of_nonces() {
+    let k = generate_key();
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[("TETHER_TEST_NONCES_MAX", "200")], |_| {});
+    let (anna, ben) = (generate_key(), generate_key());
+    members(&s, &k, &[("Anna", &anna), ("Ben", &ben)]);
+    let codes: Vec<u16> = (0..300).map(|_| member_me(&s, &anna, "198.51.100.10").status).collect();
+    assert!(codes[..120].iter().all(|&c| c == 200) && codes[120..].iter().all(|&c| c == 429), "{codes:?}");
+    let n = stored_nonces(&s.dir).len();
+    assert!(n <= 121, "{n} nonces stored (120 of Anna's and the roster's)");
+    assert_eq!(member_me(&s, &ben, "198.51.100.10").status, 200);
+}
+
+/// One source address holds at most `NONCES_PER_IP` live nonces of member requests, whatever
+/// keys sign them: then `429` with `Retry-After`; another address is not affected.
+#[test]
+fn one_address_holds_at_most_its_share_of_nonces() {
+    let k = generate_key();
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[("TETHER_TEST_NONCES_PER_IP", "5")], |_| {});
+    let keys: Vec<SigningKey> = (0..3).map(|_| generate_key()).collect();
+    members(&s, &k, &[("A", &keys[0]), ("B", &keys[1]), ("C", &keys[2])]);
+    for i in 0..5 {
+        assert_eq!(member_me(&s, &keys[i % 3], "198.51.100.11").status, 200, "request {i}");
+    }
+    let r = member_me(&s, &keys[2], "198.51.100.11");
+    assert_eq!((r.status, r.header("Retry-After")), (429, Some("60")));
+    assert_eq!(member_me(&s, &keys[2], "198.51.100.12").status, 200, "another address");
+    assert_eq!(stored_nonces(&s.dir).len(), 7, "the roster's, five and one");
+}
+
+/// A restart reads the whole `nonces.log` (here 20 001 lines), not only its first lines.
+#[test]
+fn a_restart_reads_the_whole_nonce_log() {
+    let k = generate_key();
+    let keys = key_to_b64(&k.verifying_key());
+    let s = start_env(&keys, &[], |_| {});
+    let sig = reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now());
+    assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 200);
+    let last = std::fs::read_to_string(s.dir.join("nonces.log")).unwrap();
+    let s2 = start_env(&keys, &[], |d| {
+        let t = now();
+        let mut log: String = (0..20_000).map(|i| format!("[\"filler{i:016}\",{t}]\n")).collect();
+        log.push_str(&last);
+        std::fs::write(d.join("nonces.log"), log).unwrap();
+    });
+    assert_eq!(s2.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 401, "the last line's nonce is a replay");
+}
+
+/// When `nonces.json` cannot be written, the nonces of the request that tried go to the log
+/// (which stays in force) instead of being lost for a restart.
+#[test]
+fn a_failed_compaction_keeps_the_nonces_in_the_log() {
+    let k = generate_key();
+    let keys = key_to_b64(&k.verifying_key());
+    let s = start_env(&keys, &[("TETHER_TEST_NONCE_LOG_MAX", "2")], |d| std::fs::create_dir(d.join("nonces.json")).unwrap());
+    let sigs: Vec<String> = (0..5).map(|_| reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now())).collect();
+    let get = |s: &Srv, sig: &String| s.req("GET", "/api/admin/status", &[(reqauth::HEADER, sig)], b"").status;
+    for sig in &sigs {
+        assert_eq!(get(&s, sig), 200);
+    }
+    let s2 = start_env(&keys, &[], |d| { std::fs::copy(s.dir.join("nonces.log"), d.join("nonces.log")).unwrap(); });
+    for (i, sig) in sigs.iter().enumerate() {
+        assert_eq!(get(&s2, sig), 401, "request {i} replayed after a restart");
+    }
+}
+
+/// A torn last line in `nonces.log` (a crash while appending) is ended at start, so the next
+/// nonce is not glued to it and is still refused after a restart.
+#[test]
+fn a_torn_nonce_log_line_does_not_swallow_the_next() {
+    let k = generate_key();
+    let keys = key_to_b64(&k.verifying_key());
+    let s = start_env(&keys, &[], |d| std::fs::write(d.join("nonces.log"), "[\"torn").unwrap());
+    let sig = reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now());
+    let get = |s: &Srv| s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status;
+    assert_eq!(get(&s), 200);
+    let s2 = start_env(&keys, &[], |d| { std::fs::copy(s.dir.join("nonces.log"), d.join("nonces.log")).unwrap(); });
+    assert_eq!(get(&s2), 401, "replay after a restart");
+}
+
 /// `GET /api/admin/devices` (heartbeats with addresses) is recorded, folded per actor and hour.
 #[test]
 fn the_admin_device_list_is_recorded() {

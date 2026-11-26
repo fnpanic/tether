@@ -346,6 +346,9 @@ struct App {
     /// Set by a handler (`App::defer`) whose file work runs after the state lock is released.
     later: Option<Later>,
     nonces: HashMap<String, u64>,
+    /// Per source address (`rate_ip`) of member, sign-in and Manage-session requests: when each of
+    /// its nonces leaves the replay window, oldest first ([`NONCES_PER_IP`]).
+    nonce_ips: HashMap<String, std::collections::VecDeque<u64>>,
     /// Nonces used since they were last written: `serve` appends them to `nonces.log` after the
     /// state lock is released and before the answer goes out ([`persist_nonces`]).
     nonces_new: Vec<(String, u64)>,
@@ -639,6 +642,10 @@ const NONCES_MAX: usize = 100_000;
 const NONCE_LOG_MAX: usize = 10_000;
 /// A `nonces.json` larger than this is not read (this relay writes at most `NONCES_MAX` entries).
 const NONCE_FILE_MAX: u64 = 16 << 20;
+/// Live nonces of member, sign-in and Manage-session requests from one source address (`rate_ip`):
+/// beyond it that address is refused `429`, so many keys from one address cannot fill the map. One
+/// key holds at most about `KEY_PER_MIN` (120) x the replay window (601 s), about 1 200.
+const NONCES_PER_IP: usize = 10_000;
 
 /// `n`, or in test builds `TETHER_TEST_<name>` (`NONCES_MAX`, `NONCE_LOG_MAX`).
 fn test_or(name: &str, n: usize) -> usize {
@@ -654,6 +661,10 @@ fn nonces_max() -> usize {
     test_or("NONCES_MAX", NONCES_MAX)
 }
 
+fn nonces_per_ip() -> usize {
+    test_or("NONCES_PER_IP", NONCES_PER_IP)
+}
+
 /// Writes the nonces used since the last write without the state lock: appended to `nonces.log`
 /// (synced), or, once the log has `NONCE_LOG_MAX` lines, the whole map to `nonces.json` (synced,
 /// renamed) and the log removed. The lock is held only to take the new nonces (the map is copied
@@ -663,18 +674,32 @@ fn nonces_max() -> usize {
 /// must work.
 fn persist_nonces(app: &Mutex<App>) {
     let _file = NONCE_FILE.lock().unwrap_or_else(|e| e.into_inner());
-    let (new, snap, data) = {
+    let (new, snap, data, logged) = {
         let mut a = lock(app);
         if a.nonces_new.is_empty() {
             return; // a request that came later wrote it already, with this nonce in it
         }
         let new = std::mem::take(&mut a.nonces_new);
         a.nonces_logged += new.len();
+        // Only the copy is made under the lock (NONCES_MAX entries of 32 characters, measured: about
+        // 9 MB more and 8 ms in a release build); it is serialised and written outside.
         let snap = (a.nonces_logged > test_or("NONCE_LOG_MAX", NONCE_LOG_MAX)).then(|| a.nonces.clone());
-        if snap.is_some() {
-            a.nonces_logged = 0;
+        let logged = std::mem::take(&mut a.nonces_logged);
+        if snap.is_none() {
+            a.nonces_logged = logged;
         }
-        (new, snap, a.data.clone())
+        (new, snap, a.data.clone(), logged)
+    };
+    let append = || {
+        let f = OpenOptions::new().append(true).create(true).mode(0o600).open(data.join("nonces.log"))?;
+        let mut w = BufWriter::new(&f);
+        for n in &new {
+            serde_json::to_writer(&mut w, n).map_err(io::Error::other)?;
+            w.write_all(b"\n")?;
+        }
+        w.flush()?;
+        drop(w);
+        f.sync_data()
     };
     let r = match snap {
         Some(snap) => {
@@ -693,30 +718,28 @@ fn persist_nonces(app: &Mutex<App>) {
                     _ => Ok(()),
                 }
             })();
-            if r.is_err() {
-                let _ = fs::remove_file(&tmp);
+            match r {
+                Ok(()) => Ok(()),
+                // The log stays in force: these nonces go to it too, and its line count is kept,
+                // so the next request tries again.
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp);
+                    eprintln!("error: nonces.json: {e}");
+                    lock(app).nonces_logged += logged;
+                    append()
+                }
             }
-            r
         }
-        None => (|| {
-            let f = OpenOptions::new().append(true).create(true).mode(0o600).open(data.join("nonces.log"))?;
-            let mut w = BufWriter::new(&f);
-            for n in &new {
-                serde_json::to_writer(&mut w, n).map_err(io::Error::other)?;
-                w.write_all(b"\n")?;
-            }
-            w.flush()?;
-            drop(w);
-            f.sync_data()
-        })(),
+        None => append(),
     };
     if let Err(e) = r {
         eprintln!("error: nonces.json/nonces.log: {e}");
     }
 }
 
-/// `nonces.json` and the lines appended to `nonces.log` since (a torn last line is skipped), the
-/// expired left out; and the number of lines in the log.
+/// `nonces.json` and the lines appended to `nonces.log` since (all of them: the map bounds what a
+/// request adds, and a log that could not be compacted keeps growing; a torn last line is skipped
+/// and ended, so the next line is not glued to it), the expired left out; and the number of lines.
 fn load_nonces(data: &Path) -> (HashMap<String, u64>, usize) {
     let p = data.join("nonces.json");
     let mut m: HashMap<String, u64> = if fs::metadata(&p).is_ok_and(|m| m.len() > NONCE_FILE_MAX) {
@@ -726,11 +749,22 @@ fn load_nonces(data: &Path) -> (HashMap<String, u64>, usize) {
         load_json(&p)
     };
     let mut lines = 0;
-    if let Ok(f) = File::open(data.join("nonces.log")) {
-        for l in io::BufRead::lines(BufReader::new(f)).map_while(Result::ok).take(2 * NONCE_LOG_MAX) {
+    let log = data.join("nonces.log");
+    if let Ok(f) = File::open(&log) {
+        let (mut r, mut l, mut ended) = (BufReader::new(f), Vec::new(), true);
+        while io::BufRead::read_until(&mut r, b'\n', &mut l).is_ok_and(|n| n > 0) {
             lines += 1;
-            if let Ok((n, t)) = serde_json::from_str::<(String, u64)>(&l) {
+            ended = l.ends_with(b"\n");
+            if let Ok((n, t)) = serde_json::from_slice::<(String, u64)>(&l) {
                 m.insert(n, t);
+            }
+            l.clear();
+        }
+        // A last line without its newline (a crash while appending) is ended before anything is
+        // appended, or the next line would be glued to it.
+        if !ended {
+            if let Err(e) = OpenOptions::new().append(true).open(&log).and_then(|mut f| f.write_all(b"\n").and_then(|_| f.sync_data())) {
+                eprintln!("error: nonces.log: {e}");
             }
         }
     }
@@ -1095,6 +1129,7 @@ impl App {
             devices_dirty: false,
             ip_hits: HashMap::new(),
             nonces,
+            nonce_ips: HashMap::new(),
             nonces_new: Vec::new(),
             nonces_logged,
             nonces_used: 0,
@@ -1159,29 +1194,48 @@ impl App {
     /// The admin signature; the index of the admin key that made it.
     fn auth(&mut self, rq: &Request, method: &str, url: &str, body: &[u8]) -> Result<usize, Resp> {
         let (nonce, i) = verify_sig(&self.keys, rq, method, url, body, now())?;
-        self.use_nonce(nonce, 0)?;
+        self.use_nonce(nonce, 0, None)?;
         Ok(i)
     }
 
     /// Replay check of a verified signature's nonce, remembered `keep` s longer than
     /// NONCE_TTL_SECS (stored as seen that much later; a refused replay does not renew it).
-    fn use_nonce(&mut self, nonce: String, keep: u64) -> Result<(), Resp> {
+    fn use_nonce(&mut self, nonce: String, keep: u64, ip: Option<&str>) -> Result<(), Resp> {
         if self.nonces.contains_key(&nonce) {
             return Err(text(401, "replayed request"));
         }
-        self.remember_nonce(nonce, now() + keep)
+        self.remember_nonce(nonce, now() + keep, ip)
     }
 
-    /// Remembers a nonce (not seen before) as seen at `at`; it is written before this request is
-    /// answered. A map full of nonces still in their window: `503`, nothing remembered.
-    pub(crate) fn remember_nonce(&mut self, nonce: String, at: u64) -> Result<(), Resp> {
+    /// Whether one more nonce may be remembered: a map full of nonces still in their window is
+    /// `503`; `ip` (a member, sign-in or Manage-session request's `rate_ip`) with `NONCES_PER_IP`
+    /// live ones is `429`. The admin key's own requests pass `None`.
+    pub(crate) fn nonce_room(&mut self, ip: Option<&str>) -> Result<(), Resp> {
+        let t = now();
         if self.nonces.len() >= nonces_max() {
-            let t = now();
             self.nonces.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
             if self.nonces.len() >= nonces_max() {
                 eprintln!("error: {} signed requests within the replay window: new ones refused until older ones expire", self.nonces.len());
                 return Err(text(503, "too many signed requests, retry later").with_header(hdr("Retry-After", "60")));
             }
+        }
+        if let Some(q) = ip.and_then(|ip| self.nonce_ips.get_mut(ip)) {
+            while q.front().is_some_and(|&e| e <= t) {
+                q.pop_front();
+            }
+            if q.len() >= nonces_per_ip() {
+                return Err(text(429, "too many signed requests from this address").with_header(hdr("Retry-After", "60")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remembers a nonce (not seen before) as seen at `at`; it is written before this request is
+    /// answered. No room ([`App::nonce_room`]): refused, nothing remembered.
+    pub(crate) fn remember_nonce(&mut self, nonce: String, at: u64, ip: Option<&str>) -> Result<(), Resp> {
+        self.nonce_room(ip)?;
+        if let Some(ip) = ip {
+            self.nonce_ips.entry(ip.to_owned()).or_default().push_back(at + reqauth::NONCE_TTL_SECS);
         }
         self.nonces_new.push((nonce.clone(), at));
         self.nonces.insert(nonce, at);
@@ -1454,8 +1508,10 @@ impl App {
                 "PUT" => {
                     if let Body::File { nonce: Some((nonce, key)), .. } = body {
                         // Verified with the session's key (release_precheck): a person never uploads.
-                        if let Some((_, c)) = self.release_session(rq) {
-                            self.use_nonce(nonce.clone(), 0)?;
+                        if let Some((k, c)) = self.release_session(rq) {
+                            let ip = rate_ip(rq);
+                            self.key_limit(tether_trust::key_to_b64(&k), now())?;
+                            self.use_nonce(nonce.clone(), 0, Some(ip.as_str()))?;
                             return Err(self.session_refused(rq, c, method, url, rest, &[]));
                         }
                         self.audit_admin(rq, self.admin_actor(*key), method, url, rest, &[]);
@@ -1826,7 +1882,7 @@ impl App {
         let Body::File { path: tmp, len, nonce: Some((nonce, _)) } = body else { return Err(internal("release upload not verified")) };
         // A replay that began while the timestamp was current may still be sending for as long
         // as a body may take (`Deadline`), so the nonce is kept that much longer, plus the skew.
-        self.use_nonce(nonce.clone(), 60 + LIMIT_RELEASE / (64 << 10) + reqauth::MAX_SKEW_SECS)?;
+        self.use_nonce(nonce.clone(), 60 + LIMIT_RELEASE / (64 << 10) + reqauth::MAX_SKEW_SECS, None)?;
         let index = self.index_channel(dest);
         let mut new_index = None;
         if let Some(ch) = &index {
@@ -2003,6 +2059,12 @@ impl App {
         // Pruned in memory only: the file keeps the old entries until the next write (harmless:
         // the first maintain after a restart prunes them again).
         self.nonces.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
+        self.nonce_ips.retain(|_, q| {
+            while q.front().is_some_and(|&e| e <= t) {
+                q.pop_front();
+            }
+            !q.is_empty()
+        });
         let diag = self.data.join("diag");
         let n = self.tickets.len();
         self.tickets.retain(|k| {

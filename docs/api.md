@@ -206,8 +206,13 @@ written to `nonces.json` and the log starts again (a restart reads both; a `nonc
 error is logged; the nonce keeps blocking replays in memory. At most 100 000 nonces are kept (every
 signed request's for 601 s, an upload's longer): when that many are still inside their window, a
 new admin, member or session request is refused `503 too many signed requests, retry later` with
-`Retry-After: 60` rather than the set growing. A sign-in (`POST /api/team/session`) leaves its nonce
-only once its token verified.
+`Retry-After: 60` rather than the set growing. So that no one fills it for everyone: a member or
+session key's request limit (120 a minute) is counted before its nonce is kept, so one key holds at
+most about 1 200; one source address (IPv6: one /64) holds at most 10 000 live nonces of member,
+sign-in and Manage-session requests, whatever keys sign them, and beyond that gets `429 too many
+signed requests from this address` with `Retry-After: 60` (the admin key's own requests are not
+counted per address; the count starts again at a restart). A sign-in (`POST /api/team/session`)
+leaves its nonce only when it succeeds.
 
 | Method & path | Body | Result |
 | --- | --- | --- |
@@ -302,8 +307,13 @@ groups of 4 (`630D-CD29-66C4-3366` for the key bytes `00 01 … 1f`;
 Member requests carry the same `Tether-Sig` header as admin requests (same message, v2 or v1 under the same rules, ±300 s skew),
 signed with the member's key. The relay tries every roster key; the nonce cache is the one admin
 requests use. Unknown key, bad signature, no roster or an empty roster: `401` with a short reason.
-Limits: 120 requests/min per member key and 60 failed signatures/min per IP (IPv6: per /64; `429`). Unknown path:
-`404`.
+Limits: 120 requests/min per member key (counted before the request's nonce is kept, replays too) and 60 failed signatures/min per IP (IPv6: per /64; `429`). Unknown path:
+`404`. The per-IP failure limit refuses every `/api/team` route except `config` (sign-ins too) and
+every admin route signed by a Tether Manage session from that address for the rest of the minute;
+heartbeats, status reports and requests signed with the admin key are not affected. So one machine
+behind a practice's NAT can lock the technicians there out for a minute with junk signatures or
+junk sign-ins. This is by design: the limit is what keeps unauthenticated junk cheap for the relay,
+and the address is all the relay knows about a sender before a signature verified.
 
 **`kid`.** A member header may end with ` kid=<16 hex>`: the key's fingerprint digits in lower case
 (`tether_trust::team::key_id`, `630dcd2966c43366` for the vector above; `reqauth::sign_request_for_kid`).
@@ -462,7 +472,12 @@ the API scope), `wrong-issuer`, `wrong-tenant`, `wrong-client`, `expired`, `not-
 name resolves to a loopback or private address: a production build never connects there),
 `config-changed` (the document changed during the check; retry), `too-many-sessions`. Any key may
 sign a sign-in, so what a refused one leaves is bounded: its nonce is not kept (only a sign-in
-whose token verified keeps it; a replay of a refused one is refused the same way again). A token
+that succeeds keeps it; a replay of a refused one is refused the same way again), and the signing
+key's request limit counts it only once its token verified. A sign-in refused after its token
+verified (`denied`, `no-role`, `token-used`, `expired`, `too-many-sessions`, …: it names a person)
+counts against that person's `oid`: the 21st within a minute gets `429 too many refused sign-ins for
+this person` with `Retry-After: 60` and leaves no record (anyone the tenant lets get a token for the
+API could otherwise send them with a fresh key each). A token
 refused before its own signature verified (`malformed`, `alg`, `no-kid`, `unknown-kid`,
 `bad-signature`) and `not-configured` count against the source address like a failed request
 signature (60 a minute, then `429 too many failed requests` on every team route from that address).
@@ -501,7 +516,8 @@ that answer.
 **Audit** (team audit log): `sign-in` (`actor` with `oid` and `upn`, `detail` `{"roles","exp"}`),
 `sign-in-refused` (`detail` `{"reason"}`; `actor` only the key id and `"name":"-"` unless the token
 was verified: then the person; those without a verified person at most 60 a minute for the whole
-relay, the ones left out counted as `"more":n` in the next one written), `sign-out`, `session-ended` (`detail` `{"reason":"deny-list"|
+relay, those with one at most 20 a minute per person, the ones left out counted as `"more":n` in
+the next one written), `sign-out`, `session-ended` (`detail` `{"reason":"deny-list"|
 "no-role"|"document-changed","serial"}`; `{"reason":"replaced","kid"}` when a person's ninth key
 replaced the oldest session, `kid` the key that lost its session). Never the token. Every other record of a signed-in
 member names the person (`actor.oid`, `actor.upn`) and the key id.

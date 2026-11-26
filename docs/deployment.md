@@ -221,6 +221,11 @@ key of the Tether ID (`GET /peer-pk/<id>` on hbbs's health port) and checks the 
   all. Before publishing the first signed team document, back up `/var/lib/tether-api/team/roster.json`
   on every relay; to roll back, stop tether-api, put that copy back (owner `tether-api`, mode
   `0600`), install 0.6 and start it. Members added since then are not in it.
+- **Rollback and used nonces.** This relay appends each signed request's nonce to
+  `/var/lib/tether-api/nonces.log` and writes the whole set to `nonces.json` only every 10 000 lines.
+  tether-api 0.6 reads only `nonces.json`: rolled back to 0.6, up to 10 000 recent signed requests
+  (those in the log) can be replayed for at most 601 s after they were made. To close that, wait
+  601 s after stopping tether-api before starting 0.6.
 - **Check.** On the relay, `curl -s localhost:21122/peer-pk/<a Tether ID registered there>` prints
   the key; from another address the same request gets `404`.
 - **Not tried yet:** none of this has been deployed to these relays or run against a real

@@ -446,6 +446,67 @@ mod with_the_mock {
         assert_eq!(s.sign_in(&generate_key(), &m.token("technician@tether.test", None).unwrap()).status, 200);
     }
 
+    /// Nonces in `nonces.log` and `nonces.json`.
+    fn stored_nonces(s: &Srv) -> usize {
+        std::fs::read_to_string(s.dir.join("nonces.log")).unwrap_or_default().lines().count() + std::fs::read(s.dir.join("nonces.json")).ok().map_or(0, |b| serde_json::from_slice::<std::collections::HashMap<String, u64>>(&b).unwrap().len())
+    }
+
+    /// Sign-ins refused after their token verified (here `no-role`; anyone with a token of the
+    /// tenant may send them, each with a fresh key): no nonce is kept, 20 a minute per person, then
+    /// `429` with `Retry-After` and no further `sign-in-refused` record; others are not affected.
+    #[test]
+    fn refused_sign_ins_of_one_person_keep_no_nonce_and_are_limited() {
+        let m = mock();
+        let (s, admin) = relay(&m, json!([]), &[]);
+        let tok = m.token("noroles@tether.test", None).unwrap();
+        let before = stored_nonces(&s);
+        for i in 0..20 {
+            let r = s.sign_in(&generate_key(), &tok);
+            assert_eq!((r.status, r.reason()), (403, "no-role".into()), "sign-in {i}");
+        }
+        assert_eq!(stored_nonces(&s), before, "a refused sign-in keeps no nonce");
+        for _ in 0..5 {
+            let r = s.sign_in(&generate_key(), &tok);
+            assert_eq!((r.status, r.retry_after()), (429, Some("60".into())), "{}", r.text());
+        }
+        assert_eq!(stored_nonces(&s), before);
+        assert_eq!(s.sign_in(&generate_key(), &m.token("technician@tether.test", None).unwrap()).status, 200);
+        assert_eq!(stored_nonces(&s), before + 1, "a sign-in that succeeds keeps its nonce");
+        assert_eq!(s.records(&admin, "sign-in-refused").len(), 20);
+    }
+
+    /// Sign-ins whose token does not verify do not count toward the key's request limit (120 a
+    /// minute): nothing is kept for a key before its token verified (they count per address).
+    #[test]
+    fn unverified_sign_ins_are_not_counted_per_key() {
+        let m = mock();
+        let (s, _admin) = relay(&m, json!([]), &[]);
+        let k = generate_key();
+        let body = json!({"access_token": "not.a.token", "key": key_to_b64(&k.verifying_key())}).to_string();
+        for i in 0..125 {
+            let ip = format!("198.51.100.{}", 20 + i / 50);
+            let sig = format!("{} kid={}", reqauth::sign_request(&k, "POST", "/api/team/session", body.as_bytes(), now()), team::key_id(&k.verifying_key()));
+            assert_eq!(s.req("POST", "/api/team/session", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", &ip)], body.as_bytes()).status, 401, "sign-in {i}");
+        }
+    }
+
+    /// A Tether Manage session's key over its limit (120 a minute) is refused before its nonce is
+    /// kept on the admin routes too.
+    #[test]
+    fn a_manage_session_key_is_limited_before_its_nonce_is_kept() {
+        let m = mock();
+        let admin = generate_key();
+        let s = spawn_in(new_dir(), &admin, &[]);
+        assert_eq!(s.publish(&admin, &team_doc(&admin, 1, json!([]), json!({"oidc": oidc_of(&m), "roles": manage_roles()}))).status, 204);
+        let k = generate_key();
+        assert_eq!(s.sign_in(&k, &m.token("auditor@tether.test", None).unwrap()).status, 200);
+        let before = stored_nonces(&s);
+        let codes: Vec<u16> = (0..130).map(|_| s.signed(&k, true, "GET", "/api/admin/status", b"").status).collect();
+        let ok = codes.iter().take_while(|&&c| c == 200).count();
+        assert!(ok >= 118 && codes[ok..].iter().all(|&c| c == 429), "{codes:?}");
+        assert_eq!(stored_nonces(&s), before + ok, "the refused ones keep no nonce");
+    }
+
     /// An entry or field a newer relay wrote must not wipe the one-token-one-key bindings; a file
     /// that is no JSON is kept aside as `sessions.json.bad`.
     #[test]
