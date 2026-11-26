@@ -478,12 +478,12 @@ files `0600`), also with a plain roster. Fields, in this order (absent ones left
 | `revoke` | `POST /api/admin/status/revoke` | `{"token":"<id>"}` |
 | `session-audit-read` | `GET /api/team/audit`, `GET /api/admin/audit` | – (`target`: the `device` asked for; digits only: a Tether ID) |
 | `team-audit-read` | `GET /api/admin/team-audit` | the filters given |
-| `export`, `session-start`, `agent-request` | `POST /api/team/audit-event` (`self_reported`) | `{"what":"hosts"\|"failing"\|"sbom","rows":n}`; –; `{"action":"install"\|"remove","outcome"?}` |
+| `export`, `session-start`, `agent-request`, `token-used` | `POST /api/team/audit-event` (`self_reported`) | `{"what":"hosts"\|"failing"\|"sbom","rows":n}`; –; `{"action":"install"\|"remove","outcome"?}`; `{"relay":"<host>"}` (a relay answered `409 token-used` to this person's sign-in) |
 | `dropped` | the writer | `{"since":<unix>,"queue_full":n,"log_full":n,"write_failed":n}`: records lost since `since` (the previous `dropped` record, or the writer's start) |
 | `chain-gap` | the writer at start | `{"expected","found"}`: the files no longer reach the head written before |
 
 Posted events: `{"event":"export","what":…,"rows":<≤ 10 000 000>,"uuid"?}`,
-`{"event":"session-start","tether_id","uuid"?}`, `{"event":"agent-request","tether_id","action","outcome"?,"uuid"?}`
+`{"event":"session-start","tether_id","uuid"?}`, `{"event":"agent-request","tether_id","action","outcome"?,"uuid"?}`, `{"event":"token-used","relay"}`
 (`outcome` `[a-z-]{1,32}`); nothing else is accepted. The relay accepts them; no Tether app
 posts them yet (the host's own record of an agent install or remove is the session audit
 `alarm` of type 30 above).

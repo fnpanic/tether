@@ -761,12 +761,15 @@ struct Posted {
     rows: Option<u64>,
     action: Option<String>,
     outcome: Option<String>,
+    relay: Option<String>,
 }
 
 /// `POST /api/team/audit-event`: what a member's desktop reports it did (`export` with `what`
 /// `hosts` | `failing` | `sbom` and `rows`; `session-start` with `tether_id`; `agent-request` with
 /// `tether_id`, `action` `install` | `remove` and optionally `outcome`, `[a-z-]{1,32}`); `uuid`
-/// optional for each. Event, target and detail of its record.
+/// optional for each; `token-used` with `relay` (the host that answered `409 token-used` to this
+/// member's sign-in: someone else used the person's token there first). Event, target and detail of
+/// its record.
 pub fn posted(body: &[u8]) -> Result<(&'static str, Target, Value), String> {
     let p: Posted = serde_json::from_slice(body).map_err(|e| e.to_string())?;
     if p.uuid.as_deref().is_some_and(|u| !st::valid_uuid(u)) {
@@ -782,18 +785,26 @@ pub fn posted(body: &[u8]) -> Result<(&'static str, Target, Value), String> {
     let unexpected = |ok: bool, what: &str| if ok { Ok(()) } else { Err(format!("unexpected {what}")) };
     let (event, detail) = match p.event.as_str() {
         "export" => {
-            unexpected(p.action.is_none() && p.outcome.is_none(), "action or outcome")?;
+            unexpected(p.action.is_none() && p.outcome.is_none() && p.relay.is_none(), "action, outcome or relay")?;
             let what = one_of("what", &p.what, &["hosts", "failing", "sbom"])?;
             let rows = p.rows.filter(|r| *r <= 10_000_000).ok_or("rows required (at most 10000000)")?;
             ("export", json!({"what": what, "rows": rows}))
         }
         "session-start" => {
-            unexpected(p.what.is_none() && p.rows.is_none() && p.action.is_none() && p.outcome.is_none(), "field")?;
+            unexpected(p.what.is_none() && p.rows.is_none() && p.action.is_none() && p.outcome.is_none() && p.relay.is_none(), "field")?;
             p.tether_id.as_ref().ok_or("tether_id required")?;
             ("session-start", Value::Null)
         }
+        "token-used" => {
+            unexpected(p.what.is_none() && p.rows.is_none() && p.action.is_none() && p.outcome.is_none() && p.tether_id.is_none() && p.uuid.is_none(), "field")?;
+            let r = p.relay.as_deref().ok_or("relay required")?;
+            if r.is_empty() || r.len() > 253 || !r.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.:[]".contains(&b)) {
+                return Err("bad relay".into());
+            }
+            ("token-used", json!({"relay": r.to_ascii_lowercase()}))
+        }
         "agent-request" => {
-            unexpected(p.what.is_none() && p.rows.is_none(), "what or rows")?;
+            unexpected(p.what.is_none() && p.rows.is_none() && p.relay.is_none(), "what, rows or relay")?;
             p.tether_id.as_ref().ok_or("tether_id required")?;
             let action = one_of("action", &p.action, &["install", "remove"])?;
             let mut d = json!({"action": action});
@@ -1086,6 +1097,10 @@ mod tests {
         assert_eq!(ok(json!({"event": "export", "what": "hosts", "rows": 12})).unwrap().2, json!({"what": "hosts", "rows": 12}));
         assert_eq!(ok(json!({"event": "session-start", "tether_id": "123456789"})).unwrap().1.tether_id.as_deref(), Some("123456789"));
         assert_eq!(ok(json!({"event": "agent-request", "tether_id": "123456789", "action": "install", "outcome": "not-allowed"})).unwrap().2, json!({"action": "install", "outcome": "not-allowed"}));
+        assert_eq!(ok(json!({"event": "token-used", "relay": "Relay2.example.com"})).unwrap(), ("token-used", Target { uuid: None, tether_id: None, customer: None }, json!({"relay": "relay2.example.com"})));
+        for bad in [json!({"event": "token-used"}), json!({"event": "token-used", "relay": "a b"}), json!({"event": "token-used", "relay": "x", "tether_id": "123456789"}), json!({"event": "export", "what": "hosts", "rows": 1, "relay": "x"})] {
+            assert!(ok(bad.clone()).is_err(), "{bad}");
+        }
         for bad in [
             json!({"event": "login"}),
             json!({"event": "export", "what": "all", "rows": 1}),
