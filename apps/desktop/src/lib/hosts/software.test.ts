@@ -92,7 +92,7 @@ describe("runSoftware", () => {
   it("an old relay (404): not supported, its hosts match nothing, the others still answer", async () => {
     const r = await run("software:garnet", { "a.example": found(["dev-0001"]), "b.example": "unsupported: This server does not offer software search." });
     expect(r.ids).toEqual(["m:dev-0001"]);
-    expect(r.lines).toContain("b.example does not support software search (needs tether-api 0.7.0)");
+    expect(r.lines).toContain("b.example does not support software search (needs the relay update of release 0.7.0)");
     expect(r.lines).toContain("Results from a.example only.");
     // dev-3's list is on b: unknown, so -software: does not list it either.
     expect((await run("-software:garnet", { "a.example": found(["dev-0001"]), "b.example": "unsupported: x" })).ids).toEqual(["m:dev-0002"]);

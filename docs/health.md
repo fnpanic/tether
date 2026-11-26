@@ -104,11 +104,12 @@ Nothing of this has been run on a real Windows machine yet: see [What was checke
 
 ### Setting it up (administrator)
 
-1. **Relays first.** tether-api and hbbs 0.7.0 on every relay: tether-api checks the proof, hbbs
-   answers its key lookup (`/peer-pk`). On a relay where both run on one server nothing else is
-   needed; otherwise set `HBBS_PEER_URL` and `PEER_LOOKUP_FROM` ([For the relay
-   operator](#enabling-and-switching-off), [kubernetes.md](kubernetes.md)). A relay before 0.7.0
-   refuses a policy that uses the new features (`400 unknown feature "health.agent"`; Tether Manage
+1. **Relays first.** The relay update of release 0.7.0 on every relay (tether-api and hbbs; a relay has
+   it when `GET /api/team/config` answers `200` or `404 no sign-in configured`, not `404 not found`):
+   tether-api checks the proof, hbbs answers its key lookup (`/peer-pk`). On a relay where both run on
+   one server nothing else is needed; otherwise set `HBBS_PEER_URL` and `PEER_LOOKUP_FROM` ([For the
+   relay operator](#enabling-and-switching-off), [kubernetes.md](kubernetes.md)). A relay without the
+   update refuses a policy that uses the new features (`400 unknown feature "health.agent"`; Tether Manage
    says "This relay runs an older tether-api that does not know a feature of this policy. Update
    the relay first, then publish again."), refuses the grant (`401 enrollment token: not an
    enrollment token`) and an enrolment with a proof (`400`, unknown field). So: update every relay,
@@ -338,6 +339,13 @@ real service install, upgrade or removal, no real Windows elevation prompt, no T
 session between two machines, no round trip against a real relay with a real hbbs, and no macOS or
 Linux build of the new code.
 
+**Known limits of the install.**
+
+- On the path with the Windows administrator prompt, an install that runs longer than 240 s leaves its
+  record in the audit log at `running`: the final outcome is not recorded there.
+- Two installers racing against an old agent that reports no result line can both record the install as
+  Tether's own for a short while.
+
 ## For the relay operator
 
 ### Enabling and switching off
@@ -376,7 +384,8 @@ Enrolment is refused when the same Tether ID or uuid is pinned to another key, a
 new pins or refused tokens (wrong Tether proofs and Tether IDs hbbs does not know included) per
 minute per IP (an IPv6 client counts as its /64).
 
-**Enrolment with a Tether proof** needs hbbs 0.7.0 beside tether-api 0.7.0. hbbs answers
+**Enrolment with a Tether proof** needs the relay update of release 0.7.0 (hbbs and tether-api together;
+check as in [Setting it up](#setting-it-up-administrator)). hbbs answers
 `GET /peer-pk/<id>` on its health port (21122) with the key it holds for that ID, only to loopback
 and to the addresses in its `PEER_LOOKUP_FROM` (comma-separated CIDRs, default empty; a bad entry
 stops hbbs at start), and only for IDs of 6 to 16 characters `A-Z a-z 0-9 _ -` (every Tether ID
@@ -834,7 +843,7 @@ the team dialog reads it too. Search terms and the Needs attention view are also
 ### Who may read what
 
 With a plain team roster every member reads every device's summary, report, history and software
-list. With a signed team document (relays of 0.7.0) the relay enforces each member's permissions,
+list. With a signed team document (relays with the update of release 0.7.0) the relay enforces each member's permissions,
 from the member's key entry or, for a person signed in, from the directory roles the document maps
 ([sign-in.md](sign-in.md)):
 
@@ -1001,7 +1010,7 @@ its list, not live.
   software on 2 servers… Until it answers, software terms match no computer.", then per term
   "Installed software “chrome”: 37 computers, as of 14:05 (lists as of each computer's last upload;
   112 computers without a list)", and for each relay that did not give a full answer why (an old
-  relay: "relay2.example.com does not support software search (needs tether-api 0.7.0)"; switched
+  relay: "relay2.example.com does not support software search (needs the relay update of release 0.7.0)"; switched
   off; no permission; busy; the 6-a-minute limit with the wait; still indexing; more than 2 000;
   incomplete; not reached; overloaded). A line "Each software search is sent to the servers and
   recorded in the team's audit log with its text." is shown whenever the query has a software

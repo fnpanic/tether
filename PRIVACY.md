@@ -63,8 +63,9 @@ machine. Every access to a machine's data is recorded on the relay that served i
 name, directory id), when, which device and customer, the search term of a software search, and the
 staff member's IP address, never what was shown. The records are kept for the retention the
 organization sets (90 days by default) and can be read only by the organization's administrators
-and the staff it gives a Tether Manage role, not by technicians. A customer can ask the support
-organization which of its staff accessed its machines. Details:
+and the staff it gives a Tether Manage role, not by technicians. If a relay cannot write the log (disk
+full, overload), it still serves the accesses; the records it missed are counted and the operator can
+see that. A customer can ask the support organization which of its staff accessed its machines. Details:
 [docs/api.md](docs/api.md#team-audit-log), [docs/sign-in.md](docs/sign-in.md).
 
 Session recordings are made only when recording is switched on and are saved on the technician's

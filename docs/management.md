@@ -20,8 +20,8 @@ not know this app's request signatures. Update the relay first."; with a missing
 `RELAY_HOST` it says "The relay does not know its own host name. Set RELAY_HOST on the relay to the
 name entered under Status and relays." or "The relay knows itself under another host name. Enter
 the relay's own name (its RELAY_HOST) under Status and relays." (`api.rs::explain`). A relay
-older than 0.7.0 refuses a policy that uses the health monitoring agent features (`health.agent`,
-`health.enrol-grant`), and Manage then says "This relay runs an older tether-api that does not know
+without the relay update of release 0.7.0 refuses a policy that uses the health monitoring agent
+features (`health.agent`, `health.enrol-grant`), and Manage then says "This relay runs an older tether-api that does not know
 a feature of this policy. Update the relay first, then publish again."
 
 | Screen | What it does |
@@ -64,6 +64,9 @@ the same way:
    relays**).
 
 ## Sign-in and roles
+
+Status: built and tested against test relays and a mock provider, not run end to end with a real
+window or real relays ([what was checked](sign-in.md#what-was-checked)).
 
 From 0.7.0, when the relays' team document has sign-in settings, staff can open Tether Manage with
 their organisation's account instead of the keys: "Sign in with your organisation" on the unlock
@@ -467,9 +470,11 @@ admin key signed it.
 
 The policy features `health.agent` and `health.enrol-grant` let Tether on Windows install, keep
 current and remove the health monitoring agent ([health.md](health.md#installing-the-agent-through-tether),
-[policy.md](policy.md#the-health-monitoring-agent-healthagent-healthenrol-grant)). Update every
-relay to tether-api and hbbs 0.7.0 first: an older relay refuses a policy that uses them (the
-message above), and it would refuse the grant and the proof anyway.
+[policy.md](policy.md#the-health-monitoring-agent-healthagent-healthenrol-grant)). Give every
+relay the relay update of release 0.7.0 first (tether-api and hbbs; a relay has it when
+`GET /api/team/config` answers `200` or `404 no sign-in configured`, not `404 not found`): a relay
+without it refuses a policy that uses them (the message above), and it would refuse the grant and the
+proof anyway.
 
 In the editor's **Health monitoring** area of a layer (technician profile, customer profile or a
 group):
@@ -591,6 +596,9 @@ or 50 MB (`AUDIT_RETENTION_DAYS`, `AUDIT_MAX_MB` in `/etc/tether/api.env`).
 
 ## Team activity
 
+Status: built and tested against test relays and a mock provider, not run end to end with a real
+window or real relays ([what was checked](sign-in.md#what-was-checked)).
+
 What staff did, read from the team audit log of **every** relay (`GET /api/admin/team-audit`,
 [api.md](api.md#team-audit-log)) and merged newest first: sign-ins and refused sign-ins, summary
 and host reads, software lists and searches, links, removals, exports, and every Tether Manage
@@ -672,8 +680,8 @@ while Tether Manage is open; **Reload from the relays** asks before it discards 
 first team document it becomes (every entry keeps today's rights); signing and publishing it
 switches the relays to signed documents for good."): every entry with `sbom`, `agent` and every
 customer, and the review lists every entry and role as added. Once a relay has accepted a signed
-document it refuses plain rosters (`409`), also after a restart. A relay before 0.7 refuses the
-signed document: update the relays first ([sign-in.md](sign-in.md#release-order)).
+document it refuses plain rosters (`409`), also after a restart. A relay without the relay update of release 0.7.0
+(`GET /api/team/config` answers `404 not found`) refuses the signed document: update the relays first ([sign-in.md](sign-in.md#release-order)).
 
 The review before publishing lists the changes in words, security-relevant ones first, and needs a
 tick for a change of the sign-in settings or of a KeyHolder mapping ([Proposals](#proposals)). The

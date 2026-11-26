@@ -145,7 +145,8 @@ only a pointer into the token (overage), which the relay refuses (`overage`).
 
 Both are Entra's: Tether neither adds nor checks a second factor. Require MFA, compliant devices or
 locations with a Conditional Access policy for the Tether API (the resource of the token) or the
-Tether apps client. The sign-in runs in the system browser, not in a window of Tether. When a renewal is refused because the person must sign in again (`interaction_required`,
+Tether apps client. The sign-in runs in the system browser, not in a window of Tether. When a renewal
+is refused because the person must sign in again (`interaction_required`,
 `login_required`, `consent_required`, `invalid_grant`), the app ends the session with the reason and
 the person signs in again with **Sign in**.
 
@@ -179,7 +180,9 @@ The issuer is then `https://login.microsoftonline.com/<tenant id>/v2.0`.
 
 ### Release order
 
-1. **Every relay first**: tether-api 0.7.0. A relay before it refuses the signed team document,
+1. **Every relay first**: the relay update of release 0.7.0. A relay has it when `GET /api/team/config`
+   answers `200` or `404 no sign-in configured`, not `404 not found` (the version number tether-api
+   reports is not the release number). A relay without it refuses the signed team document,
    and a desktop that finds one relay with sign-in and one without does not sign in.
 2. **Tether Manage 0.7.0.** Its Team page shows the plain roster as the first signed document it
    becomes, every entry keeping today's rights. Publishing it switches the relays to signed

@@ -207,11 +207,14 @@ key of the Tether ID (`GET /peer-pk/<id>` on hbbs's health port) and checks the 
 - **No proxy route.** Caddy and nginx forward only `/rendezvous/pubkey` to the health port;
   `/peer-pk` must never be reachable from outside through a broader route on the same host, or
   every outside caller would arrive as loopback.
-- **Order.** 1. Every relay: tether-api and hbbs 0.7.0 (`scripts/deploy-relay-update.sh` replaces
-  both). 2. The agent 0.2.0 or later to `monitor.json`. 3. Tether Manage and the apps 0.7.0. 4. Last
-  the policy with `health.agent`. A relay before 0.7.0 refuses to store that policy (`400 unknown
-  feature "health.agent"`), the grant and the proof field; an hbbs before 0.7.0 answers `404` to
-  every lookup (`409 tether id unknown to this relay`). Details: [updates.md](updates.md#relay-deploy-notes).
+- **Order.** 1. Every relay: the relay update of release 0.7.0 (tether-api and hbbs;
+  `scripts/deploy-relay-update.sh` replaces both). A relay has it when `GET /api/team/config` answers
+  `200` or `404 no sign-in configured`, not `404 not found` (the version number tether-api reports,
+  for example in Manage's Home, is not the release number). 2. The agent 0.2.0 or later to
+  `monitor.json`. 3. Tether Manage and the apps 0.7.0. 4. Last the policy with `health.agent`. A relay
+  without the update refuses to store that policy (`400 unknown feature "health.agent"`), the grant and
+  the proof field; an hbbs without it answers `404` to every lookup (`409 tether id unknown to this
+  relay`). Details: [updates.md](updates.md#relay-deploy-notes).
 - **Rollback after a signed team document.** When a relay accepts the first signed team document
   it deletes `team/roster.json` (the plain roster is never read again). tether-api 0.6 knows only
   that file: rolled back to 0.6 after a signed document was published, the relay admits no member at

@@ -238,7 +238,7 @@ export function chipLines(terms: SwTerm[], res: Results | null, hosts: Host[], r
       }
       notes.add(
         a.why === "unsupported"
-          ? `${r} does not support software search (needs tether-api 0.7.0)`
+          ? `${r} does not support software search (needs the relay update of release 0.7.0)`
           : a.why === "off"
             ? `software search is switched off on ${r}`
             : a.why === "forbidden"

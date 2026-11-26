@@ -425,8 +425,9 @@ and, unless issued for one Tether ID, reusable until they expire or are revoked.
   it, above); its serials, summed over all channels, are the `releases` hint of status answers.
 - Order: tether-api (+ Caddyfile) first, then hbbs; clients and Manage after. Each step works
   without the next ones; old clients ignore `ReleaseHint` and the heartbeat body.
-- **Release order for the agent through Tether (0.7.0):** relays first (tether-api and hbbs 0.7.0,
-  with `HBBS_PEER_URL` and `PEER_LOOKUP_FROM` where they run apart,
+- **Release order for the agent through Tether (0.7.0):** relays first (the relay update of release 0.7.0:
+  tether-api and hbbs, a relay has it when `GET /api/team/config` answers `200` or `404 no sign-in
+  configured`, not `404 not found`; with `HBBS_PEER_URL` and `PEER_LOOKUP_FROM` where they run apart,
   [deployment.md](deployment.md#update-the-agent-through-tether-070)), then the agent 0.2.0 or later to
   `monitor.json`, then Tether Manage and the apps 0.7.0, **the policy with `health.agent` last**. An
   old relay refuses to store that policy (`400 unknown feature "health.agent"`), refuses the grant
