@@ -686,6 +686,8 @@ mod with_the_mock {
             ("GET", "/api/admin/custom", vec![], [false; 5]),
             ("POST", "/api/admin/releases/prune", br#"{"dry_run":true}"#.to_vec(), [false; 5]),
             ("DELETE", "/api/admin/release/stable/x/y.exe", vec![], [false; 5]),
+            // Verified with the session's key before the lock, then refused like the others (not 401).
+            ("PUT", "/api/admin/release/stable/x/y.exe", b"build".to_vec(), [false; 5]),
         ];
         for (method, path, body, may) in &rows {
             for ((who, k), ok) in [("auditor", &auditor), ("operator", &operator), ("editor", &editor), ("publisher", &publisher), ("holder", &holder)].into_iter().zip(may) {
@@ -746,6 +748,13 @@ mod with_the_mock {
         assert!(other.iter().any(|r| r["detail"]["route"] == "GET /api/admin/custom" && r["actor"]["oid"] == oid(5)), "{other:?}");
         let del = s.records(&admin, "proposal-delete");
         assert_eq!(del.iter().map(|r| r["result"].as_u64().unwrap()).collect::<Vec<_>>(), [204, 403, 204]);
+        // Who proposed it and whether the remover did: the author removing their own, then the key
+        // holder after publishing someone else's (the publish itself is recorded under the admin key).
+        assert_eq!((del[0]["detail"]["author_oid"].clone(), del[0]["detail"]["same_person"].clone(), del[0]["detail"]["id"].clone()), (json!(oid(7)), json!(true), json!(ids[1])));
+        assert_eq!((del[2]["detail"]["author_oid"].clone(), del[2]["detail"]["same_person"].clone(), del[2]["detail"]["serial"].clone()), (json!(oid(7)), json!(false), json!(3)));
+        let up: Vec<Value> = s.records(&admin, "release-upload").into_iter().filter(|r| r["detail"]["path"] == "stable/x/y.exe").collect();
+        assert_eq!(up.len(), 5, "a session's release upload is recorded with the person: {up:?}");
+        assert!(up.iter().all(|r| r["result"] == 403 && r["actor"]["oid"].is_string()), "{up:?}");
         // Manage's own exports, self-reported by any role (and the admin signature); nothing else.
         let ev = |k: &SigningKey, kid: bool, b: Value| s.signed(k, kid, "POST", "/api/admin/audit-event", b.to_string().as_bytes()).status;
         assert_eq!(ev(&auditor, true, json!({"event": "export", "what": "team-activity", "rows": 12})), 204);

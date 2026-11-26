@@ -13,7 +13,8 @@
 //! author (the session's person, or `admin` for an admin signature), time, base, serial (the
 //! doc's). At most [`PER_KIND`] per kind. `GET` answers `{"live","proposals":[…oldest first]}`
 //! (`live`: the hash of the policy or team document served now; `null` for releases or none).
-//! `DELETE /api/admin/proposals/<kind>/<id>`: its author, a KeyHolder, or the admin signature.
+//! `DELETE /api/admin/proposals/<kind>/<id>`: its author, a KeyHolder, or the admin signature; the
+//! record names the author's oid and `same_person` (the remover proposed it).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -150,8 +151,15 @@ impl App {
                     }
                 }
                 fs::remove_file(&f).map_err(internal)?;
+                // Who proposed it and whether the remover (a key holder after publishing) is that
+                // person: publishing one's own proposal shows in the log.
+                let same_person = match (&s.author.oid, &actor.oid) {
+                    (Some(a), Some(b)) => a == b,
+                    (None, None) => s.author.key_fingerprint == actor.key_fingerprint,
+                    _ => false,
+                };
                 if let Some(r) = self.audit_pending.as_mut() {
-                    r.detail = json!({"kind": kind, "id": id, "serial": s.serial, "author": s.author.name});
+                    r.detail = json!({"kind": kind, "id": id, "serial": s.serial, "author_oid": s.author.oid, "same_person": same_person});
                 }
                 Ok(empty(204))
             }

@@ -604,6 +604,17 @@ impl App {
         })())
     }
 
+    /// The session a release upload's `kid` names: its key (the body is verified with it before
+    /// the lock, main.rs `read_request_body`) and who it is, so the refusal is recorded with the
+    /// person. `None`: no such session; the admin keys verify the upload.
+    pub(crate) fn release_session(&self, rq: &Request) -> Option<(VerifyingKey, ManageCaller)> {
+        let sig = header(rq, reqauth::HEADER)?;
+        let s = self.team.sessions.get(reqauth::header_kid(&sig)?)?;
+        let key = tether_trust::key_from_b64(&s.key).ok()?;
+        let roles = self.team.signin.as_ref().map(|si| oidc::manage_roles(&s.roles, &si.roles)).unwrap_or_default();
+        Some((key, ManageCaller { actor: s.actor(), roles, oid: s.oid.clone() }))
+    }
+
     /// `GET /api/team/config` (no signature): the `oidc` part of the team document, as the admin
     /// signed it (`tether_trust::team::Config`), `ETag: "<serial>"`.
     pub(crate) fn team_config(&self, rq: &Request) -> Result<Resp, Resp> {

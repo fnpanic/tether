@@ -1104,7 +1104,9 @@ impl App {
         if !ts.is_some_and(|ts| now().abs_diff(ts) <= reqauth::MAX_SKEW_SECS) {
             return Err(text(401, "request timestamp outside allowed clock skew"));
         }
-        Ok(self.keys.clone())
+        // A sign-in session's upload is verified with its key, then refused and recorded (`admin`),
+        // like every other admin route a session may not use.
+        Ok(self.release_session(rq).map_or_else(|| self.keys.clone(), |(k, _)| vec![k]))
     }
 
     /// Index of the open diagnostics ticket `ticket`, or 404: body `ticket not open` when this
@@ -1347,7 +1349,12 @@ impl App {
             let dest = release_path(&self.data, rel)?;
             return match method {
                 "PUT" => {
-                    if let Body::File { nonce: Some((_, key)), .. } = body {
+                    if let Body::File { nonce: Some((nonce, key)), .. } = body {
+                        // Verified with the session's key (release_precheck): a person never uploads.
+                        if let Some((_, c)) = self.release_session(rq) {
+                            self.use_nonce(nonce.clone(), 0)?;
+                            return Err(self.session_refused(rq, c, method, url, rest, &[]));
+                        }
                         self.audit_admin(rq, self.admin_actor(*key), method, url, rest, &[]);
                     }
                     self.put_release(body, &dest)
