@@ -5,6 +5,7 @@ import { useApp } from "../App";
 import { api, host, invoke, PROFILES, when, type Bundle, type Device, type Effective, type Feature, type Layer, type Rule } from "../lib/ipc";
 import { byArea, FeatureRow, sameRule, shown, type Lang } from "../components/features";
 import { ChangeList } from "../components/publish";
+import { Proposals, useProposals } from "../components/proposals";
 import { GrantRow, PendingLines } from "../components/grant";
 import { GRANT, layerKey, type GrantsInfo } from "../lib/grants";
 import { liveCount, unchecked } from "../lib/live";
@@ -195,7 +196,8 @@ function History() {
 }
 
 export function Policy() {
-  const { draft, setDraft, live, invalid, dirty, changes, toast } = useApp();
+  const { draft, setDraft, live, invalid, dirty, changes, toast, can, reviewing, setReviewing, state } = useApp();
+  const proposals = useProposals("policy", can("read-proposals-policy"));
   const [features, setFeatures] = useState<Feature[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [tab, setTab] = useState<Tab>("editor");
@@ -266,9 +268,37 @@ export function Policy() {
 
   return (
     <>
-      <PageHeader title="Policy" sub="Edit the draft, compare it with what is live, publish from the bar above.">
+      <PageHeader title="Policy" sub={can("sign") ? "Edit the draft, compare it with what is live, publish from the bar above." : can("propose-policy") ? "Edit the draft, compare it with what is live, propose it from the bar above: a key holder signs and publishes it." : "The live policy and its history. Changes made here are not published or proposed."}>
         <Segmented<Lang> label="Label language" value={lang} onChange={setLang} options={[{ value: "en", label: "EN" }, { value: "de", label: "DE" }]} />
       </PageHeader>
+      <Proposals
+        kind="policy"
+        list={proposals.list}
+        error={proposals.error}
+        reload={proposals.load}
+        review={
+          can("sign")
+            ? (p) => {
+                // The draft becomes the proposal; the bar and the publish sheet show its exact difference against what is live.
+                setDraft({ ...p.doc, serial: draft.serial, issued_at: draft.issued_at });
+                setReviewing(p);
+                toast(`Loaded the proposal of ${p.author.name}: review the changes, then publish from the bar.`);
+              }
+            : undefined
+        }
+      />
+      {reviewing?.kind === "policy" && (
+        <p className="mb-4 text-caption" role="status">
+          <Badge tone="ink">Reviewing</Badge> the proposal of {reviewing.author.name}
+          {reviewing.author.upn ? ` (${reviewing.author.upn})` : ""}, {when(reviewing.created)}
+          {reviewing.stale.length > 0 && <span className="text-warn"> · the live policy changed since it was made: its changes are shown against what is live now</span>}
+          {state.signin.upn && reviewing.author.upn === state.signin.upn && <span className="text-warn"> · you proposed it yourself (no second person checks it)</span>}
+          {" "}
+          <button className="text-accent" onClick={() => setReviewing(null)}>
+            Stop reviewing
+          </button>
+        </p>
+      )}
       <div className="mb-6 flex items-center gap-4">
         <Segmented<Tab>
           label="View"

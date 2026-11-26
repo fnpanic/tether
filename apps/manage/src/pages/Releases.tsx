@@ -10,7 +10,8 @@ import { pageHtml } from "../lib/page-template";
 import { PublishSheet, RelayResults } from "../components/publish";
 import { CleanupSheet } from "../components/cleanup";
 import { customFields, customRollout, defaultCustom, describeRamp, groupReleases, minimumProblem, rampSteps, rolloutProblem, rolloutState, releaseToast, Tally, type CustomRamp, type IndexView, type ReleaseGroup } from "../lib/releases";
-import { Badge, Button, Card, ErrorText, IconButton, Label, Modal, PageHeader, Segmented, Sub, Table, TextArea, TextField, Toggle } from "../components/ui";
+import { Badge, Button, Card, ErrorText, IconButton, Label, Modal, PageHeader, Segmented, Select, Sub, Table, TextArea, TextField, Toggle } from "../components/ui";
+import { Proposals, ProposeSheet, useProposals } from "../components/proposals";
 
 interface Release {
   channel: string;
@@ -518,8 +519,71 @@ function CleanupSettings({ onOpen }: { onOpen: () => void }) {
   );
 }
 
+/** Release proposals (design 12.4): a publisher names the build and where its files are; a key holder
+ * signs the files and the index with the keys on their PC and publishes, then removes the proposal. */
+function ReleaseProposals() {
+  const { can } = useApp();
+  const proposals = useProposals("release", can("read-proposals-release"));
+  const [doc, setDoc] = useState({ channel: "stable", app: "technician", platform: "windows-x86_64", version: "", notes: "", files: "" });
+  const [proposing, setProposing] = useState(false);
+  const set = (k: keyof typeof doc) => (e: { target: { value: string } }) => setDoc({ ...doc, [k]: e.target.value });
+  return (
+    <>
+      <Proposals kind="release" list={proposals.list} error={proposals.error} reload={proposals.load} />
+      {can("propose-release") && (
+        <>
+          <h2 className="mb-3 text-headline font-semibold">Propose a release</h2>
+          <Card>
+            <p className="mb-3 text-caption text-muted">Stored on the relays for a key holder, unsigned: nothing is published until they sign the files and the release index with the update and admin keys.</p>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+              <Label text="Channel">
+                <TextField value={doc.channel} onChange={set("channel")} />
+              </Label>
+              <Label text="Version">
+                <TextField value={doc.version} onChange={set("version")} placeholder="0.7.0" />
+              </Label>
+              <Label text="App">
+                <Select value={doc.app} onChange={set("app")}>
+                  <option value="technician">Technician app</option>
+                  <option value="customer">Customer module</option>
+                </Select>
+              </Label>
+              <Label text="Platform">
+                <Select value={doc.platform} onChange={set("platform")}>
+                  <option value="windows-x86_64">Windows</option>
+                  <option value="darwin-universal">macOS</option>
+                </Select>
+              </Label>
+              <Label text="Release notes">
+                <TextArea rows={3} value={doc.notes} onChange={set("notes")} />
+              </Label>
+              <Label text="Where the build files are" hint="A share, a build number, their SHA-256">
+                <TextArea rows={3} value={doc.files} onChange={set("files")} />
+              </Label>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <Button variant="primary" disabled={!doc.version.trim() || !doc.channel.trim()} onClick={() => setProposing(true)}>
+                Propose…
+              </Button>
+            </div>
+          </Card>
+          {proposing && (
+            <ProposeSheet
+              kind="release"
+              doc={doc}
+              changes={[`${doc.app === "customer" ? "Customer module" : "Technician app"} ${doc.version} for ${doc.platform} on ${doc.channel}`, ...(doc.files ? [`Files: ${doc.files}`] : [])]}
+              onClose={() => setProposing(false)}
+              onDone={proposals.load}
+            />
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 export function Releases() {
-  const { toast, state } = useApp();
+  const { toast, state, can } = useApp();
   const remember = useRememberRollout();
   const [cleanup, setCleanup] = useState(false);
   const [file, setFile] = useState("");
@@ -600,9 +664,20 @@ export function Releases() {
 
   const target = fileName(kind, platform, version || "<version>");
 
+  if (!can("sign"))
+    return (
+      <>
+        <PageHeader title="Releases" sub="What each relay publishes. Signing and publishing new installers needs a key holder's keys." />
+        <ReleaseProposals />
+        <Overview key={round} />
+        <Rollouts key={`r${round}`} />
+      </>
+    );
+
   return (
     <>
       <PageHeader title="Releases" sub="What each relay publishes, and signing new installers with the update key." />
+      <ReleaseProposals />
       <LatestBuilds onDone={() => setRound((r) => r + 1)} />
       <Overview key={round} />
       <Rollouts key={`r${round}`} />

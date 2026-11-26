@@ -1,16 +1,41 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke, type AppState } from "../lib/ipc";
+import type { SignIn } from "../lib/roles";
 import { Button, ErrorText, Label, TextField } from "../components/ui";
 
-/** First run (create or import keys) and unlock. */
-export function Gate({ state, onDone }: { state: AppState; onDone: () => void }) {
+/** First run (create or import keys), unlock, and staff sign-in where the relays offer it (a person
+ * with a Tether Manage role works without the keys; only a key holder's keys sign). `onCancel`: back
+ * to the app (a signed-in key holder who came here to unlock). */
+export function Gate({ state, onDone, onCancel }: { state: AppState; onDone: () => void; onCancel?: () => void }) {
   const [mode, setMode] = useState<"unlock" | "create" | "import">(state.exists ? "unlock" : "create");
   const [pass, setPass] = useState("");
   const [pass2, setPass2] = useState("");
   const [file, setFile] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [signin, setSignin] = useState<SignIn>(state.signin);
+  // Asks the relays whether they offer sign-in (and takes up a stored sign-in).
+  useEffect(() => {
+    if (onCancel) return;
+    invoke<SignIn>("signin_status", { check: true }).then((s) => {
+      setSignin(s);
+      if (s.signed_in) onDone();
+    }, () => {});
+  }, []);
+  const signIn = async () => {
+    setError(null);
+    setSignin((s) => ({ ...s, busy: true }));
+    try {
+      const s = await invoke<SignIn>("signin_start");
+      setSignin(s);
+      if (!s.manage.length) setError("Signed in, but your account has no Tether Manage role. Ask your administrator to assign one.");
+      onDone();
+    } catch (e: any) {
+      setSignin((s) => ({ ...s, busy: false }));
+      setError(e.message);
+    }
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -73,12 +98,42 @@ export function Gate({ state, onDone }: { state: AppState; onDone: () => void })
           <Button variant="primary" size="lg" disabled={busy || !pass || (mode === "import" && !file)}>
             {busy ? "Working…" : mode === "unlock" ? "Unlock" : mode === "create" ? "Create keys" : "Import and unlock"}
           </Button>
+          {onCancel && (
+            <button type="button" className="text-caption text-accent" onClick={onCancel}>
+              Back
+            </button>
+          )}
           {mode === "unlock" ? null : (
             <button type="button" className="text-caption text-accent" onClick={() => setMode(mode === "create" ? "import" : state.exists ? "unlock" : "create")}>
               {mode === "create" ? "Import a backup instead" : state.exists ? "Back to unlock" : "Create new keys instead"}
             </button>
           )}
         </div>
+        {!onCancel && (signin.offered || signin.problem || signin.note) && (
+          <div className="mt-6 border-t border-hairline pt-5">
+            <h2 className="text-callout font-semibold">Sign in with your organisation</h2>
+            <p className="mt-1 text-caption text-muted">Without the keys: what your Tether Manage role allows (read, operate, propose). Signing and publishing stay with a key holder's keys.</p>
+            {signin.problem && <p className="mt-2 text-caption text-danger">{signin.problem}</p>}
+            {signin.note && <p className="mt-2 text-caption text-muted">{signin.note}</p>}
+            {signin.relays.filter((r) => !r.ok).map((r) => (
+              <p key={r.relay} className="mt-1 text-caption text-warn">
+                {r.relay}: {r.text}
+              </p>
+            ))}
+            {signin.offered && (
+              <div className="mt-3 flex gap-2">
+                <Button type="button" disabled={signin.busy} onClick={signIn}>
+                  {signin.busy ? "Finish in your web browser…" : "Sign in"}
+                </Button>
+                {signin.busy && (
+                  <Button type="button" variant="ghost" onClick={() => invoke<SignIn>("signin_cancel").then(setSignin)}>
+                    Cancel
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </form>
     </div>
   );

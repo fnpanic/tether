@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "node --test src/lib/releases.test.ts src/lib/progress.test.ts src/lib/page-preview.test.ts src/lib/serverkeys.test.ts src/lib/sessions.test.ts src/lib/team.test.ts src/lib/paging.test.ts src/lib/page-template.test.ts src/lib/prune.test.ts src/lib/live.test.ts src/lib/grants.test.ts",
+    "test": "node --test src/lib/releases.test.ts src/lib/progress.test.ts src/lib/page-preview.test.ts src/lib/serverkeys.test.ts src/lib/sessions.test.ts src/lib/team.test.ts src/lib/paging.test.ts src/lib/page-template.test.ts src/lib/prune.test.ts src/lib/live.test.ts src/lib/grants.test.ts src/lib/roles.test.ts src/lib/teamdoc.test.ts src/lib/activity.test.ts",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -5,11 +5,13 @@ import { useApp } from "../App";
 import { api, host, invoke, midnight, type Device, type RelayResult } from "../lib/ipc";
 import { liveCount, liveLine } from "../lib/live";
 import { ChangeList, PublishSheet, RelayResults } from "./publish";
+import { ProposeSheet, removeProposal } from "./proposals";
 import { Badge, Button, IconButton, Modal, StatusDot } from "./ui";
 
 export function PolicyBar() {
-  const { live, liveError, changes, dirty, invalid, publish, go, reloadLive } = useApp();
+  const { live, liveError, changes, dirty, invalid, publish, go, reloadLive, can, draft } = useApp();
   const [synced, setSynced] = useState<RelayResult[] | null>(null);
+  const [proposing, setProposing] = useState(false);
   const [busy, setBusy] = useState(false);
   const { on, of } = liveCount(live);
   const behind = live?.serial != null && on < of;
@@ -48,7 +50,7 @@ export function PolicyBar() {
         </button>
       ))}
       <span className="ml-auto" />
-      {behind && (
+      {behind && can("sign") && (
         <Button size="sm" variant="secondary" disabled={busy} onClick={sync}>
           {busy ? "Updating…" : `Bring ${of - on} relay${of - on === 1 ? "" : "s"} up to date`}
         </Button>
@@ -59,9 +61,20 @@ export function PolicyBar() {
       <Button size="sm" variant="ghost" onClick={() => go("policy")}>
         Review
       </Button>
-      <Button size="sm" variant="primary" disabled={!dirty || !!invalid} onClick={publish} title={invalid ?? undefined}>
-        Publish…
-      </Button>
+      {can("sign") ? (
+        <Button size="sm" variant="primary" disabled={!dirty || !!invalid} onClick={publish} title={invalid ?? undefined}>
+          Publish…
+        </Button>
+      ) : can("propose-policy") ? (
+        <Button size="sm" variant="primary" disabled={!dirty || !!invalid} onClick={() => setProposing(true)} title={invalid ?? "Stored for a key holder to sign and publish"}>
+          Propose…
+        </Button>
+      ) : (
+        <span className="text-muted" title="Your Tether Manage role reads the policy. A policy editor proposes changes; a key holder publishes them.">
+          Read only
+        </span>
+      )}
+      {proposing && <ProposeSheet kind="policy" doc={draft} changes={changes.map((c) => c.text)} onClose={() => setProposing(false)} />}
       {synced && (
         <Modal
           onClose={() => setSynced(null)}
@@ -83,13 +96,18 @@ export function PolicyBar() {
 }
 
 export function PolicyPublish({ onClose }: { onClose: () => void }) {
-  const { draft, setDraft, changes, live, state, reloadLive, go } = useApp();
+  const { draft, setDraft, changes, live, state, reloadLive, go, reviewing, setReviewing } = useApp();
   const [serial, setSerial] = useState<number | null>(null);
   const missing = live?.unconfigured ?? [];
 
   const run = async (skip: string[]) => {
     const r = await api.publish(draft, skip);
     setSerial(r.serial);
+    // A reviewed proposal is published now: it leaves the relays' list.
+    if (reviewing?.kind === "policy" && r.relays.some((x) => x.ok)) {
+      removeProposal(reviewing).catch(() => {});
+      setReviewing(null);
+    }
     setDraft({ ...draft, serial: r.serial, issued_at: Math.floor(Date.now() / 1000) });
     reloadLive();
     return r.relays;

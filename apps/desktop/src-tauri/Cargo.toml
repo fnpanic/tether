@@ -88,6 +88,10 @@ opt-level = 3
 
 [workspace]
 
+# Tether Manage includes src/oidc.rs with this cfg set (apps/manage/src-tauri/build.rs).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tether_manage)'] }
+
 # Optimized build that keeps debug-only test hooks (TETHER_DEV_PASSWORD) for benchmarks.
 [profile.profiling]
 inherits = "release"

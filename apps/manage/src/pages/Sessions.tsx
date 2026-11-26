@@ -57,6 +57,8 @@ export function Sessions() {
     if (!p) return;
     try {
       await invoke("text_save", { path: p, text });
+      // Recorded on the relays as this person's export (Manage's own record).
+      invoke("audit_export", { what: "sessions", rows: rows.length }).catch(() => {});
       toast(`Saved ${rows.length} rows`);
     } catch (e: any) {
       setError(e.message);

@@ -9,6 +9,10 @@
 //! credential store (Windows Credential Manager, macOS Keychain). The token is posted to every relay
 //! at once, signed with this app's team key and `kid`, and renewed before the relays' sessions end;
 //! signing out ends them everywhere. No token or code is ever logged, written to a file or shown.
+//!
+//! Tether Manage includes this file with `#[path]` (cfg `tether_manage`, set by its build.rs): there
+//! `crate::team` and `crate::policy` are Manage's (its `signin.rs`), there is no viewer name, the
+//! refresh token has its own credential-store entry, and these tests are the desktop's only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read as _, Write as _};
@@ -195,7 +199,7 @@ fn open_browser(url: &str) -> R<()> {
 /// The refresh token in the OS credential store, split over entries of at most 2000 bytes (a
 /// Windows credential holds 2560; Entra's refresh tokens are often longer than half of that).
 mod secret {
-    const SERVICE: &str = "Tether sign-in";
+    const SERVICE: &str = if cfg!(tether_manage) { "Tether Manage sign-in" } else { "Tether sign-in" };
     const CHUNK: usize = 2000;
     const CHUNKS: usize = 8;
 
@@ -477,7 +481,10 @@ impl Loopback {
             match bind6(port) {
                 Ok(l) => break (v4, port, Some(l)),
                 Err(e) if tries == 4 => {
+                    #[cfg(not(tether_manage))]
                     hbb_common::log::warn!("sign-in: [::1]:{port} cannot be bound ({e}); waiting for the browser on 127.0.0.1 only");
+                    #[cfg(tether_manage)]
+                    eprintln!("sign-in: [::1]:{port} cannot be bound ({e}); waiting for the browser on 127.0.0.1 only");
                     break (v4, port, None);
                 }
                 Err(_) => tries += 1,
@@ -693,6 +700,7 @@ fn delete_all() -> Vec<RelayAnswer> {
     })
 }
 
+#[cfg(not(tether_manage))]
 fn set_viewer_name(name: Option<&str>) {
     let mut b = hbb_common::config::BUILTIN_SETTINGS.write().unwrap();
     match name {
@@ -700,6 +708,8 @@ fn set_viewer_name(name: Option<&str>) {
         None => b.remove(DISPLAY_NAME),
     };
 }
+#[cfg(tether_manage)]
+fn set_viewer_name(_: Option<&str>) {}
 
 /// The client id whose refresh token was last stored (not secret): sign-out deletes its token even
 /// when nothing is live and the last check reached no relay, so the next start resumes no one.
@@ -942,7 +952,7 @@ pub fn sign_out() -> Value {
     status_json()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(tether_manage)))]
 pub(crate) mod tests {
     use super::*;
 

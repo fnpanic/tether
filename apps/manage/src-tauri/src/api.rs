@@ -26,6 +26,16 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
+/// The `Tether-Sig` of an admin request: with `kid` when it is signed with the sign-in session's key
+/// (the relay finds the person's session by it), as before with the vault's admin key.
+fn sig(key: &SigningKey, server: &str, method: &str, path: &str, body: &[u8], t: u64) -> String {
+    if key.verifying_key() == crate::signin::SESSION_KEY.verifying_key() {
+        reqauth::sign_request_for_kid(key, server, method, path, body, t)
+    } else {
+        reqauth::sign_request_for(key, server, method, path, body, t)
+    }
+}
+
 pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
@@ -119,7 +129,7 @@ pub async fn cancellable<T>(f: impl std::future::Future<Output = Result<T, Strin
 /// within [`WRITE`]. Returns the body on 2xx.
 pub async fn admin(server: &str, key: &SigningKey, method: &str, path: &str, body: Vec<u8>, content_type: &str) -> Result<Vec<u8>, String> {
     let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
-    let sig = reqauth::sign_request_for(key, server, method, path, &body, now());
+    let sig = sig(key, server, method, path, &body, now());
     let mut req = client().request(m, url(server, path)).header(reqauth::HEADER, sig).timeout(WRITE);
     if !body.is_empty() {
         req = req.header("Content-Type", content_type).body(body);
@@ -129,7 +139,7 @@ pub async fn admin(server: &str, key: &SigningKey, method: &str, path: &str, bod
 
 /// Signed `GET` of a file: the answer must start within [`QUICK`] and be complete within `total`.
 pub async fn admin_download(server: &str, key: &SigningKey, path: &str, total: Duration) -> Result<Vec<u8>, String> {
-    let sig = reqauth::sign_request_for(key, server, "GET", path, b"", now());
+    let sig = sig(key, server, "GET", path, b"", now());
     read_body(started(client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(total)).await?).await
 }
 
@@ -152,13 +162,13 @@ async fn started(req: reqwest::RequestBuilder) -> Result<reqwest::Response, Stri
 
 /// Signed `GET` that gives up after [`QUICK`].
 pub async fn admin_quick(server: &str, key: &SigningKey, path: &str) -> Result<Vec<u8>, String> {
-    let sig = reqauth::sign_request_for(key, server, "GET", path, b"", now());
+    let sig = sig(key, server, "GET", path, b"", now());
     finish(client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(QUICK).send().await).await
 }
 
 /// [`admin_quick`], and whether the answer carries the response header `flag`.
 pub async fn admin_quick_flag(server: &str, key: &SigningKey, path: &str, flag: &str) -> Result<(Vec<u8>, bool), String> {
-    let sig = reqauth::sign_request_for(key, server, "GET", path, b"", now());
+    let sig = sig(key, server, "GET", path, b"", now());
     let res = client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(QUICK).send().await.map_err(unreachable)?;
     let set = res.headers().contains_key(flag);
     Ok((read_body(res).await?, set))
@@ -167,7 +177,7 @@ pub async fn admin_quick_flag(server: &str, key: &SigningKey, path: &str, flag: 
 /// Signed `PUT` of a release file with the limits of [`upload`]; `sent(bytes so far)` runs as the
 /// body goes out (256 KiB steps).
 pub async fn admin_upload(server: &str, key: &SigningKey, path: &str, body: Vec<u8>, content_type: &str, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<Vec<u8>, String> {
-    let sig = reqauth::sign_request_for(key, server, "PUT", path, &body, now());
+    let sig = sig(key, server, "PUT", path, &body, now());
     let req = client().put(url(server, path)).header(reqauth::HEADER, sig).header("Content-Type", content_type);
     let res = upload(req, body, sent).await?;
     cancellable(read_body(res)).await
