@@ -37,6 +37,7 @@ impl Drop for Srv {
 struct Reply {
     status: u16,
     body: Vec<u8>,
+    head: String,
 }
 
 impl Reply {
@@ -45,6 +46,9 @@ impl Reply {
     }
     fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
+    }
+    fn retry_after(&self) -> Option<String> {
+        self.head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("retry-after")).map(|(_, v)| v.trim().to_owned()))
     }
     /// A refusal's reason code.
     fn reason(&self) -> String {
@@ -102,7 +106,7 @@ impl Srv {
         let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("response head");
         let head = String::from_utf8_lossy(&raw[..split]).into_owned();
         let status = head.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
-        Reply { status, body: raw[split + 4..].to_vec() }
+        Reply { status, body: raw[split + 4..].to_vec(), head }
     }
 
     /// Signed with `key`, naming it with `kid` (as 0.7 desktops do) or not.
@@ -322,7 +326,7 @@ mod with_the_mock {
     #[test]
     fn a_token_binds_one_key() {
         let m = mock();
-        let (s, _admin) = relay(&m, json!([]), &[]);
+        let (s, admin) = relay(&m, json!([]), &[]);
         let (a, b) = (generate_key(), generate_key());
         let tok = m.token("writer@tether.test", None).unwrap();
         assert_eq!(s.sign_in(&a, &tok).status, 200);
@@ -333,10 +337,92 @@ mod with_the_mock {
         // Also after the first key signed out, and after a restart.
         assert_eq!(s.sign_out(&a).status, 204);
         assert_eq!(s.sign_in(&b, &tok).reason(), "token-used");
-        let admin = generate_key();
-        drop(admin);
+        let s = restart(s, &admin, &[]);
+        let r = s.sign_in(&b, &tok);
+        assert_eq!((r.status, r.reason()), (409, "token-used".into()), "the binding is kept in sessions.json");
         // A fresh token for b works.
         assert_eq!(s.sign_in(&b, &m.token("writer@tether.test", None).unwrap()).json()["write"], true);
+    }
+
+    /// A person's ninth key replaces the oldest session: one `session-ended` record, reason `replaced`.
+    #[test]
+    fn a_ninth_key_replaces_a_session_and_says_so() {
+        let m = mock();
+        let (s, admin) = relay(&m, json!([]), &[]);
+        let keys: Vec<SigningKey> = (0..9).map(|_| generate_key()).collect();
+        for k in &keys[..8] {
+            assert_eq!(s.sign_in(k, &m.token("technician@tether.test", None).unwrap()).status, 200);
+        }
+        assert!(s.records(&admin, "session-ended").is_empty());
+        assert_eq!(s.sign_in(&keys[8], &m.token("technician@tether.test", None).unwrap()).status, 200);
+        let ended = s.records(&admin, "session-ended");
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        let gone: Vec<&SigningKey> = keys.iter().filter(|k| s.me(k).status == 401).collect();
+        assert_eq!(gone.len(), 1, "exactly one session replaced");
+        let kid = team::key_id(&gone[0].verifying_key());
+        assert_eq!((ended[0]["detail"]["reason"].clone(), ended[0]["detail"]["kid"].clone(), ended[0]["actor"]["oid"].clone()), (json!("replaced"), json!(kid), json!(oid(1))));
+    }
+
+    /// Refused tokens count per key (20 a minute, `429` with `Retry-After`), not against the source
+    /// address, whose limit (60 failures) refuses every team route.
+    #[test]
+    fn refused_tokens_count_per_key_and_not_per_address() {
+        let m = mock();
+        let roster = generate_key();
+        let (s, _admin) = relay(&m, json!([entry("Roster Anna", &roster, json!({}))]), &[]);
+        // 4 keys x 18 refusals from one address: 72, over the address limit of 60.
+        for _ in 0..4 {
+            let k = generate_key();
+            for _ in 0..18 {
+                assert_eq!(s.sign_in(&k, "not.a.token").status, 401);
+            }
+        }
+        assert_eq!(s.me(&roster).status, 200, "the address is not locked out");
+        assert_eq!(s.sign_in(&generate_key(), &m.token("technician@tether.test", None).unwrap()).status, 200);
+        // One key: 20 refusals, then 429 with Retry-After, also for a good token; others unaffected.
+        let k = generate_key();
+        for _ in 0..20 {
+            assert_eq!(s.sign_in(&k, "not.a.token").status, 401);
+        }
+        let r = s.sign_in(&k, &m.token("technician@tether.test", None).unwrap());
+        assert_eq!((r.status, r.retry_after()), (429, Some("60".into())), "{}", r.text());
+        assert_eq!(s.sign_in(&generate_key(), &m.token("technician@tether.test", None).unwrap()).status, 200);
+        assert_eq!(s.me(&roster).status, 200);
+    }
+
+    /// An entry or field a newer relay wrote must not wipe the one-token-one-key bindings; a file
+    /// that is no JSON is kept aside as `sessions.json.bad`.
+    #[test]
+    fn sessions_json_is_read_tolerantly_and_a_corrupt_one_is_kept_aside() {
+        let m = mock();
+        let (s, admin) = relay(&m, json!([]), &[]);
+        let (a, b) = (generate_key(), generate_key());
+        let tok = m.token("writer@tether.test", None).unwrap();
+        assert_eq!(s.sign_in(&a, &tok).status, 200);
+        let stop = |mut s: Srv| {
+            let _ = s.child.kill();
+            let _ = s.child.wait();
+            let dir = s.dir.clone();
+            std::mem::forget(s);
+            dir
+        };
+        let dir = stop(s);
+        let file = dir.join("team/sessions.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        v["from_a_newer_relay"] = json!({"x": 1});
+        v["sessions"][0]["more"] = json!(true);
+        v["tokens"][0]["more"] = json!([1]);
+        v["tokens"].as_array_mut().unwrap().push(json!({"shape": "unknown"}));
+        std::fs::write(&file, serde_json::to_vec(&v).unwrap()).unwrap();
+        let s = spawn_in(dir, &admin, &[]);
+        assert_eq!(s.me(&a).status, 200, "the session survived");
+        assert_eq!(s.sign_in(&b, &tok).reason(), "token-used", "and the binding");
+        let dir = stop(s);
+        std::fs::write(dir.join("team/sessions.json"), b"{\"sessions\": [").unwrap();
+        let s = spawn_in(dir.clone(), &admin, &[]);
+        assert_eq!(std::fs::read(dir.join("team/sessions.json.bad")).unwrap(), b"{\"sessions\": [");
+        assert!(s.journal().contains("sessions.json.bad"), "{}", s.journal());
+        assert_eq!(s.me(&a).status, 401);
     }
 
     /// The deny list refuses at sign-in and ends live sessions when the document arrives; a
@@ -395,8 +481,6 @@ mod with_the_mock {
         assert_eq!(s.me(&roster).json()["name"], "Roster Anna");
         // TEAM_SESSION_MAX_MINUTES caps a long token.
         m.control("lifetime", json!({"seconds": 3600})).unwrap();
-        let s2 = spawn_in(new_dir(), &generate_key(), &[("TEAM_SESSION_MAX_MINUTES", "1")]);
-        drop(s2);
         let admin = generate_key();
         let s = spawn_in(new_dir(), &admin, &[("TEAM_SESSION_MAX_MINUTES", "1")]);
         assert_eq!(s.publish(&admin, &team_doc(&admin, 1, json!([]), json!({"oidc": oidc_of(&m), "roles": roles()}))).status, 204);

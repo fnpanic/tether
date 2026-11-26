@@ -351,14 +351,14 @@ pub(crate) fn public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(a) => {
             let o = a.octets();
-            !(a.is_loopback() || a.is_private() || a.is_link_local() || a.is_unspecified() || a.is_broadcast() || a.is_multicast() || a.is_documentation() || o[0] == 0 || (o[0] == 100 && o[1] & 0xc0 == 64) || o[0] >= 240)
+            !(a.is_loopback() || a.is_private() || a.is_link_local() || a.is_unspecified() || a.is_broadcast() || a.is_multicast() || a.is_documentation() || o[0] == 0 || (o[0] == 100 && o[1] & 0xc0 == 64) || (o[0] == 198 && o[1] & 0xfe == 18) || o[0] >= 240)
         }
         IpAddr::V6(a) => {
             if let Some(v4) = a.to_ipv4_mapped() {
                 return public(IpAddr::V4(v4));
             }
             let s = a.segments();
-            !(a.is_loopback() || a.is_unspecified() || a.is_multicast() || s[0] & 0xfe00 == 0xfc00 || s[0] & 0xffc0 == 0xfe80)
+            !(a.is_loopback() || a.is_unspecified() || a.is_multicast() || s[0] & 0xfe00 == 0xfc00 || s[0] & 0xffc0 == 0xfe80 || s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || s[0] == 0x2002 || s[..6] == [0; 6] || (s[0], s[1]) == (0x2001, 0xdb8))
         }
     }
 }
@@ -803,6 +803,18 @@ mod tests {
         // The resolver: a name resolving to loopback is refused in production.
         assert!(resolve("localhost:443", false).is_err());
         assert!(resolve("127.0.0.1:443", true).is_ok());
+    }
+
+    /// Ranges that reach a private or special network (NAT64, 6to4, IPv4-compatible, documentation,
+    /// benchmarking) are not a provider's address; their neighbours are.
+    #[test]
+    fn special_address_ranges_are_not_public() {
+        for bad in ["64:ff9b::808:808", "64:ff9b::a00:1", "2002:808:808::1", "2002::", "::a00:1", "::808:808", "2001:db8::1", "2001:db8:ffff::1", "198.18.0.1", "198.19.255.255"] {
+            assert!(!public(bad.parse().unwrap()), "{bad}");
+        }
+        for ok in ["64:ff9a::1", "64:ff9b:1::1", "2003::1", "::1:0:0:1", "2001:db9::1", "2001:4860::1", "198.17.255.255", "198.20.0.0", "8.8.8.8"] {
+            assert!(public(ok.parse().unwrap()), "{ok}");
+        }
     }
 
     #[test]

@@ -68,7 +68,6 @@ pub(crate) struct SignIn {
 
 /// A person signed in with a key (`team/sessions.json`).
 #[derive(Serialize, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
 struct Session {
     kid: String,
     /// Standard base64 of the key (the rate limit's key, as for roster members).
@@ -92,15 +91,14 @@ impl Session {
 
 /// A token bound to a key until it expires.
 #[derive(Serialize, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
 struct Bound {
     uti: String,
     kid: String,
     exp: u64,
 }
 
-#[derive(Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+/// What [`persist_sessions`] writes (read back entry by entry, [`Team::load_sessions`]).
+#[derive(Serialize)]
 struct SessionFile {
     /// The provider they were made with: another one in the document ends them all.
     oidc: Option<Oidc>,
@@ -115,6 +113,9 @@ const LIMIT_TAGS: u64 = 512 << 10;
 const KEY_PER_MIN: u32 = 120;
 /// Failed member signatures per IP and minute: a failure without `kid` tries every member key.
 const FAIL_PER_MIN: u32 = 60;
+/// Sign-ins per member key and minute refused for their token: one key cannot be used to probe tokens,
+/// and an office behind one address with skewed clocks does not lock itself out of every team route.
+const TOKEN_FAIL_PER_MIN: u32 = 20;
 /// Signatures without `kid` being checked (up to 2000 keys, about 105 ms each in a release build):
 /// two at a time for the whole relay and one per source address, so they cannot keep many workers
 /// busy and one source cannot hold both; at most two requests (one per source) wait up to
@@ -296,6 +297,8 @@ pub struct Team {
     tags: Tags,
     key_hits: HashMap<String, (u64, u32)>,
     fail_hits: HashMap<String, (u64, u32)>,
+    /// Sign-ins refused for their token (`401`), per member key: not the source address's failures.
+    token_fail_hits: HashMap<String, (u64, u32)>,
     /// `POST /api/team/audit-event` per member key.
     posted_hits: HashMap<String, (u64, u32)>,
     /// Summary and device-list reads, one record per actor and hour (also the admin's, main.rs).
@@ -409,24 +412,34 @@ impl Team {
     }
 
     /// `team/sessions.json` as the last run left it: expired tokens and long-expired sessions
-    /// dropped, and what the document in force does not allow.
+    /// dropped, and what the document in force does not allow. Read entry by entry with unknown
+    /// fields ignored, so an entry or field a newer relay wrote costs that entry only and the token
+    /// bindings (one token, one key) survive a downgrade, also those of another provider. A file
+    /// that is no JSON at all is kept aside as `sessions.json.bad` (its bindings are lost).
     fn load_sessions(&mut self, data: &Path) {
         let p = data.join("team/sessions.json");
         if fs::metadata(&p).is_ok_and(|m| m.len() > SESSIONS_FILE_MAX) {
             eprintln!("error: team/sessions.json is too large; no session is kept");
             return;
         }
-        let f: SessionFile = load_json(&p);
+        let Ok(raw) = fs::read(&p) else { return };
+        let Ok(v) = serde_json::from_slice::<Value>(&raw) else {
+            eprintln!("error: team/sessions.json is not JSON; kept as team/sessions.json.bad, no session and no token binding is kept");
+            let _ = fs::rename(&p, data.join("team/sessions.json.bad"));
+            return;
+        };
         let t = now();
-        if f.oidc.is_some() && f.oidc != self.signin.as_ref().map(|s| s.oidc.clone()) {
+        let list = |k: &str| v.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
+        for b in list("tokens").into_iter().filter_map(|b| serde_json::from_value::<Bound>(b).ok()).filter(|b| b.exp + oidc::SKEW > t).take(TOKENS_MAX) {
+            self.tokens.insert(b.uti.clone(), b);
+        }
+        let made_with = serde_json::from_value::<Option<Oidc>>(v.get("oidc").cloned().unwrap_or(Value::Null));
+        if made_with.as_ref().map_or(true, |o| o.is_some() && *o != self.signin.as_ref().map(|s| s.oidc.clone())) {
             eprintln!("team: the sessions in team/sessions.json were made with another provider; none is kept");
             return;
         }
-        for s in f.sessions.into_iter().filter(|s| s.exp + EXPIRED_KEEP > t && tether_trust::key_from_b64(&s.key).is_ok_and(|k| team::key_id(&k) == s.kid)).take(SESSIONS_MAX) {
+        for s in list("sessions").into_iter().filter_map(|s| serde_json::from_value::<Session>(s).ok()).filter(|s| s.exp + EXPIRED_KEEP > t && tether_trust::key_from_b64(&s.key).is_ok_and(|k| team::key_id(&k) == s.kid)).take(SESSIONS_MAX) {
             self.sessions.insert(s.kid.clone(), s);
-        }
-        for b in f.tokens.into_iter().filter(|b| b.exp + oidc::SKEW > t).take(TOKENS_MAX) {
-            self.tokens.insert(b.uti.clone(), b);
         }
         for (s, why) in self.end_sessions(false) {
             eprintln!("team: session of {} ({}) ended at start: {why}", s.oid, s.kid);
@@ -442,6 +455,7 @@ impl Team {
     pub fn maintain(&mut self, t: u64) {
         self.key_hits.retain(|_, (start, _)| t < *start + 60);
         self.fail_hits.retain(|_, (start, _)| t < *start + 60);
+        self.token_fail_hits.retain(|_, (start, _)| t < *start + 60);
         self.posted_hits.retain(|_, (start, _)| t < *start + 60);
         self.limit_noted.retain(|_, at| t < *at + 60);
         // In memory only: a restart drops them from the file the same way.
@@ -737,6 +751,9 @@ impl App {
         if !rate_ok(&mut self.team.key_hits, key.clone(), t, KEY_PER_MIN) {
             return Err(text(429, "too many requests"));
         }
+        if self.team.token_fail_hits.get(&key).is_some_and(|h| t < h.0 + 60 && h.1 >= TOKEN_FAIL_PER_MIN) {
+            return Err(text(429, "too many refused tokens from this key").with_header(hdr("Retry-After", "60")));
+        }
         let unverified = Actor { key_fingerprint: s.kid.clone(), name: "-".into(), oid: None, upn: None };
         match self.session_from(&s, key, t) {
             Ok(sess) => {
@@ -749,9 +766,10 @@ impl App {
                 Ok(json(&answer))
             }
             Err((reason, actor)) => {
-                // A token that does not check out counts as a failed signature does (per IP).
+                // The request was signed by the key: its refused tokens count per key, not per source
+                // address (those failures lock the address out of every team route).
                 if reason.status() == 401 {
-                    rate_ok(&mut self.team.fail_hits, crate::rate_ip(rq), t, u32::MAX);
+                    rate_ok(&mut self.team.token_fail_hits, tether_trust::key_to_b64(&s.key), t, u32::MAX);
                 }
                 self.audit_pending = Some(Rec::new("sign-in-refused", Some(actor.unwrap_or(unverified)), Some(ip), Target::default(), serde_json::json!({"reason": reason.code()})));
                 Err(refusal(reason))
@@ -798,7 +816,10 @@ impl App {
         if mine.len() >= SESSIONS_PER_PERSON {
             mine.sort_unstable();
             for (_, k) in &mine[..mine.len() + 1 - SESSIONS_PER_PERSON] {
-                sessions.remove(k);
+                if let Some(old) = sessions.remove(k) {
+                    eprintln!("team: session of {} ({}) replaced by a newer key", old.oid, old.kid);
+                    self.team_audit.submit(Rec::new("session-ended", Some(old.actor()), None, Target::default(), serde_json::json!({"reason": "replaced", "kid": old.kid})));
+                }
             }
         }
         tokens.insert(c.uti.clone(), Bound { uti: c.uti.clone(), kid: s.kid.clone(), exp: c.exp });

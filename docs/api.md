@@ -296,7 +296,7 @@ signed upload's errors), anything else a plain roster. Customer patterns: `*` (e
 customer reference (1–32 of `A-Za-z0-9._-`, matched exactly, case-sensitive), or a customer reference
 followed by one `*` (every reference starting with it: `47*` covers `47`, `4711`, `47-B`); nothing else,
 at most 64 per member or role. `oidc_only` true needs `oidc` (`400`): then only `service` entries
-keep their keys and people sign in ([below](#staff-sign-in-sessions-post-delete-apiteamsession)).
+keep their keys and people sign in ([below](#staff-sign-in-sessions-postdelete-apiteamsession)).
 `oidc.issuer` must be `https://`, in normal form, and not `localhost` or a loopback, private or
 link-local address (`400`; only debug and `test-hooks` builds also take `http://` on loopback, for
 the mock provider). `roles` and `deny` apply to sign-in sessions; `deny` does not affect key members. Once a relay has accepted a signed document it refuses plain rosters
@@ -333,7 +333,7 @@ trust another admin key). The relay is trusted to enforce the permissions it ser
 | Method & path | Body | Result |
 | --- | --- | --- |
 | `GET /api/team/config` | no signature | The `config` envelope of the signed document as published (`{"payload","sig","key"}`, payload `{"serial","oidc"}`); verify it with the admin key, not the relay. `ETag: "<serial>"`, `304` on `If-None-Match`. `404 no sign-in configured` without a document with `oidc`. |
-| `POST /api/team/session` | `{"access_token":"<JWT>","key":"<std base64 of the member key>"}` (≤ 32 KiB), signed with that key, the header naming its `kid` | Staff sign-in ([below](#staff-sign-in-sessions-post-delete-apiteamsession)): `200` the session as `me` answers it; a refusal `{"reason","message"}` |
+| `POST /api/team/session` | `{"access_token":"<JWT>","key":"<std base64 of the member key>"}` (≤ 32 KiB), signed with that key, the header naming its `kid` | Staff sign-in ([below](#staff-sign-in-sessions-postdelete-apiteamsession)): `200` the session as `me` answers it; a refusal `{"reason","message"}` |
 | `DELETE /api/team/session` | – | Sign-out: the signing key's session ends (an expired one too), `204`; a roster key without a session: `204`, nothing changes |
 | `GET /api/team/me` | – | `{"name":…, "write":bool, "audit":bool}`; with a signed document also `"sbom","agent":bool, "customers":[…], "service":bool`; signed in: `{"name","write","audit","sbom","agent","customers","service":false,"oid","upn","exp":<unix>,"roles":[…]}` |
 | `GET /api/team/devices` | – | `[{uuid,id,profile,version,os,last_seen}]` newest first, from the heartbeats (no IP, no serials) |
@@ -386,7 +386,11 @@ key is on the roster too (the session wins while it lasts; after it, the roster 
 in `team/sessions.json` (0600, written before the answer) and survive a restart until they expire;
 at most 5 000 sessions (8 per person: a ninth key replaces that person's oldest) and 20 000 bound
 tokens (`503 too-many-sessions` when full). A new document ends at once the sessions of a denied
-`oid`, those left without a mapped role, and all of them when the provider (`oidc`) changed.
+`oid`, those left without a mapped role, and all of them when the provider (`oidc`) changed. A
+`deny` entry ends a person's sessions, but the same key then falls back to its roster entry if it
+has one: remove that entry too. `sessions.json` is read entry by entry, unknown fields ignored (a
+downgrade keeps the token bindings); a file that is not JSON is kept as `sessions.json.bad` and
+its sessions and bindings are lost.
 
 Refusals: `{"reason":"<code>","message":"<text for an administrator>"}`, `Content-Type:
 application/json`. `401`: `malformed`, `alg`, `no-kid`, `unknown-kid`, `bad-signature`, `v1-token`
@@ -397,8 +401,12 @@ the API scope), `wrong-issuer`, `wrong-tenant`, `wrong-client`, `expired`, `not-
 `not-configured` (no `oidc` in the document); `409`: `token-used`; `503` with `Retry-After`:
 `provider-unavailable` (the provider's keys cannot be fetched), `provider-address` (the provider's
 name resolves to a loopback or private address: a production build never connects there),
-`config-changed` (the document changed during the check; retry), `too-many-sessions`. A refused
-token counts like a failed signature (60 a minute per address).
+`config-changed` (the document changed during the check; retry), `too-many-sessions`. Once the
+request signature has verified, a token refused with a `401` counts against the signing key, not
+the address (which would refuse every team route to an office behind one NAT with skewed clocks):
+the 21st within a minute from one key gets `429 too many refused tokens from this key` with
+`Retry-After: 60`, also for a good token. Failures before the signature check (and replays) still
+count 60 a minute per address.
 
 **What is trusted from where.** Issuer, tenant, audience and client id come only from the
 admin-signed team document, never from the request or the provider. From the provider's discovery
@@ -411,12 +419,26 @@ kept 24 h and fetched again earlier only for an unknown `kid`, at most once a mi
 a time for the whole relay, a sign-in meanwhile gets `503` at once, and none of it runs under the
 relay's state lock, so heartbeats and reports never wait for the provider. When the keys cannot be
 fetched, sign-ins get `503`, sessions already made keep working until they expire, and roster
-members are not affected. The relay needs outbound HTTPS to the provider.
+members are not affected; after 24 h without a successful key refresh the old keys are not used any
+more and every new sign-in gets `503` (`provider-unavailable`). The relay needs outbound HTTPS to
+the provider, directly: it trusts the compiled-in web PKI roots, not the system's store, and uses
+no proxy, so a TLS-inspecting proxy (or any middlebox presenting its own certificate) between the
+relay and Microsoft breaks sign-in.
+
+**Limits of the design.** A role removed in Entra takes effect at the next sign-in (the session
+keeps the roles of the token it was made with, at most `TEAM_SESSION_MAX_MINUTES`, so 60 minutes by
+default); only `deny` ends a session at once. A token is bound to the first key that presents it
+on a relay, but the same access token is accepted by every relay of the tenant within its
+lifetime: whoever obtains one (from a log, a proxy, a memory dump) can present it to a relay that
+has not seen it, with a key of their own. This is mitigated, not removed: the desktop posts the
+token to all relays at once, so a replay on any of them meets `409 token-used`, and it alarms on
+that answer.
 
 **Audit** (team audit log): `sign-in` (`actor` with `oid` and `upn`, `detail` `{"roles","exp"}`),
 `sign-in-refused` (`detail` `{"reason"}`; `actor` only the key id and `"name":"-"` unless the token
 was verified: then the person), `sign-out`, `session-ended` (`detail` `{"reason":"deny-list"|
-"no-role"|"document-changed","serial"}`). Never the token. Every other record of a signed-in
+"no-role"|"document-changed","serial"}`; `{"reason":"replaced","kid"}` when a person's ninth key
+replaced the oldest session, `kid` the key that lost its session). Never the token. Every other record of a signed-in
 member names the person (`actor.oid`, `actor.upn`) and the key id.
 
 ## Team audit log
@@ -512,7 +534,7 @@ newest lines are not those last written). The read is itself recorded.
 |---|---|---|
 | `TEAM_AUDIT_RETENTION_DAYS` | `90` | whole UTC days older than this are removed (checked hourly and at each new day) |
 | `TEAM_AUDIT_MAX_MB` | `2048` | all day files together; above it the oldest day goes, never today's; today's file alone at the cap: new records are dropped and counted |
-| `TEAM_SESSION_MAX_MINUTES` | `60` | the longest staff sign-in session (1 to 1440 minutes), whatever the token's lifetime ([sign-in](#staff-sign-in-sessions-post-delete-apiteamsession)) |
+| `TEAM_SESSION_MAX_MINUTES` | `60` | the longest staff sign-in session (1 to 1440 minutes), whatever the token's lifetime ([sign-in](#staff-sign-in-sessions-postdelete-apiteamsession)) |
 
 Backup: copy `team-audit/` with the rest of `/var/lib/tether-api`. A restored older copy is a
 shorter chain: a head stored elsewhere after the backup is no longer reached, so note the restore
