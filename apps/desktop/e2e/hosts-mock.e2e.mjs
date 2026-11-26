@@ -305,7 +305,7 @@ async function run(name) {
   await setQuery('software:"garnet browser"@126 health:crit');
   await search.press("Enter");
   check(tag("Enter searches at once; quotes and @version"), (await until(async () => (await swCalls()) === 4, 600)) && (await calls("team_status_software")).at(-1).q === "garnet browser" && (await calls("team_status_software")).at(-1).v === "126");
-  const swState = async (states, q, wait = 3000) => {
+  const swState = async (states, q, wait = 6000) => {
     await p.evaluate((s) => (window.__mockSoftware = s), states);
     await setQuery(q);
     await search.press("Enter");
@@ -321,7 +321,7 @@ async function run(name) {
   await setQuery("software:kestrel");
   await search.press("Enter");
   check(tag("a relay busy with another search: tried again, and it says so"), await until(async () => /relay\.example\.com is busy with another search; trying again…/.test(await notes.textContent()), 2000));
-  check(tag("still busy after 3 more tries: a line that offers to try again"), (await until(async () => /relay\.example\.com stayed busy with other searches: press Enter to try again/.test(await notes.textContent()), 8000)) && (await calls("team_status_software")).filter((c) => c.relay === "relay.example.com").length === 4);
+  check(tag("still busy after 3 more tries: a line that offers to try again"), (await until(async () => /relay\.example\.com stayed busy with other searches: press Enter to try again/.test(await notes.textContent()), 12000)) && (await calls("team_status_software")).filter((c) => c.relay === "relay.example.com").length === 4);
   check(tag("relay not ready (503)"), /relay2\.example\.com is not ready to search yet \(it is preparing its status data\): press Enter to try again in 5 s/.test(await swState({ "relay2.example.com": "notready" }, "software:larch")));
   check(tag("health reporting off (503)"), /health reporting is switched off on relay2\.example\.com: it holds no software lists to search/.test(await swState({ "relay2.example.com": "reportoff" }, "software:meadow")));
   check(tag("more than 2000"), /more than 2000 computers match on relay\.example\.com: refine the search/.test(await swState({ "relay.example.com": "more" }, "software:elm")));

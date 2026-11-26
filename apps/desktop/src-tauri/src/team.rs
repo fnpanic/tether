@@ -363,7 +363,7 @@ fn software_path(q: &str, v: &str) -> String {
 /// valid uuid, names and versions plain text cut to the sidecar's bounds (128, 64). Refusals carry a
 /// prefix the webview tells apart: `unsupported:` (an older relay), `forbidden:`, `busy:<s>:` (the
 /// relay runs another search), `limit:<s>:` (this member's searches a minute), `reportoff:` and
-/// `unavailable:<s>:` (the relay's 503s).
+/// `overloaded:` (503 busy) and `unavailable:<s>:` (its other 503s); any other 429 is the general error.
 fn software_answer(code: u16, retry: Option<&str>, raw: &[u8]) -> R<Value> {
     #[derive(serde::Deserialize)]
     struct Hit {
@@ -397,9 +397,13 @@ fn software_answer(code: u16, retry: Option<&str>, raw: &[u8]) -> R<Value> {
             let body = String::from_utf8_lossy(raw);
             return Err(match (code, body.trim()) {
                 (429, "busy") => format!("busy{s}: The server is busy with another search."),
-                (429, _) => format!("limit{s}: Too many software searches."),
-                (_, b) if b.starts_with("status reporting is off") => "reportoff: Health reporting is switched off on this server.".into(),
-                (_, b) => format!("unavailable{s}: The server is not ready: {}", b.chars().take(200).collect::<String>()),
+                (429, "too many searches") => format!("limit{s}: Too many software searches."),
+                // The relay's worker limit (main.rs): not "preparing its status data".
+                (503, "busy") => "overloaded: The server is overloaded; try again shortly.".into(),
+                (503, b) if b.starts_with("status reporting is off") => "reportoff: Health reporting is switched off on this server.".into(),
+                (503, b) => format!("unavailable{s}: The server is not ready: {}", b.chars().take(200).collect::<String>()),
+                // The relay's general 429s (too many requests, too many failed requests): their own sentence.
+                _ => status_error(code, &body),
             });
         }
         _ => return Err(status_error(code, &String::from_utf8_lossy(raw))),
@@ -722,11 +726,16 @@ mod tests {
         assert!(software_answer(429, Some("junk"), b"busy").unwrap_err().starts_with("busy: "));
         assert!(software_answer(429, Some("42"), b"too many searches").unwrap_err().starts_with("limit:42: "));
         assert!(software_answer(429, Some("999999"), b"too many searches").unwrap_err().starts_with("limit:3600: "));
-        assert!(software_answer(429, None, b"too many requests").unwrap_err().starts_with("limit: "));
+        assert!(software_answer(429, None, b"too many searches").unwrap_err().starts_with("limit: "));
+        // The relay's general 429s are not the search limit.
+        for b in [&b"too many requests"[..], b"too many failed requests"] {
+            assert_eq!(software_answer(429, None, b).unwrap_err(), "Too many requests; try again in a minute.");
+        }
         // The relay's 503s get their own state, not the health list's "off:".
         assert!(software_answer(503, Some("3600"), b"status reporting is off").unwrap_err().starts_with("reportoff: "));
         assert!(software_answer(503, Some("5"), b"status summary not ready").unwrap_err().starts_with("unavailable:5: "));
-        assert!(software_answer(503, None, b"busy").unwrap_err().starts_with("unavailable: "));
+        assert!(software_answer(503, None, b"busy").unwrap_err().starts_with("overloaded: "));
+        assert!(software_answer(503, Some("5"), b"busy").unwrap_err().starts_with("overloaded: "));
         assert!(software_answer(500, None, b"oops").unwrap_err().contains("500"));
         assert!(software_answer(200, None, b"{not json").unwrap_err().starts_with("bad answer"));
         assert!(software_answer(200, None, br#"{"sbom":true,"hosts":"x"}"#).unwrap_err().starts_with("bad answer"));

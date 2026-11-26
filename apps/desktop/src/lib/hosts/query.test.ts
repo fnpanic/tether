@@ -228,6 +228,7 @@ describe("software and failure terms", () => {
     expect(hit("-software:chrome")).toEqual(["222222222"]); // has a list without a match; m:u9 and hosts without an agent have none
     expect(hit("software:chrome | is:offline")).toEqual(["111111111", "222222222"]);
     expect(hit("-(software:chrome | software:x)")).toEqual(["222222222"]);
+    expect(hit("-(software:x customer:nomatch)")).toEqual(expect.arrayContaining(["111111111", "222222222"])); // NOT over (unknown AND false) is true
     expect(hit("software:chrome customer:0815")).toEqual([]);
     expect(hit("-software:chrome | health:stale")).toEqual(["222222222", "m:u9"]);
     // Without a lookup (not searched yet) the term matches nothing, either way.

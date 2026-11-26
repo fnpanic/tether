@@ -12,8 +12,9 @@ export type Answer =
   | { ok: true; hits: Map<string, Hit>; more: number; pending: number; partial: boolean; at: number }
   | { ok: false; why: Why; text: string; retry?: number };
 /** busy: the relay runs another search (relay-wide); limit: this member's 6 searches a minute;
- *  reportoff / unavailable: the relay's 503 (health reporting off / its status data not ready). */
-type Why = "unsupported" | "off" | "forbidden" | "busy" | "limit" | "reportoff" | "unavailable" | "offline" | "error";
+ *  reportoff / unavailable / overloaded: the relay's 503 (health reporting off / its status data not
+ *  ready / its worker limit). */
+type Why = "unsupported" | "off" | "forbidden" | "busy" | "limit" | "reportoff" | "unavailable" | "overloaded" | "offline" | "error";
 /** Per term (`termKey`), per relay. */
 export type Results = Map<string, Map<string, Answer>>;
 
@@ -57,13 +58,13 @@ function answerOf(r: unknown): Answer {
     const x = (h && typeof h === "object" ? h : {}) as Record<string, unknown>;
     if (typeof x.uuid === "string" && !hits.has(x.uuid)) hits.set(x.uuid, { name: typeof x.name === "string" ? x.name : "", version: typeof x.version === "string" ? x.version : "" });
   }
-  // `partial`: the relay's time ran out before every list was read.
-  return { ok: true, hits, more: num(o.more), pending: num(o.pending), partial: !!o.partial, at: Date.now() };
+  // `partial`: the relay's time ran out before every list was read. `at`: when the relay built the answer (its `built`, seconds).
+  return { ok: true, hits, more: num(o.more), pending: num(o.pending), partial: !!o.partial, at: num(o.built) * 1000 || Date.now() };
 }
 
 function failureOf(e: unknown): Answer {
   const s = String(e);
-  const m = /^(unsupported|forbidden|offline|busy|limit|reportoff|unavailable)(?::(\d+))?: ?(.*)$/s.exec(s);
+  const m = /^(unsupported|forbidden|offline|busy|limit|reportoff|unavailable|overloaded)(?::(\d+))?: ?(.*)$/s.exec(s);
   if (!m) return { ok: false, why: "error", text: s };
   return { ok: false, why: m[1] as Why, text: m[3], ...(m[2] ? { retry: Number(m[2]) } : {}) };
 }
@@ -89,24 +90,38 @@ function ask(relay: string, t: SwTerm, call: Call): Promise<Answer> {
 /** Tries a relay that is busy with another search (relay-wide, not this member's fault) again after
  *  its Retry-After, at most `BUSY_TRIES` times; `onBusy(relay, true)` while it waits. */
 const BUSY_TRIES = 3;
-async function askRetrying(r: string, t: SwTerm, call: Call, onBusy?: (relay: string, waiting: boolean) => void): Promise<Answer> {
+async function askRetrying(r: string, t: SwTerm, call: Call, onBusy?: (relay: string, waiting: boolean) => void, live: () => boolean = () => true): Promise<Answer> {
   for (let i = 0; ; i++) {
+    if (!live()) return GONE;
     const a = await ask(r, t, call);
     if (a.ok || a.why !== "busy" || i === BUSY_TRIES) {
       if (i) onBusy?.(r, false);
       return a;
     }
     onBusy?.(r, true);
-    await new Promise((ok) => setTimeout(ok, Math.min(a.retry ?? 5, 60) * 1000));
+    // Random 0 to 2 s on top, so several open windows do not collide again.
+    await new Promise((ok) => setTimeout(ok, Math.min(a.retry ?? 5, 60) * 1000 + Math.random() * 2000));
   }
 }
+/** What a search that was dropped meanwhile returns (nobody reads it). */
+const GONE: Answer = { ok: false, why: "error", text: "" };
+/** Failures that apply to the whole relay: its other terms would only get the same answer. */
+const wide = (a: Answer) => !a.ok && ["unsupported", "off", "forbidden", "limit", "reportoff", "offline"].includes(a.why);
 
-export async function runSoftware(terms: SwTerm[], relays: string[], call: Call = (c, a) => invoke(c, a), onBusy?: (relay: string, waiting: boolean) => void): Promise<Results> {
+export async function runSoftware(terms: SwTerm[], relays: string[], call: Call = (c, a) => invoke(c, a), onBusy?: (relay: string, waiting: boolean) => void, live: () => boolean = () => true): Promise<Results> {
   const ok = runnable(terms);
   const out: Results = new Map(ok.map((t) => [termKey(t), new Map<string, Answer>()]));
   // A relay runs one search at a time: per relay one term after the other, the relays in parallel.
   await Promise.all(relays.map(async (r) => {
-    for (const t of ok) out.get(termKey(t))!.set(r, await askRetrying(r, t, call, onBusy));
+    for (const [i, t] of ok.entries()) {
+      if (!live()) return;
+      const a = await askRetrying(r, t, call, onBusy, live);
+      out.get(termKey(t))!.set(r, a);
+      if (wide(a)) {
+        for (const x of ok.slice(i + 1)) out.get(termKey(x))!.set(r, a);
+        return;
+      }
+    }
   }));
   return out;
 }
@@ -155,7 +170,7 @@ export function searcher(call: Call, relays: () => string[], onRun: (r: SwState)
       else busy.delete(r);
       if (my === gen) onRun({ key, results: null, busy: [...busy] });
     };
-    void runSoftware(terms, relays(), call, onBusy).then((results) => my === gen && onRun({ key, results }));
+    void runSoftware(terms, relays(), call, onBusy, () => my === gen).then((results) => my === gen && onRun({ key, results }));
   };
   return {
     /** Typing that leaves the software terms as they are (another term, a chosen query) changes nothing. */
@@ -234,7 +249,9 @@ export function chipLines(terms: SwTerm[], res: Results | null, hosts: Host[], r
                   ? `you ran more than 6 software searches a minute on ${r}: wait ${a.retry ?? 60} s, then press Enter`
                   : a.why === "reportoff"
                     ? `health reporting is switched off on ${r}: it holds no software lists to search`
-                    : a.why === "unavailable"
+                    : a.why === "overloaded"
+                      ? `${r}: the server is overloaded; try again shortly`
+                      : a.why === "unavailable"
                       ? `${r} is not ready to search yet (it is preparing its status data): press Enter to try again in ${a.retry ?? 30} s`
                       : a.why === "offline"
                         ? `${r} could not be reached`

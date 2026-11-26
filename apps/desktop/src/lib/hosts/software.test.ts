@@ -104,6 +104,7 @@ describe("runSoftware", () => {
     expect(await one("limit:42: Too many software searches.")).toContain("you ran more than 6 software searches a minute on b.example: wait 42 s, then press Enter");
     expect(await one("reportoff: Health reporting is switched off on this server.")).toContain("health reporting is switched off on b.example: it holds no software lists to search");
     expect(await one("unavailable:5: The server is not ready: status summary not ready")).toContain("b.example is not ready to search yet (it is preparing its status data): press Enter to try again in 5 s");
+    expect(await one("overloaded: The server is overloaded; try again shortly.")).toContain("b.example: the server is overloaded; try again shortly");
     expect(await one("offline: connection timed out")).toContain("b.example could not be reached");
     expect(await one("The server answered 500: oops")).toContain("b.example: The server answered 500: oops");
     expect(await one(found([], { more: 120 }))).toContain("more than 2000 computers match on b.example: refine the search");
@@ -174,6 +175,60 @@ describe("runSoftware", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await l;
     expect(lim.calls.filter((c) => c.relay === "a.example").length).toBe(1);
+  });
+  it("after a failure that covers the whole relay, its other terms get the same answer without a request", async () => {
+    for (const bad of ["offline: timed out", "limit:42: Too many software searches.", "forbidden: no", "reportoff: off", "unsupported: no", { sbom: false, hosts: [] }]) {
+      resetSoftwareCache();
+      const r = relays({ "a.example": bad, "b.example": found([]) });
+      const res = await runSoftware(softwareTerms(parse("software:garnet software:aster software:opal").node), RELAYS, r.call);
+      expect(r.calls.filter((c) => c.relay === "a.example").map((c) => c.q)).toEqual(["garnet"]);
+      expect(r.calls.filter((c) => c.relay === "b.example").length).toBe(3);
+      const got = ["garnet", "aster", "opal"].map((q) => res.get(termKey({ q, v: "" }))!.get("a.example"));
+      expect(got[1]).toBe(got[0]);
+      expect(got[2]).toBe(got[0]);
+    }
+    // An error that is not relay-wide is asked term after term.
+    resetSoftwareCache();
+    const r = relays({ "a.example": "boom", "b.example": found([]) });
+    await runSoftware(softwareTerms(parse("software:garnet software:aster").node), RELAYS, r.call);
+    expect(r.calls.filter((c) => c.relay === "a.example").length).toBe(2);
+  });
+  it("the wait before a retry after busy gets 0 to 2 s of jitter", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    let busyFor = 1;
+    const r = relays({ "a.example": () => (busyFor-- > 0 ? "busy:5: busy" : found([])) });
+    const p = runSoftware(softwareTerms(parse("software:garnet").node), ["a.example"], r.call);
+    await vi.advanceTimersByTimeAsync(5_999);
+    expect(r.calls.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(r.calls.length).toBe(2);
+    vi.restoreAllMocks();
+  });
+  it("a dropped search sends no further request and does not retry", async () => {
+    vi.useFakeTimers();
+    let release: (v: unknown) => void = () => {};
+    const sent: string[] = [];
+    const call: Call = (_c, a) => {
+      sent.push(String((a as { q: string }).q));
+      return new Promise((ok) => (release = ok));
+    };
+    const s = searcher(call, () => ["a.example"], () => {});
+    s.enter("software:garnet software:aster");
+    expect(sent).toEqual(["garnet"]);
+    s.typed("software:opal"); // the query changes while the first term is on its way
+    release(found([]));
+    await vi.advanceTimersByTimeAsync(700);
+    expect(sent).toEqual(["garnet"]);
+    // A busy answer to a search that is closed meanwhile is not asked again.
+    resetSoftwareCache();
+    sent.length = 0;
+    s.enter("software:ruby");
+    s.dispose();
+    release("busy:5: busy");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sent).toEqual(["ruby"]);
   });
   it("one request per (term, relay), cached 60 s; failures that pass are asked again", async () => {
     let now = 1000;
@@ -276,7 +331,9 @@ describe("unknown until answered", () => {
   });
   it("says when the result is from, and that a negated term leaves out what it cannot say", async () => {
     const r = await run("software:garnet", { "a.example": found(["dev-0001"]), "b.example": found([]) });
-    expect(Math.abs((asOf(r.res) ?? 0) - Date.now())).toBeLessThan(1000);
+    expect(asOf(r.res)).toBe(NOW * 1000); // the relay's `built`
+    const res = await runSoftware(softwareTerms(parse("software:aster").node), ["a.example"], relays({ "a.example": { ...found([]), built: undefined } }).call);
+    expect(Math.abs((asOf(res) ?? 0) - Date.now())).toBeLessThan(1000); // without `built`, the arrival time
     expect(asOf(new Map())).toBeNull();
     expect(negatedSoftware(parse("-software:garnet customer:47").node)).toBe(true);
     expect(negatedSoftware(parse("-(software:a | is:online)").node)).toBe(true);

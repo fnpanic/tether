@@ -160,7 +160,7 @@ export function Hosts() {
   const swTerms = useMemo(() => softwareTerms(parsed.node), [parsed]);
   const swReady = runnable(swTerms);
   const swApplied = swReady.length > 0 && sw.key === termsKey(swReady) ? sw.results : null;
-  const swRetry = !!swApplied && [...swApplied.values()].some((m) => [...m.values()].some((a) => !a.ok && ["busy", "limit", "unavailable", "offline", "error"].includes(a.why)));
+  const swRetry = !!swApplied && [...swApplied.values()].some((m) => [...m.values()].some((a) => !a.ok && ["busy", "limit", "unavailable", "overloaded", "offline", "error"].includes(a.why)));
   const swBusy = swReady.length > 0 && sw.key === termsKey(swReady) ? sw.busy : undefined;
   const swLines = useMemo(() => {
     if (!swTerms.length) return [];
