@@ -39,7 +39,7 @@ use tether_trust::{
 };
 
 pub use crate::agent_elevated::{Action, AgentAnswer};
-use crate::agent_elevated::{active, download_time, parse_identity, tidy, STAGED_EXE};
+use crate::agent_elevated::{active, download_time, parse_identity, service_was_there, tidy, ALREADY_INSTALLED, INSTALLED_MEANWHILE, NOT_INSTALLED, STAGED_EXE};
 
 const STATE_FILE: &str = "health-agent.json";
 /// What Settings shows on this computer, readable by its users (the state folder is not): only
@@ -88,6 +88,10 @@ pub(crate) struct State {
     /// Saved before the agent's `install` runs, cleared with its outcome: set after a restart means
     /// Tether stopped while it ran ([`Manager::adopt`]).
     pub pending_install: Option<Pending>,
+    /// When an agent service Tether did not install was first seen (0: none): that service vanishing
+    /// without Tether is the practice's removal too (a 0.1.x `uninstall` writes no `RemovedAt`).
+    /// Cleared by Tether's own install or removal.
+    pub hand_seen: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -336,11 +340,18 @@ impl Manager<'_> {
         let at = match self.sys.removed_at() {
             Some(t) if st.hold != "removed-locally" => if t == 0 { now } else { t },
             Some(_) => return,
-            None if st.ours && !svc => now,
+            None if (st.ours || st.hand_seen != 0) && !svc => now,
             None => return,
         };
         log::warn!("health agent: removed on this computer; Tether does not install it again by policy");
         *st = State { state: "removed-locally".into(), at, hold: "removed-locally".into(), detail: "removed on this computer".into(), version: st.version.clone(), by: st.by.clone(), grant_id: st.grant_id.clone(), ..Default::default() };
+    }
+
+    /// An agent service Tether did not install is there: remember since when.
+    fn see(st: &mut State, svc: bool, now: u64) {
+        if svc && !st.ours && st.hand_seen == 0 {
+            st.hand_seen = now;
+        }
     }
 
     /// An install under way when Tether stopped: the agent's service there means it finished (the
@@ -380,6 +391,7 @@ impl Manager<'_> {
         let svc = self.sys.service_exists()?;
         let mut st = self.load().unwrap_or_default();
         Self::adopt(&mut st, svc, now);
+        Self::see(&mut st, svc, now);
         self.notice_removal(&mut st, svc, now);
         if now >= st.next_try && st.pending_install.is_none() {
             match self.p.mode.as_str() {
@@ -388,14 +400,16 @@ impl Manager<'_> {
                         Self::succeeded(&mut st, "removed-by-tether", "policy", l, now);
                         st.ours = false;
                         st.hold.clear();
+                        st.hand_seen = 0;
                     }
                     Err(e) => Self::fail(&mut st, e, now),
                 },
-                "install" if !svc && st.hold.is_empty() => {
-                    if let Err(e) = self.install(&mut st, "policy", now, true) {
-                        Self::fail(&mut st, e, now);
-                    }
-                }
+                "install" if !svc && st.hold.is_empty() => match self.install(&mut st, "policy", now, true) {
+                    // Another installer was quicker: its agent, not Tether's.
+                    Err(e) if e == INSTALLED_MEANWHILE => st.hand_seen = now,
+                    Err(e) => Self::fail(&mut st, e, now),
+                    Ok(()) => {}
+                },
                 "install" | "on-request" if svc && st.ours => self.maintain(&mut st, now),
                 // An agent installed by hand, a removal that sticks, nothing to do.
                 _ => {}
@@ -411,12 +425,15 @@ impl Manager<'_> {
             let grant_changed = self.grant(now).is_ok_and(|(_, id)| id != st.grant_id);
             if grant_changed || (self.sys.not_enrolled() && now >= st.enrol_at + ENROL_EVERY) {
                 st.enrol_at = now;
-                if let Ok((_, id)) = self.grant(now) {
-                    st.grant_id = id; // once per grant, whatever the outcome
-                }
                 let by = st.by.clone();
                 match self.enrol(now) {
-                    Ok(l) => Self::succeeded(st, "installed", &by, l, now),
+                    Ok(l) => {
+                        Self::succeeded(st, "installed", &by, l, now);
+                        // Only once enrolled: a refusal (503, 429 in a fleet's burst) is tried again after the backoff.
+                        if let Ok((_, id)) = self.grant(now) {
+                            st.grant_id = id;
+                        }
+                    }
                     Err(e) => Self::fail(st, e, now),
                 }
                 return;
@@ -545,6 +562,10 @@ impl Manager<'_> {
         child("installing the agent");
         let r = self.staged(&c, |exe| {
             let line = self.from_tether_line(exe, &token)?;
+            // Another installer (a user's Tether through its prompt) may have been quicker during the download.
+            if self.sys.service_exists()? {
+                return Err(INSTALLED_MEANWHILE.to_owned());
+            }
             // When the child starts: PENDING_MAX covers only its own limit, not the download before it.
             st.pending_install = Some(Pending { at: self.sys.clock().max(now), by: by.into() });
             self.save(&None, st)?;
@@ -553,6 +574,9 @@ impl Manager<'_> {
         st.pending_install = None;
         let r = r?;
         let mut detail = line_of(&r);
+        if r.code != 0 && service_was_there(&detail) {
+            return Err(INSTALLED_MEANWHILE.into());
+        }
         if r.code != 0 {
             // A failure after the agent made its service (its worker did not come up in time): that
             // agent is Tether's all the same, so re-enrolment, the version floor and removal apply.
@@ -567,6 +591,7 @@ impl Manager<'_> {
         st.grant_id = grant_id;
         st.ours = true;
         st.hold.clear();
+        st.hand_seen = 0;
         st.enrol_at = now;
         st.checked_at = now;
         st.below_since = 0;
@@ -637,7 +662,7 @@ impl Manager<'_> {
             return AgentAnswer { state: "removed-locally".into(), at: if t == 0 { now } else { t }, detail: "removed on this computer".into(), ..Default::default() };
         }
         match st.state.as_str() {
-            _ if st.ours || st.hold == "removed-locally" => answer("removed-locally"),
+            _ if st.ours || st.hold == "removed-locally" || st.hand_seen != 0 => answer("removed-locally"),
             "failed" | "removed-by-tether" => answer(&st.state),
             _ => AgentAnswer::only("not-installed", ""),
         }
@@ -667,19 +692,37 @@ impl Manager<'_> {
             let svc = self.sys.service_exists()?;
             let mut st = self.load().unwrap_or_default();
             Self::adopt(&mut st, svc, now);
+            Self::see(&mut st, svc, now);
             self.notice_removal(&mut st, svc, now);
             if action == Action::Install && !svc && st.pending_install.is_some() && self.p.mode != "remove" {
                 // That install may well succeed: not a failure, and the saved state stays as it is.
-                return Ok(None);
+                return Ok(Err(("busy", MAY_STILL_RUN)));
+            }
+            // Nothing to do (also when another installer was quicker): state `unchanged`, which the
+            // core neither audits nor shows as an action.
+            let noop = match action {
+                Action::Install if svc && self.p.mode != "remove" => Some(ALREADY_INSTALLED),
+                Action::Remove if !svc => Some(NOT_INSTALLED),
+                _ => None,
+            };
+            if let Some(why) = noop {
+                self.save(&self.load(), &st)?;
+                return Ok(Err(("unchanged", why)));
             }
             let done = match action {
                 Action::Install if self.p.mode == "remove" => Err("not allowed: this computer's policy removes the agent".to_owned()),
-                Action::Install if svc => Err("the agent is already installed".to_owned()),
-                Action::Install => self.install(&mut st, "session", now, false).map(|()| st.detail.clone()),
-                Action::Remove if !svc => Err("the agent is not installed".to_owned()),
+                Action::Install => match self.install(&mut st, "session", now, false) {
+                    Err(e) if e == INSTALLED_MEANWHILE => {
+                        st.hand_seen = now;
+                        self.save(&self.load(), &st)?;
+                        return Ok(Err(("unchanged", INSTALLED_MEANWHILE)));
+                    }
+                    r => r.map(|()| st.detail.clone()),
+                },
                 Action::Remove => self.remove().map(|l| {
                     Self::succeeded(&mut st, "removed-by-tether", "session", l.clone(), now);
                     st.ours = false;
+                    st.hand_seen = 0;
                     // A technician's removal sticks against an install by policy.
                     st.hold = "session".into();
                     l
@@ -695,11 +738,12 @@ impl Manager<'_> {
                 }
             }
             self.save(&self.load(), &st)?;
-            done.map(Some)
+            done.map(Ok)
         })();
         match r {
-            Ok(None) => AgentAnswer::only("busy", MAY_STILL_RUN),
-            Ok(Some(line)) => AgentAnswer { detail: line, ..self.status_of(now) },
+            Ok(Err(("busy", why))) => AgentAnswer::only("busy", why),
+            Ok(Err((state, why))) => AgentAnswer { state: state.into(), detail: why.into(), ..self.status_of(now) },
+            Ok(Ok(line)) => AgentAnswer { detail: line, ..self.status_of(now) },
             Err(e) => {
                 log::warn!("health agent request: {e}");
                 AgentAnswer { detail: e, ..self.status_of(now) }
@@ -1338,6 +1382,8 @@ mod tests {
         download_takes: Cell<u64>,
         /// A failing `install` has made the agent's service first.
         svc_on_failure: Cell<bool>,
+        /// Another installer makes the agent's service during the download.
+        svc_on_download: Cell<bool>,
     }
 
     impl Fake {
@@ -1386,6 +1432,9 @@ mod tests {
         }
         fn download(&self, _c: &Candidate, _key: &str, within: Duration) -> Result<Vec<u8>, String> {
             self.within.borrow_mut().push(within);
+            if self.svc_on_download.get() {
+                self.svc.set(true);
+            }
             if self.download_takes.get() > 0 {
                 self.clock.set(NOW + self.download_takes.get());
             }
@@ -1674,13 +1723,103 @@ mod tests {
                 w.tick(t).unwrap();
             }
             assert!(w.runs().is_empty() && w.fake.fetches.get() == 0, "{mode}");
-            assert!(w.state().is_none(), "no state written");
+            // only that it was seen, and since when
+            assert_eq!(w.state().unwrap(), State { hand_seen: NOW, ..Default::default() });
             assert_eq!(w.m().status(NOW).state, "installed-by-hand");
-            assert_eq!(w.m().request(Action::Install, NOW).detail, "the agent is already installed");
+            let a = w.m().request(Action::Install, NOW);
+            assert_eq!((a.state.as_str(), a.detail.as_str()), ("unchanged", "nothing to do: the agent is already installed"));
             // a technician's explicit remove does reach it
             assert_eq!(w.m().request(Action::Remove, NOW).state, "removed-by-tether");
             assert_eq!(w.runs(), [vec!["uninstall"]]);
         }
+    }
+
+    #[test]
+    fn a_hand_installed_agent_removed_without_tether_stays_removed() {
+        for mode in ["install", "on-request"] {
+            // a 0.1.x agent: its uninstall writes no RemovedAt
+            let w = world("handvanished", mode);
+            w.fake.svc.set(true);
+            *w.fake.versions.borrow_mut() = (Some("0.1.4".into()), Some("0.1.4".into()));
+            w.tick(NOW).unwrap();
+            w.fake.svc.set(false);
+            w.tick(NOW + 100).unwrap();
+            let st = w.state().unwrap();
+            assert_eq!((st.state.as_str(), st.hold.as_str(), st.at, st.hand_seen), ("removed-locally", "removed-locally", NOW + 100, 0), "{mode}");
+            w.tick(NOW + 86_400 * 30).unwrap();
+            assert!(w.runs().is_empty() && w.fake.fetches.get() == 0, "never installed again by policy ({mode})");
+            assert_eq!(w.m().status(NOW + 86_400 * 30).state, "removed-locally");
+        }
+        // seen by a technician's request alone, gone before the next policy check
+        let w = world("handseenbyrequest", "install");
+        w.fake.svc.set(true);
+        assert_eq!(w.m().request(Action::Install, NOW).state, "unchanged");
+        w.fake.svc.set(false);
+        assert_eq!(w.m().status(NOW + 1).state, "removed-locally");
+        w.tick(NOW + 2).unwrap();
+        assert!(w.runs().is_empty(), "{:?}", w.runs());
+    }
+
+    #[test]
+    fn nothing_to_do_answers_unchanged() {
+        let w = world("noop", "on-request");
+        let a = w.m().request(Action::Remove, NOW);
+        assert_eq!((a.state.as_str(), a.detail.as_str()), ("unchanged", "nothing to do: the agent is not installed"));
+        assert_eq!(w.m().request(Action::Install, NOW).state, "installed");
+        let a = w.m().request(Action::Install, NOW + 1);
+        assert_eq!((a.state.as_str(), a.detail.as_str(), a.installed_by.as_str()), ("unchanged", "nothing to do: the agent is already installed", "session"));
+        assert_eq!(w.runs().len(), 2, "identity and install only: {:?}", w.runs());
+    }
+
+    #[test]
+    fn an_agent_another_installer_made_first_is_not_claimed() {
+        // the service appeared during the download: install is not run
+        for mode in ["install", "on-request"] {
+            let w = world("racedownload", mode);
+            w.fake.svc_on_download.set(true);
+            let a = w.m().request(Action::Install, NOW);
+            assert_eq!((a.state.as_str(), a.detail.as_str()), ("unchanged", INSTALLED_MEANWHILE), "{a:?}");
+            assert!(!w.runs().iter().any(|r| r[0] == "install"), "{:?}", w.runs());
+            let st = w.state().unwrap();
+            assert!(!st.ours && st.state != "installed" && st.hand_seen == NOW, "{st:?}");
+            assert_eq!(w.m().status(NOW + 1).state, "installed-by-hand");
+        }
+        // by policy the same, and no failure with backoff
+        let w = world("racepolicy", "install");
+        w.fake.svc_on_download.set(true);
+        w.tick(NOW).unwrap();
+        let st = w.state().unwrap();
+        assert!(!st.ours && st.state.is_empty() && st.next_try == 0 && st.hand_seen == NOW, "{st:?}");
+        // the agent refused: its service exists (made after Tether's check)
+        let w = world("racerefused", "on-request");
+        w.fake.svc_on_failure.set(true);
+        w.fake.codes.borrow_mut().insert("install", (1, "the Tether Monitor service already exists: run `tether-monitor uninstall` first".into()));
+        let a = w.m().request(Action::Install, NOW);
+        assert_eq!(a.state, "unchanged", "{a:?}");
+        assert!(!w.state().unwrap().ours);
+        assert_eq!(w.m().status(NOW + 1).state, "installed-by-hand");
+    }
+
+    #[test]
+    fn a_failed_re_enrolment_after_a_new_grant_is_tried_again() {
+        let w = world("grantretry", "install");
+        w.tick(NOW).unwrap();
+        let (token2, id2) = grant(&w.k, true);
+        let m = Manager { sys: &w.fake, p: Inputs { grant: token2, ..w.p.clone() } };
+        let enrols = || w.runs().iter().filter(|r| r[0] == "enrol").count();
+        w.fake.codes.borrow_mut().insert("enrol", (1, "enrolment failed: relay.test: 503 busy".into()));
+        m.tick(NOW + 10).unwrap();
+        let st = w.state().unwrap();
+        assert_eq!((enrols(), st.state.as_str()), (1, "failed"));
+        assert_ne!(st.grant_id, id2);
+        m.tick(NOW + 10 + 3599).unwrap();
+        assert_eq!(enrols(), 1, "not before the backoff ends");
+        w.fake.codes.borrow_mut().clear();
+        m.tick(NOW + 10 + 3600).unwrap();
+        let st = w.state().unwrap();
+        assert_eq!((enrols(), st.state.as_str(), st.grant_id.as_str()), (2, "installed", id2.as_str()));
+        m.tick(NOW + 10 + 7200).unwrap();
+        assert_eq!(enrols(), 2, "once the grant enrolled");
     }
 
     #[test]

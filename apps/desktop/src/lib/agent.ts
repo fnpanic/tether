@@ -76,6 +76,9 @@ export function agentView(a: AgentAnswer, did: AgentAction = "status"): AgentVie
       return view("The last action on the remote computer did not succeed.", ["again", "install"], true, true);
     case "running":
       return view("Still running on the remote computer. Ask again in a moment to see the result.", ["again"]);
+    case "unchanged":
+      // A no-op: nothing was done on the remote computer (not recorded as an action).
+      return view(did === "remove" ? "Nothing to do: the agent is not installed on the remote computer." : "Nothing to do: the agent is already installed on the remote computer.", ["again"]);
     case "busy":
       // The host's reason (what runs, or "ask again in N minutes") is the added line.
       return view("Tether on the remote computer is busy with the agent right now. Ask again in a moment.", ["again"], true);

@@ -532,6 +532,9 @@ pub struct UserState {
     pub detail: String,
     /// The Tether ID the agent was linked to.
     pub tether_id: String,
+    /// When an agent service this program did not install was first seen (0: none): its service
+    /// vanishing then is the practice's removal too (a 0.1.x `uninstall` writes no `RemovedAt`).
+    pub hand_seen: u64,
     /// Written before the launch, cleared when the outcome is known ([`Host::settle`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending: Option<Pending>,
@@ -574,6 +577,15 @@ const MACHINE_OFF: &str = "This computer's administrator has switched this off (
 const NO_ELEVATE: &str = "not allowed: this computer's policy does not allow administrator prompts";
 const DECLINED: &str = "Administrator approval was not given (declined, or no administrator's name and password).";
 const MAY_STILL_RUN: &str = "the agent Tether started may still be running; ask for the status again in a few minutes";
+/// No-ops (state `unchanged`, which the core neither audits nor shows as an action).
+pub const ALREADY_INSTALLED: &str = "nothing to do: the agent is already installed";
+pub const NOT_INSTALLED: &str = "nothing to do: the agent is not installed";
+pub const INSTALLED_MEANWHILE: &str = "nothing to do: the agent was installed meanwhile by someone else (not by this Tether, not linked by it)";
+
+/// The agent's `install` refused because its service exists (another installer was first).
+pub fn service_was_there(line: &str) -> bool {
+    line.contains("service already exists")
+}
 
 pub struct Host<'a> {
     pub m: &'a dyn Machine,
@@ -584,6 +596,8 @@ pub struct Host<'a> {
 enum Ended {
     /// Nothing changed (nothing is recorded); the sentence for the answer.
     Kept(String),
+    /// Nothing to do (state `unchanged`); nothing is recorded.
+    Unchanged(&'static str),
     Done(UserState),
     /// The agent did not end within the wait: the pending record stays.
     Running,
@@ -650,9 +664,9 @@ impl Host<'_> {
         if now >= p.at + PENDING_MAX + ADOPT_GRACE {
             hbb_common::log::info!("health agent: an old pending record was dropped");
         } else if p.action == "install" && svc {
-            st = UserState { state: "installed".into(), by: p.by, version: p.version, at: now, detail: "installed while Tether was not waiting for it".into(), tether_id: p.tether_id, pending: None };
+            st = UserState { state: "installed".into(), by: p.by, version: p.version, at: now, detail: "installed while Tether was not waiting for it".into(), tether_id: p.tether_id, pending: None, hand_seen: 0 };
         } else if p.action == "remove" && !svc {
-            st = UserState { state: "removed-by-tether".into(), by: p.by, at: now, detail: "removed while Tether was not waiting for it".into(), pending: None, ..st };
+            st = UserState { state: "removed-by-tether".into(), by: p.by, at: now, detail: "removed while Tether was not waiting for it".into(), pending: None, hand_seen: 0, ..st };
         } else if now < p.at + PENDING_MAX {
             return; // it may still be running
         }
@@ -668,6 +682,9 @@ impl Host<'_> {
         let ours = |state: &str| AgentAnswer { state: state.into(), version: st.version.clone(), installed_by: st.by.clone(), detail: String::new(), at: st.at };
         if svc {
             if st.state != "installed" {
+                if st.hand_seen == 0 {
+                    self.save(&UserState { hand_seen: now, ..st.clone() });
+                }
                 return AgentAnswer::only("installed-by-hand", "");
             }
             let other = (!st.tether_id.is_empty() && Some(st.tether_id.as_str()) != self.own_id()).then(|| format!("linked to another ID ({})", st.tether_id));
@@ -677,8 +694,9 @@ impl Host<'_> {
             return AgentAnswer { state: "removed-locally".into(), at: if t == 0 { now } else { t }, detail: "removed on this computer".into(), ..Default::default() };
         }
         match st.state.as_str() {
-            // installed by this program and its service gone: removed here
+            // installed by this program, or one seen installed by someone else, and its service gone: removed here
             "installed" => AgentAnswer { detail: "removed on this computer".into(), ..ours("removed-locally") },
+            _ if st.hand_seen != 0 => AgentAnswer { state: "removed-locally".into(), at: st.hand_seen.max(st.at), detail: "removed on this computer".into(), ..Default::default() },
             "failed" | "removed-by-tether" => AgentAnswer { detail: tidy(&st.detail), ..ours(&st.state) },
             _ => AgentAnswer::only("not-installed", ""),
         }
@@ -727,7 +745,10 @@ impl Host<'_> {
                 AgentAnswer { detail: tidy(&st.detail), ..self.state_now(now) }
             }
             Ok(Ended::Kept(why)) => AgentAnswer { detail: why, ..self.state_now(now) },
-            Ok(Ended::Running) => AgentAnswer::only("busy", MAY_STILL_RUN),
+            Ok(Ended::Unchanged(why)) => AgentAnswer { state: "unchanged".into(), detail: why.into(), ..self.state_now(now) },
+            // Not a refusal: the core's record after its own wait carries this (the outcome is not known
+            // yet; a later status settles the pending record).
+            Ok(Ended::Running) => AgentAnswer::only("running", MAY_STILL_RUN),
             Err(e) => {
                 hbb_common::log::warn!("health agent (prompt): {e}");
                 let st = UserState { state: "failed".into(), detail: tidy(&e), at: now, ..self.load() };
@@ -771,7 +792,7 @@ impl Host<'_> {
             return Err("this build has no update keys".into());
         }
         if self.m.agent_service()? {
-            return Ok(Ended::Kept("the agent is already installed".into()));
+            return Ok(Ended::Unchanged(ALREADY_INSTALLED));
         }
         if let Err(why) = self.ask(Kind::Install, viewer, prompt, now) {
             return Ok(Ended::Kept(why));
@@ -802,6 +823,11 @@ impl Host<'_> {
             }
             let mut pipe = self.m.create_pipe(&name)?;
             let arg = format!("pipe:{name}");
+            // Another installer (Tether's service, another user's Tether) may have been quicker
+            // during the dialog and the download.
+            if self.m.agent_service()? {
+                return Err(INSTALLED_MEANWHILE.to_owned());
+            }
             let owner = self.m.owner_window();
             self.mark("install", by, &c.version, &id);
             let mut child = match self.m.launch(&exe, &["install", "--from-tether", &arg], owner) {
@@ -833,12 +859,17 @@ impl Host<'_> {
             Ok(Some((code, result)))
         });
         let _ = std::fs::remove_file(&exe);
+        if matches!(&r, Err(e) if e == INSTALLED_MEANWHILE) {
+            return Ok(Ended::Unchanged(INSTALLED_MEANWHILE));
+        }
         match r? {
             None => {
                 DECLINED_AT.store(now, Ordering::Relaxed);
                 Ok(Ended::Kept(DECLINED.into()))
             }
             Some((None, _)) => Ok(Ended::Running),
+            // Its service was there by the time the agent checked: someone else's, not linked by us.
+            Some((Some(code), Some((_, l)))) if code != 0 && service_was_there(&l) => Ok(Ended::Unchanged(INSTALLED_MEANWHILE)),
             // Exit 1 after a service whose start failed: installed all the same (the agent's line says why).
             Some((Some(code), result)) if code == 0 || self.m.agent_service()? => {
                 let said = result.map(|(_, l)| l).filter(|l| !l.is_empty());
@@ -846,7 +877,7 @@ impl Host<'_> {
                     Some(l) => format!("Installed {}, linked to {id}. The agent: {l}", c.version),
                     None => format!("Installed {}, linked to {id}; first report within five minutes.", c.version),
                 };
-                Ok(Ended::Done(UserState { state: "installed".into(), by: by.into(), version: c.version.clone(), at: now, detail, tether_id: id, pending: None }))
+                Ok(Ended::Done(UserState { state: "installed".into(), by: by.into(), version: c.version.clone(), at: now, detail, tether_id: id, pending: None, hand_seen: 0 }))
             }
             Some((Some(code), result)) => Err(match result.map(|(_, l)| l).filter(|l| !l.is_empty()) {
                 Some(l) => format!("the agent refused: {l}"),
@@ -857,7 +888,7 @@ impl Host<'_> {
 
     fn remove(&self, viewer: Option<&str>, prompt: bool, now: u64) -> Result<Ended, String> {
         if !self.m.agent_service()? {
-            return Ok(Ended::Kept("the agent is not installed".into()));
+            return Ok(Ended::Unchanged(NOT_INSTALLED));
         }
         let old = self.m.installed_version().is_none_or(|v| tether_trust::version::compare(&v, BY_TETHER_SINCE).is_none_or(|o| o.is_lt()));
         if old {
@@ -885,7 +916,7 @@ impl Host<'_> {
             Err(Launch::Failed(e)) => return Err(e),
         };
         match child.wait(EXIT_WAIT) {
-            Some(0) => Ok(Ended::Done(UserState { state: "removed-by-tether".into(), by: by.into(), at: now, detail: "Removed: the agent's service, folders and enrolment are gone.".into(), pending: None, ..self.load() })),
+            Some(0) => Ok(Ended::Done(UserState { state: "removed-by-tether".into(), by: by.into(), at: now, detail: "Removed: the agent's service, folders and enrolment are gone.".into(), pending: None, hand_seen: 0, ..self.load() })),
             Some(code) => Err(format!("the agent's uninstall failed (exit code {code})")),
             None => Ok(Ended::Running),
         }
@@ -1507,6 +1538,8 @@ mod tests {
         fronted: Cell<bool>,
         /// The owner window the launch got, and whether the window had come to the front before it.
         owner_at_launch: Cell<Option<(usize, bool)>>,
+        /// Another installer makes the agent's service while the dialog is open.
+        svc_on_consent: Cell<bool>,
     }
 
     impl Machine for Fake {
@@ -1578,6 +1611,9 @@ mod tests {
         }
         fn consent(&self, d: &Dialog) -> Consent {
             self.dialogs.borrow_mut().push(d.clone());
+            if self.svc_on_consent.get() {
+                self.svc.set(true);
+            }
             self.consent.get()
         }
     }
@@ -1632,6 +1668,7 @@ mod tests {
             clock: Cell::new(NOW),
             fronted: Cell::new(false),
             owner_at_launch: Cell::new(None),
+            svc_on_consent: Cell::new(false),
         };
         DECLINED_AT.store(0, Ordering::Relaxed);
         let p = Inputs { mode: mode.into(), grant: token.clone(), channel: "stable".into(), admin: vec![k.admin.verifying_key()], updater_key: k.public.clone(), elevate: true, identity: Some((ID.into(), SEED)), org: "Example Support".into(), relays: vec!["relay.test".into()], ..Default::default() };
@@ -2025,7 +2062,8 @@ mod tests {
         let w = world("pending", "install");
         w.fake.agent.set(Agent::Hangs);
         let a = w.install();
-        assert!(a.state == "busy" && a.detail.contains("may still be running"), "{a:?}");
+        // not a refusal: the core's record after its wait says the action is still running
+        assert!(a.state == "running" && a.detail.contains("may still be running"), "{a:?}");
         let st = w.host().load();
         assert_eq!((st.state.as_str(), st.pending.as_ref().map(|p| (p.action.as_str(), p.by.as_str(), p.at))), ("", Some(("install", "session", NOW))), "no failure, the record kept");
         // a second ask meanwhile: busy, nothing started
@@ -2056,6 +2094,56 @@ mod tests {
         std::fs::write(w.fake.dir.join(STAGE_DIR).join(STAGED_EXE), b"x").unwrap();
         w.host().status(NOW + 6);
         assert!(!w.fake.dir.join(STAGE_DIR).join(STAGED_EXE).exists());
+    }
+
+    #[test]
+    fn nothing_to_do_is_unchanged_and_starts_nothing() {
+        let w = world("noop", "install");
+        let a = w.host().request(Action::Remove, Some("Sam"), NOW);
+        assert_eq!((a.state.as_str(), a.detail.as_str()), ("unchanged", "nothing to do: the agent is not installed"));
+        w.fake.svc.set(true);
+        let a = w.install();
+        assert_eq!((a.state.as_str(), a.detail.as_str()), ("unchanged", "nothing to do: the agent is already installed"));
+        assert!(w.fake.dialogs.borrow().is_empty() && w.fake.launched.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_hand_installed_agent_that_vanishes_was_removed_here() {
+        // seen installed by someone else (a 0.1.x agent: its uninstall writes no RemovedAt), then gone
+        let w = world("handgone", "install");
+        w.fake.svc.set(true);
+        assert_eq!(w.host().status(NOW).state, "installed-by-hand");
+        w.fake.svc.set(false);
+        let s = w.host().status(NOW + 60);
+        assert_eq!((s.state.as_str(), s.detail.as_str()), ("removed-locally", "removed on this computer"), "{s:?}");
+        drop(w);
+        // removed by this Tether: no local removal
+        let w = world("handremoved", "install");
+        w.fake.svc.set(true);
+        assert_eq!(w.host().status(NOW).state, "installed-by-hand");
+        assert_eq!(w.host().request(Action::Remove, Some("Sam"), NOW).state, "removed-by-tether");
+        assert_eq!(w.host().status(NOW + 60).state, "removed-by-tether");
+    }
+
+    #[test]
+    fn another_installer_first_is_not_claimed() {
+        // the service appeared while the dialog was open: nothing is started
+        let w = world("racebefore", "install");
+        w.fake.svc_on_consent.set(true);
+        let a = w.install();
+        assert_eq!((a.state.as_str(), a.detail.as_str()), ("unchanged", INSTALLED_MEANWHILE), "{a:?}");
+        assert!(w.fake.launched.borrow().is_empty() && w.host().load().pending.is_none());
+        assert_eq!(w.host().status(NOW + 1).state, "installed-by-hand");
+        drop(w);
+        // after the check, before the agent's own: it refuses, its service is someone else's
+        let w = world("raceafter", "install");
+        w.fake.agent.set(Agent::Unstarted);
+        *w.fake.result.borrow_mut() = Some(r#"{"ok":false,"line":"the Tether Monitor service already exists: run `tether-monitor uninstall` first"}"#.into());
+        let a = w.install();
+        assert_eq!(a.state, "unchanged", "{a:?}");
+        assert!(!a.detail.contains("linked to"), "{a:?}");
+        let s = w.host().status(NOW + 1);
+        assert_eq!((s.state.as_str(), s.detail.as_str()), ("installed-by-hand", ""));
     }
 
     #[test]

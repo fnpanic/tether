@@ -7099,10 +7099,10 @@ index 50eb3e2..008ddf7 100644
      ] {
 diff --git a/src/tauri_ui/agent.rs b/src/tauri_ui/agent.rs
 new file mode 100644
-index 0000000..3893da8
+index 0000000..30c739a
 --- /dev/null
 +++ b/src/tauri_ui/agent.rs
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,294 @@
 +//! Tether: the health monitoring agent through a session (`Misc` `TetherAgentRequest` and
 +//! `TetherAgentAnswer`, message.proto).
 +//!
@@ -7174,8 +7174,9 @@ index 0000000..3893da8
 +
 +const NO_HANDLER: &str = "Tether on this computer does not manage the health monitoring agent";
 +
-+/// Outcomes where nothing was done: no audit record, no line in the connection window.
-+const REFUSALS: [&str; 4] = ["not-supported", "needs-service", "not-allowed", "busy"];
++/// Outcomes where nothing was done (`unchanged`: a no-op, the agent already installed or not
++/// installed): no audit record, no line in the connection window.
++const REFUSALS: [&str; 5] = ["not-supported", "needs-service", "not-allowed", "busy", "unchanged"];
 +
 +/// `typ` of the alarm audit record (`POST /api/audit/alarm`, docs/api.md). The relay takes 0-31;
 +/// upstream's `AlarmAuditType` uses 0-10, so Tether's starts from the top.

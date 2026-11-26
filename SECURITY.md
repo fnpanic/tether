@@ -460,8 +460,10 @@ machine yet; the statements below are from the code and its tests.
   nothing; that program gets administrator rights only if the person approves a prompt that shows
   its other or missing publisher, the same exposure as any program that asks for elevation);
   connect to the pipe first or hand the agent a wrong proof (the install fails); lower its own
-  per-user index cache and floor (the elevated agent checks its own floor); show an elevation prompt
-  of its own at any time, which this path adds nothing to. It cannot change the protected copy or
+  per-user index cache and floor (the elevated agent checks its own floor; on a first install, or
+  after an uninstall, it has no floor yet, so then an older admin-signed index that has not expired
+  is accepted); show an elevation prompt of its own at any time, which this path adds nothing to.
+  It cannot change the protected copy or
   the service, get administrator rights without someone approving the prompt, or link an agent to
   another machine's ID. With Tether's service, a local process that can write core options over the
   service's IPC can choose which signed policy group applies to the service ([Known

@@ -27,6 +27,11 @@ describe("session dialog: one sentence and its buttons per state", () => {
       expect([a.state, v.text, v.offers]).toEqual([a.state, text, offers]);
     }
   });
+  it("nothing to do is said as such, not as an action", () => {
+    const i = agentView(ans("unchanged", { version: "0.2.0", installed_by: "session", detail: "nothing to do: the agent is already installed" }), "install");
+    expect([i.text, i.problem, i.offers]).toEqual(["Nothing to do: the agent is already installed on the remote computer.", false, ["again"]]);
+    expect(agentView(ans("unchanged"), "remove").text).toBe("Nothing to do: the agent is not installed on the remote computer.");
+  });
   it("running is never shown as failed, and asks again", () => {
     const v = agentView(ans("running", { detail: "failed" }), "install");
     expect([v.problem, v.detail, v.offers, /fail/i.test(v.text)]).toEqual([false, "", ["again"], false]);

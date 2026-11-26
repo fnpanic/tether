@@ -481,7 +481,8 @@ async fn ask_agent(peer: &impl AgentPeer, action: &str, status_wait: std::time::
 
 /// The session's health agent dialog: `action` is `status`, `install` or `remove`. `state` is one of
 /// `not-installed`, `installed`, `installed-by-hand`, `removed-locally`, `removed-by-tether`,
-/// `failed`, `running` (still going on the host: ask `status` again), `busy`, `not-allowed`,
+/// `failed`, `running` (still going on the host: ask `status` again), `unchanged` (nothing to do:
+/// already installed, or not installed), `busy`, `not-allowed`,
 /// `needs-service`, `not-supported`, `too-old`; anything else is shown as a generic line with `detail`.
 #[tauri::command]
 async fn session_agent(key: String, action: String) -> R<crate::agent::AgentAnswer> {
@@ -489,6 +490,10 @@ async fn session_agent(key: String, action: String) -> R<crate::agent::AgentAnsw
     let change = matches!(action.as_str(), "install" | "remove");
     let peer = s.lc.read().unwrap().get_id().to_owned();
     // The team's `agent` permission (design 12.4) is the viewer's to keep: the host cannot check it.
+    // Not known yet (simple mode, Hosts never opened): asked for first, also for the audit record.
+    if change {
+        blocking(team::learn_me).await?;
+    }
     if change && !team::allows("agent") {
         team::audit_agent_request(&peer, &action, "not-permitted");
         return Err(AGENT_NOT_PERMITTED.to_owned());
@@ -966,8 +971,12 @@ async fn team_identity() -> R<Value> {
 
 /// What this app's team permissions allow (`agent`, `sbom`, `write`, `audit`), for any window.
 #[tauri::command]
-fn team_permissions() -> Value {
-    team::permissions()
+async fn team_permissions() -> R<Value> {
+    blocking(|| {
+        team::learn_me();
+        team::permissions()
+    })
+    .await
 }
 
 /// A host list, failing-checks or SBOM export was saved: the self-reported audit event.
@@ -1501,8 +1510,12 @@ mod tests {
         fn installed(_: Action, _: &str) -> TetherAgentAnswer {
             TetherAgentAnswer { state: "installed".into(), ..Default::default() }
         }
-        // Refused or busy: answered, but no audit record and no line in the connection window.
-        for h in [refused as core_agent::Handler, busy] {
+        // Nothing to do (already installed, or not installed): no action either.
+        fn unchanged(_: Action, _: &str) -> TetherAgentAnswer {
+            TetherAgentAnswer { state: "unchanged".into(), detail: crate::agent_elevated::ALREADY_INSTALLED.into(), ..Default::default() }
+        }
+        // Refused, busy or nothing to do: answered, but no audit record and no line in the connection window.
+        for h in [refused as core_agent::Handler, busy, unchanged] {
             let (s, free) = serve(Action::Install, h, ok_post, Duration::from_secs(1));
             assert_eq!(s.sent.len(), 1);
             assert!(s.posted.is_empty() && s.cm.is_empty(), "{:?}", s.sent[0].state);
