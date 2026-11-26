@@ -72,7 +72,7 @@ pub struct Counters {
     pub write_errors: AtomicU64,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Actor {
     /// `tether_trust::team::key_id` of the key that signed the request.
     pub key_fingerprint: String,

@@ -616,6 +616,141 @@ mod with_the_mock {
         assert_eq!(s.publish(&admin, &team_doc(&admin, 1, json!([]), json!({}))).status, 204);
         assert_eq!(s.sign_in(&k, "a.b.c").reason(), "not-configured");
     }
+
+    /// The roles above and the five Tether Manage roles of design 12.4.
+    fn manage_roles() -> Value {
+        let mut r = roles();
+        for (role, m) in [("Auditor", "auditor"), ("Operator", "operator"), ("PolicyEditor", "policy-editor"), ("Publisher", "publisher"), ("KeyHolder", "key-holder")] {
+            r[format!("Tether.Manage.{role}")] = json!({"manage": m});
+        }
+        r
+    }
+
+    fn sha256_hex(b: &[u8]) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// Each Tether Manage role reaches exactly its row of design 12.4 at the relay's admin routes;
+    /// everything that signs or publishes stays with the admin signature; a proposal is stored
+    /// unsigned, never served as live, and goes live only when the admin key publishes it.
+    #[test]
+    fn manage_roles_reach_exactly_their_admin_routes() {
+        let m = mock();
+        let admin = generate_key();
+        let s = spawn_in(new_dir(), &admin, &[]);
+        let tech = generate_key();
+        let doc = team_doc(&admin, 1, json!([entry("Tech", &tech, json!({}))]), json!({"oidc": oidc_of(&m), "roles": manage_roles()}));
+        assert_eq!(s.publish(&admin, &doc).status, 204);
+        let person = |user: &str| {
+            let k = generate_key();
+            let r = s.sign_in(&k, &m.token(&format!("{user}@tether.test"), None).unwrap());
+            assert_eq!(r.status, 200, "{user}: {}", r.text());
+            (k, r.json())
+        };
+        let (auditor, a) = person("auditor");
+        let (operator, _) = person("operator");
+        let (editor, _) = person("editor");
+        let (publisher, _) = person("publisher");
+        let (holder, _) = person("keyholder");
+        // The sign-in answer names the Manage role; no team permission comes with it.
+        assert_eq!((a["manage"].clone(), a["customers"].clone(), a["sbom"].clone()), (json!(["auditor"]), json!([]), json!(false)));
+        assert_eq!(s.me(&auditor).json()["manage"], json!(["auditor"]));
+        assert_eq!(s.signed(&auditor, true, "GET", "/api/team/devices", b"").status, 403, "a Manage role is no team member");
+        assert_eq!(s.signed(&auditor, true, "GET", "/api/team/status", b"").status, 403);
+
+        let policy = json!({"serial": 3, "issued_at": 1});
+        let put = |k: &SigningKey, kind: &str, doc: &Value| s.signed(k, true, "PUT", &format!("/api/admin/proposals/{kind}"), json!({"base": "", "note": "why", "doc": doc}).to_string().as_bytes());
+        let signed_policy = serde_json::to_vec(&envelope::sign(&serde_json::to_vec(&policy).unwrap(), &admin)).unwrap();
+        // (route, body, [auditor, operator, editor, publisher, key holder] may)
+        let reads = ["/api/admin/status", "/api/admin/devices", "/api/admin/status/devices", "/api/admin/status/revoked", "/api/admin/audit?device=123456789", "/api/admin/team-audit", "/api/admin/policy-history", "/api/admin/releases"];
+        for path in reads {
+            for (who, k) in [("auditor", &auditor), ("operator", &operator), ("editor", &editor), ("publisher", &publisher), ("holder", &holder)] {
+                let r = s.signed(k, true, "GET", path, b"");
+                assert_eq!(r.status, 200, "{who} GET {path}: {}", r.text());
+            }
+        }
+        let rows: Vec<(&str, &str, Vec<u8>, [bool; 5])> = vec![
+            ("GET", "/api/admin/diag", vec![], [false, true, false, false, false]),
+            ("POST", "/api/admin/diag-ticket", br#"{"note":"n"}"#.to_vec(), [false, true, false, false, false]),
+            ("DELETE", "/api/admin/status/dev-9999", vec![], [false, true, false, false, false]),
+            ("POST", "/api/admin/status/revoke", br#"{"id":"x"}"#.to_vec(), [false, true, false, false, false]),
+            ("GET", "/api/admin/team", vec![], [false, false, true, false, true]),
+            ("GET", "/api/admin/proposals/policy", vec![], [false, false, true, false, true]),
+            ("GET", "/api/admin/proposals/team", vec![], [false, false, true, false, true]),
+            ("GET", "/api/admin/proposals/release", vec![], [false, false, false, true, true]),
+            // Signing and publishing: never with a session, whatever the role.
+            ("PUT", "/api/admin/policy", signed_policy.clone(), [false; 5]),
+            ("PUT", "/api/admin/team", doc.clone(), [false; 5]),
+            ("PUT", "/api/admin/download-page", b"<p>x</p>".to_vec(), [false; 5]),
+            ("GET", "/api/admin/custom", vec![], [false; 5]),
+            ("POST", "/api/admin/releases/prune", br#"{"dry_run":true}"#.to_vec(), [false; 5]),
+            ("DELETE", "/api/admin/release/stable/x/y.exe", vec![], [false; 5]),
+        ];
+        for (method, path, body, may) in &rows {
+            for ((who, k), ok) in [("auditor", &auditor), ("operator", &operator), ("editor", &editor), ("publisher", &publisher), ("holder", &holder)].into_iter().zip(may) {
+                let r = s.signed(k, true, method, path, body);
+                assert_eq!(r.status != 403, *ok, "{who} {method} {path}: {} {}", r.status, r.text());
+                assert!(r.status != 401, "{who} {method} {path}: {}", r.text());
+            }
+        }
+        assert_eq!(s.req("GET", "/api/policy", &[], b"").status, 404, "nothing was published");
+        // Proposals: who may write which kind.
+        for (k, kind, d, code) in [(&editor, "policy", &policy, 200), (&editor, "team", &json!({"serial": 2, "members": []}), 200), (&publisher, "release", &json!({"channel": "stable", "version": "0.7.0"}), 200), (&editor, "release", &json!({}), 403), (&publisher, "policy", &policy, 403), (&auditor, "policy", &policy, 403), (&operator, "team", &json!({"serial": 2, "members": []}), 403), (&holder, "policy", &policy, 403)] {
+            assert_eq!(put(k, kind, d).status, code, "{kind}");
+        }
+        // Validated like a publish; bounded.
+        assert_eq!(put(&editor, "policy", &json!({"serial": 0})).status, 400);
+        assert_eq!(put(&editor, "team", &json!({"serial": 2, "members": [], "x": 1})).status, 400);
+        assert_eq!(s.signed(&editor, true, "PUT", "/api/admin/proposals/policy", json!({"base": "nothex", "doc": policy}).to_string().as_bytes()).status, 400);
+        assert_eq!(s.signed(&editor, true, "PUT", "/api/admin/proposals/other", json!({"doc": policy}).to_string().as_bytes()).status, 403);
+        for _ in 1..10 {
+            assert_eq!(put(&editor, "policy", &policy).status, 200);
+        }
+        let r = put(&editor, "policy", &policy);
+        assert_eq!(r.status, 409, "{}", r.text());
+        // Stored unsigned with its author; never live.
+        let list = s.signed(&holder, true, "GET", "/api/admin/proposals/policy", b"").json();
+        let p0 = list["proposals"][0].clone();
+        assert_eq!((list["live"].clone(), list["proposals"].as_array().unwrap().len()), (Value::Null, 10));
+        assert_eq!((p0["kind"].clone(), p0["serial"].clone(), p0["doc"].clone(), p0["note"].clone(), p0["author"]["oid"].clone()), (json!("policy"), json!(3), policy.clone(), json!("why"), json!(oid(7))));
+        assert_eq!(s.req("GET", "/api/policy", &[], b"").status, 404, "a proposal is never served as live");
+        // Only its author or a key holder removes one; the key holder signs and publishes it.
+        let id = p0["id"].as_str().unwrap();
+        let admin_put = s.signed(&admin, false, "PUT", "/api/admin/proposals/policy", json!({"doc": policy}).to_string().as_bytes());
+        assert_eq!(admin_put.status, 409, "full; the admin signature is accepted too");
+        let ids: Vec<String> = list["proposals"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(s.signed(&editor, true, "DELETE", &format!("/api/admin/proposals/policy/{}", ids[1]), b"").status, 204, "its author");
+        assert_eq!(s.signed(&publisher, true, "DELETE", &format!("/api/admin/proposals/policy/{}", ids[2]), b"").status, 403);
+        assert_eq!(s.signed(&admin, false, "PUT", "/api/admin/policy", &signed_policy).status, 204);
+        assert_eq!(s.signed(&holder, true, "DELETE", &format!("/api/admin/proposals/policy/{id}"), b"").status, 204, "a key holder, after publishing");
+        let served = s.req("GET", "/api/policy", &[], b"");
+        assert_eq!(served.body, signed_policy);
+        let list = s.signed(&editor, true, "GET", "/api/admin/proposals/policy", b"").json();
+        assert_eq!((list["live"].clone(), list["proposals"].as_array().unwrap().len()), (json!(sha256_hex(&signed_policy)), 8), "the live hash shows what remaining proposals were based on");
+        let team_live = s.signed(&holder, true, "GET", "/api/admin/team", b"");
+        assert_eq!(s.signed(&holder, true, "GET", "/api/admin/proposals/team", b"").json()["live"], json!(sha256_hex(&team_live.body)));
+        // A session signature that does not verify, a replay, or no kid: 401 as before.
+        assert_eq!(s.signed(&auditor, false, "GET", "/api/admin/status", b"").status, 401);
+        let sig = format!("{} kid={}", reqauth::sign_request(&tech, "GET", "/api/admin/status", b"", now()), team::key_id(&auditor.verifying_key()));
+        assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 401);
+        // Recorded with the person: proposals, the refused publish, the refused other route.
+        let p = s.records(&admin, "proposal-put");
+        assert_eq!(p.iter().filter(|r| r["result"] == 200).count(), 12);
+        assert_eq!((p[0]["actor"]["oid"].clone(), p[0]["detail"]["kind"].clone(), p[0]["detail"]["serial"].clone()), (json!(oid(7)), json!("policy"), json!(3)));
+        assert!(p[0]["detail"]["id"].is_string());
+        let refused: Vec<Value> = s.records(&admin, "policy-publish").into_iter().filter(|r| r["result"] == 403).collect();
+        assert_eq!(refused.len(), 5);
+        assert_eq!(refused[0]["actor"]["oid"], oid(5));
+        let other = s.records(&admin, "admin-refused");
+        assert!(other.iter().any(|r| r["detail"]["route"] == "GET /api/admin/custom" && r["actor"]["oid"] == oid(5)), "{other:?}");
+        let del = s.records(&admin, "proposal-delete");
+        assert_eq!(del.iter().map(|r| r["result"].as_u64().unwrap()).collect::<Vec<_>>(), [204, 403, 204]);
+        // A document that drops the Manage role takes it away at once.
+        let doc2 = team_doc(&admin, 2, json!([]), json!({"oidc": oidc_of(&m), "roles": roles()}));
+        assert_eq!(s.publish(&admin, &doc2).status, 204);
+        assert_eq!(s.signed(&auditor, true, "GET", "/api/admin/status", b"").status, 401, "session ended: no mapped role");
+    }
 }
 
 /// A production build (no debug assertions, no `test-hooks`) never trusts a provider on http or on

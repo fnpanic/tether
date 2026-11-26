@@ -205,10 +205,30 @@ pub struct Oidc {
     pub scope: String,
 }
 
-/// What one app role grants; a missing field grants nothing.
+/// A Tether Manage role (design 12.4): what a signed-in person may read, operate and propose in
+/// Manage and at the relay's admin routes. None of them signs: signing needs a key holder's vault.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManageRole {
+    /// Reads status, devices, sessions, team activity, policy (live, history) and releases.
+    Auditor,
+    /// Auditor, and diagnostics tickets, device removal, revoking enrolment tokens and grants.
+    Operator,
+    /// Auditor, and policy and team document proposals.
+    PolicyEditor,
+    /// Auditor, and release proposals.
+    Publisher,
+    /// Auditor, and reads and removes every proposal (signing is the vault's, on the key holder's PC).
+    KeyHolder,
+}
+
+/// What one app role grants; a missing field grants nothing. A role with `manage` is a Tether
+/// Manage role and grants no team permission (validated).
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Grants {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manage: Option<ManageRole>,
     #[serde(default)]
     pub write: bool,
     #[serde(default)]
@@ -340,6 +360,9 @@ impl TeamDoc {
                 return Err(format!("role {name:?}: 1-128 printable ASCII characters"));
             }
             check_patterns(&format!("role {name}"), &g.customers)?;
+            if g.manage.is_some() && (g.write || g.audit || g.sbom || g.agent || !g.customers.is_empty()) {
+                return Err(format!("role {name}: a Tether Manage role grants no team permissions (map them with another role)"));
+            }
         }
         if let Some(d) = self.deny.iter().find(|d| !(1..=128).contains(&d.len()) || !d.bytes().all(|b| b.is_ascii_graphic())) {
             return Err(format!("deny {d:?}: 1-128 printable ASCII characters"));
@@ -536,6 +559,11 @@ mod tests {
         let cfg = serde_json::to_vec(&Config { serial: 1, oidc: oidc() }).unwrap();
         assert!(open(&upload(&only, Some(&cfg), &admin), &[admin.verifying_key()]).unwrap().0.oidc_only);
         assert_eq!(d.roles["Tether.Software"], Grants { sbom: true, ..Default::default() });
+        // Tether Manage roles by their kebab-case names; written back only where set.
+        let mr = ok(doc_json(1, m(serde_json::json!({})), serde_json::json!({"roles": {"Tether.Manage.PolicyEditor": {"manage": "policy-editor"}, "Tether.Manage.KeyHolder": {"manage": "key-holder"}}}))).unwrap();
+        assert_eq!((mr.roles["Tether.Manage.PolicyEditor"].manage, mr.roles["Tether.Manage.KeyHolder"].manage), (Some(ManageRole::PolicyEditor), Some(ManageRole::KeyHolder)));
+        assert_eq!(serde_json::to_value(&d.roles["Tether.Software"]).unwrap()["manage"], serde_json::Value::Null);
+        assert!(serde_json::to_value(&d.roles["Tether.Software"]).unwrap().get("manage").is_none());
         for (bad, why) in [
             (doc_json(0, m(serde_json::json!({})), serde_json::json!({})), "serial 0"),
             (doc_json(1, m(serde_json::json!({"customers": ["4*7"]})), serde_json::json!({})), "star inside"),
@@ -547,6 +575,8 @@ mod tests {
             (doc_json(1, m(serde_json::json!({})), serde_json::json!({"x": 1})), "unknown field"),
             (doc_json(1, m(serde_json::json!({})), serde_json::json!({"deny": [""]})), "empty oid"),
             (doc_json(1, m(serde_json::json!({})), serde_json::json!({"roles": {"": {}}})), "empty role"),
+            (doc_json(1, m(serde_json::json!({})), serde_json::json!({"roles": {"Tether.Manage.Operator": {"manage": "operator", "write": true}}})), "manage role with a team permission"),
+            (doc_json(1, m(serde_json::json!({})), serde_json::json!({"roles": {"Tether.Manage.X": {"manage": "admin"}}})), "unknown manage role"),
             (doc_json(1, m(serde_json::json!({})), serde_json::json!({"roles": {"R": {"customers": ["a*b"]}}})), "role pattern"),
             (doc_json(1, m(serde_json::json!({})), serde_json::json!({"roles": {"R": {"admin": true}}})), "unknown grant"),
             (doc_json(1, serde_json::json!([{"name": "A", "key": a, "sbom": true, "agent": true, "customers": []}, {"name": "B", "key": a, "sbom": true, "agent": true, "customers": []}]), serde_json::json!({})), "key twice"),

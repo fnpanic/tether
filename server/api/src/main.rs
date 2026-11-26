@@ -15,6 +15,7 @@ mod maczip;
 mod metrics;
 mod oidc;
 mod prune;
+mod proposals;
 mod status;
 mod team;
 mod teamaudit;
@@ -876,6 +877,36 @@ fn stored_meta(raw: &[u8]) -> Option<BundleMeta> {
     serde_json::from_slice(&envelope::open(&doc, &[key]).ok()?).ok()
 }
 
+/// A signed-in person's request for an admin route their Tether Manage roles do not allow.
+const SESSION_REFUSED: &str = "your Tether Manage role does not allow this; signing and publishing need a key holder's Tether Manage with its keys unlocked";
+
+/// Whether a session with Tether Manage `roles` may use admin route `method rest` (design 12.4):
+/// every role reads status, devices, session and team audit, policy history and releases; Operator
+/// also diagnostics tickets, device removal and revocations; PolicyEditor policy and team
+/// proposals (and reads the team document), Publisher release proposals, KeyHolder reads and
+/// deletes every proposal. Nothing else: publishing anything needs the admin signature.
+fn session_may(method: &str, rest: &str, roles: &[tether_trust::team::ManageRole]) -> bool {
+    use tether_trust::team::ManageRole::{KeyHolder, Operator, PolicyEditor, Publisher};
+    let any = |set: &[tether_trust::team::ManageRole]| roles.iter().any(|r| set.contains(r));
+    match (method, rest) {
+        ("GET", "status" | "devices" | "status/devices" | "status/revoked" | "audit" | "team-audit" | "policy-history" | "releases") => !roles.is_empty(),
+        ("GET", r) if r.starts_with("policy-history/") => !roles.is_empty(),
+        ("GET", "diag") | ("POST", "diag-ticket" | "status/revoke") => any(&[Operator]),
+        ("GET" | "POST" | "DELETE", r) if r.starts_with("diag/") => any(&[Operator]),
+        ("DELETE", r) if r.starts_with("status/") => any(&[Operator]),
+        ("GET", "team") => any(&[PolicyEditor, KeyHolder]),
+        (m, r) if r.starts_with("proposals/") => {
+            let editor = match r["proposals/".len()..].split('/').next() {
+                Some("policy" | "team") => PolicyEditor,
+                Some("release") => Publisher,
+                _ => return false,
+            };
+            if m == "PUT" { any(&[editor]) } else { any(&[editor, KeyHolder]) }
+        }
+        _ => false,
+    }
+}
+
 /// The `serial` of a signed envelope's payload, opened with the key it names: only for an
 /// audit record of an admin-signed request (the handler verifies it against the trusted keys).
 fn envelope_serial(v: &serde_json::Value) -> Option<u64> {
@@ -910,6 +941,9 @@ fn admin_change(method: &str, rest: &str, body: &[u8]) -> Option<(&'static str, 
         // An index upload becomes `release-index-publish` with its serial (put_release).
         ("PUT", r) if r.starts_with("release/") => ("release-upload", json!({"path": t(&r["release/".len()..])})),
         ("DELETE", r) if r.starts_with("release/") => ("release-delete", json!({"path": t(&r["release/".len()..])})),
+        // The id (and serial, author) are added by the handler (proposals.rs).
+        ("PUT", r) if r.starts_with("proposals/") => ("proposal-put", json!({"kind": t(&r["proposals/".len()..])})),
+        ("DELETE", r) if r.starts_with("proposals/") => ("proposal-delete", json!({"kind": t(r["proposals/".len()..].split('/').next().unwrap_or(""))})),
         _ => return None,
     })
 }
@@ -1234,9 +1268,24 @@ impl App {
         self.defer(move |_| Ok(audit::response(&dir, since, limit, &device)))
     }
 
+    /// A session's request for an admin route its roles do not allow: recorded (the route's own
+    /// event, or `admin-refused` with the route) and answered `403`.
+    fn session_refused(&mut self, rq: &Request, c: team::ManageCaller, method: &str, url: &str, rest: &str, body: &[u8]) -> Resp {
+        self.audit_admin(rq, c.actor.clone(), method, url, rest, body);
+        if self.audit_pending.is_none() {
+            let route = format!("{method} /api/admin/{}", teamaudit::text(rest));
+            self.audit_pending = Some(teamaudit::Rec::new("admin-refused", Some(c.actor), Some(client_ip(rq)), teamaudit::Target::default(), serde_json::json!({"route": route})));
+        }
+        text(403, SESSION_REFUSED)
+    }
+
+    /// The actor of a request with the admin signature of key `key`.
+    fn admin_actor(&self, key: usize) -> teamaudit::Actor {
+        teamaudit::Actor { key_fingerprint: tether_trust::team::key_id(&self.keys[key]), name: "admin".into(), oid: None, upn: None }
+    }
+
     /// The team audit record of an admin request that reads or changes a device's data.
-    fn audit_admin(&mut self, rq: &Request, key: usize, method: &str, url: &str, rest: &str, body: &[u8]) {
-        let actor = teamaudit::Actor { key_fingerprint: tether_trust::team::key_id(&self.keys[key]), name: "admin".into(), oid: None, upn: None };
+    fn audit_admin(&mut self, rq: &Request, actor: teamaudit::Actor, method: &str, url: &str, rest: &str, body: &[u8]) {
         if (method, rest) == ("GET", "status/devices") {
             self.audit_pending = self.team.reads.read("status-device-list", actor, Some(client_ip(rq)), now());
             return;
@@ -1299,14 +1348,18 @@ impl App {
             return match method {
                 "PUT" => {
                     if let Body::File { nonce: Some((_, key)), .. } = body {
-                        self.audit_admin(rq, *key, method, url, rest, &[]);
+                        self.audit_admin(rq, self.admin_actor(*key), method, url, rest, &[]);
                     }
                     self.put_release(body, &dest)
                 }
                 "DELETE" => {
                     let b = body.bytes(LIMIT_SMALL)?;
+                    // Only with the admin signature (a session's release upload already failed it).
+                    if let Some(c) = self.manage_session(rq, method, url, b) {
+                        return Err(self.session_refused(rq, c?, method, url, rest, b));
+                    }
                     let key = self.auth(rq, method, url, b)?;
-                    self.audit_admin(rq, key, method, url, rest, b);
+                    self.audit_admin(rq, self.admin_actor(key), method, url, rest, b);
                     self.delete_guarded(&dest, url)
                 }
                 _ => Err(not_found()),
@@ -1327,12 +1380,33 @@ impl App {
             ("DELETE", r) if r.starts_with("diag/") => LIMIT_SMALL,
             ("DELETE", r) if r.starts_with("status/") => LIMIT_SMALL,
             ("POST", "status/revoke") | ("GET", "status/revoked" | "status/devices") => LIMIT_SMALL,
+            ("PUT", r) if r.starts_with("proposals/") => proposals::LIMIT_PROPOSAL,
+            ("GET" | "DELETE", r) if r.starts_with("proposals/") => LIMIT_SMALL,
             _ => return Err(not_found()),
         };
         let body = body.bytes(limit)?;
-        let key = self.auth(rq, method, url, body)?;
-        self.audit_admin(rq, key, method, url, rest, body);
+        // A person signed in at this relay (a session key named by `kid`) with a Tether Manage role,
+        // for the routes their role allows; every other admin route needs the admin signature.
+        let session = match self.manage_session(rq, method, url, body) {
+            Some(c) => {
+                let c = c?;
+                if !session_may(method, rest, &c.roles) {
+                    return Err(self.session_refused(rq, c, method, url, rest, body));
+                }
+                Some(c)
+            }
+            None => None,
+        };
+        let actor = match &session {
+            Some(c) => c.actor.clone(),
+            None => {
+                let key = self.auth(rq, method, url, body)?;
+                self.admin_actor(key)
+            }
+        };
+        self.audit_admin(rq, actor.clone(), method, url, rest, body);
         match (method, rest) {
+            (m, r) if r.starts_with("proposals/") => self.proposals(m, &r["proposals/".len()..], body, &actor, session.as_ref()),
             ("PUT", "policy") => self.put_policy(body),
             ("PUT", "server-keys") => self.put_server_keys(body),
             ("PUT", "team") => self.put_team(body),
@@ -1357,7 +1431,10 @@ impl App {
             ("GET", "diag") => self.list_tickets(url),
             ("POST", r) if r.starts_with("diag/") => self.close_ticket(r["diag/".len()..].strip_suffix("/close").unwrap_or_default()),
             ("DELETE", r) if r.starts_with("diag/") => self.delete_ticket(&r["diag/".len()..]),
-            ("DELETE", r) if r.starts_with("status/") => self.admin_status_delete(&r["status/".len()..], "an admin", false, None),
+            ("DELETE", r) if r.starts_with("status/") => {
+                let by = session.as_ref().map_or("an admin".to_owned(), |c| format!("{} (Tether Manage)", c.actor.name));
+                self.admin_status_delete(&r["status/".len()..], &by, false, None)
+            }
             ("POST", "status/revoke") => self.status_revoke(body),
             ("GET", "status/revoked") => self.status_revoked(),
             ("GET", "status/devices") => self.status_devices(url),

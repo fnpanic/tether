@@ -28,7 +28,7 @@ use base64::Engine;
 use serde::de::IgnoredAny;
 use serde::Deserialize;
 use serde_json::Value;
-use tether_trust::team::{Grants, Oidc, Permissions};
+use tether_trust::team::{Grants, ManageRole, Oidc, Permissions};
 
 /// Clock skew allowed on `exp`, `nbf` and `iat` (as for request signatures).
 pub const SKEW: u64 = 300;
@@ -325,12 +325,12 @@ pub(crate) fn check(token: &str, cfg: &Oidc, t: u64, key: impl FnOnce(&str) -> R
 }
 
 /// What the token's `roles` grant through the document's `roles` table: the union of the mapped
-/// roles; customers the union of theirs, `*` when none names any (design 12.4). `None`: no role is
-/// in the table (a role not in it gives nothing).
+/// roles; customers the union of theirs, `*` when none names any (design 12.4). `None`: no team
+/// role is in the table (a role not in it gives nothing, a Tether Manage role no team access).
 pub(crate) fn permissions(roles: &[String], table: &BTreeMap<String, Grants>) -> Option<Permissions> {
     let mut p = Permissions { write: false, audit: false, sbom: false, agent: false, customers: Vec::new() };
     let mut any = false;
-    for g in roles.iter().filter_map(|r| table.get(r)) {
+    for g in roles.iter().filter_map(|r| table.get(r)).filter(|g| g.manage.is_none()) {
         any = true;
         p.write |= g.write;
         p.audit |= g.audit;
@@ -344,6 +344,19 @@ pub(crate) fn permissions(roles: &[String], table: &BTreeMap<String, Grants>) ->
     p.customers.sort_unstable();
     p.customers.dedup();
     any.then_some(p)
+}
+
+/// The Tether Manage roles the token's `roles` map to through the table, sorted, each once.
+pub(crate) fn manage_roles(roles: &[String], table: &BTreeMap<String, Grants>) -> Vec<ManageRole> {
+    let mut m: Vec<ManageRole> = roles.iter().filter_map(|r| table.get(r)?.manage).collect();
+    m.sort_unstable();
+    m.dedup();
+    m
+}
+
+/// Whether the roles give anything at all: team permissions or a Tether Manage role.
+pub(crate) fn has_role(roles: &[String], table: &BTreeMap<String, Grants>) -> bool {
+    permissions(roles, table).is_some() || !manage_roles(roles, table).is_empty()
 }
 
 /// Whether `ip` may be the identity provider's address in a production build.
@@ -785,6 +798,15 @@ mod tests {
         assert_eq!(p(&["Tether.Admin", "Tether.Technician"]).unwrap(), p(&["Tether.Technician"]).unwrap());
         assert_eq!(p(&["Tether.Admin", "tether.software"]), None);
         assert_eq!(p(&[]), None);
+        // A Tether Manage role: no team access, its own list.
+        let mut table = table;
+        table.insert("Tether.Manage.Auditor".into(), Grants { manage: Some(ManageRole::Auditor), ..Default::default() });
+        table.insert("Tether.Manage.KeyHolder".into(), Grants { manage: Some(ManageRole::KeyHolder), ..Default::default() });
+        let r = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(permissions(&r(&["Tether.Manage.Auditor"]), &table), None);
+        assert_eq!(manage_roles(&r(&["Tether.Manage.KeyHolder", "Tether.Manage.Auditor", "Tether.Manage.Auditor", "Tether.Technician"]), &table), [ManageRole::Auditor, ManageRole::KeyHolder]);
+        assert!(has_role(&r(&["Tether.Manage.Auditor"]), &table) && has_role(&r(&["Tether.Technician"]), &table) && !has_role(&r(&["Tether.Admin"]), &table));
+        assert_eq!(permissions(&r(&["Tether.Manage.Auditor", "Tether.Software"]), &table).unwrap().sbom, true);
     }
 
     #[test]

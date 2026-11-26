@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tether_trust::team::{self, Grants, Oidc, OpenError, Permissions, Roster, Upload};
+use tether_trust::team::{self, Grants, ManageRole, Oidc, OpenError, Permissions, Roster, Upload};
 use tether_trust::{reqauth, VerifyingKey};
 use tiny_http::Request;
 
@@ -274,6 +274,14 @@ struct Caller {
     session: Option<String>,
 }
 
+/// A person signed in at this relay calling an admin route (`App::manage_session`).
+pub(crate) struct ManageCaller {
+    pub actor: Actor,
+    /// Their Tether Manage roles now (sorted); may be empty.
+    pub roles: Vec<ManageRole>,
+    pub oid: String,
+}
+
 enum Authed {
     Member(Caller),
     SignIn(Box<SignInCheck>),
@@ -399,7 +407,7 @@ impl Team {
                 _ if all => Some("document-changed"),
                 None => Some("document-changed"),
                 Some(si) if si.deny.contains(&s.oid) => Some("deny-list"),
-                Some(si) if oidc::permissions(&s.roles, &si.roles).is_none() => Some("no-role"),
+                Some(si) if !oidc::has_role(&s.roles, &si.roles) => Some("no-role"),
                 _ => None,
             };
             if let Some(w) = why.filter(|_| s.exp > t) {
@@ -544,11 +552,56 @@ impl App {
 
     /// The plain roster, or the signed upload exactly as published.
     pub(crate) fn get_team(&self) -> Result<Resp, Resp> {
-        if self.team.doc.is_none() {
-            return Ok(json(&self.team.roster));
-        }
-        let raw = fs::read(self.data.join("team/team.json")).map_err(crate::internal)?;
+        let raw = self.team_served().ok_or_else(|| crate::internal("team/team.json unreadable"))?;
         Ok(tiny_http::Response::from_data(raw).with_header(hdr("Content-Type", "application/json")).boxed())
+    }
+
+    /// The bytes `GET /api/admin/team` answers: the plain roster, or the signed upload as received
+    /// (proposals.rs hashes them: what a team proposal was based on).
+    pub(crate) fn team_served(&self) -> Option<Vec<u8>> {
+        match self.team.doc {
+            None => serde_json::to_vec(&self.team.roster).ok(),
+            Some(_) => fs::read(self.data.join("team/team.json")).ok(),
+        }
+    }
+
+    /// Who signed an admin request with a key that has a sign-in session here (`kid` names it);
+    /// `None` when the header names no such key: the admin signature is checked as before. The
+    /// signature (one key, under the state lock like an admin signature), replay, the session's
+    /// life, and its Tether Manage roles through the document in force (none: every route `403`,
+    /// main.rs `session_may`). Failed signatures count against the source as on member routes.
+    pub(crate) fn manage_session(&mut self, rq: &Request, method: &str, url: &str, body: &[u8]) -> Option<Result<ManageCaller, Resp>> {
+        let sig = header(rq, reqauth::HEADER)?;
+        let s = self.team.sessions.get(reqauth::header_kid(&sig)?)?.clone();
+        let (t, ip) = (now(), crate::rate_ip(rq));
+        let fail = |a: &mut App, e: &str| {
+            rate_ok(&mut a.team.fail_hits, ip.clone(), t, u32::MAX);
+            text(401, e)
+        };
+        Some((|| {
+            if self.team.fail_hits.get(&ip).is_some_and(|h| t < h.0 + 60 && h.1 >= FAIL_PER_MIN) {
+                return Err(text(429, "too many failed requests"));
+            }
+            let key = tether_trust::key_from_b64(&s.key).map_err(crate::internal)?;
+            let nonce = match verify_key(&key, rq, method, url, body, t) {
+                Ok(n) => n,
+                Err(Refused::Auth(e)) => return Err(fail(self, &e)),
+                Err(_) => return Err(fail(self, "not a team member")),
+            };
+            if self.nonces.contains_key(&nonce) {
+                return Err(fail(self, "replayed request"));
+            }
+            self.nonces.insert(nonce, t);
+            self.nonce_used();
+            if s.exp <= t {
+                return Err(text(401, SESSION_EXPIRED));
+            }
+            if !rate_ok(&mut self.team.key_hits, s.key.clone(), t, KEY_PER_MIN) {
+                return Err(text(429, "too many requests"));
+            }
+            let roles = self.team.signin.as_ref().map(|si| oidc::manage_roles(&s.roles, &si.roles)).unwrap_or_default();
+            Ok(ManageCaller { actor: s.actor(), roles, oid: s.oid.clone() })
+        })())
     }
 
     /// `GET /api/team/config` (no signature): the `oidc` part of the team document, as the admin
@@ -566,7 +619,7 @@ impl App {
     pub(crate) fn team_route(&mut self, rq: &Request, body: &Body, method: &str, url: &str, rest: &str) -> Result<Resp, Resp> {
         let limit = route_limit(method, rest).ok_or_else(crate::not_found)?;
         let body = body.bytes(limit)?;
-        let caller = match self.member_auth(rq, (method, rest) == ("DELETE", "session"))? {
+        let caller = match self.member_auth(rq, method, rest)? {
             Authed::Member(c) => c,
             Authed::SignIn(s) => return self.sign_in(rq, *s),
         };
@@ -602,7 +655,8 @@ impl App {
             }
             ("GET", "me") if session.is_some() => {
                 let s = session.and_then(|k| self.team.sessions.get(&k)).ok_or_else(|| text(401, SESSION_EXPIRED))?;
-                Ok(json(&session_answer(s, m)))
+                let si = self.team.signin.as_ref().ok_or_else(|| text(401, SESSION_EXPIRED))?;
+                Ok(json(&session_answer(s, si)))
             }
             // The plain roster's answer stays as it was; with a signed document every permission.
             ("GET", "me") if self.team.doc.is_none() => Ok(json(&serde_json::json!({"name": name, "write": m.write, "audit": m.audit}))),
@@ -683,7 +737,8 @@ impl App {
     /// entries are there); a session that ended long ago or never existed: `not a team member`,
     /// one that expired: [`SESSION_EXPIRED`] (not counted as a failure). `sign_out`: an expired
     /// session may still be ended.
-    fn member_auth(&mut self, rq: &Request, sign_out: bool) -> Result<Authed, Resp> {
+    fn member_auth(&mut self, rq: &Request, method: &str, rest: &str) -> Result<Authed, Resp> {
+        let sign_out = (method, rest) == ("DELETE", "session");
         let ip = crate::rate_ip(rq);
         let Verified { r, t } = self.team.verified.take().ok_or_else(|| crate::internal("member signature not checked"))?;
         let fail = |a: &mut App, e: &str| {
@@ -726,13 +781,15 @@ impl App {
             }
             Signer::Session(kid, key, _) => {
                 let s = self.team.sessions.get(&kid).filter(|s| tether_trust::key_from_b64(&s.key).is_ok_and(|k| k == key));
-                let perms = s.filter(|s| s.exp > t).and_then(|s| self.team.signin.as_ref().and_then(|si| oidc::permissions(&s.roles, &si.roles)));
-                match (s, perms) {
-                    (Some(s), Some(perms)) => Ok(Authed::Member(Caller { name: s.name.clone(), key: s.key.clone(), perms, service: false, actor: s.actor(), session: Some(kid) })),
-                    (Some(s), None) if sign_out => {
-                        let none = Permissions { write: false, audit: false, sbom: false, agent: false, customers: Vec::new() };
-                        Ok(Authed::Member(Caller { name: s.name.clone(), key: s.key.clone(), perms: none, service: false, actor: s.actor(), session: Some(kid) }))
-                    }
+                let live = s.filter(|s| s.exp > t).and_then(|s| self.team.signin.as_ref().map(|si| (oidc::permissions(&s.roles, &si.roles), !oidc::manage_roles(&s.roles, &si.roles).is_empty())));
+                let none = |s: &Session| Authed::Member(Caller { name: s.name.clone(), key: s.key.clone(), perms: no_permissions(), service: false, actor: s.actor(), session: Some(kid.clone()) });
+                match (s, live) {
+                    (Some(s), Some((Some(perms), _))) => Ok(Authed::Member(Caller { name: s.name.clone(), key: s.key.clone(), perms, service: false, actor: s.actor(), session: Some(kid) })),
+                    (Some(s), _) if sign_out => Ok(none(s)),
+                    // A Tether Manage sign-in: its own answer and sign-out, no team route (the relay's
+                    // admin routes take it, `manage_session`).
+                    (Some(s), Some((None, true))) if (method, rest) == ("GET", "me") => Ok(none(s)),
+                    (Some(_), Some((None, true))) => Err(text(403, "this sign-in has only Tether Manage roles")),
                     (s, _) => match roster(self, &key) {
                         Some(c) => Ok(Authed::Member(c)),
                         None if s.is_some() => Err(text(401, SESSION_EXPIRED)),
@@ -757,8 +814,8 @@ impl App {
         let unverified = Actor { key_fingerprint: s.kid.clone(), name: "-".into(), oid: None, upn: None };
         match self.session_from(&s, key, t) {
             Ok(sess) => {
-                let m = self.team.signin.as_ref().and_then(|si| oidc::permissions(&sess.roles, &si.roles)).ok_or_else(|| crate::internal("session without a role"))?;
-                let answer = session_answer(&sess, &m);
+                let si = self.team.signin.clone().ok_or_else(|| crate::internal("session without sign-in"))?;
+                let answer = session_answer(&sess, &si);
                 self.audit_pending = Some(Rec::new("sign-in", Some(sess.actor()), Some(ip), Target::default(), serde_json::json!({"roles": sess.roles, "exp": sess.exp})));
                 eprintln!("team: {} ({}) signed in with key {}", sess.oid, sess.upn, sess.kid);
                 self.team.sessions.insert(sess.kid.clone(), sess);
@@ -791,7 +848,7 @@ impl App {
             return no(Reason::Denied);
         }
         let roles: Vec<String> = c.roles.iter().filter(|r| si.roles.contains_key(*r)).cloned().collect();
-        if oidc::permissions(&roles, &si.roles).is_none() {
+        if !oidc::has_role(&roles, &si.roles) {
             return no(Reason::NoRole);
         }
         if self.team.tokens.get(&c.uti).is_some_and(|b| b.kid != s.kid) {
@@ -987,9 +1044,21 @@ fn sign_in_verify(rq: &Request, method: &str, url: &str, body: &[u8], t: u64, cf
     Ok(SignInCheck { kid, key, nonce, cfg, token })
 }
 
-/// A session as `POST /api/team/session` and `GET /api/team/me` answer it.
-fn session_answer(s: &Session, m: &Permissions) -> Value {
-    serde_json::json!({"name": s.name, "write": m.write, "audit": m.audit, "sbom": m.sbom, "agent": m.agent, "customers": m.customers, "service": false, "oid": s.oid, "upn": s.upn, "exp": s.exp, "roles": s.roles})
+/// No team permission (a sign-in with only Tether Manage roles; a sign-out of an ended session).
+fn no_permissions() -> Permissions {
+    Permissions { write: false, audit: false, sbom: false, agent: false, customers: Vec::new() }
+}
+
+/// A session as `POST /api/team/session` and `GET /api/team/me` answer it; `manage`: its Tether
+/// Manage roles (none: the field is left out, as before).
+fn session_answer(s: &Session, si: &SignIn) -> Value {
+    let m = oidc::permissions(&s.roles, &si.roles).unwrap_or_else(no_permissions);
+    let mut v = serde_json::json!({"name": s.name, "write": m.write, "audit": m.audit, "sbom": m.sbom, "agent": m.agent, "customers": m.customers, "service": false, "oid": s.oid, "upn": s.upn, "exp": s.exp, "roles": s.roles});
+    let manage = oidc::manage_roles(&s.roles, &si.roles);
+    if !manage.is_empty() {
+        v["manage"] = serde_json::json!(manage);
+    }
+    v
 }
 
 /// A refused sign-in: `{"reason","message"}` with the reason's status; `503` with `Retry-After`.
