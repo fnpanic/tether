@@ -4,7 +4,7 @@ import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useApp, type Proposal } from "../App";
 import { host, inTauri, invoke, when, type RelayResult } from "../lib/ipc";
 import { fingerprint, keyProblem, nameProblem, parseKey } from "../lib/team";
-import { emptyOidc, grantText, lockedOut, sameDoc, standardRoles, teamChanges, type DocMember, type Grants, type Oidc, type TeamDoc } from "../lib/teamdoc";
+import { emptyOidc, grantText, lockedOut, sameDoc, standardRoles, teamChanges, type DocMember, type Grants, type Oidc, type TeamChange, type TeamDoc } from "../lib/teamdoc";
 import { ROLES, ROLE_TEXT, type Role } from "../lib/roles";
 import { PublishSheet } from "../components/publish";
 import { Proposals, ProposeSheet, removeProposal, useProposals } from "../components/proposals";
@@ -31,6 +31,22 @@ function useFingerprints(keys: string[]) {
 }
 
 const patterns = (t: string) => t.split(",").map((s) => s.trim()).filter(Boolean);
+
+/** A change's text with its values (between backticks) in a monospace font. */
+const mono = (t: string) => t.split("`").map((s, i) => (i % 2 ? <code key={i} className="select-text font-mono">{s}</code> : s));
+
+/** What a publish changes: security-relevant changes first, as warnings. */
+function TeamChangeList({ changes }: { changes: TeamChange[] }) {
+  return (
+    <ul className="flex flex-col gap-1 text-caption">
+      {changes.map((c, i) => (
+        <li key={i} className={c.risk ? "rounded-md border border-warn/60 px-2 py-1 text-warn" : ""}>
+          {c.risk && <Badge tone="warn">security</Badge>} {mono(c.text)}
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function AddMember({ members, onAdd, onClose }: { members: DocMember[]; onAdd: (m: DocMember) => void; onClose: () => void }) {
   const [name, setName] = useState("");
@@ -170,7 +186,10 @@ export function Team() {
   };
   const edit = (f: (d: TeamDoc) => TeamDoc) => draft && setDraft(f(draft));
   const setMember = (i: number, m: Partial<DocMember>) => edit((d) => ({ ...d, members: d.members.map((x, j) => (j === i ? { ...x, ...m } : x)) }));
-  const changes = loaded && draft ? [...(!loaded.signed ? ["First signed team document: the relays then refuse plain rosters"] : []), ...teamChanges(loaded.doc, draft)] : [];
+  // From a plain roster: everything in the first signed document is new to review.
+  const changes: TeamChange[] = loaded && draft ? [...(!loaded.signed ? [{ text: "First signed team document: the relays then refuse plain rosters", risk: true, confirm: false }] : []), ...teamChanges(loaded.signed ? loaded.doc : null, draft)] : [];
+  const mustTick = changes.some((c) => c.confirm);
+  const [ticked, setTicked] = useState(false);
   const out = draft ? lockedOut(draft) : [];
   const editable = can("sign") || can("propose-team");
 
@@ -370,11 +389,12 @@ export function Team() {
           }}
         />
       )}
-      {sheet === "propose" && draft && <ProposeSheet kind="team" doc={draft} changes={changes} onClose={() => setSheet(null)} onDone={proposals.load} />}
+      {sheet === "propose" && draft && <ProposeSheet kind="team" doc={draft} changes={changes.map((c) => (c.risk ? "Security: " : "") + c.text.replace(/`/g, ""))} onClose={() => setSheet(null)} onDone={proposals.load} />}
       {sheet === "publish" && loaded && draft && (
         <PublishSheet
           title="Sign and publish the team document"
           action="Sign and publish"
+          blocked={mustTick && !ticked}
           run={async (skip) => {
             const r = await invoke<{ serial: number; relays: RelayResult[] }>("team_publish", { doc: draft, skip });
             if (r.relays.some((x) => x.ok) && reviewing) {
@@ -384,7 +404,10 @@ export function Team() {
             load(true);
             return r.relays;
           }}
-          onClose={() => setSheet(null)}
+          onClose={() => {
+            setSheet(null);
+            setTicked(false);
+          }}
           warning={
             <>
               {reviewing && <p className="text-caption">Proposed by {reviewing.author.name}{reviewing.note ? `: “${reviewing.note}”` : ""}.</p>}
@@ -393,11 +416,13 @@ export function Team() {
             </>
           }
         >
-          <ul className="flex flex-col gap-1 text-caption">
-            {changes.map((c, i) => (
-              <li key={i}>{c}</li>
-            ))}
-          </ul>
+          <TeamChangeList changes={changes} />
+          {mustTick && (
+            <label className="mt-3 flex items-start gap-2 text-caption font-semibold text-warn">
+              <input type="checkbox" className="mt-0.5" checked={ticked} onChange={(e) => setTicked(e.target.checked)} />
+              I checked the sign-in settings and the KeyHolder mapping above: they decide who can sign in and who signs for the organisation.
+            </label>
+          )}
         </PublishSheet>
       )}
     </>

@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Check, ChevronRight, RefreshCw, Trash2, X } from "lucide-react";
-import { useApp } from "../App";
+import { useApp, type Proposal } from "../App";
 import { api, bytes, host, inTauri, invoke, target, when, type RelayResult } from "../lib/ipc";
 import { idle, percent, track, type Progress } from "../lib/progress";
 import { mockListen } from "../lib/mock";
@@ -11,7 +11,7 @@ import { PublishSheet, RelayResults } from "../components/publish";
 import { CleanupSheet } from "../components/cleanup";
 import { customFields, customRollout, defaultCustom, describeRamp, groupReleases, minimumProblem, rampSteps, rolloutProblem, rolloutState, releaseToast, Tally, type CustomRamp, type IndexView, type ReleaseGroup } from "../lib/releases";
 import { Badge, Button, Card, ErrorText, IconButton, Label, Modal, PageHeader, Segmented, Select, Sub, Table, TextArea, TextField, Toggle } from "../components/ui";
-import { Proposals, ProposeSheet, useProposals } from "../components/proposals";
+import { Proposals, ProposeSheet, removeProposal, useProposals } from "../components/proposals";
 
 interface Release {
   channel: string;
@@ -519,17 +519,41 @@ function CleanupSettings({ onOpen }: { onOpen: () => void }) {
   );
 }
 
-/** Release proposals (design 12.4): a publisher names the build and where its files are; a key holder
- * signs the files and the index with the keys on their PC and publishes, then removes the proposal. */
-function ReleaseProposals() {
-  const { can } = useApp();
+/** A build file as a release proposal names it (backend file_hashes). */
+export interface FileHash {
+  name: string;
+  sha256: string;
+}
+/** A release proposal's document. */
+export interface ReleaseDoc {
+  channel: string;
+  app: string;
+  platform: string;
+  version: string;
+  notes: string;
+  /** Where the files are (a share, a build number). */
+  where: string;
+  files: FileHash[];
+}
+
+/** Release proposals (design 12.4): a publisher names the build, where its files are and each
+ * file's SHA-256 (the proposal carries no files); a key holder reviews one (`review`), selects the
+ * files, which are checked against those hashes before anything is signed, publishes, and the
+ * proposal is removed. */
+function ReleaseProposals({ review }: { review?: (p: Proposal) => void }) {
+  const { can, toast } = useApp();
   const proposals = useProposals("release", can("read-proposals-release"));
-  const [doc, setDoc] = useState({ channel: "stable", app: "technician", platform: "windows-x86_64", version: "", notes: "", files: "" });
+  const [doc, setDoc] = useState<ReleaseDoc>({ channel: "stable", app: "technician", platform: "windows-x86_64", version: "", notes: "", where: "", files: [] });
   const [proposing, setProposing] = useState(false);
-  const set = (k: keyof typeof doc) => (e: { target: { value: string } }) => setDoc({ ...doc, [k]: e.target.value });
+  const set = (k: keyof ReleaseDoc) => (e: { target: { value: string } }) => setDoc({ ...doc, [k]: e.target.value });
+  const addFiles = async () => {
+    const f = await open({ multiple: true });
+    const paths = Array.isArray(f) ? f : typeof f === "string" ? [f] : [];
+    if (paths.length) invoke<FileHash[]>("file_hashes", { paths }).then((h) => setDoc((d) => ({ ...d, files: [...d.files.filter((x) => !h.some((y) => y.name === x.name)), ...h] })), (e) => toast(e.message));
+  };
   return (
     <>
-      <Proposals kind="release" list={proposals.list} error={proposals.error} reload={proposals.load} />
+      <Proposals kind="release" list={proposals.list} error={proposals.error} reload={proposals.load} review={review} />
       {can("propose-release") && (
         <>
           <h2 className="mb-3 text-headline font-semibold">Propose a release</h2>
@@ -557,12 +581,28 @@ function ReleaseProposals() {
               <Label text="Release notes">
                 <TextArea rows={3} value={doc.notes} onChange={set("notes")} />
               </Label>
-              <Label text="Where the build files are" hint="A share, a build number, their SHA-256">
-                <TextArea rows={3} value={doc.files} onChange={set("files")} />
+              <Label text="Where the build files are" hint="A share or a build number, for the key holder to fetch them">
+                <TextArea rows={3} value={doc.where} onChange={set("where")} />
               </Label>
             </div>
+            <div className="mt-4">
+              <div className="flex items-center justify-between">
+                <p className="text-caption font-semibold">Build files</p>
+                <Button size="sm" onClick={addFiles}>
+                  Add files…
+                </Button>
+              </div>
+              <p className="text-footnote text-muted">Only their names and SHA-256 are stored: the key holder's Tether Manage signs only files with these hashes.</p>
+              <ul className="mt-1 flex flex-col gap-0.5 text-footnote">
+                {doc.files.map((f) => (
+                  <li key={f.name}>
+                    {f.name} <code className="select-text font-mono text-muted">{f.sha256}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
             <div className="mt-4 flex justify-end">
-              <Button variant="primary" disabled={!doc.version.trim() || !doc.channel.trim()} onClick={() => setProposing(true)}>
+              <Button variant="primary" disabled={!doc.version.trim() || !doc.channel.trim() || !doc.files.length} onClick={() => setProposing(true)}>
                 Propose…
               </Button>
             </div>
@@ -571,7 +611,7 @@ function ReleaseProposals() {
             <ProposeSheet
               kind="release"
               doc={doc}
-              changes={[`${doc.app === "customer" ? "Customer module" : "Technician app"} ${doc.version} for ${doc.platform} on ${doc.channel}`, ...(doc.files ? [`Files: ${doc.files}`] : [])]}
+              changes={[`${doc.app === "customer" ? "Customer module" : "Technician app"} ${doc.version} for ${doc.platform} on ${doc.channel}`, ...(doc.where ? [`Files at: ${doc.where}`] : []), ...doc.files.map((f) => `${f.name} SHA-256 ${f.sha256}`)]}
               onClose={() => setProposing(false)}
               onDone={proposals.load}
             />
@@ -600,6 +640,19 @@ export function Releases() {
   // A security release skips the ramp (every device at once): the Custom fields neither block nor travel.
   const ramp = security ? "now" : rollout;
   const [reviewing, setReviewing] = useState(false);
+  // A release proposal under review: its fields filled in, its files' SHA-256 checked before signing.
+  const [fromProposal, setFromProposal] = useState<Proposal | null>(null);
+  const expect = (fromProposal?.doc as ReleaseDoc | undefined)?.files ?? [];
+  const reviewProposal = (p: Proposal) => {
+    const d = p.doc as ReleaseDoc;
+    setFromProposal(p);
+    setChannel(d.channel);
+    setVersion(d.version);
+    setKind(d.app as Kind);
+    setPlatform(d.platform as Platform);
+    setNotes(d.notes);
+    toast(`Loaded the release proposal of ${p.author.name}: choose its file below.`);
+  };
   const [list, setList] = useState<Release[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [round, setRound] = useState(0);
@@ -677,12 +730,22 @@ export function Releases() {
   return (
     <>
       <PageHeader title="Releases" sub="What each relay publishes, and signing new installers with the update key." />
-      <ReleaseProposals />
+      <ReleaseProposals review={reviewProposal} />
       <LatestBuilds onDone={() => setRound((r) => r + 1)} />
       <Overview key={round} />
       <Rollouts key={`r${round}`} />
 
       <h2 className="mb-3 text-headline font-semibold">Sign and publish a new release</h2>
+      {fromProposal && (
+        <p className="mb-3 text-caption" role="status">
+          <Badge tone="ink">Reviewing</Badge> the release proposal of {fromProposal.author.name}
+          {state.signin.upn && fromProposal.author.upn === state.signin.upn && <span className="text-warn"> (you proposed it yourself: no second person checks it)</span>}
+          {(fromProposal.doc as ReleaseDoc).where ? `; files at ${(fromProposal.doc as ReleaseDoc).where}` : ""}. The proposal carries no files: choose them below. Tether Manage signs a file only if its SHA-256 is one the proposal names ({expect.map((f) => f.name).join(", ") || "none"}).{" "}
+          <Button size="sm" variant="ghost" onClick={() => setFromProposal(null)}>
+            Stop reviewing
+          </Button>
+        </p>
+      )}
       <Card>
         <div className="grid grid-cols-2 gap-x-6 gap-y-4">
           <Label
@@ -762,16 +825,29 @@ export function Releases() {
             const id = startRun();
             if (!security) await remember(rollout);
             const r = await invoke<RelayResult[]>("release_publish", {
-              args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced, rollout: ramp, security },
+              args: { file, kind, platform, channel: channel.trim(), version: version.trim(), notes, mandatory, minimum_version: minimumVersion.trim(), forced, rollout: ramp, security, expect },
               skip,
               run: id,
             });
             toast(releaseToast(version.trim(), channel.trim(), r));
             setFile("");
+            // A reviewed proposal is published now: it leaves the relays' list (as the person, when signed in).
+            if (fromProposal && r.some((x) => x.ok)) {
+              removeProposal(fromProposal).catch(() => {});
+              setFromProposal(null);
+            }
             return r;
           }}
         >
           <dl className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-1.5 text-caption">
+            {fromProposal && (
+              <>
+                <dt className="text-muted">Proposal</dt>
+                <dd className="text-warn">
+                  of {fromProposal.author.name}: the file is checked against the SHA-256 it names before anything is signed
+                </dd>
+              </>
+            )}
             <dt className="text-muted">Release</dt>
             <dd className="font-semibold">
               {APP[kind]} {version.trim()} for {OS[platform]}

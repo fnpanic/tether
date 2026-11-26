@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { save } from "@tauri-apps/plugin-dialog";
+import { ask, save } from "@tauri-apps/plugin-dialog";
 import { Download, RefreshCw } from "lucide-react";
 import { useApp } from "../App";
 import { host, inTauri, invoke, when } from "../lib/ipc";
@@ -25,12 +25,13 @@ export function TeamActivity() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const load = async () => {
+  /** `deep`: the chain check reads further back on every relay ("Read further back"). */
+  const load = async (deep = false) => {
     setBusy(true);
     setError(null);
     try {
       const since = Math.floor(Date.now() / 1000) - Number(span) * 86400;
-      setData(await invoke("team_activity", { filter: { since, actor, device, customer, event, limit: 2000 } }));
+      setData(await invoke("team_activity", { filter: { since, actor, device, customer, event, limit: 2000 }, deep }));
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -39,7 +40,12 @@ export function TeamActivity() {
   };
   useEffect(() => void load(), [span]);
 
-  const accept = async (server: string) => {
+  const accept = async (server: string, chain?: string) => {
+    const risk =
+      chain === "undecided"
+        ? "This PC could not check that the log still continues from the point it last read. Accepting takes whatever the relay holds now as the new starting point: if its log was rewritten, that is accepted for good. Read further back first, or compare with a copy kept elsewhere (the relay's journal)."
+        : "The relay's log no longer continues from the point this PC last read: records were removed or rewritten. Accepting takes the rewritten log as the new starting point. Compare with a copy kept elsewhere (the relay's journal) first.";
+    if (inTauri && !(await ask(risk, { title: `Accept the state of ${host(server)}`, kind: "warning", okLabel: "Accept the risk" }))) return;
     try {
       await invoke("team_activity_accept", { server });
       await load();
@@ -58,12 +64,13 @@ export function TeamActivity() {
     toast(`Exported ${data.records.length} records.`);
   };
 
-  const warnings = data?.relays.flatMap((r) => r.warnings.map((w) => ({ server: r.server, w, broken: !!r.broken }))) ?? [];
+  // The relay's chain warning (the first) carries the buttons.
+  const warnings = data?.relays.flatMap((r) => r.warnings.map((w, i) => ({ server: r.server, w, chain: i === 0 && (r.chain === "broken" || r.chain === "undecided") ? r.chain : undefined }))) ?? [];
 
   return (
     <>
       <PageHeader title="Team activity" sub="What staff did on every relay: sign-ins, host opens, searches, changes, Tether Manage actions. Kept on the relays; this PC keeps only each relay's last chain head.">
-        <IconButton label="Read again" onClick={load}>
+        <IconButton label="Read again" onClick={() => load()}>
           <RefreshCw size={16} />
         </IconButton>
         <Button onClick={exportCsv} disabled={!data?.records.length}>
@@ -101,12 +108,17 @@ export function TeamActivity() {
         <button type="submit" hidden />
       </form>
       <ErrorText error={error} />
-      {warnings.map(({ server, w, broken }, i) => (
+      {warnings.map(({ server, w, chain }, i) => (
         <div key={i} role="alert" className="mb-2 flex items-center gap-3 rounded-lg border border-danger/50 p-3 text-caption text-danger">
           <span className="select-text">{w}</span>
-          {broken && (
-            <Button size="sm" className="ml-auto" onClick={() => accept(server)}>
-              Accept the new state
+          {chain === "undecided" && (
+            <Button size="sm" className="ml-auto" disabled={busy} onClick={() => load(true)}>
+              Read further back
+            </Button>
+          )}
+          {chain && (
+            <Button size="sm" className={chain === "undecided" ? "" : "ml-auto"} onClick={() => accept(server, chain)}>
+              Accept the relay's state…
             </Button>
           )}
         </div>

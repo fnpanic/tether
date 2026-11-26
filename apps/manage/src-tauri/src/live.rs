@@ -17,6 +17,22 @@ pub struct Change {
     pub to: Option<String>,
     /// The whole change as one sentence.
     pub text: String,
+    /// Security-relevant ([`risky`]): listed first and shown as a warning in the review.
+    pub risk: bool,
+    /// Changes where devices connect: the review needs an explicit tick before signing.
+    pub confirm: bool,
+}
+
+/// Features whose change a reviewer must not miss: where devices connect and take policy and
+/// updates from, how sessions are approved and secured, the agent and its enrolment grant,
+/// tunnels, elevation, recording uploads.
+fn risky(id: &str) -> (bool, bool) {
+    let confirm = matches!(id, "servers.list" | "settings.server");
+    let risk = confirm
+        || id.starts_with("security.")
+        || id.starts_with("health.")
+        || matches!(id, "update.channel" | "update.enabled" | "permission.tunnel" | "customer.elevate" | "connect.incoming" | "recording.upload-target" | "recording.upload-token");
+    (risk, confirm)
 }
 
 fn shown(f: Option<&Feature>, v: &str) -> String {
@@ -53,7 +69,8 @@ fn layer_changes(scope: &str, from: &Layer, to: &Layer, out: &mut Vec<Change>) {
         let f = policy::feature(id);
         let label = f.map_or(id.as_str(), |f| f.en).to_owned();
         let (fw, tw) = (rule_words(f, a), rule_words(f, b));
-        out.push(Change { scope: scope.into(), text: format!("{scope}: {label}: {fw} → {tw}"), label: Some(label), from: Some(fw), to: Some(tw) });
+        let (risk, confirm) = risky(id);
+        out.push(Change { scope: scope.into(), text: format!("{scope}: {label}: {fw} → {tw}"), label: Some(label), from: Some(fw), to: Some(tw), risk, confirm });
     }
 }
 
@@ -88,13 +105,13 @@ pub fn changes(live: Option<&Bundle>, draft: &Bundle) -> Vec<Change> {
         let scope = format!("Group {g}");
         match (live.groups.get(g), draft.groups.get(g)) {
             (None, Some(d)) => {
-                out.push(Change { scope: scope.clone(), label: None, from: None, to: None, text: format!("{scope} created for {} devices", d.profile) });
+                out.push(Change { scope: scope.clone(), label: None, from: None, to: None, text: format!("{scope} created for {} devices", d.profile), risk: false, confirm: false });
                 layer_changes(&scope, &none, &d.overrides, &mut out);
             }
-            (Some(_), None) => out.push(Change { scope: scope.clone(), label: None, from: None, to: None, text: format!("{scope} deleted") }),
+            (Some(_), None) => out.push(Change { scope: scope.clone(), label: None, from: None, to: None, text: format!("{scope} deleted"), risk: false, confirm: false }),
             (Some(l), Some(d)) => {
                 if l.profile != d.profile {
-                    out.push(Change { scope: scope.clone(), label: None, from: Some(l.profile.clone()), to: Some(d.profile.clone()), text: format!("{scope} now targets {} devices (was {})", d.profile, l.profile) });
+                    out.push(Change { scope: scope.clone(), label: None, from: Some(l.profile.clone()), to: Some(d.profile.clone()), text: format!("{scope} now targets {} devices (was {})", d.profile, l.profile), risk: false, confirm: false });
                 }
                 layer_changes(&scope, &l.overrides, &d.overrides, &mut out);
             }
@@ -110,8 +127,10 @@ pub fn changes(live: Option<&Bundle>, draft: &Bundle) -> Vec<Change> {
             (Some(x), Some(y)) if x != y => format!("Device {} moved from group {x} to {y}", short(d)),
             _ => continue,
         };
-        out.push(Change { scope: "Devices".into(), label: None, from: a.cloned(), to: b.cloned(), text });
+        out.push(Change { scope: "Devices".into(), label: None, from: a.cloned(), to: b.cloned(), text, risk: false, confirm: false });
     }
+    // What a reviewer must not miss first (stable: the order within each part stays).
+    out.sort_by_key(|c| !c.risk);
     out
 }
 
@@ -211,13 +230,19 @@ mod tests {
         draft.profiles.insert("customer".into(), Layer::from([("security.approve-mode".into(), rule(State::On, Some("click")))]));
         draft.groups.insert("desk".into(), Group { profile: "customer".into(), overrides: Layer::from([("connect.chat".into(), rule(State::Hidden, None))]) });
         draft.assignments.insert("aaaaaaaa-1111".into(), "desk".into());
-        let texts: Vec<String> = changes(Some(&live), &draft).into_iter().map(|c| c.text).collect();
+        draft.groups.get_mut("desk").unwrap().overrides.insert("servers.list".into(), rule(State::Locked, Some("evil.example.com")));
+        let all = changes(Some(&live), &draft);
+        // Security-relevant first, marked; where devices connect also needs the tick.
+        assert_eq!(all.iter().map(|c| (c.risk, c.confirm)).take(3).collect::<Vec<_>>(), [(true, false), (true, true), (false, false)]);
+        assert!(all.iter().skip(2).all(|c| !c.risk));
+        let texts: Vec<String> = all.into_iter().map(|c| c.text).collect();
         assert_eq!(
             texts,
             [
+                "Customer profile: How incoming sessions are approved: default → on (click, user may change)",
+                "Group desk: Additional relay servers (host names or wss:// URLs, comma-separated): default → locked to evil.example.com",
                 "Technician profile: Allow clipboard sync: off → on",
                 "Technician profile: Default image quality: default → locked to best",
-                "Customer profile: How incoming sessions are approved: default → on (click, user may change)",
                 "Group desk created for customer devices",
                 "Group desk: Chat in sessions: default → hidden",
                 "Group old deleted",
@@ -226,7 +251,7 @@ mod tests {
         );
         // Serial and time alone are no change; nothing published = compare with an empty bundle.
         assert!(changes(Some(&draft), &Bundle { serial: 1, ..draft.clone() }).is_empty());
-        assert_eq!(changes(None, &draft).len(), 6);
+        assert_eq!(changes(None, &draft).len(), 7);
         assert!(changes(None, &Bundle::default()).is_empty());
     }
 

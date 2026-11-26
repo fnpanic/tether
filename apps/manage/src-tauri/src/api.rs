@@ -295,6 +295,49 @@ pub(crate) mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
 
+    /// One request as a fake relay saw it: method, path with query, `Tether-Sig`, body.
+    pub(crate) type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String, Vec<u8>)>>>;
+
+    /// A relay stand-in for many requests: `answer(method, path, body)` gives status and body.
+    pub(crate) fn fake_relay(answer: impl Fn(&str, &str, &[u8]) -> (u16, Vec<u8>) + Send + 'static) -> (String, Seen) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let seen: Seen = Default::default();
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for s in listener.incoming().flatten() {
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                if r.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let (mut sig, mut len) = (String::new(), 0usize);
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = h.split_once(':') {
+                        match k.to_ascii_lowercase().as_str() {
+                            "content-length" => len = v.trim().parse().unwrap_or(0),
+                            "tether-sig" => sig = v.trim().to_owned(),
+                            _ => {}
+                        }
+                    }
+                }
+                let mut body = vec![0; len];
+                let _ = r.read_exact(&mut body);
+                let mut parts = line.split_whitespace();
+                let (method, path) = (parts.next().unwrap_or("").to_owned(), parts.next().unwrap_or("").to_owned());
+                let (code, text) = answer(&method, &path, &body);
+                log.lock().unwrap().push((method, path, sig, body));
+                let _ = write!(&s, "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", text.len());
+                let _ = (&s).write_all(&text);
+            }
+        });
+        (server, seen)
+    }
+
     /// A one-shot HTTP server that checks the `Tether-Sig` header the way tether-api does.
     fn one_shot(pk: tether_trust::VerifyingKey) -> (String, std::thread::JoinHandle<(String, String, Vec<u8>)>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

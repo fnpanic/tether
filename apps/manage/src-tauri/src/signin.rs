@@ -38,6 +38,51 @@ pub fn roles() -> Vec<String> {
     crate::oidc::me().and_then(|m| m.get("manage").cloned()).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
 }
 
+/// Roles a relay stated for this session at most [`FRESH_FOR`] ago, with the person they were for.
+type Fresh = (std::time::Instant, Option<serde_json::Value>, Vec<String>);
+static FRESH: Mutex<Option<Fresh>> = Mutex::new(None);
+/// One signing action (a release signs and uploads several files) asks the relays once.
+const FRESH_FOR: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: signed in with these roles (this thread only).
+    pub static TEST_ROLES: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While signed in, the roles that decide whether the vault signs: asked from the relays now
+/// (`GET /api/team/me` with the session key), not those of the last renewal, which may be up to an
+/// hour old (a key holder demoted since must not sign). `None`: not signed in.
+pub fn signing_roles() -> Option<Vec<String>> {
+    #[cfg(test)]
+    if let Some(r) = TEST_ROLES.with(|t| t.borrow().clone()) {
+        return Some(r);
+    }
+    if !crate::oidc::signed_in() {
+        return None;
+    }
+    let me = crate::oidc::me();
+    let mut f = FRESH.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, _, r)) = f.as_ref().filter(|(t, who, _)| t.elapsed() < FRESH_FOR && *who == me) {
+        return Some(r.clone());
+    }
+    // Blocking requests on a thread of their own (this may run on the async runtime).
+    let r = std::thread::spawn(|| roles_at(&policy::relay_bases().into_iter().map(|(_, b)| b).collect::<Vec<_>>())).join().unwrap_or_default();
+    *f = Some((std::time::Instant::now(), me, r.clone()));
+    Some(r)
+}
+
+/// The Tether Manage roles the first relay that answers `GET /api/team/me` states for this
+/// session; none when no relay confirms the session (signing is then refused).
+fn roles_at(relays: &[String]) -> Vec<String> {
+    for relay in relays {
+        if let Ok((200, b)) = signed(relay, "GET", "/api/team/me", b"") {
+            return serde_json::from_slice::<serde_json::Value>(&b).ok().and_then(|v| serde_json::from_value(v["manage"].clone()).ok()).unwrap_or_default();
+        }
+    }
+    Vec::new()
+}
+
 
 fn client() -> R<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(30)).user_agent(concat!("tether-manage/", env!("CARGO_PKG_VERSION"))).build().map_err(|e| e.to_string())
@@ -178,6 +223,17 @@ mod tests {
         let hosts = [reqauth::host_of(&base)];
         let relay = reqauth::Relay { hosts: &hosts, v1: false };
         reqauth::verify_request_for(&sig, &SESSION_KEY.verifying_key(), relay, "POST", "/api/team/session", &reqauth::body_digest(&body), crate::api::now(), |_| true).unwrap();
+    }
+
+    /// The roles signing goes by are what a relay states now for this session (`GET /api/team/me`
+    /// with the session key): the first relay that confirms it; none when no relay does.
+    #[test]
+    fn signing_asks_the_relays_for_the_roles_now() {
+        let (gone, _) = crate::api::tests::fake_relay(|_, _, _| (401, b"session expired".to_vec()));
+        let (demoted, seen) = crate::api::tests::fake_relay(|_, p, _| if p == "/api/team/me" { (200, br#"{"name":"Kim","manage":["auditor"]}"#.to_vec()) } else { (404, Vec::new()) });
+        assert_eq!(roles_at(&[gone.clone(), demoted]), ["auditor"]);
+        assert_eq!(reqauth::header_kid(&seen.lock().unwrap()[0].2), Some(tether_trust::team::key_id(&SESSION_KEY.verifying_key()).as_str()));
+        assert!(roles_at(&[gone]).is_empty(), "no relay confirms the session: no role, nothing signed");
     }
 
     #[test]

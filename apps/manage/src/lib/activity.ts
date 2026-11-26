@@ -19,6 +19,8 @@ export interface RelayState {
   head?: string;
   more?: boolean;
   broken?: boolean;
+  /** The chain check since this PC's stored head (activity.rs): first, ok, partly, undecided, broken. */
+  chain?: string;
   warnings: string[];
 }
 

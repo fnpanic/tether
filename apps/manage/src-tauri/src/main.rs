@@ -85,10 +85,12 @@ impl App {
     }
     /// The vault's admin key: everything that signs a document or an admin request as the admin.
     /// While a person is signed in, only with the KeyHolder role (design 12.4); without sign-in
-    /// (vault only, the break-glass path) as before.
+    /// (vault only, the break-glass path) as before. The roles are asked from the relays now
+    /// (signin::signing_roles), not taken from the last renewal.
     fn admin_key(&self) -> R<SigningKey> {
         let k = self.keys.lock().unwrap().as_ref().map(|k| k.admin.clone()).ok_or_else(|| "Unlock the keys first.".to_owned())?;
-        may_sign(oidc::signed_in(), &signin::roles())?;
+        let roles = signin::signing_roles();
+        may_sign(roles.is_some(), &roles.unwrap_or_default())?;
         Ok(k)
     }
     /// The key admin requests are signed with: the vault's admin key, else the sign-in session's
@@ -614,7 +616,13 @@ async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>, skip: Opt
 /// key file can be opened by the current user only (private.rs); delete it after installing.
 #[tauri::command]
 fn serverkeys_save_files(app: State<App>, public: String, folder: String) -> R<()> {
-    let (secret, public) = app.keys.lock().unwrap().as_ref().ok_or("Unlock the keys first.")?.server_key_files(&public).ok_or("This key was not generated on this PC.")?;
+    save_key_files(&app, &public, folder)
+}
+
+fn save_key_files(app: &App, public: &str, folder: String) -> R<()> {
+    // The server's secret key leaves the vault: a key holder's (or break-glass) action only.
+    app.admin_key()?;
+    let (secret, public) = app.keys.lock().unwrap().as_ref().ok_or("Unlock the keys first.")?.server_key_files(public).ok_or("This key was not generated on this PC.")?;
     let dir = PathBuf::from(folder);
     // Saving the same key again is fine; any other pair of that name (e.g. an SSH key) stays.
     if key_files_of(&dir).is_some_and(|k| k != public) {
@@ -1106,6 +1114,39 @@ struct ReleaseArgs {
     /// Security release: skips the ramp.
     #[serde(default)]
     security: bool,
+    /// A reviewed release proposal's files: each file read is signed only if its SHA-256 is one of them.
+    #[serde(default)]
+    expect: Vec<FileHash>,
+}
+
+/// A build file of a release proposal: its name and SHA-256 (lower-case hex).
+#[derive(Serialize, Deserialize, Clone)]
+struct FileHash {
+    name: String,
+    sha256: String,
+}
+
+/// The files' names and SHA-256, as a release proposal carries them.
+#[tauri::command]
+async fn file_hashes(paths: Vec<String>) -> R<Vec<FileHash>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths.iter().map(|p| {
+            let name = std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            Ok(FileHash { name, sha256: proposals::sha256_hex(&fs::read(p).map_err(|e| format!("{p}: {e}"))?) })
+        }).collect()
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Before signing a file of a reviewed proposal: its SHA-256 must be one the proposal names.
+fn expected(expect: &[FileHash], file: &str, data: &[u8]) -> R<()> {
+    let h = proposals::sha256_hex(data);
+    if expect.is_empty() || expect.iter().any(|f| f.sha256.eq_ignore_ascii_case(&h)) {
+        return Ok(());
+    }
+    let names: Vec<&str> = expect.iter().map(|f| f.name.as_str()).collect();
+    Err(format!("{file} is not a file of the proposal (its SHA-256 {h} is not that of {}): nothing was published.", names.join(", ")))
 }
 
 /// One release as it goes to a relay: its files (artifact first) and the manifest fields.
@@ -1227,6 +1268,8 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs, 
         return Err(cancelled_msg());
     }
     let a = args;
+    // The KeyHolder gate before the update key signs anything (the uploads check it again).
+    app.admin_key()?;
     let targets = app.chosen(&skip)?;
     if !release::valid_channel(&a.channel) {
         return Err("Channel: use 1-32 lowercase letters, digits or dashes.".into());
@@ -1243,6 +1286,7 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs, 
     let rollout = release::rollout(&a.rollout, if a.rollout_start == 0 { api::now() } else { a.rollout_start })?;
     let (dir, name) = release::target(&a.kind, &a.platform, &a.version)?;
     let data = fs::read(&a.file).map_err(|e| format!("Could not read the file: {e}"))?;
+    expected(&a.expect, &a.file, &data)?;
     let sign = |bytes: &[u8], file: &str| -> R<String> {
         // No server yet: the sheet shows "Signing <file>".
         emit(&ui, Progress { dir: dir.clone(), version: a.version.clone(), server: String::new(), file: file.to_owned(), sent: 0, total: bytes.len() as u64, done: false, error: None });
@@ -1256,6 +1300,7 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs, 
         let dmg_name = release::dmg_name(&a.version);
         let path = std::path::Path::new(&a.file).with_file_name(&dmg_name);
         let bytes = fs::read(&path).map_err(|_| format!("Put {dmg_name} next to the .app.tar.gz (scripts/build-macos.sh writes both to dist/macos)."))?;
+        expected(&a.expect, &dmg_name, &bytes)?;
         let dmg_sig = sign(&bytes, &dmg_name)?;
         files.push((dmg_name.clone(), bytes));
         files.push((format!("{dmg_name}.sig"), dmg_sig.into_bytes()));
@@ -2836,17 +2881,23 @@ fn team_check(doc: TeamDoc) -> R<()> {
     d.validate().map(|_| ())
 }
 
-/// Signs `doc` with the vault (serial: one above every relay's) and its `oidc` part as the config
-/// the relays serve, checks the upload exactly as a relay does, and `PUT /api/admin/team` to every
-/// relay. Needs the keys (and, while signed in, the KeyHolder role).
+/// Signs `doc` with the vault (serial: one above every relay's, whatever the draft or proposal
+/// says) and its `oidc` part as the config the relays serve, checks the upload exactly as a relay
+/// does, and `PUT /api/admin/team` to every relay. Needs the keys (and, while signed in, the
+/// KeyHolder role).
 #[tauri::command]
 async fn team_publish(app: State<'_, App>, doc: TeamDoc, skip: Option<Vec<String>>) -> R<Value> {
+    publish_team(&app, doc, skip).await
+}
+
+async fn publish_team(app: &App, doc: TeamDoc, skip: Option<Vec<String>>) -> R<Value> {
     let admin = app.admin_key()?;
     let keys = [admin.verifying_key()];
     let servers = app.servers();
     let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", "/api/admin/team", Vec::new(), "application/json"))).await;
     let live = got.iter().filter_map(|r| r.as_ref().ok().and_then(|b| team_doc_of(b, &keys).ok())).map(|(d, _)| d.serial).max().unwrap_or(0);
-    let doc = TeamDoc { serial: live.max(doc.serial.saturating_sub(1)) + 1, ..doc };
+    // A proposal's serial is not taken: a huge one would leave no serial above it.
+    let doc = TeamDoc { serial: live.checked_add(1).ok_or("The relays' team document is at the highest serial.")?, ..doc };
     let up = team_upload(&doc, &admin)?;
     let (to, left) = app.chosen(&skip)?;
     let mut out = app.fan_out_to(&to, "PUT", "/api/admin/team", up, "application/json").await;
@@ -3054,6 +3105,7 @@ fn main() {
             policy_history,
             policy_local,
             release_publish,
+            file_hashes,
             release_cancel,
             release_index,
             release_control,
@@ -3583,6 +3635,75 @@ mod tests {
         app.write("settings.json", json!({ "server": relays.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",") }).to_string().as_bytes()).unwrap();
         *app.keys.lock().unwrap() = Some(Keys::generate().unwrap());
         app
+    }
+
+    /// A key holder publishes a team proposal through Manage's own code, with a fake relay: the
+    /// proposal is stored with the live document's hash, listed, signed with the vault at one above
+    /// the live serial (not the proposal's huge one), then removed with the person's session key
+    /// (`kid`: the relay's record names them); without a sign-in (break-glass) admin-signed.
+    #[test]
+    fn a_key_holder_publishes_a_proposal_and_removes_it_as_the_person() {
+        let roster = br#"{"members":[]}"#.to_vec();
+        let live = proposals::sha256_hex(&roster);
+        let stored: std::sync::Arc<Mutex<Vec<Value>>> = Default::default();
+        let (st, live_c) = (stored.clone(), live.clone());
+        let (a, seen) = api::tests::fake_relay(move |m, p, body| match (m, p) {
+            ("GET", "/api/admin/team") => (200, roster.clone()),
+            ("PUT", "/api/admin/proposals/team") => {
+                let mut v: Value = serde_json::from_slice(body).unwrap();
+                v["id"] = json!("0123456789abcdef");
+                v["author"] = json!({"key_fingerprint": "aa", "name": "Ed", "oid": "o1"});
+                v["created"] = json!(1);
+                st.lock().unwrap().push(v);
+                (200, br#"{"id":"0123456789abcdef"}"#.to_vec())
+            }
+            ("GET", "/api/admin/proposals/team") => (200, serde_json::to_vec(&json!({"live": live_c, "proposals": *st.lock().unwrap()})).unwrap()),
+            ("PUT", "/api/admin/team") | ("DELETE", "/api/admin/proposals/team/0123456789abcdef") => (204, Vec::new()),
+            _ => (404, b"not found".to_vec()),
+        });
+        let app = with_relays("propose-publish", &[&a]);
+        let doc = TeamDoc { serial: u64::MAX, oidc: None, roles: BTreeMap::new(), deny: Vec::new(), oidc_only: false, members: Vec::new() };
+        tauri::async_runtime::block_on(proposals::put(&app, "team", &serde_json::to_value(&doc).unwrap(), "why")).unwrap();
+        assert_eq!(stored.lock().unwrap()[0]["base"], json!(live), "based on what the relay serves");
+        let listed = tauri::async_runtime::block_on(proposals::list(&app, "team")).unwrap();
+        let p = &listed["proposals"][0];
+        assert_eq!((p["stale"].clone(), p["author"]["name"].clone()), (json!([]), json!("Ed")));
+        let out = tauri::async_runtime::block_on(publish_team(&app, serde_json::from_value(p["doc"].clone()).unwrap(), None)).unwrap();
+        assert_eq!(out["serial"], 1, "one above the live serial, not the proposal's");
+        let ids: BTreeMap<String, String> = serde_json::from_value(p["ids"].clone()).unwrap();
+        tauri::async_runtime::block_on(proposals::delete(&app, "team", &ids, true)).unwrap();
+        tauri::async_runtime::block_on(proposals::delete(&app, "team", &ids, false)).unwrap();
+        let seen = seen.lock().unwrap();
+        let put = seen.iter().find(|r| (r.0.as_str(), r.1.as_str()) == ("PUT", "/api/admin/team")).unwrap();
+        let admin = app.admin_key().unwrap().verifying_key();
+        assert_eq!(tether_trust::team::open(&put.3, &[admin]).unwrap().0.serial, 1, "signed with the vault");
+        assert_eq!(tether_trust::reqauth::header_kid(&put.2), None);
+        let dels: Vec<Option<&str>> = seen.iter().filter(|r| r.0 == "DELETE").map(|r| tether_trust::reqauth::header_kid(&r.2)).collect();
+        assert_eq!(dels, [Some(tether_trust::team::key_id(&signin::SESSION_KEY.verifying_key()).as_str()), None]);
+    }
+
+    /// While signed in without KeyHolder (roles as the relays state them now), the vault signs
+    /// nothing and does not hand out a server's secret key; with KeyHolder it does.
+    #[test]
+    fn without_key_holder_the_vault_does_not_hand_out_the_server_key() {
+        let app = temp_app("gate");
+        *app.keys.lock().unwrap() = Some(Keys::generate().unwrap());
+        let folder = app.path("out").to_string_lossy().into_owned();
+        signin::TEST_ROLES.with(|t| *t.borrow_mut() = Some(vec!["auditor".into()]));
+        assert_eq!(save_key_files(&app, "x", folder.clone()), Err(NOT_KEY_HOLDER.to_owned()));
+        assert_eq!(app.admin_key().unwrap_err(), NOT_KEY_HOLDER);
+        signin::TEST_ROLES.with(|t| *t.borrow_mut() = Some(vec!["key-holder".into()]));
+        assert_eq!(save_key_files(&app, "x", folder), Err("This key was not generated on this PC.".to_owned()));
+        signin::TEST_ROLES.with(|t| *t.borrow_mut() = None);
+    }
+
+    #[test]
+    fn a_proposals_files_are_checked_by_hash_before_signing() {
+        let f = vec![FileHash { name: "Tether_0.7.0_x64-setup.exe".into(), sha256: proposals::sha256_hex(b"build").to_uppercase() }];
+        assert!(expected(&f, "C:\\dist\\x.exe", b"build").is_ok());
+        assert!(expected(&[], "x.exe", b"other").is_ok(), "no proposal: nothing to compare");
+        let e = expected(&f, "x.exe", b"other").unwrap_err();
+        assert!(e.contains("Tether_0.7.0_x64-setup.exe") && e.contains(&proposals::sha256_hex(b"other")) && e.ends_with("nothing was published."), "{e}");
     }
 
     fn with_grant(token: &str) -> Bundle {

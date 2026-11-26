@@ -540,6 +540,16 @@ to a lower serial by a publish. What it does not do: whoever can write a relay's
 `ADMIN_PUB_KEY` decides who is a member on that relay; the relay itself enforces the permissions,
 so it must be trusted.
 
+**Who signed, in the team audit log.** A publish (policy, team document, server keys, releases,
+download page, custom apps) is signed with the vault's admin key, so its record names the admin
+key (`admin`), never a person. When a key holder is signed in, Tether Manage then removes the
+proposal it published with the person's own session key: that `proposal-delete` record names the
+key holder, the proposal (`kind`, `id`, `serial`), its author (`author_oid`) and `same_person`
+(true: the key holder published their own proposal, with no second person checking it). A
+**break-glass** publish (nobody signed in to Tether Manage, the keys alone) is recorded under the
+admin key only, with no person named: who did it is known only from who holds the vault and its
+passphrase.
+
 Restoring a backup of a relay's data folder (`team/` in `/var/lib/tether-api`): an older
 `team.json` is in force again after the restart, and its serial becomes the floor (a document with a
 serial between the restored one and the newest is accepted again), so publish the current document

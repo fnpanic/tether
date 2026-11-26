@@ -35,10 +35,14 @@ async fn base_on(app: &App, relay: &str, kind: &str) -> R<String> {
 /// Stores `doc` as a proposal on every relay, each with the hash of what that relay serves now.
 #[tauri::command]
 pub async fn proposal_put(app: State<'_, App>, kind: String, doc: Value, note: String) -> R<Vec<RelayResult>> {
-    kind_ok(&kind)?;
+    put(&app, &kind, &doc, &note).await
+}
+
+pub(crate) async fn put(app: &App, kind: &str, doc: &Value, note: &str) -> R<Vec<RelayResult>> {
+    kind_ok(kind)?;
     let servers = app.servers();
     let path = format!("/api/admin/proposals/{kind}");
-    let (app, kind, path, doc, note) = (&*app, &kind, &path, &doc, &note);
+    let path = &path;
     let got = futures_util::future::join_all(servers.iter().map(|sv| async move {
         let base = base_on(app, sv, kind).await?;
         let body = serde_json::to_vec(&json!({"base": base, "note": note, "doc": doc})).map_err(|e| e.to_string())?;
@@ -86,7 +90,11 @@ fn merge(answers: Vec<(String, Value)>) -> Vec<Value> {
 /// The proposals of `kind` on every relay, merged (`proposals`), and the relays that failed.
 #[tauri::command]
 pub async fn proposals_list(app: State<'_, App>, kind: String) -> R<Value> {
-    kind_ok(&kind)?;
+    list(&app, &kind).await
+}
+
+pub(crate) async fn list(app: &App, kind: &str) -> R<Value> {
+    kind_ok(kind)?;
     let servers = app.servers();
     let path = format!("/api/admin/proposals/{kind}");
     let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", &path, Vec::new(), "application/json"))).await;
@@ -103,14 +111,21 @@ pub async fn proposals_list(app: State<'_, App>, kind: String) -> R<Value> {
     Ok(json!({"proposals": merge(answers), "failed": failed}))
 }
 
-/// Removes a proposal from every relay that holds it (`ids`: relay → its id there).
+/// Removes a proposal from every relay that holds it (`ids`: relay → its id there). While someone
+/// is signed in, with their session key (not the vault's): the relay's `proposal-delete` record then
+/// names the key holder who published it and whether they proposed it themselves (`same_person`).
 #[tauri::command]
 pub async fn proposal_delete(app: State<'_, App>, kind: String, ids: BTreeMap<String, String>) -> R<Vec<RelayResult>> {
-    kind_ok(&kind)?;
+    delete(&app, &kind, &ids, crate::oidc::signed_in()).await
+}
+
+pub(crate) async fn delete(app: &App, kind: &str, ids: &BTreeMap<String, String>, signed_in: bool) -> R<Vec<RelayResult>> {
+    kind_ok(kind)?;
+    let key = if signed_in { crate::signin::SESSION_KEY.clone() } else { app.request_key()? };
     let servers = app.servers();
     let todo: Vec<(&String, &String)> = ids.iter().filter(|(r, id)| servers.contains(r) && id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit())).collect();
     let paths: Vec<String> = todo.iter().map(|(_, id)| format!("/api/admin/proposals/{kind}/{id}")).collect();
-    let got = futures_util::future::join_all(todo.iter().zip(&paths).map(|((sv, _), p)| app.call_on(sv, "DELETE", p, Vec::new(), "application/json"))).await;
+    let got = futures_util::future::join_all(todo.iter().zip(&paths).map(|((sv, _), p)| crate::api::admin(sv, &key, "DELETE", p, Vec::new(), "application/json"))).await;
     Ok(todo.iter().zip(got).map(|((sv, _), r)| RelayResult::of(sv, r.map(|_| Value::Null))).collect())
 }
 

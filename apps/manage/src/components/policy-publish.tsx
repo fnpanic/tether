@@ -99,6 +99,8 @@ export function PolicyPublish({ onClose }: { onClose: () => void }) {
   const { draft, setDraft, changes, live, state, reloadLive, go, reviewing, setReviewing } = useApp();
   const [serial, setSerial] = useState<number | null>(null);
   const missing = live?.unconfigured ?? [];
+  const mustTick = changes.some((c) => c.confirm);
+  const [ticked, setTicked] = useState(false);
 
   const run = async (skip: string[]) => {
     const r = await api.publish(draft, skip);
@@ -117,6 +119,7 @@ export function PolicyPublish({ onClose }: { onClose: () => void }) {
     <PublishSheet
       title="Publish policy"
       action="Publish"
+      blocked={mustTick && !ticked}
       run={run}
       onClose={onClose}
       after={() => serial != null && <Adoption serial={serial} />}
@@ -147,6 +150,12 @@ export function PolicyPublish({ onClose }: { onClose: () => void }) {
         {changes.length} change{changes.length === 1 ? "" : "s"} compared with the live policy{live?.serial != null ? ` (serial ${live.serial})` : ""}:
       </p>
       <ChangeList changes={changes} />
+      {mustTick && (
+        <label className="mt-3 flex items-start gap-2 text-caption font-semibold text-warn">
+          <input type="checkbox" className="mt-0.5" checked={ticked} onChange={(e) => setTicked(e.target.checked)} />
+          I checked the relay servers above: the devices of this policy connect through them.
+        </label>
+      )}
     </PublishSheet>
   );
 }

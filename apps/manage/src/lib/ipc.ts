@@ -116,6 +116,10 @@ export interface Change {
   from: string | null;
   to: string | null;
   text: string;
+  /** Security-relevant (live.rs `risky`): listed first, shown as a warning. */
+  risk?: boolean;
+  /** Where devices connect: an explicit tick before publishing. */
+  confirm?: boolean;
 }
 
 export const PROFILES = ["technician", "customer"] as const;

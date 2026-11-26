@@ -258,7 +258,7 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
     team_check: () => (a.doc.oidc_only && !a.doc.oidc ? (() => { throw new Error("oidc_only needs the oidc part (people sign in with it)"); })() : null),
     team_activity: () => ({
       records: activity.filter((r) => (!a.filter?.actor || r.actor?.name.includes(a.filter.actor)) && (!a.filter?.event || r.event === a.filter.event)),
-      relays: servers.map((s) => ({ server: s, ok: true, head: "ab".repeat(32), more: false, broken: s === R2 && new URLSearchParams(location.search).has("rewritten"), warnings: s === R2 && new URLSearchParams(location.search).has("rewritten") ? [`${s}: the log no longer continues from the point this PC last read (5d41402abc4b…): records were removed or rewritten since. Compare with a copy kept elsewhere (the relay's journal), then accept the new state.`] : [] })),
+      relays: servers.map((s) => ({ server: s, ok: true, head: "ab".repeat(32), more: false, broken: s === R2 && new URLSearchParams(location.search).has("rewritten"), chain: s === R2 && new URLSearchParams(location.search).has("rewritten") ? "broken" : "ok", warnings: s === R2 && new URLSearchParams(location.search).has("rewritten") ? [`${s}: the log no longer continues from the point this PC last read (5d41402abc4b…): records were removed or rewritten since. Compare with a copy kept elsewhere (the relay's journal), then accept the new state.`] : [] })),
     }),
     team_activity_accept: () => null,
     audit_export: () => null,
@@ -337,6 +337,7 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       { kind: "technician", platform: "darwin-universal", version: "0.5.1", file: "dist/macos/Tether_0.5.1_universal.app.tar.gz", published: "0.4.0", newer: true, problem: null },
       { kind: "technician", platform: "windows-x86_64", version: "0.5.1", file: "dist/windows/Tether_0.5.1_x64-setup.exe", published: "0.4.0", newer: true, problem: null },
     ],
+    file_hashes: () => (a.paths as string[]).map((p) => ({ name: p.split(/[\\/]/).pop(), sha256: "ab".repeat(32) })),
     release_publish: () => {
       if (uploading) {
         const p = (dir: string, server: string, file: string, sent: number, total: number, done = false) => ({ dir, version: "0.5.1", server, file, sent, total, done, error: null });
