@@ -17,6 +17,9 @@ rsync -a --delete "$SRC/server/patched/" "$OUT/rustdesk-server/patched/"
 mkdir -p "$OUT/server" "$OUT/crates"
 rsync -a --delete --exclude target "$SRC/server/api/" "$OUT/server/api/"
 rsync -a --delete --exclude target "$SRC/crates/tether-trust/" "$OUT/crates/tether-trust/"
+# The mock OpenID provider: a dev-dependency of tether-api (tests/session.rs).
+mkdir -p "$OUT/tools"
+rsync -a --delete --exclude target "$SRC/tools/oidc-mock/" "$OUT/tools/oidc-mock/"
 (cd "$OUT/rustdesk-server" && cargo build --release --target $T --bin hbbs --bin hbbr --bin relay-harness --bin tether-load)
 (cd "$OUT/server/api" && cargo build --release --target $T)
 for b in hbbs hbbr relay-harness tether-load; do install -m 0755 "$OUT/rustdesk-server/target/$T/release/$b" "$OUT/bin/"; done

@@ -451,8 +451,8 @@ fn kid_picks_one_key() {
 }
 
 #[test]
-fn oidc_only_is_refused_until_this_relay_serves_sign_in() {
-    // Today it would lock out every person (only service keys stay): refused, and it needs oidc.
+fn oidc_only_needs_oidc_and_leaves_keys_to_service_entries() {
+    // People sign in (tests/session.rs); only service keys stay. It needs the oidc part.
     let admin = generate_key();
     let s = start(&admin);
     let (anna, svc) = (generate_key(), generate_key());
@@ -460,10 +460,11 @@ fn oidc_only_is_refused_until_this_relay_serves_sign_in() {
     let r = s.publish(&admin, &team_doc(&admin, 1, members.clone(), json!({"oidc_only": true})));
     assert_eq!((r.status, r.text().contains("oidc_only needs the oidc part")), (400, true), "{}", r.text());
     let oidc = json!({"issuer": "https://login.example.com/t/v2.0", "tenant": "t", "audience": "api://tether", "client_id": "c", "scope": "api://tether/access"});
-    let r = s.publish(&admin, &team_doc(&admin, 1, members.clone(), json!({"oidc_only": true, "oidc": oidc})));
-    assert_eq!((r.status, r.text()), (400, "oidc_only needs sign-in support on this relay".into()));
-    assert!(!s.dir.join("team/team.json").exists());
-    assert_eq!(s.publish(&admin, &team_doc(&admin, 1, members, json!({"oidc_only": false, "oidc": oidc}))).status, 204);
+    assert_eq!(s.publish(&admin, &team_doc(&admin, 1, members.clone(), json!({"oidc_only": true, "oidc": oidc}))).status, 204);
+    assert_eq!(s.get(&anna, "/api/team/me").status, 401);
+    assert_eq!(s.me_kid(&anna, &kid(&anna)).status, 401);
+    assert_eq!(s.get(&svc, "/api/team/me").status, 200);
+    assert_eq!(s.publish(&admin, &team_doc(&admin, 2, members, json!({"oidc_only": false, "oidc": oidc}))).status, 204);
     assert_eq!(s.get(&anna, "/api/team/me").status, 200);
 }
 

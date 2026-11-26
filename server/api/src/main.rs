@@ -13,6 +13,7 @@
 mod audit;
 mod maczip;
 mod metrics;
+mod oidc;
 mod prune;
 mod status;
 mod team;
@@ -697,7 +698,7 @@ fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
         read_request_body(app, &mut rq, data).map(|mut body| {
             // A member signature is checked before the lock (up to 2000 keys without `kid`).
             let verified = team::member_verify(app, &rq, &body);
-            let (r, later, nonce, pending) = {
+            let (r, later, nonce, pending, sessions) = {
                 let mut a = lock(app);
                 let held = Instant::now();
                 let used = a.nonces_used;
@@ -705,12 +706,15 @@ fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
                 let r = a.route(&mut rq, &mut body);
                 a.team.verified = None;
                 let pending = a.audit_pending.take().map(|rec| (a.team_audit.clone(), rec));
-                let out = (r, a.later.take(), a.nonces_used != used, pending);
+                let out = (r, a.later.take(), a.nonces_used != used, pending, std::mem::take(&mut a.team.sessions_dirty));
                 traced(|| format!("{} {}", rq.method(), rq.url().split('?').next().unwrap_or("")), held.elapsed());
                 out
             };
             if nonce {
                 persist_nonces(app);
+            }
+            if sessions {
+                team::persist_sessions(app);
             }
             let resp = match (r, later) {
                 (Ok(_), Some(f)) => f(app),
@@ -1194,7 +1198,7 @@ impl App {
 
     /// The team audit record of an admin request that reads or changes a device's data.
     fn audit_admin(&mut self, rq: &Request, key: usize, method: &str, url: &str, rest: &str, body: &[u8]) {
-        let actor = teamaudit::Actor { key_fingerprint: tether_trust::team::key_id(&self.keys[key]), name: "admin".into() };
+        let actor = teamaudit::Actor { key_fingerprint: tether_trust::team::key_id(&self.keys[key]), name: "admin".into(), oid: None, upn: None };
         if (method, rest) == ("GET", "status/devices") {
             self.audit_pending = self.team.reads.read("status-device-list", actor, Some(client_ip(rq)), now());
             return;
@@ -2079,6 +2083,8 @@ fn main() {
     let (audit_days, audit_max) = (env_num("AUDIT_RETENTION_DAYS", 90), env_num("AUDIT_MAX_MB", 50).saturating_mul(1 << 20));
     // The team audit log (teamaudit.rs): TEAM_AUDIT_RETENTION_DAYS (90), TEAM_AUDIT_MAX_MB (2048).
     let team_audit = (env_num("TEAM_AUDIT_RETENTION_DAYS", 90), env_num("TEAM_AUDIT_MAX_MB", 2048).saturating_mul(1 << 20));
+    // Staff sign-in sessions last at most this long (1 to 1440 minutes; default 60), whatever the token says.
+    let _ = team::SESSION_MAX_MINUTES.set(env_num("TEAM_SESSION_MAX_MINUTES", 60).clamp(1, 1440));
     status::set_conf(status::Conf {
         off: std::env::var("STATUS").is_ok_and(|v| v.trim() == "off"),
         rps: env_num("STATUS_TARGET_RPS", 10).max(1),

@@ -12,22 +12,101 @@
 //!
 //! Member requests that read or change a device's data leave a team audit record (`audited`,
 //! teamaudit.rs), and `POST /api/team/audit-event` takes the desktop's own events.
+//!
+//! Staff sign-in (design 12.3 (b)): with an `oidc` part in the document, any key may present an
+//! access token of that provider in `POST /api/team/session`, signed with that key (the token is
+//! the authorisation, the signature the proof of possession). The relay checks the token
+//! (oidc.rs, before the state lock), maps its roles through the document's `roles` table and
+//! binds the person to the key until min(token `exp`, `TEAM_SESSION_MAX_MINUTES`), in
+//! `team/sessions.json`. A key with a live session is that person on every member route (also a
+//! key that is on the roster: the session wins while it lasts); its permissions are recomputed
+//! from the document in force on every request. `oidc_only`: roster keys only for `service` entries.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tether_trust::team::{self, OpenError, Permissions, Roster, Upload};
+use tether_trust::team::{self, Grants, Oidc, OpenError, Permissions, Roster, Upload};
 use tether_trust::{reqauth, VerifyingKey};
 use tiny_http::Request;
 
+use crate::oidc::{self, Claims, Reason};
 use crate::teamaudit::{self, Actor, Rec, Target};
 use crate::{audit, empty, hdr, header, json, load_json, lock, mkdirs, now, rate_ok, text, App, Body, Resp, LIMIT_SMALL};
+
+/// `POST /api/team/session`: the token (at most `oidc::TOKEN_MAX`) and the key.
+const LIMIT_SESSION: u64 = 32 << 10;
+/// Sessions kept (live, and expired ones for a day to answer "session expired"); a person's keys
+/// at most `SESSIONS_PER_PERSON` (a new one replaces the oldest); tokens remembered until they
+/// expire (one token binds one key) at most `TOKENS_MAX`. Full: `503 too-many-sessions`.
+const SESSIONS_MAX: usize = 5000;
+const SESSIONS_PER_PERSON: usize = 8;
+const TOKENS_MAX: usize = 20_000;
+const EXPIRED_KEEP: u64 = 86_400;
+/// `team/sessions.json` larger than this is not read (it is written by this relay alone).
+const SESSIONS_FILE_MAX: u64 = 16 << 20;
+/// Whose session expired gets this (the desktop signs in again).
+pub const SESSION_EXPIRED: &str = "session expired: sign in again";
+/// `TEAM_SESSION_MAX_MINUTES` (default 60): the longest session, whatever the token's lifetime.
+pub static SESSION_MAX_MINUTES: OnceLock<u64> = OnceLock::new();
+
+fn session_max_secs() -> u64 {
+    SESSION_MAX_MINUTES.get().copied().unwrap_or(60) * 60
+}
+
+/// What the document in force says about sign-in.
+pub(crate) struct SignIn {
+    oidc: Oidc,
+    roles: BTreeMap<String, Grants>,
+    deny: HashSet<String>,
+}
+
+/// A person signed in with a key (`team/sessions.json`).
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Session {
+    kid: String,
+    /// Standard base64 of the key (the rate limit's key, as for roster members).
+    key: String,
+    oid: String,
+    name: String,
+    upn: String,
+    /// The token's roles that the table had when it signed in (permissions come from the
+    /// document in force, request by request).
+    roles: Vec<String>,
+    uti: String,
+    exp: u64,
+    since: u64,
+}
+
+impl Session {
+    fn actor(&self) -> Actor {
+        Actor { key_fingerprint: self.kid.clone(), name: self.name.clone(), oid: Some(self.oid.clone()), upn: Some(self.upn.clone()).filter(|u| !u.is_empty()) }
+    }
+}
+
+/// A token bound to a key until it expires.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Bound {
+    uti: String,
+    kid: String,
+    exp: u64,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SessionFile {
+    /// The provider they were made with: another one in the document ends them all.
+    oidc: Option<Oidc>,
+    sessions: Vec<Session>,
+    tokens: Vec<Bound>,
+}
 
 pub const LIMIT_ROSTER: u64 = 64 << 10;
 /// `PUT /api/admin/team`: a signed upload; a plain roster stays at `LIMIT_ROSTER`.
@@ -103,9 +182,6 @@ impl Drop for Slot {
         self.0.freed.notify_all();
     }
 }
-/// `oidc_only` locks out every member key but the service ones: refused until this relay serves
-/// sign-in sessions (`POST /api/team/session`, a later task sets this).
-const OIDC_SESSIONS: bool = false;
 const AUDIT_DEFAULT: usize = 200;
 const AUDIT_MAX: usize = 500;
 
@@ -148,11 +224,30 @@ pub(crate) struct Members {
     kids: HashMap<String, usize>,
 }
 
-/// What [`member_verify`] found, before the state lock: the snapshot, the index of the key that
-/// signed and the nonce (still to be checked for replay), or why not.
+/// What [`member_verify`] found, before the state lock: who signed and the nonce (still to be
+/// checked for replay), or why not.
 pub(crate) struct Verified {
-    r: Result<(Arc<Members>, usize, String), Refused>,
+    r: Result<Signer, Refused>,
     t: u64,
+}
+
+enum Signer {
+    /// A roster or document key: the snapshot it was checked on and its index there.
+    Key(Arc<Members>, usize, String),
+    /// A key with a session (live or not when it was looked up): its kid and key.
+    Session(String, VerifyingKey, String),
+    /// `POST /api/team/session`, signed by the key in its body.
+    SignIn(Box<SignInCheck>),
+}
+
+/// A sign-in as checked before the lock: the key, and the token against the provider of `cfg`
+/// (the document in force then; `None`: none had `oidc`).
+struct SignInCheck {
+    kid: String,
+    key: VerifyingKey,
+    nonce: String,
+    cfg: Option<Oidc>,
+    token: Result<Claims, Reason>,
 }
 
 enum Refused {
@@ -162,6 +257,25 @@ enum Refused {
     Busy,
     /// Not a member's valid signature (`401` with this text, counts as a failure).
     Auth(String),
+    /// A sign-in body that is not `{"access_token","key"}` (`400`).
+    Bad(String),
+}
+
+/// Who a member request is from, as the handlers see it.
+struct Caller {
+    name: String,
+    /// Standard base64 of the key (rate limits).
+    key: String,
+    perms: Permissions,
+    service: bool,
+    actor: Actor,
+    /// Signed in: the session (its kid); `None`: a roster or document key.
+    session: Option<String>,
+}
+
+enum Authed {
+    Member(Caller),
+    SignIn(Box<SignInCheck>),
 }
 
 /// The signed team document in force.
@@ -190,6 +304,13 @@ pub struct Team {
     limit_noted: HashMap<String, u64>,
     /// `signature-limit` records relay-wide: (minute start, written in it, not written since the last one).
     limit_records: (u64, u32, u64),
+    /// Sign-in (the document's `oidc`, roles, deny list); `None`: no sign-in on this relay.
+    signin: Option<Arc<SignIn>>,
+    /// Sessions by key id; tokens bound to a key by `uti`.
+    sessions: HashMap<String, Session>,
+    tokens: HashMap<String, Bound>,
+    /// `team/sessions.json` is to be written before the answer ([`persist_sessions`]).
+    pub(crate) sessions_dirty: bool,
 }
 
 /// `signature-limit` records (and journal lines) per minute, relay-wide: many source addresses
@@ -208,7 +329,10 @@ impl Team {
         let mut t = Team { tags: load_json(&data.join("team/tags.json")), ..Default::default() };
         match fs::read(data.join("team/team.json")) {
             Ok(raw) => match open_stored(&raw) {
-                Ok((d, keys)) => t.set_doc(&d, keys, &raw),
+                Ok((d, keys)) => {
+                    t.set_doc(&d, keys, &raw);
+                    t.load_sessions(data);
+                }
                 Err(e) => {
                     eprintln!("error: team/team.json: {e}; no team member is accepted until a signed team document is published again");
                     t.doc = Some(Doc { serial: 0, config: None });
@@ -240,8 +364,15 @@ impl Team {
         self.roster = roster;
     }
 
-    /// With `oidc_only`, only service entries keep their keys.
-    fn set_doc(&mut self, d: &team::TeamDoc, keys: Vec<VerifyingKey>, raw: &[u8]) {
+    /// With `oidc_only`, only service entries keep their keys. Sessions the new document no
+    /// longer allows end here (returned with why, for the audit log): every one when the provider
+    /// changed or sign-in is gone (`document-changed`), a denied person's (`deny-list`), one left
+    /// without a mapped role (`no-role`).
+    fn set_doc(&mut self, d: &team::TeamDoc, keys: Vec<VerifyingKey>, raw: &[u8]) -> Vec<(Session, &'static str)> {
+        let old = self.signin.as_ref().map(|s| s.oidc.clone());
+        self.signin = d.oidc.clone().map(|oidc| Arc::new(SignIn { oidc, roles: d.roles.clone(), deny: d.deny.iter().cloned().collect() }));
+        let changed = old.is_some() && old != d.oidc;
+        let ended = self.end_sessions(changed);
         let (members, keys) = d
             .members
             .iter()
@@ -253,6 +384,54 @@ impl Team {
         let config = serde_json::from_slice::<Upload>(raw).ok().and_then(|u| u.config).and_then(|c| serde_json::to_vec(&c).ok());
         self.roster = Roster::default();
         self.doc = Some(Doc { serial: d.serial, config });
+        ended
+    }
+
+    /// Ends the sessions the document in force does not allow (all with `all`); the live ones
+    /// ended are returned with why, expired ones go silently.
+    fn end_sessions(&mut self, all: bool) -> Vec<(Session, &'static str)> {
+        let (t, si, mut ended) = (now(), self.signin.clone(), Vec::new());
+        self.sessions.retain(|_, s| {
+            let why = match &si {
+                _ if all => Some("document-changed"),
+                None => Some("document-changed"),
+                Some(si) if si.deny.contains(&s.oid) => Some("deny-list"),
+                Some(si) if oidc::permissions(&s.roles, &si.roles).is_none() => Some("no-role"),
+                _ => None,
+            };
+            if let Some(w) = why.filter(|_| s.exp > t) {
+                ended.push((s.clone(), w));
+            }
+            why.is_none()
+        });
+        self.sessions_dirty |= !ended.is_empty();
+        ended
+    }
+
+    /// `team/sessions.json` as the last run left it: expired tokens and long-expired sessions
+    /// dropped, and what the document in force does not allow.
+    fn load_sessions(&mut self, data: &Path) {
+        let p = data.join("team/sessions.json");
+        if fs::metadata(&p).is_ok_and(|m| m.len() > SESSIONS_FILE_MAX) {
+            eprintln!("error: team/sessions.json is too large; no session is kept");
+            return;
+        }
+        let f: SessionFile = load_json(&p);
+        let t = now();
+        if f.oidc.is_some() && f.oidc != self.signin.as_ref().map(|s| s.oidc.clone()) {
+            eprintln!("team: the sessions in team/sessions.json were made with another provider; none is kept");
+            return;
+        }
+        for s in f.sessions.into_iter().filter(|s| s.exp + EXPIRED_KEEP > t && tether_trust::key_from_b64(&s.key).is_ok_and(|k| team::key_id(&k) == s.kid)).take(SESSIONS_MAX) {
+            self.sessions.insert(s.kid.clone(), s);
+        }
+        for b in f.tokens.into_iter().filter(|b| b.exp + oidc::SKEW > t).take(TOKENS_MAX) {
+            self.tokens.insert(b.uti.clone(), b);
+        }
+        for (s, why) in self.end_sessions(false) {
+            eprintln!("team: session of {} ({}) ended at start: {why}", s.oid, s.kid);
+        }
+        self.sessions_dirty = false;
     }
 
     /// A signed team document is in force (one that could not be read has no members).
@@ -265,6 +444,9 @@ impl Team {
         self.fail_hits.retain(|_, (start, _)| t < *start + 60);
         self.posted_hits.retain(|_, (start, _)| t < *start + 60);
         self.limit_noted.retain(|_, at| t < *at + 60);
+        // In memory only: a restart drops them from the file the same way.
+        self.sessions.retain(|_, s| s.exp + EXPIRED_KEEP > t);
+        self.tokens.retain(|_, b| b.exp + oidc::SKEW > t);
     }
 
     /// Whether a `signature-limit` record may be written at `t` (relay-wide cap), and how many were
@@ -322,8 +504,9 @@ impl App {
             OpenError::Bad(e) => text(400, &e),
             OpenError::Untrusted(e) => text(401, &e),
         })?;
-        if d.oidc_only && !OIDC_SESSIONS {
-            return Err(text(400, "oidc_only needs sign-in support on this relay"));
+        // A provider this build may not trust (production: https and a public address only).
+        if let Some(o) = &d.oidc {
+            oidc::issuer_ok(&o.issuer).map_err(|e| text(400, &e))?;
         }
         if self.team.doc.as_ref().is_some_and(|c| d.serial <= c.serial) {
             return Err(text(409, "serial must be greater than the current team document's"));
@@ -336,8 +519,12 @@ impl App {
                 eprintln!("warning: team/roster.json: {e}");
             }
         }
-        self.team.set_doc(&d, keys, body);
+        let ended = self.team.set_doc(&d, keys, body);
         eprintln!("team: signed team document {} accepted ({} members, {} with a key here)", d.serial, d.members.len(), self.team.members.who.len());
+        for (s, why) in ended {
+            eprintln!("team: session of {} ({}) ended: {why}", s.oid, s.kid);
+            self.team_audit.submit(Rec::new("session-ended", Some(s.actor()), None, Target::default(), serde_json::json!({"reason": why, "serial": d.serial})));
+        }
         Ok(empty(204))
     }
 
@@ -365,14 +552,16 @@ impl App {
     pub(crate) fn team_route(&mut self, rq: &Request, body: &Body, method: &str, url: &str, rest: &str) -> Result<Resp, Resp> {
         let limit = route_limit(method, rest).ok_or_else(crate::not_found)?;
         let body = body.bytes(limit)?;
-        let i = self.member_auth(rq)?;
+        let caller = match self.member_auth(rq, (method, rest) == ("DELETE", "session"))? {
+            Authed::Member(c) => c,
+            Authed::SignIn(s) => return self.sign_in(rq, *s),
+        };
         let t = now();
-        if !rate_ok(&mut self.team.key_hits, self.team.members.who[i].key.clone(), t, KEY_PER_MIN) {
+        if !rate_ok(&mut self.team.key_hits, caller.key.clone(), t, KEY_PER_MIN) {
             return Err(text(429, "too many requests"));
         }
-        let Who { name, perms, service, key } = self.team.members.who[i].clone();
+        let Caller { name, perms, service, key, actor, session } = caller;
         let m = &perms;
-        let actor = Actor { key_fingerprint: team::key_id(&self.team.members.keys[i]), name: name.clone() };
         let ip = crate::client_ip(rq);
         if let ("GET", r @ ("status" | "devices")) = (method, rest) {
             self.audit_pending = self.team.reads.read(if r == "status" { "summary" } else { "device-list" }, actor.clone(), Some(ip.clone()), t);
@@ -388,6 +577,18 @@ impl App {
                 let (event, target, detail) = teamaudit::posted(body).map_err(|e| text(400, &e))?;
                 self.audit_pending = Some(Rec { self_reported: true, ..Rec::new(event, Some(actor), Some(ip), target, detail) });
                 Ok(empty(204))
+            }
+            // Sign-out: the key's session ends (a roster key has none: nothing to end).
+            ("DELETE", "session") => {
+                if let Some(s) = session.and_then(|k| self.team.sessions.remove(&k)) {
+                    self.team.sessions_dirty = true;
+                    self.audit_pending = Some(Rec::new("sign-out", Some(s.actor()), Some(ip), Target::default(), Value::Null));
+                }
+                Ok(empty(204))
+            }
+            ("GET", "me") if session.is_some() => {
+                let s = session.and_then(|k| self.team.sessions.get(&k)).ok_or_else(|| text(401, SESSION_EXPIRED))?;
+                Ok(json(&session_answer(s, m)))
             }
             // The plain roster's answer stays as it was; with a signed document every permission.
             ("GET", "me") if self.team.doc.is_none() => Ok(json(&serde_json::json!({"name": name, "write": m.write, "audit": m.audit}))),
@@ -461,41 +662,147 @@ impl App {
         }
     }
 
-    /// Index (in the current members) of the member whose key signed the request, from this
-    /// request's [`member_verify`]: here, under the lock, only the replay check and whether that
-    /// key is still a member (a document may have replaced the snapshot it was checked on).
-    fn member_auth(&mut self, rq: &Request) -> Result<usize, Resp> {
+    /// Who signed the request, from this request's [`member_verify`]: here, under the lock, the
+    /// replay check and whether the key is still a member now (a document may have replaced the
+    /// snapshot it was checked on, a session may have ended or expired). A key with a live session
+    /// is that person; without one, its roster entry if it has one (with `oidc_only` only service
+    /// entries are there); a session that ended long ago or never existed: `not a team member`,
+    /// one that expired: [`SESSION_EXPIRED`] (not counted as a failure). `sign_out`: an expired
+    /// session may still be ended.
+    fn member_auth(&mut self, rq: &Request, sign_out: bool) -> Result<Authed, Resp> {
         let ip = crate::rate_ip(rq);
         let Verified { r, t } = self.team.verified.take().ok_or_else(|| crate::internal("member signature not checked"))?;
-        let r = match r {
+        let fail = |a: &mut App, e: &str| {
+            rate_ok(&mut a.team.fail_hits, ip.clone(), t, u32::MAX);
+            text(401, e)
+        };
+        let signer = match r {
             Err(Refused::Limited) => return Err(text(429, "too many failed requests")),
             // Not a failed signature (none was checked): several old desktops behind one address
             // must not lock it out. The waiter bound of `NO_KID` limits what they hold.
             Err(Refused::Busy) => return Err(text(429, "busy").with_header(hdr("Retry-After", "1"))),
-            Err(Refused::Auth(e)) => Err(e),
-            Ok((snap, i, nonce)) => {
-                let cur = &self.team.members;
-                let i = if Arc::ptr_eq(&snap, cur) { Some(i) } else { cur.keys.iter().position(|k| *k == snap.keys[i]) };
+            Err(Refused::Bad(e)) => return Err(text(400, &e)),
+            Err(Refused::Auth(e)) => return Err(fail(self, &e)),
+            Ok(s) => s,
+        };
+        let nonce = match &signer {
+            Signer::Key(_, _, n) | Signer::Session(_, _, n) => n.clone(),
+            Signer::SignIn(s) => s.nonce.clone(),
+        };
+        if self.nonces.contains_key(&nonce) {
+            return Err(fail(self, "replayed request"));
+        }
+        self.nonces.insert(nonce, t);
+        self.nonce_used();
+        let roster = |a: &App, key: &VerifyingKey| {
+            let i = a.team.members.keys.iter().position(|k| k == key)?;
+            let w = &a.team.members.who[i];
+            Some(Caller { name: w.name.clone(), key: w.key.clone(), perms: w.perms.clone(), service: w.service, actor: Actor { key_fingerprint: team::key_id(key), name: w.name.clone(), oid: None, upn: None }, session: None })
+        };
+        match signer {
+            Signer::SignIn(s) => Ok(Authed::SignIn(s)),
+            Signer::Key(snap, i, _) => {
+                // Checked on the snapshot; the same key in the members now (a document may have come).
+                let key = snap.keys[i];
+                let i = if Arc::ptr_eq(&snap, &self.team.members) { Some(i) } else { self.team.members.keys.iter().position(|k| *k == key) };
                 match i {
-                    None => Err("not a team member".to_owned()),
-                    Some(_) if self.nonces.contains_key(&nonce) => Err("replayed request".to_owned()),
-                    Some(i) => {
-                        self.nonces.insert(nonce, t);
-                        Ok(i)
-                    }
+                    Some(_) => roster(self, &key).map(Authed::Member).ok_or_else(|| fail(self, "not a team member")),
+                    None => Err(fail(self, "not a team member")),
                 }
             }
-        };
-        match r {
-            Ok(i) => {
-                self.nonce_used();
-                Ok(i)
-            }
-            Err(e) => {
-                rate_ok(&mut self.team.fail_hits, ip, t, u32::MAX);
-                Err(text(401, &e))
+            Signer::Session(kid, key, _) => {
+                let s = self.team.sessions.get(&kid).filter(|s| tether_trust::key_from_b64(&s.key).is_ok_and(|k| k == key));
+                let perms = s.filter(|s| s.exp > t).and_then(|s| self.team.signin.as_ref().and_then(|si| oidc::permissions(&s.roles, &si.roles)));
+                match (s, perms) {
+                    (Some(s), Some(perms)) => Ok(Authed::Member(Caller { name: s.name.clone(), key: s.key.clone(), perms, service: false, actor: s.actor(), session: Some(kid) })),
+                    (Some(s), None) if sign_out => {
+                        let none = Permissions { write: false, audit: false, sbom: false, agent: false, customers: Vec::new() };
+                        Ok(Authed::Member(Caller { name: s.name.clone(), key: s.key.clone(), perms: none, service: false, actor: s.actor(), session: Some(kid) }))
+                    }
+                    (s, _) => match roster(self, &key) {
+                        Some(c) => Ok(Authed::Member(c)),
+                        None if s.is_some() => Err(text(401, SESSION_EXPIRED)),
+                        None => Err(fail(self, "not a team member")),
+                    },
+                }
             }
         }
+    }
+
+    /// `POST /api/team/session` after its signature: the token's check (made before the lock)
+    /// against the document in force now, the deny list, the role table, the token's key binding
+    /// and the bounds; then the session. Every outcome is one team audit record.
+    fn sign_in(&mut self, rq: &Request, s: SignInCheck) -> Result<Resp, Resp> {
+        let (t, ip, key) = (now(), crate::client_ip(rq), tether_trust::key_to_b64(&s.key));
+        if !rate_ok(&mut self.team.key_hits, key.clone(), t, KEY_PER_MIN) {
+            return Err(text(429, "too many requests"));
+        }
+        let unverified = Actor { key_fingerprint: s.kid.clone(), name: "-".into(), oid: None, upn: None };
+        match self.session_from(&s, key, t) {
+            Ok(sess) => {
+                let m = self.team.signin.as_ref().and_then(|si| oidc::permissions(&sess.roles, &si.roles)).ok_or_else(|| crate::internal("session without a role"))?;
+                let answer = session_answer(&sess, &m);
+                self.audit_pending = Some(Rec::new("sign-in", Some(sess.actor()), Some(ip), Target::default(), serde_json::json!({"roles": sess.roles, "exp": sess.exp})));
+                eprintln!("team: {} ({}) signed in with key {}", sess.oid, sess.upn, sess.kid);
+                self.team.sessions.insert(sess.kid.clone(), sess);
+                self.team.sessions_dirty = true;
+                Ok(json(&answer))
+            }
+            Err((reason, actor)) => {
+                // A token that does not check out counts as a failed signature does (per IP).
+                if reason.status() == 401 {
+                    rate_ok(&mut self.team.fail_hits, crate::rate_ip(rq), t, u32::MAX);
+                }
+                self.audit_pending = Some(Rec::new("sign-in-refused", Some(actor.unwrap_or(unverified)), Some(ip), Target::default(), serde_json::json!({"reason": reason.code()})));
+                Err(refusal(reason))
+            }
+        }
+    }
+
+    /// The session a checked sign-in gives, or why not (with the person when the token was
+    /// verified). Makes room: expired sessions and tokens go first, then a person's oldest key.
+    fn session_from(&mut self, s: &SignInCheck, key: String, t: u64) -> Result<Session, (Reason, Option<Actor>)> {
+        let si = self.team.signin.clone().ok_or((Reason::NotConfigured, None))?;
+        let c = s.token.clone().map_err(|r| (r, None))?;
+        if s.cfg.as_ref() != Some(&si.oidc) {
+            return Err((Reason::ConfigChanged, None));
+        }
+        let person = Actor { key_fingerprint: s.kid.clone(), name: c.name.clone(), oid: Some(c.oid.clone()), upn: Some(c.upn.clone()).filter(|u| !u.is_empty()) };
+        let no = |r| Err((r, Some(person.clone())));
+        if si.deny.contains(&c.oid) {
+            return no(Reason::Denied);
+        }
+        let roles: Vec<String> = c.roles.iter().filter(|r| si.roles.contains_key(*r)).cloned().collect();
+        if oidc::permissions(&roles, &si.roles).is_none() {
+            return no(Reason::NoRole);
+        }
+        if self.team.tokens.get(&c.uti).is_some_and(|b| b.kid != s.kid) {
+            return no(Reason::TokenUsed);
+        }
+        let exp = c.exp.min(t + session_max_secs());
+        // Within the clock skew after its `exp`: the token passed, but a session would be over.
+        if exp <= t {
+            return no(Reason::Expired);
+        }
+        let (sessions, tokens) = (&mut self.team.sessions, &mut self.team.tokens);
+        if !sessions.contains_key(&s.kid) && sessions.len() >= SESSIONS_MAX {
+            sessions.retain(|_, x| x.exp > t);
+        }
+        if !tokens.contains_key(&c.uti) && tokens.len() >= TOKENS_MAX {
+            tokens.retain(|_, b| b.exp + oidc::SKEW > t);
+        }
+        if (!sessions.contains_key(&s.kid) && sessions.len() >= SESSIONS_MAX) || (!tokens.contains_key(&c.uti) && tokens.len() >= TOKENS_MAX) {
+            return no(Reason::TooManySessions);
+        }
+        let mut mine: Vec<(u64, String)> = sessions.values().filter(|x| x.oid == c.oid && x.kid != s.kid && x.exp > t).map(|x| (x.since, x.kid.clone())).collect();
+        if mine.len() >= SESSIONS_PER_PERSON {
+            mine.sort_unstable();
+            for (_, k) in &mine[..mine.len() + 1 - SESSIONS_PER_PERSON] {
+                sessions.remove(k);
+            }
+        }
+        tokens.insert(c.uti.clone(), Bound { uti: c.uti.clone(), kid: s.kid.clone(), exp: c.exp });
+        Ok(Session { kid: s.kid.clone(), key, oid: c.oid, name: c.name, upn: c.upn, roles, uti: c.uti, exp, since: t })
     }
 
     /// The team audit record a member request leaves, before its handler runs (a removed device's
@@ -569,6 +876,8 @@ fn route_limit(method: &str, rest: &str) -> Option<u64> {
         ("GET", r) if r.starts_with("status/") => Some(LIMIT_SMALL),
         ("POST", r) if r.starts_with("status/") && (r.ends_with("/link") || r.ends_with("/allow-claim")) => Some(LIMIT_SMALL),
         ("POST", "audit-event") => Some(LIMIT_SMALL),
+        ("POST", "session") => Some(LIMIT_SESSION),
+        ("DELETE", "session") => Some(LIMIT_SMALL),
         ("DELETE", r) if r.starts_with("status/") => Some(LIMIT_SMALL),
         ("PUT", "tags") => Some(LIMIT_TAGS),
         _ => None,
@@ -586,7 +895,7 @@ pub(crate) fn member_verify(app: &Mutex<App>, rq: &Request, body: &Body) -> Opti
     let rest = url.split('?').next().unwrap_or("").strip_prefix("/api/team/")?;
     let body = body.bytes(route_limit(method, rest)?).ok()?;
     let (t, ip) = (now(), crate::rate_ip(rq));
-    let snap = {
+    let (snap, session, cfg) = {
         let mut a = lock(app);
         if a.team.fail_hits.get(&ip).is_some_and(|h| t < h.0 + 60 && h.1 >= FAIL_PER_MIN) {
             // Once per source and minute: the journal and the team audit log name the source and
@@ -605,10 +914,71 @@ pub(crate) fn member_verify(app: &Mutex<App>, rq: &Request, body: &Body) -> Opti
             }
             return Some(Verified { r: Err(Refused::Limited), t });
         }
-        a.team.members.clone()
+        // A key with a session (live or expired: the answer then says so) is checked with that key.
+        let kid = header(rq, reqauth::HEADER).and_then(|s| reqauth::header_kid(&s).map(str::to_owned));
+        let session = kid.and_then(|k| Some((tether_trust::key_from_b64(&a.team.sessions.get(&k)?.key).ok()?, k)));
+        (a.team.members.clone(), session, a.team.signin.as_ref().map(|s| s.oidc.clone()))
     };
-    let r = verify_on(&snap, rq, method, url, body, t).map(|(i, nonce)| (snap, i, nonce));
+    let r = match ((method, rest), session) {
+        (("POST", "session"), _) => sign_in_verify(rq, method, url, body, t, cfg).map(|s| Signer::SignIn(Box::new(s))),
+        (_, Some((key, kid))) => verify_key(&key, rq, method, url, body, t).map(|n| Signer::Session(kid, key, n)),
+        (_, None) => verify_on(&snap, rq, method, url, body, t).map(|(i, nonce)| Signer::Key(snap, i, nonce)),
+    };
     Some(Verified { r, t })
+}
+
+/// The nonce of a request signed with `key` (not yet checked for replay).
+fn verify_key(key: &VerifyingKey, rq: &Request, method: &str, url: &str, body: &[u8], t: u64) -> Result<String, Refused> {
+    let sig = header(rq, reqauth::HEADER).ok_or_else(|| Refused::Auth("missing signature".into()))?;
+    let mut nonce = String::new();
+    let seen = |n: &str| {
+        nonce = n.to_owned();
+        true
+    };
+    match reqauth::verify_request_for(&sig, key, crate::sig_relay(), method, url, &reqauth::body_digest(body), t, seen) {
+        Ok(()) => Ok(nonce),
+        Err(e) => Err(Refused::Auth(if e == "signature does not match" { "not a team member".into() } else { e })),
+    }
+}
+
+/// `POST /api/team/session` before the lock: a signature, a body `{"access_token","key"}` with
+/// `key` the key that signed it and `kid` naming that key, then the token against `cfg` (the
+/// provider of the document in force; this may fetch its keys, oidc.rs).
+fn sign_in_verify(rq: &Request, method: &str, url: &str, body: &[u8], t: u64, cfg: Option<Oidc>) -> Result<SignInCheck, Refused> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SignInBody {
+        access_token: String,
+        key: String,
+    }
+    let sig = header(rq, reqauth::HEADER).ok_or_else(|| Refused::Auth("missing signature".into()))?;
+    let b: SignInBody = serde_json::from_slice(body).map_err(|e| Refused::Bad(format!("expected {{\"access_token\",\"key\"}}: {e}")))?;
+    let key = tether_trust::key_from_b64(&b.key).map_err(|_| Refused::Bad("key: standard base64 of a 32-byte Ed25519 key".into()))?;
+    let kid = team::key_id(&key);
+    if reqauth::header_kid(&sig) != Some(kid.as_str()) {
+        return Err(Refused::Auth("kid must name the key in the body".into()));
+    }
+    let nonce = verify_key(&key, rq, method, url, body, t)?;
+    let token = match &cfg {
+        Some(c) => oidc::verify(&b.access_token, c, t),
+        None => Err(Reason::NotConfigured),
+    };
+    Ok(SignInCheck { kid, key, nonce, cfg, token })
+}
+
+/// A session as `POST /api/team/session` and `GET /api/team/me` answer it.
+fn session_answer(s: &Session, m: &Permissions) -> Value {
+    serde_json::json!({"name": s.name, "write": m.write, "audit": m.audit, "sbom": m.sbom, "agent": m.agent, "customers": m.customers, "service": false, "oid": s.oid, "upn": s.upn, "exp": s.exp, "roles": s.roles})
+}
+
+/// A refused sign-in: `{"reason","message"}` with the reason's status; `503` with `Retry-After`.
+fn refusal(r: Reason) -> Resp {
+    let body = serde_json::to_vec(&serde_json::json!({"reason": r.code(), "message": r.message()})).unwrap_or_default();
+    let mut resp = tiny_http::Response::from_data(body).with_status_code(r.status()).with_header(hdr("Content-Type", "application/json")).boxed();
+    if r.status() == 503 {
+        resp = resp.with_header(hdr("Retry-After", if r == Reason::ConfigChanged { "1" } else { "60" }));
+    }
+    resp
 }
 
 /// The index of the key in `m` that signed the request, and its nonce (not yet checked for replay).
@@ -642,6 +1012,38 @@ fn verify_on(m: &Members, rq: &Request, method: &str, url: &str, body: &[u8], t:
         }
     }
     Err(auth(if err == "signature does not match" { "not a team member" } else { &err }))
+}
+
+/// Serialises the writers of `team/sessions.json`; the snapshot is taken inside it, so an older one
+/// never replaces a newer file.
+static SESSION_FILE: Mutex<()> = Mutex::new(());
+
+/// Writes `team/sessions.json` (0600, synced, renamed) outside the state lock, before the answer
+/// that changed it goes out (a sign-out is durable when it is answered). A failed write is logged:
+/// the sessions stay right in memory.
+pub(crate) fn persist_sessions(app: &Mutex<App>) {
+    let _file = SESSION_FILE.lock().unwrap_or_else(|e| e.into_inner());
+    let (snap, data) = {
+        let a = lock(app);
+        let f = SessionFile { oidc: a.team.signin.as_ref().map(|s| s.oidc.clone()), sessions: a.team.sessions.values().cloned().collect(), tokens: a.team.tokens.values().cloned().collect() };
+        (f, a.data.clone())
+    };
+    let tmp = crate::tmp_path(&data);
+    let r = (|| {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let f = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut w = io::BufWriter::new(&f);
+        serde_json::to_writer(&mut w, &snap).map_err(io::Error::other)?;
+        w.flush()?;
+        drop(w);
+        f.sync_all()?;
+        fs::rename(&tmp, data.join("team/sessions.json"))
+    })();
+    if let Err(e) = r {
+        let _ = fs::remove_file(&tmp);
+        eprintln!("error: team/sessions.json: {e}");
+    }
 }
 
 #[cfg(test)]

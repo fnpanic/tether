@@ -15,11 +15,32 @@ libc = "0.2"
 sha2 = "0.10"
 # gzip copy of the team summary (written once per rebuild): pure-Rust deflate (miniz_oxide), no C code.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Staff sign-in (oidc.rs): discovery and JWKS over HTTPS (rustls, webpki roots; no gzip, no proxy
+# feature), the same ureq as the agent; RS256 checked with ring (already in that tree through
+# rustls); the issuer and jwks_uri parsed with url (in the tree through ureq); strict base64url.
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+ring = "0.17"
+url = "2"
+base64 = "0.22"
 
 [features]
-# Test-only settings (`TETHER_TEST_*`) in a release build, for scripts/test-relay.sh. Debug builds
-# have them anyway; a production build (`cargo build --release`, scripts/build-relay.sh) never.
+# Test-only settings (`TETHER_TEST_*`) and an identity provider on http:// loopback (the mock,
+# tests/session.rs) in a release build, for scripts/test-relay.sh. Debug builds have them anyway;
+# a production build (`cargo build --release`, scripts/build-relay.sh) never.
 test-hooks = []
+
+[dev-dependencies]
+# The mock OpenID provider (tests/session.rs), and RSA keys and tokens forged in oidc.rs's tests.
+oidc-mock = { path = "../../tools/oidc-mock" }
+rsa = { version = "0.9", features = ["sha2"] }
+rand_chacha = "0.3"
+rand_core = "0.6"
+
+# RSA key generation in tests takes seconds unoptimised.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3
 
 [profile.release]
 lto = true

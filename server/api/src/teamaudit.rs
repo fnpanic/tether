@@ -77,6 +77,12 @@ pub struct Actor {
     /// `tether_trust::team::key_id` of the key that signed the request.
     pub key_fingerprint: String,
     pub name: String,
+    /// A signed-in person (oidc.rs): object id and user name; absent for a roster key (and on
+    /// lines written before, so their hashes stay).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upn: Option<String>,
 }
 
 #[derive(Serialize, Default, Clone, Debug, PartialEq)]
@@ -645,7 +651,7 @@ impl Query {
         let any = |f: &Option<String>, a: &Value, b: &Value| f.as_deref().is_none_or(|f| a.as_str() == Some(f) || b.as_str() == Some(f));
         ts >= self.since
             && self.until.is_none_or(|u| ts <= u)
-            && any(&self.actor, &v["actor"]["name"], &v["actor"]["key_fingerprint"])
+            && (any(&self.actor, &v["actor"]["name"], &v["actor"]["key_fingerprint"]) || any(&self.actor, &v["actor"]["oid"], &v["actor"]["upn"]))
             && any(&self.device, &v["target"]["uuid"], &v["target"]["tether_id"])
             && is(&self.customer, &v["target"]["customer"])
             && is(&self.event, &v["event"])
@@ -828,7 +834,7 @@ mod tests {
     }
 
     fn rec(ts: u64, name: &str) -> Rec {
-        let actor = Actor { key_fingerprint: "0123456789abcdef".into(), name: name.into() };
+        let actor = Actor { key_fingerprint: "0123456789abcdef".into(), name: name.into(), oid: None, upn: None };
         Rec { ts, ..Rec::new("report", Some(actor), Some("192.0.2.1".into()), Target { uuid: Some("dev-0001".into()), tether_id: Some("123456789".into()), customer: Some("4711".into()) }, Value::Null) }.answered(200)
     }
 
@@ -1006,7 +1012,7 @@ mod tests {
     #[test]
     fn folded_reads_are_written_each_hour_with_their_count() {
         let mut f = Folded::default();
-        let actor = |n: &str| Actor { key_fingerprint: format!("{n:0>16}"), name: n.into() };
+        let actor = |n: &str| Actor { key_fingerprint: format!("{n:0>16}"), name: n.into(), oid: None, upn: None };
         let reads = |r: &Rec| r.detail["reads"].as_u64().unwrap();
         // The first read is recorded at once; the next ones of the hour are counted.
         assert_eq!(f.read("summary", actor("a"), None, T).map(|r| reads(&r)), Some(1));

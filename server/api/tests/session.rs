@@ -1,0 +1,583 @@
+//! Staff sign-in sessions end to end (`POST`/`DELETE /api/team/session`, design 12.2-12.5): the
+//! relay as a child process, the mock OpenID provider (`tools/oidc-mock`) in this process. Same
+//! harness as tests/team.rs.
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{json, Value};
+use tether_trust::{envelope, generate_key, key_to_b64, reqauth, team, SigningKey};
+
+static SEQ: AtomicU32 = AtomicU32::new(0);
+
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+}
+
+struct Srv {
+    child: Child,
+    addr: String,
+    dir: PathBuf,
+    journal: Arc<Mutex<String>>,
+}
+
+impl Drop for Srv {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+struct Reply {
+    status: u16,
+    body: Vec<u8>,
+}
+
+impl Reply {
+    fn json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap_or_else(|_| panic!("not JSON: {}", self.text()))
+    }
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+    /// A refusal's reason code.
+    fn reason(&self) -> String {
+        self.json()["reason"].as_str().unwrap_or_default().to_owned()
+    }
+}
+
+fn new_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("tether-api-session-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn spawn_in(dir: PathBuf, admin: &SigningKey, env: &[(&str, &str)]) -> Srv {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tether-api"));
+    cmd.args(["--data", dir.to_str().unwrap(), "--listen", "127.0.0.1:0"]).env("ADMIN_PUB_KEY", key_to_b64(&admin.verifying_key())).stdout(Stdio::piped()).stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().unwrap();
+    let journal = Arc::new(Mutex::new(String::new()));
+    let (err, j) = (child.stderr.take().unwrap(), journal.clone());
+    std::thread::spawn(move || {
+        for l in BufReader::new(err).lines().map_while(Result::ok) {
+            j.lock().unwrap().push_str(&(l + "\n"));
+        }
+    });
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let addr = line.trim().strip_prefix("listening on ").expect("listen line").to_owned();
+    Srv { child, addr, dir, journal }
+}
+
+fn restart(mut s: Srv, admin: &SigningKey, env: &[(&str, &str)]) -> Srv {
+    let _ = s.child.kill();
+    let _ = s.child.wait();
+    let dir = s.dir.clone();
+    std::mem::forget(s); // its Drop would remove the folder
+    spawn_in(dir, admin, env)
+}
+
+impl Srv {
+    fn req(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Reply {
+        let mut s = TcpStream::connect(&self.addr).unwrap();
+        let mut head = format!("{method} {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
+        for (k, v) in headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str("\r\n");
+        s.write_all(head.as_bytes()).unwrap();
+        let _ = s.write_all(body);
+        let mut raw = Vec::new();
+        let _ = s.read_to_end(&mut raw);
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("response head");
+        let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+        let status = head.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+        Reply { status, body: raw[split + 4..].to_vec() }
+    }
+
+    /// Signed with `key`, naming it with `kid` (as 0.7 desktops do) or not.
+    fn signed(&self, key: &SigningKey, kid: bool, method: &str, path: &str, body: &[u8]) -> Reply {
+        let mut sig = reqauth::sign_request(key, method, path, body, now());
+        if kid {
+            sig = format!("{sig} kid={}", team::key_id(&key.verifying_key()));
+        }
+        self.req(method, path, &[(reqauth::HEADER, &sig)], body)
+    }
+
+    fn me(&self, key: &SigningKey) -> Reply {
+        self.signed(key, true, "GET", "/api/team/me", b"")
+    }
+
+    fn sign_in(&self, key: &SigningKey, token: &str) -> Reply {
+        let body = json!({"access_token": token, "key": key_to_b64(&key.verifying_key())}).to_string();
+        self.signed(key, true, "POST", "/api/team/session", body.as_bytes())
+    }
+
+    fn sign_out(&self, key: &SigningKey) -> Reply {
+        self.signed(key, true, "DELETE", "/api/team/session", b"")
+    }
+
+    fn publish(&self, admin: &SigningKey, body: &[u8]) -> Reply {
+        self.signed(admin, false, "PUT", "/api/admin/team", body)
+    }
+
+    /// The team audit records of `event`.
+    fn records(&self, admin: &SigningKey, event: &str) -> Vec<Value> {
+        let r = self.signed(admin, false, "GET", &format!("/api/admin/team-audit?event={event}&limit=5000"), b"");
+        assert_eq!(r.status, 200, "{}", r.text());
+        r.json()["records"].as_array().unwrap().clone()
+    }
+
+    fn journal(&self) -> String {
+        self.journal.lock().unwrap().clone()
+    }
+}
+
+fn mock() -> oidc_mock::Mock {
+    oidc_mock::Mock::start(oidc_mock::Config { seed: Some(7), ..oidc_mock::Config::default() }, "127.0.0.1:0", false).unwrap()
+}
+
+fn oidc_of(m: &oidc_mock::Mock) -> Value {
+    let c = m.config();
+    json!({"issuer": m.issuer(), "tenant": c.tenant, "audience": c.audience, "client_id": c.client_id, "scope": c.scope})
+}
+
+fn roles() -> Value {
+    json!({
+        "Tether.Technician": {},
+        "Tether.Software": {"sbom": true},
+        "Tether.Technician.Write": {"write": true},
+        "Tether.SessionAudit": {"audit": true},
+        "Tether.Customer.4711": {"customers": ["4711"]},
+    })
+}
+
+/// The upload of a signed team document `{serial, members, …extra}` with its signed config.
+fn team_doc(admin: &SigningKey, serial: u64, members: Value, extra: Value) -> Vec<u8> {
+    let mut d = json!({"serial": serial, "members": members});
+    for (k, v) in extra.as_object().unwrap() {
+        d[k] = v.clone();
+    }
+    let mut up = json!({"team": envelope::sign(&serde_json::to_vec(&d).unwrap(), admin)});
+    if let Some(o) = d.get("oidc") {
+        up["config"] = json!(envelope::sign(&serde_json::to_vec(&json!({"serial": serial, "oidc": o})).unwrap(), admin));
+    }
+    serde_json::to_vec(&up).unwrap()
+}
+
+fn entry(name: &str, key: &SigningKey, extra: Value) -> Value {
+    let mut e = json!({"name": name, "key": key_to_b64(&key.verifying_key()), "sbom": true, "agent": true, "customers": ["*"]});
+    for (k, v) in extra.as_object().unwrap() {
+        e[k] = v.clone();
+    }
+    e
+}
+
+/// A relay with a document naming the mock as provider, the roles above and `members`.
+fn relay(m: &oidc_mock::Mock, members: Value, env: &[(&str, &str)]) -> (Srv, SigningKey) {
+    let admin = generate_key();
+    let s = spawn_in(new_dir(), &admin, env);
+    let r = s.publish(&admin, &team_doc(&admin, 1, members, json!({"oidc": oidc_of(m), "roles": roles()})));
+    assert_eq!(r.status, 204, "{}", r.text());
+    (s, admin)
+}
+
+fn oid(n: u8) -> String {
+    format!("00000000-0000-4000-8000-0000000000{n:02}")
+}
+
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+mod with_the_mock {
+    use super::*;
+
+    #[test]
+    fn a_token_with_roles_gives_a_session_with_their_permissions() {
+        let m = mock();
+        let (s, admin) = relay(&m, json!([]), &[]);
+        let k = generate_key();
+        assert_eq!(s.me(&k).status, 401, "no session yet: not a member");
+        let tok = m.token("software@tether.test", None).unwrap();
+        let r = s.sign_in(&k, &tok);
+        assert_eq!(r.status, 200, "{}", r.text());
+        let v = r.json();
+        let exp = v["exp"].as_u64().unwrap();
+        assert!(exp > now() + 3000 && exp <= now() + 3600, "{exp}");
+        assert_eq!(v, json!({"name": "Software Technician", "write": false, "audit": false, "sbom": true, "agent": false, "customers": ["*"], "service": false, "oid": oid(2), "upn": "software@tether.test", "exp": exp, "roles": ["Tether.Software", "Tether.Technician"]}));
+        // Every member request of that key now carries the person; `me` answers the same.
+        assert_eq!(s.me(&k).json(), v);
+        assert_eq!(s.signed(&k, true, "GET", "/api/team/devices", b"").status, 200);
+        assert_eq!(s.signed(&k, true, "PUT", "/api/team/tags", b"{}").status, 403, "no write");
+        // A session needs `kid` in the header (the key is found by it).
+        assert_eq!(s.signed(&k, false, "GET", "/api/team/me", b"").status, 401);
+        // The customer role scopes; a role not in the table gives nothing; no mapped role: refused.
+        let k2 = generate_key();
+        assert_eq!(s.sign_in(&k2, &m.token("customer@tether.test", None).unwrap()).json()["customers"], json!(["4711"]));
+        let k3 = generate_key();
+        let r = s.sign_in(&k3, &m.token("auditor@tether.test", None).unwrap());
+        assert_eq!((r.status, r.reason()), (403, "no-role".into()), "Tether.Manage.Auditor is not in the table");
+        let r = s.sign_in(&k3, &m.token("noroles@tether.test", None).unwrap());
+        assert_eq!((r.status, r.reason()), (403, "no-role".into()));
+        assert_eq!(s.me(&k3).status, 401);
+        // The audit log names the person and the key.
+        let rec = s.records(&admin, "sign-in");
+        assert_eq!(rec.len(), 2);
+        assert_eq!(rec[0]["actor"], json!({"key_fingerprint": team::key_id(&k.verifying_key()), "name": "Software Technician", "oid": oid(2), "upn": "software@tether.test"}));
+        assert_eq!((rec[0]["detail"]["roles"].clone(), rec[0]["result"].clone()), (json!(["Tether.Software", "Tether.Technician"]), json!(200)));
+        let dev = s.records(&admin, "device-list");
+        assert_eq!(dev[0]["actor"]["oid"], oid(2), "every member record names the person");
+        // Sign-out: the key is no member any more; recorded.
+        assert_eq!(s.sign_out(&k).status, 204);
+        assert_eq!(s.me(&k).status, 401);
+        assert_eq!(s.records(&admin, "sign-out")[0]["actor"]["oid"], oid(2));
+        assert_eq!(s.sign_out(&k).status, 401, "nothing left to sign out: not a member");
+    }
+
+    #[test]
+    fn the_request_must_be_signed_by_the_key_it_binds() {
+        let m = mock();
+        let (s, _admin) = relay(&m, json!([]), &[]);
+        let (k, other) = (generate_key(), generate_key());
+        let tok = m.token("technician@tether.test", None).unwrap();
+        let body = |key: &SigningKey| json!({"access_token": tok, "key": key_to_b64(&key.verifying_key())}).to_string();
+        // Signed by `other`, binding `k`: refused, whatever kid says.
+        let b = body(&k);
+        for kid in [team::key_id(&k.verifying_key()), team::key_id(&other.verifying_key())] {
+            let sig = format!("{} kid={kid}", reqauth::sign_request(&other, "POST", "/api/team/session", b.as_bytes(), now()));
+            assert_eq!(s.req("POST", "/api/team/session", &[(reqauth::HEADER, &sig)], b.as_bytes()).status, 401, "{kid}");
+        }
+        // Without kid, or unsigned: refused.
+        let sig = reqauth::sign_request(&k, "POST", "/api/team/session", b.as_bytes(), now());
+        assert_eq!(s.req("POST", "/api/team/session", &[(reqauth::HEADER, &sig)], b.as_bytes()).status, 401);
+        assert_eq!(s.req("POST", "/api/team/session", &[], b.as_bytes()).status, 401);
+        // Bad bodies.
+        for bad in [json!({"access_token": tok}).to_string(), json!({"access_token": tok, "key": "x"}).to_string(), json!({"access_token": tok, "key": key_to_b64(&k.verifying_key()), "more": 1}).to_string(), "[]".into()] {
+            assert_eq!(s.signed(&k, true, "POST", "/api/team/session", bad.as_bytes()).status, 400, "{bad}");
+        }
+        assert_eq!(s.sign_in(&k, &tok).status, 200);
+        // The same signed request again: a replay.
+        let sig = format!("{} kid={}", reqauth::sign_request(&k, "POST", "/api/team/session", b.as_bytes(), now()), team::key_id(&k.verifying_key()));
+        assert_eq!(s.req("POST", "/api/team/session", &[(reqauth::HEADER, &sig)], b.as_bytes()).status, 200);
+        assert_eq!(s.req("POST", "/api/team/session", &[(reqauth::HEADER, &sig)], b.as_bytes()).text(), "replayed request");
+    }
+
+    /// Every error shape of the mock is refused for its own reason, recorded without the token.
+    #[test]
+    fn every_token_shape_is_refused_with_its_reason_and_audited() {
+        let m = mock();
+        let (s, admin) = relay(&m, json!([]), &[]);
+        let k = generate_key();
+        assert_eq!(s.sign_in(&k, &m.token("technician@tether.test", None).unwrap()).status, 200, "the keys are fetched");
+        let shapes = [
+            ("expired", 401, "expired"),
+            ("not_yet_valid", 401, "not-yet-valid"),
+            ("wrong_aud", 401, "wrong-audience"),
+            ("aud_app_id_uri", 401, "wrong-audience"),
+            ("graph", 401, "wrong-audience"),
+            ("wrong_iss", 401, "wrong-issuer"),
+            ("wrong_tid", 401, "wrong-tenant"),
+            ("wrong_azp", 401, "wrong-client"),
+            ("wrong_ver", 401, "v1-token"),
+            ("v1", 401, "v1-token"),
+            ("overage", 401, "overage"),
+            ("hasgroups", 401, "overage"),
+            ("unknown_kid", 401, "unknown-kid"),
+            ("bad_signature", 401, "bad-signature"),
+        ];
+        let mut tokens = Vec::new();
+        for (shape, status, reason) in shapes {
+            let tok = m.token("technician@tether.test", Some(shape)).unwrap();
+            let r = s.sign_in(&generate_key(), &tok);
+            assert_eq!((r.status, r.reason()), (status, reason.to_owned()), "{shape}: {}", r.text());
+            assert!(!r.json()["message"].as_str().unwrap().is_empty());
+            tokens.push(tok);
+        }
+        let r = s.sign_in(&generate_key(), "not.a.token");
+        assert_eq!((r.status, r.reason()), (401, "malformed".into()));
+        assert!(s.sign_in(&generate_key(), "").reason() == "malformed");
+        // Each refusal one record with its reason and the key, nothing of the token.
+        let rec = s.records(&admin, "sign-in-refused");
+        let reasons: Vec<&str> = rec.iter().map(|r| r["detail"]["reason"].as_str().unwrap()).collect();
+        let want: Vec<&str> = shapes.iter().map(|x| x.2).chain(["malformed", "malformed"]).collect();
+        assert_eq!(reasons, want);
+        assert!(rec.iter().all(|r| r["actor"]["key_fingerprint"].as_str().is_some_and(|k| k.len() == 16) && r["actor"].get("oid").is_none()), "unverified claims are not recorded");
+        let log: String = std::fs::read_dir(s.dir.join("team-audit")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl")).map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
+        for t in &tokens {
+            for part in t.split('.') {
+                assert!(!log.contains(&part[..part.len().min(40)]), "a token part in the audit log");
+            }
+        }
+        assert!(!s.journal().contains(&tokens[0][..60]), "a token in the journal");
+    }
+
+    #[test]
+    fn a_token_binds_one_key() {
+        let m = mock();
+        let (s, _admin) = relay(&m, json!([]), &[]);
+        let (a, b) = (generate_key(), generate_key());
+        let tok = m.token("writer@tether.test", None).unwrap();
+        assert_eq!(s.sign_in(&a, &tok).status, 200);
+        assert_eq!(s.sign_in(&a, &tok).status, 200, "the same key again (a retry)");
+        let r = s.sign_in(&b, &tok);
+        assert_eq!((r.status, r.reason()), (409, "token-used".into()));
+        assert_eq!(s.me(&b).status, 401);
+        // Also after the first key signed out, and after a restart.
+        assert_eq!(s.sign_out(&a).status, 204);
+        assert_eq!(s.sign_in(&b, &tok).reason(), "token-used");
+        let admin = generate_key();
+        drop(admin);
+        // A fresh token for b works.
+        assert_eq!(s.sign_in(&b, &m.token("writer@tether.test", None).unwrap()).json()["write"], true);
+    }
+
+    /// The deny list refuses at sign-in and ends live sessions when the document arrives; a
+    /// document that leaves a session no mapped role, or changes the provider, ends it too.
+    #[test]
+    fn the_deny_list_and_a_new_document_end_sessions() {
+        let m = mock();
+        let (s, admin) = relay(&m, json!([]), &[]);
+        let (a, b, c) = (generate_key(), generate_key(), generate_key());
+        assert_eq!(s.sign_in(&a, &m.token("technician@tether.test", None).unwrap()).status, 200);
+        assert_eq!(s.sign_in(&b, &m.token("software@tether.test", None).unwrap()).status, 200);
+        assert_eq!(s.sign_in(&c, &m.token("writer@tether.test", None).unwrap()).status, 200);
+        assert_eq!(s.publish(&admin, &team_doc(&admin, 2, json!([]), json!({"oidc": oidc_of(&m), "roles": roles(), "deny": [oid(1)]}))).status, 204);
+        assert_eq!(s.me(&a).status, 401, "ended at once");
+        assert_eq!(s.me(&b).status, 200);
+        let r = s.sign_in(&a, &m.token("technician@tether.test", None).unwrap());
+        assert_eq!((r.status, r.reason()), (403, "denied".into()));
+        let ended = s.records(&admin, "session-ended");
+        assert_eq!((ended.len(), ended[0]["actor"]["oid"].clone(), ended[0]["detail"]["reason"].clone()), (1, json!(oid(1)), json!("deny-list")));
+        // Fewer rights on the next request; the software role gone from the table: b keeps
+        // Technician, c keeps write.
+        let mut r2 = roles();
+        r2.as_object_mut().unwrap().remove("Tether.Software");
+        assert_eq!(s.publish(&admin, &team_doc(&admin, 3, json!([]), json!({"oidc": oidc_of(&m), "roles": r2}))).status, 204);
+        assert_eq!(s.me(&b).json()["sbom"], false);
+        assert_eq!(s.me(&c).json()["write"], true);
+        // Only Technician.Write left: b has no mapped role any more.
+        let r3 = json!({"Tether.Technician.Write": {"write": true}});
+        assert_eq!(s.publish(&admin, &team_doc(&admin, 4, json!([]), json!({"oidc": oidc_of(&m), "roles": r3}))).status, 204);
+        assert_eq!(s.me(&b).status, 401);
+        assert_eq!(s.me(&c).status, 200);
+        // Another provider configuration: every session ends.
+        let mut o = oidc_of(&m);
+        o["client_id"] = json!("another-client");
+        assert_eq!(s.publish(&admin, &team_doc(&admin, 5, json!([]), json!({"oidc": o, "roles": roles()}))).status, 204);
+        assert_eq!(s.me(&c).status, 401);
+        let reasons: Vec<Value> = s.records(&admin, "session-ended").iter().map(|r| r["detail"]["reason"].clone()).collect();
+        assert_eq!(reasons, [json!("deny-list"), json!("no-role"), json!("document-changed")]);
+    }
+
+    #[test]
+    fn a_session_expires_with_its_token_or_the_relay_cap() {
+        let m = mock();
+        let roster = generate_key();
+        let (s, _admin) = relay(&m, json!([entry("Roster Anna", &roster, json!({}))]), &[]);
+        m.control("lifetime", json!({"seconds": 3})).unwrap();
+        let k = generate_key();
+        let r = s.sign_in(&k, &m.token("technician@tether.test", None).unwrap());
+        assert!(r.json()["exp"].as_u64().unwrap() <= now() + 3);
+        // A roster key that signs in: the session wins while it lasts, the roster entry after.
+        assert_eq!(s.sign_in(&roster, &m.token("software@tether.test", None).unwrap()).json()["name"], "Software Technician");
+        assert_eq!(s.me(&roster).json()["name"], "Software Technician");
+        std::thread::sleep(Duration::from_secs(4));
+        let r = s.me(&k);
+        assert_eq!((r.status, r.text()), (401, "session expired: sign in again".into()));
+        assert_eq!(s.me(&roster).json()["name"], "Roster Anna");
+        // TEAM_SESSION_MAX_MINUTES caps a long token.
+        m.control("lifetime", json!({"seconds": 3600})).unwrap();
+        let s2 = spawn_in(new_dir(), &generate_key(), &[("TEAM_SESSION_MAX_MINUTES", "1")]);
+        drop(s2);
+        let admin = generate_key();
+        let s = spawn_in(new_dir(), &admin, &[("TEAM_SESSION_MAX_MINUTES", "1")]);
+        assert_eq!(s.publish(&admin, &team_doc(&admin, 1, json!([]), json!({"oidc": oidc_of(&m), "roles": roles()}))).status, 204);
+        let exp = s.sign_in(&k, &m.token("technician@tether.test", None).unwrap()).json()["exp"].as_u64().unwrap();
+        assert!(exp <= now() + 60 && exp + 5 >= now() + 60, "{exp}");
+    }
+
+    #[test]
+    fn oidc_only_leaves_keys_to_service_entries() {
+        let m = mock();
+        let admin = generate_key();
+        let s = spawn_in(new_dir(), &admin, &[]);
+        let (anna, svc) = (generate_key(), generate_key());
+        let members = json!([entry("Anna", &anna, json!({})), entry("Bridge", &svc, json!({"service": true}))]);
+        assert_eq!(s.publish(&admin, &team_doc(&admin, 1, members, json!({"oidc": oidc_of(&m), "roles": roles(), "oidc_only": true}))).status, 204);
+        assert_eq!(s.me(&anna).status, 401);
+        assert_eq!(s.signed(&anna, false, "GET", "/api/team/me", b"").status, 401);
+        assert_eq!(s.me(&svc).json()["service"], true);
+        // Anna signs in with her key: a session, her person and roles.
+        assert_eq!(s.sign_in(&anna, &m.token("technician@tether.test", None).unwrap()).status, 200);
+        assert_eq!(s.me(&anna).json()["name"], "Test Technician");
+    }
+
+    /// The provider down: sessions keep working until they expire (also across a restart, from
+    /// sessions.json), roster members are unaffected, new sign-ins get 503.
+    #[test]
+    fn sessions_outlive_the_provider_and_a_restart() {
+        let m = mock();
+        let roster = generate_key();
+        let (s, admin) = relay(&m, json!([entry("Roster Anna", &roster, json!({}))]), &[]);
+        let (k, gone) = (generate_key(), generate_key());
+        assert_eq!(s.sign_in(&k, &m.token("software@tether.test", None).unwrap()).status, 200);
+        assert_eq!(s.sign_in(&gone, &m.token("technician@tether.test", None).unwrap()).status, 200);
+        assert_eq!(s.sign_out(&gone).status, 204);
+        let later = m.token("writer@tether.test", None).unwrap();
+        drop(m);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(s.dir.join("team/sessions.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        let s = restart(s, &admin, &[]);
+        assert_eq!(s.me(&k).json()["name"], "Software Technician", "survives the restart");
+        assert_eq!(s.me(&gone).status, 401, "signed out stays signed out");
+        assert_eq!(s.me(&roster).status, 200);
+        let t = Instant::now();
+        let r = s.sign_in(&generate_key(), &later);
+        assert_eq!((r.status, r.reason()), (503, "provider-unavailable".into()), "{}", r.text());
+        assert!(t.elapsed() < Duration::from_secs(12));
+        // Within the minute after a failed fetch: 503 at once, no new fetch.
+        let t = Instant::now();
+        assert_eq!(s.sign_in(&generate_key(), &later).status, 503);
+        assert!(t.elapsed() < Duration::from_millis(500), "{:?}", t.elapsed());
+        assert!(s.journal().contains("could not be fetched"), "{}", s.journal());
+        assert_eq!(s.me(&k).status, 200);
+    }
+
+    /// A provider that accepts and never answers: the sign-in waiting for it holds one worker,
+    /// the next sign-in gets 503 at once, device heartbeats are answered before it.
+    #[test]
+    fn a_hanging_provider_delays_no_heartbeat() {
+        let hang = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let h = held.clone();
+        let port = hang.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for c in hang.incoming().flatten() {
+                h.lock().unwrap().push(c);
+            }
+        });
+        let m = mock();
+        let admin = generate_key();
+        let s = spawn_in(new_dir(), &admin, &[]);
+        let mut o = oidc_of(&m);
+        o["issuer"] = json!(format!("http://127.0.0.1:{port}/t/v2.0"));
+        assert_eq!(s.publish(&admin, &team_doc(&admin, 1, json!([]), json!({"oidc": o, "roles": roles()}))).status, 204);
+        let tok = m.token("technician@tether.test", None).unwrap();
+        std::thread::scope(|sc| {
+            let first = sc.spawn(|| {
+                let r = s.sign_in(&generate_key(), &tok);
+                (r.status, Instant::now())
+            });
+            let t = Instant::now();
+            while held.lock().unwrap().is_empty() {
+                assert!(t.elapsed() < Duration::from_secs(10), "the relay never asked the provider");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let t = Instant::now();
+            let r = s.sign_in(&generate_key(), &tok);
+            assert_eq!((r.status, r.reason()), (503, "provider-unavailable".into()));
+            let hb = r#"{"uuid":"hb-00001","id":"111222333","profile":"technician","version":"0.5.21","os":"windows 10.0.26300","serial":3}"#;
+            assert_eq!(s.req("POST", "/api/heartbeat", &[], hb.as_bytes()).status, 200);
+            let (took, done) = (t.elapsed(), Instant::now());
+            assert!(took < Duration::from_millis(300), "{took:?}");
+            let (status, end) = first.join().unwrap();
+            assert_eq!(status, 503);
+            assert!(done < end, "the heartbeat waited for the sign-in");
+        });
+    }
+
+    /// A discovery document whose jwks_uri points to another host is not followed.
+    #[test]
+    fn a_jwks_uri_on_another_host_is_refused() {
+        let fake = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = fake.server_addr().to_ip().unwrap().port();
+        let issuer = format!("http://127.0.0.1:{port}/t/v2.0");
+        let m = mock();
+        let jwks = m.discovery()["jwks_uri"].as_str().unwrap().replace("127.0.0.1", "localhost");
+        let disc = json!({"issuer": issuer, "jwks_uri": jwks}).to_string();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let a = asked.clone();
+        std::thread::spawn(move || {
+            for rq in fake.incoming_requests() {
+                a.lock().unwrap().push(rq.url().to_owned());
+                let _ = rq.respond(tiny_http::Response::from_string(disc.clone()));
+            }
+        });
+        let admin = generate_key();
+        let s = spawn_in(new_dir(), &admin, &[]);
+        let mut o = oidc_of(&m);
+        o["issuer"] = json!(issuer);
+        assert_eq!(s.publish(&admin, &team_doc(&admin, 1, json!([]), json!({"oidc": o, "roles": roles()}))).status, 204);
+        let r = s.sign_in(&generate_key(), &m.token("technician@tether.test", None).unwrap());
+        assert_eq!((r.status, r.reason()), (503, "provider-unavailable".into()));
+        assert_eq!(*asked.lock().unwrap(), ["/t/v2.0/.well-known/openid-configuration"]);
+        assert!(s.journal().contains("not on the issuer's own host"), "{}", s.journal());
+    }
+
+    #[test]
+    fn no_sign_in_without_oidc_in_the_document() {
+        let admin = generate_key();
+        let s = spawn_in(new_dir(), &admin, &[]);
+        let k = generate_key();
+        let r = s.sign_in(&k, "a.b.c");
+        assert_eq!((r.status, r.reason()), (404, "not-configured".into()));
+        assert_eq!(s.publish(&admin, &team_doc(&admin, 1, json!([]), json!({}))).status, 204);
+        assert_eq!(s.sign_in(&k, "a.b.c").reason(), "not-configured");
+    }
+}
+
+/// A production build (no debug assertions, no `test-hooks`) never trusts a provider on http or on
+/// a loopback or private address: the document is refused, and a name that resolves to loopback is
+/// refused when the keys are fetched. Run by scripts/test-relay.sh (`-- production_build`).
+#[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+#[test]
+fn production_build_refuses_a_loopback_or_http_issuer() {
+    let m = mock();
+    let admin = generate_key();
+    let s = spawn_in(new_dir(), &admin, &[]);
+    for bad in [m.issuer(), "http://login.example.com/t/v2.0".into(), "https://127.0.0.1/t/v2.0".into(), "https://localhost/t/v2.0".into(), "https://10.0.0.1/t/v2.0".into()] {
+        let mut o = oidc_of(&m);
+        o["issuer"] = json!(bad);
+        let r = s.publish(&admin, &team_doc(&admin, 1, json!([]), json!({"oidc": o, "roles": roles()})));
+        assert_eq!(r.status, 400, "{bad}: {}", r.text());
+    }
+    // A host name that resolves to ::1 (/etc/hosts): refused at the connection, never fetched.
+    let mut o = oidc_of(&m);
+    o["issuer"] = json!("https://ip6-localhost/t/v2.0");
+    assert_eq!(s.publish(&admin, &team_doc(&admin, 1, json!([]), json!({"oidc": o, "roles": roles()}))).status, 204);
+    let r = s.sign_in(&generate_key(), &m.token("technician@tether.test", None).unwrap());
+    assert_eq!((r.status, r.reason()), (503, "provider-address".into()), "{}", r.text());
+}
+
+/// Memory of a real key fetch over TLS (Microsoft's own public tenant; run by hand:
+/// `cargo test --release --test session -- --ignored --nocapture measure`): the relay's VmRSS and
+/// VmHWM before and after one sign-in attempt that fetches discovery and keys.
+#[test]
+#[ignore]
+fn measure_memory_of_a_tls_key_fetch() {
+    let tid = "72f988bf-86f1-41af-91ab-2d7cd011db47";
+    let admin = generate_key();
+    let s = spawn_in(new_dir(), &admin, &[]);
+    let mem = |s: &Srv| {
+        let st = std::fs::read_to_string(format!("/proc/{}/status", s.child.id())).unwrap();
+        let f = |k: &str| st.lines().find(|l| l.starts_with(k)).unwrap().split_whitespace().nth(1).unwrap().to_owned();
+        format!("VmRSS {} kB, VmHWM {} kB", f("VmRSS:"), f("VmHWM:"))
+    };
+    let o = json!({"issuer": format!("https://login.microsoftonline.com/{tid}/v2.0"), "tenant": tid, "audience": "aud", "client_id": "c", "scope": "api://x/access"});
+    assert_eq!(s.publish(&admin, &team_doc(&admin, 1, json!([]), json!({"oidc": o, "roles": roles()}))).status, 204);
+    eprintln!("idle: {}", mem(&s));
+    let b64 = |v: &Value| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, v.to_string());
+    let tok = format!("{}.{}.{}", b64(&json!({"alg": "RS256", "kid": "none-such"})), b64(&json!({"aud": "aud", "ver": "2.0"})), "AAAA");
+    let t = Instant::now();
+    let r = s.sign_in(&generate_key(), &tok);
+    eprintln!("sign-in: {} {} after {:?}; {}", r.status, r.text(), t.elapsed(), mem(&s));
+    eprintln!("{}", s.journal());
+}

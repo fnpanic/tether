@@ -295,10 +295,11 @@ decided by the body's top level: a JSON object with a `team` field is a signed u
 signed upload's errors), anything else a plain roster. Customer patterns: `*` (every device, also those without a customer reference), a
 customer reference (1–32 of `A-Za-z0-9._-`, matched exactly, case-sensitive), or a customer reference
 followed by one `*` (every reference starting with it: `47*` covers `47`, `4711`, `47-B`); nothing else,
-at most 64 per member or role. `oidc_only` true needs `oidc` (`400`) and is refused for now
-(`400 oidc_only needs sign-in support on this relay`): only `service` entries would keep their keys,
-and this relay does not yet serve sign-in sessions, so every person would be locked out. `roles` and `deny` are stored for sign-in sessions (not yet served by this relay); `deny`
-does not affect key members. Once a relay has accepted a signed document it refuses plain rosters
+at most 64 per member or role. `oidc_only` true needs `oidc` (`400`): then only `service` entries
+keep their keys and people sign in ([below](#staff-sign-in-sessions-post-delete-apiteamsession)).
+`oidc.issuer` must be `https://`, in normal form, and not `localhost` or a loopback, private or
+link-local address (`400`; only debug and `test-hooks` builds also take `http://` on loopback, for
+the mock provider). `roles` and `deny` apply to sign-in sessions; `deny` does not affect key members. Once a relay has accepted a signed document it refuses plain rosters
 (`409`) for as long as `team/team.json` exists, also after a restart; an unreadable `team.json`
 leaves nobody admitted (and plain rosters still refused) until a new document is published. The
 stored document is checked against the key it names at start, so it stays in force across an admin
@@ -332,7 +333,9 @@ trust another admin key). The relay is trusted to enforce the permissions it ser
 | Method & path | Body | Result |
 | --- | --- | --- |
 | `GET /api/team/config` | no signature | The `config` envelope of the signed document as published (`{"payload","sig","key"}`, payload `{"serial","oidc"}`); verify it with the admin key, not the relay. `ETag: "<serial>"`, `304` on `If-None-Match`. `404 no sign-in configured` without a document with `oidc`. |
-| `GET /api/team/me` | – | `{"name":…, "write":bool, "audit":bool}`; with a signed document also `"sbom","agent":bool, "customers":[…], "service":bool` |
+| `POST /api/team/session` | `{"access_token":"<JWT>","key":"<std base64 of the member key>"}` (≤ 32 KiB), signed with that key, the header naming its `kid` | Staff sign-in ([below](#staff-sign-in-sessions-post-delete-apiteamsession)): `200` the session as `me` answers it; a refusal `{"reason","message"}` |
+| `DELETE /api/team/session` | – | Sign-out: the signing key's session ends (an expired one too), `204`; a roster key without a session: `204`, nothing changes |
+| `GET /api/team/me` | – | `{"name":…, "write":bool, "audit":bool}`; with a signed document also `"sbom","agent":bool, "customers":[…], "service":bool`; signed in: `{"name","write","audit","sbom","agent","customers","service":false,"oid","upn","exp":<unix>,"roles":[…]}` |
 | `GET /api/team/devices` | – | `[{uuid,id,profile,version,os,last_seen}]` newest first, from the heartbeats (no IP, no serials) |
 | `GET /api/team/tags` | – | `{"rev":<u64>,"doc":<JSON or null>,"updated_by":"<name>","updated_at":<unix>}`; `rev` 0, `doc` null, `updated_by` "" and `updated_at` 0 when none was stored |
 | `PUT /api/team/tags` | a JSON object (≤ 512 KiB), header `If-Match: <rev>` (decimal, quotes tolerated) | `200 {"rev":<new>}`. Member without `write`: `403`. Missing or bad `If-Match`, body not a JSON object: `400`. `rev` is not the current one: `409` with the current `{"rev","doc","updated_by","updated_at"}`. Too large: `413`. Stored atomically as `team/tags.json` (0600) with `rev + 1`, `updated_by` = the member's roster name. The relay does not look inside the document. |
@@ -348,6 +351,73 @@ trust another admin key). The relay is trusted to enforce the permissions it ser
 
 The roster is per relay: publish it to every relay (Tether Manage does). Tags are stored per relay
 too: a client should read and write them on one relay (the first that answers).
+
+### Staff sign-in sessions (`POST`/`DELETE /api/team/session`)
+
+With an `oidc` part in the team document, staff sign in with that OpenID Connect provider
+(Microsoft Entra ID is the documented one): the desktop gets an access token for the API (scope
+`oidc.scope`) and posts it, signed with its member key, to every relay. **Any key may present a
+token**: the token is the authorisation, the request signature the proof that the desktop holds
+the key the session is bound to. The relay checks:
+
+- the request: a `Tether-Sig` with `kid` (required here), made by the key in the body, whose key
+  id `kid` names (`401`); the body exactly `{"access_token","key"}` (`400`);
+- the token: at most 16 KiB, three parts in strict base64url (no padding); header `alg` exactly
+  `RS256` (the relay's choice; `none`, `HS256` or anything else refused) and a `kid` (a token
+  without one matches no key); no `crit`; the signature over the exact signing input with the
+  provider's key of that `kid` (`kty` RSA, `use` sig and `alg` RS256 when present, modulus 2048 to
+  4096 bits); then the claims: `ver` `2.0`, `iss` exactly `oidc.issuer`, `tid` exactly
+  `oidc.tenant`, `aud` exactly `oidc.audience` (the API's client id: a string, or an array holding
+  only it; the App ID URI form is not accepted), `azp` exactly `oidc.client_id`, `exp`, `nbf`, `iat`
+  with 300 s of skew, a lifetime (`exp - nbf`) of at most 28 h, no groups overage
+  (`_claim_names`, `_claim_sources`, `hasgroups`), a delegated `scp`, an `oid` and a `uti` (at most
+  128 printable characters each);
+- the document: `oid` not in `deny` (`403`); the token's `roles` (only these, never groups) mapped
+  through `roles`: a role not in the table gives nothing, the permissions are the union of the
+  mapped roles, `customers` the union of theirs and `*` when none names any; no mapped role:
+  `403`; a token (`uti`) binds one key until it expires: another key presenting it gets `409`.
+
+The session lasts until min(token `exp`, `TEAM_SESSION_MAX_MINUTES`, default 60, 1 to 1440); the
+desktop posts a fresh token before then. Its permissions are recomputed from the document in force
+on every request. A key with a live session is that person on every member route, also when the
+key is on the roster too (the session wins while it lasts; after it, the roster entry again unless
+`oidc_only` removed it). A session needs `kid` in every request. An expired session answers
+`401 session expired: sign in again` (for a day; then `401 not a team member`). Sessions are kept
+in `team/sessions.json` (0600, written before the answer) and survive a restart until they expire;
+at most 5 000 sessions (8 per person: a ninth key replaces that person's oldest) and 20 000 bound
+tokens (`503 too-many-sessions` when full). A new document ends at once the sessions of a denied
+`oid`, those left without a mapped role, and all of them when the provider (`oidc`) changed.
+
+Refusals: `{"reason":"<code>","message":"<text for an administrator>"}`, `Content-Type:
+application/json`. `401`: `malformed`, `alg`, `no-kid`, `unknown-kid`, `bad-signature`, `v1-token`
+(the API registration issues v1.0 tokens: set `requestedAccessTokenVersion` to 2 in its manifest),
+`wrong-version`, `wrong-audience` (also a token for Microsoft Graph: the sign-in did not request
+the API scope), `wrong-issuer`, `wrong-tenant`, `wrong-client`, `expired`, `not-yet-valid`,
+`lifetime`, `overage`, `no-scope`, `no-oid`, `no-uti`; `403`: `denied`, `no-role`; `404`:
+`not-configured` (no `oidc` in the document); `409`: `token-used`; `503` with `Retry-After`:
+`provider-unavailable` (the provider's keys cannot be fetched), `provider-address` (the provider's
+name resolves to a loopback or private address: a production build never connects there),
+`config-changed` (the document changed during the check; retry), `too-many-sessions`. A refused
+token counts like a failed signature (60 a minute per address).
+
+**What is trusted from where.** Issuer, tenant, audience and client id come only from the
+admin-signed team document, never from the request or the provider. From the provider's discovery
+document (`<issuer>/.well-known/openid-configuration`, whose `issuer` must be exactly the
+document's) only `jwks_uri` is taken, and only when it has the issuer's scheme, host and port. Both
+are fetched by the relay with certificate checks (rustls, the webpki root set), a 5 s connect and
+request timeout each, at most 64 KiB, no redirect followed, no proxy (proxy environment variables
+are ignored); the address is checked when the name is resolved for the connection. The keys are
+kept 24 h and fetched again earlier only for an unknown `kid`, at most once a minute; one fetch at
+a time for the whole relay, a sign-in meanwhile gets `503` at once, and none of it runs under the
+relay's state lock, so heartbeats and reports never wait for the provider. When the keys cannot be
+fetched, sign-ins get `503`, sessions already made keep working until they expire, and roster
+members are not affected. The relay needs outbound HTTPS to the provider.
+
+**Audit** (team audit log): `sign-in` (`actor` with `oid` and `upn`, `detail` `{"roles","exp"}`),
+`sign-in-refused` (`detail` `{"reason"}`; `actor` only the key id and `"name":"-"` unless the token
+was verified: then the person), `sign-out`, `session-ended` (`detail` `{"reason":"deny-list"|
+"no-role"|"document-changed","serial"}`). Never the token. Every other record of a signed-in
+member names the person (`actor.oid`, `actor.upn`) and the key id.
 
 ## Team audit log
 
@@ -442,6 +512,7 @@ newest lines are not those last written). The read is itself recorded.
 |---|---|---|
 | `TEAM_AUDIT_RETENTION_DAYS` | `90` | whole UTC days older than this are removed (checked hourly and at each new day) |
 | `TEAM_AUDIT_MAX_MB` | `2048` | all day files together; above it the oldest day goes, never today's; today's file alone at the cap: new records are dropped and counted |
+| `TEAM_SESSION_MAX_MINUTES` | `60` | the longest staff sign-in session (1 to 1440 minutes), whatever the token's lifetime ([sign-in](#staff-sign-in-sessions-post-delete-apiteamsession)) |
 
 Backup: copy `team-audit/` with the rest of `/var/lib/tether-api`. A restored older copy is a
 shorter chain: a head stored elsewhere after the backup is no longer reached, so note the restore
