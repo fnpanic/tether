@@ -232,7 +232,7 @@ enum Body {
     /// The large uploads (release, diagnostics), streamed to a temp file that is removed on drop
     /// unless the handler renamed it into place. `nonce`: of the admin signature already
     /// verified over the file (release uploads), still to be checked for replay.
-    File { path: PathBuf, len: u64, nonce: Option<String> },
+    File { path: PathBuf, len: u64, nonce: Option<(String, usize)> },
     /// A software list (`PUT /api/status/sbom`) and the second whose global budget slot it took;
     /// the handler takes the buffer out (no copy under the state lock).
     Sbom(Vec<u8>, u64),
@@ -611,7 +611,7 @@ fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<
     let t = now();
     let mut body = body_to_file(rq, data, limit, mode)?;
     if let (Some(keys), Body::File { path, nonce, .. }) = (keys, &mut body) {
-        *nonce = Some(with_mapped(path, |b| verify_sig(&keys, rq, "PUT", &url, b, t).map(|(n, _)| n)).map_err(internal)??);
+        *nonce = Some(with_mapped(path, |b| verify_sig(&keys, rq, "PUT", &url, b, t)).map_err(internal)??);
     }
     Ok(body)
 }
@@ -874,6 +874,44 @@ fn stored_meta(raw: &[u8]) -> Option<BundleMeta> {
     let doc: envelope::Signed = serde_json::from_slice(raw).ok()?;
     let key = tether_trust::key_from_b64(&doc.key).ok()?;
     serde_json::from_slice(&envelope::open(&doc, &[key]).ok()?).ok()
+}
+
+/// The `serial` of a signed envelope's payload, opened with the key it names: only for an
+/// audit record of an admin-signed request (the handler verifies it against the trusted keys).
+fn envelope_serial(v: &serde_json::Value) -> Option<u64> {
+    let doc: envelope::Signed = serde_json::from_value(v.clone()).ok()?;
+    let key = tether_trust::key_from_b64(&doc.key).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&envelope::open(&doc, &[key]).ok()?).ok()?["serial"].as_u64()
+}
+
+/// The team audit event and detail of an admin route that changes something (or reads a
+/// diagnostics upload): serials, versions, ids and paths, never the documents themselves. `None`:
+/// a read the log does not record.
+fn admin_change(method: &str, rest: &str, body: &[u8]) -> Option<(&'static str, serde_json::Value)> {
+    use serde_json::{json, Value};
+    let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let serial = |v: &Value| envelope_serial(v).map_or(Value::Null, |s| json!({"serial": s}));
+    let t = |s: &str| Value::from(teamaudit::text(s));
+    let ticket = |r: &str| json!({"ticket": t(r.trim_start_matches("diag/").trim_end_matches("/close"))});
+    Some(match (method, rest) {
+        ("PUT", "policy") => ("policy-publish", serial(&v)),
+        ("PUT", "server-keys") => ("server-keys-publish", serial(&v)),
+        // A signed document names its serial; a plain roster (before the first one) only its size.
+        ("PUT", "team") if v.get("team").is_some() => ("team-publish", serial(&v["team"])),
+        ("PUT", "team") => ("team-publish", json!({"plain_roster": true, "members": v["members"].as_array().map_or(0, |m| m.len())})),
+        ("PUT", "download-page") => ("download-page-publish", json!({"bytes": body.len()})),
+        ("POST", "diag-ticket") => ("diag-ticket", v["ticket"].as_str().map_or(Value::Null, |k| json!({"ticket": t(k)}))),
+        ("POST", r) if r.starts_with("diag/") => ("diag-close", ticket(r)),
+        ("DELETE", r) if r.starts_with("diag/") => ("diag-delete", ticket(r)),
+        ("GET", r) if r.starts_with("diag/") => ("diag-download", ticket(r)),
+        ("POST", "releases/prune") => ("release-prune", json!({"dry_run": v["dry_run"].as_bool().unwrap_or(true)})),
+        ("PUT", r) if r.starts_with("custom/") => ("custom-app-publish", json!({"id": t(&r["custom/".len()..]), "channel": v["channel"].as_str().map(t), "expires": v["expires"].as_u64()})),
+        ("DELETE", r) if r.starts_with("custom/") => ("custom-app-delete", json!({"id": t(&r["custom/".len()..])})),
+        // An index upload becomes `release-index-publish` with its serial (put_release).
+        ("PUT", r) if r.starts_with("release/") => ("release-upload", json!({"path": t(&r["release/".len()..])})),
+        ("DELETE", r) if r.starts_with("release/") => ("release-delete", json!({"path": t(&r["release/".len()..])})),
+        _ => return None,
+    })
 }
 
 fn load_json<T: for<'de> Deserialize<'de> + Default>(p: &Path) -> T {
@@ -1211,7 +1249,11 @@ impl App {
             }
             ("GET", "audit") => ("session-audit-read", team::query_param(url, "device").map(|d| teamaudit::Target::asked(&d)).unwrap_or_default(), serde_json::Value::Null),
             ("GET", "team-audit") => ("team-audit-read", teamaudit::Target::default(), teamaudit::Query::parse(url).map(|q| q.detail()).unwrap_or_default()),
-            _ => return,
+            // Every change an admin makes (design 12.5: what changed, never a document's contents).
+            (m, r) => match admin_change(m, r, body) {
+                Some((event, detail)) => (event, teamaudit::Target::default(), detail),
+                None => return,
+            },
         };
         self.audit_pending = Some(teamaudit::Rec::new(event, Some(actor), Some(client_ip(rq)), target, detail));
     }
@@ -1255,9 +1297,16 @@ impl App {
         if let Some(rel) = rest.strip_prefix("release/") {
             let dest = release_path(&self.data, rel)?;
             return match method {
-                "PUT" => self.put_release(body, &dest),
+                "PUT" => {
+                    if let Body::File { nonce: Some((_, key)), .. } = body {
+                        self.audit_admin(rq, *key, method, url, rest, &[]);
+                    }
+                    self.put_release(body, &dest)
+                }
                 "DELETE" => {
-                    self.auth(rq, method, url, body.bytes(LIMIT_SMALL)?)?;
+                    let b = body.bytes(LIMIT_SMALL)?;
+                    let key = self.auth(rq, method, url, b)?;
+                    self.audit_admin(rq, key, method, url, rest, b);
                     self.delete_guarded(&dest, url)
                 }
                 _ => Err(not_found()),
@@ -1580,7 +1629,7 @@ impl App {
 
     /// The signature over the body was verified before the state lock (`read_request_body`).
     fn put_release(&mut self, body: &Body, dest: &Path) -> Result<Resp, Resp> {
-        let Body::File { path: tmp, len, nonce: Some(nonce) } = body else { return Err(internal("release upload not verified")) };
+        let Body::File { path: tmp, len, nonce: Some((nonce, _)) } = body else { return Err(internal("release upload not verified")) };
         // A replay that began while the timestamp was current may still be sending for as long
         // as a body may take (`Deadline`), so the nonce is kept that much longer, plus the skew.
         self.use_nonce(nonce.clone(), 60 + LIMIT_RELEASE / (64 << 10) + reqauth::MAX_SKEW_SECS)?;
@@ -1602,6 +1651,10 @@ impl App {
                 }
             }
             new_index = Some((ch.clone(), (ix.serial, ix.expires)));
+            if let Some(rec) = self.audit_pending.as_mut() {
+                rec.event = "release-index-publish";
+                rec.detail = serde_json::json!({"channel": ch.0, "file": ch.1, "serial": ix.serial, "expires": ix.expires});
+            }
         }
         mkdirs(dest.parent().expect("under download/"), 0o750).map_err(internal)?;
         fs::rename(tmp, dest).map_err(internal)?;

@@ -3000,7 +3000,8 @@ fn the_team_audit_log_records_every_access_and_nothing_it_returned() {
     publish_doc(&s, &admin, 1, &[("All", &all, json!({"write": true, "audit": true})), ("Part", &part, json!({"customers": ["47*"], "write": true})), ("NoSbom", &nosbom, json!({"sbom": false}))]);
     let kid = |k: &SigningKey| tether_trust::team::key_id(&k.verifying_key());
     // (who, event, uuid asked, status): what each request must have left.
-    let mut want: Vec<(String, &str, Option<&str>, u16)> = Vec::new();
+    // The publish of the document comes first (every admin change is recorded).
+    let mut want: Vec<(String, &str, Option<&str>, u16)> = vec![("admin".to_owned(), "team-publish", None, 204)];
     let mut go = |who: &str, k: &SigningKey, method: &str, path: &str, body: &[u8], event: &'static str, uuid: Option<&'static str>| {
         let r = s.admin(k, method, path, body);
         want.push((who.to_owned(), event, uuid, r.status));
@@ -3048,16 +3049,16 @@ fn the_team_audit_log_records_every_access_and_nothing_it_returned() {
         assert!(r["target"].as_object().is_none_or(|t| t.keys().all(|k| ["uuid", "tether_id", "customer"].contains(&k.as_str()))), "{r}");
     }
     // A read in scope names the device fully (its pin's Tether ID once linked); a refused one only what was asked.
-    assert_eq!(recs[1]["actor"], json!({"key_fingerprint": kid(&all), "name": "All"}));
-    assert_eq!((recs[1]["target"].clone(), recs[1]["ip"].clone(), recs[1].get("detail")), (json!({"uuid": "dev-0001", "customer": "4711"}), json!("127.0.0.1"), None));
-    assert_eq!((recs[3]["result"].as_u64(), recs[3]["detail"].clone()), (Some(204), json!({"tether_id": "123456789"})));
-    assert_eq!(recs[7]["result"].as_u64(), Some(403));
-    assert_eq!(recs[0]["detail"], json!({"reads": 1}));
-    for (i, u) in [(7, "dev-0001"), (8, "dev-0002"), (9, "dev-9999"), (10, "dev-0002")] {
+    assert_eq!(recs[2]["actor"], json!({"key_fingerprint": kid(&all), "name": "All"}));
+    assert_eq!((recs[2]["target"].clone(), recs[2]["ip"].clone(), recs[2].get("detail")), (json!({"uuid": "dev-0001", "customer": "4711"}), json!("127.0.0.1"), None));
+    assert_eq!((recs[4]["result"].as_u64(), recs[4]["detail"].clone()), (Some(204), json!({"tether_id": "123456789"})));
+    assert_eq!(recs[8]["result"].as_u64(), Some(403));
+    assert_eq!(recs[1]["detail"], json!({"reads": 1}));
+    for (i, u) in [(8, "dev-0001"), (9, "dev-0002"), (10, "dev-9999"), (11, "dev-0002")] {
         assert_eq!(recs[i]["target"], json!({"uuid": u}), "{}", recs[i]);
     }
-    assert_eq!(recs[12]["detail"], json!({"token": tok}));
-    assert_eq!(recs[12]["actor"], json!({"key_fingerprint": kid(&admin), "name": "admin"}));
+    assert_eq!(recs[13]["detail"], json!({"token": tok}));
+    assert_eq!(recs[13]["actor"], json!({"key_fingerprint": kid(&admin), "name": "admin"}));
     // Never what was returned: no host name, product, check, software list or report content.
     let log = team_audit_files(&s);
     for secret in ["PC-1", "Example App", "app/db-service", "CycloneDX", "bomFormat", "zeta", "counts", "hosts"] {
@@ -3105,9 +3106,9 @@ fn members_report_their_own_events_marked_as_self_reported() {
     let v = team_audit(&s, &admin, "");
     let recs = v["records"].as_array().unwrap();
     let got: Vec<(&str, bool, &str)> = recs.iter().map(|r| (r["event"].as_str().unwrap(), r["self_reported"] == true, r["actor"]["name"].as_str().unwrap())).collect();
-    assert_eq!(got, [("export", true, "M"), ("session-start", true, "M"), ("agent-request", true, "M"), ("summary", false, "M")]);
-    assert_eq!((recs[0]["detail"].clone(), recs[0]["result"].as_u64()), (json!({"what": "hosts", "rows": 120}), Some(204)));
-    assert_eq!(recs[2]["target"], json!({"tether_id": "123456789"}));
+    assert_eq!(got, [("team-publish", false, "admin"), ("export", true, "M"), ("session-start", true, "M"), ("agent-request", true, "M"), ("summary", false, "M")]);
+    assert_eq!((recs[1]["detail"].clone(), recs[1]["result"].as_u64()), (json!({"what": "hosts", "rows": 120}), Some(204)));
+    assert_eq!(recs[3]["target"], json!({"tether_id": "123456789"}));
     assert!(!team_audit_files(&s).contains("PC-1"));
     // 30 per minute and member key (5 used above, refused ones included).
     let codes: Vec<u16> = (0..30).map(|_| post(json!({"event": "session-start", "tether_id": "123456789"})).status).collect();
@@ -3146,8 +3147,8 @@ fn the_team_audit_chain_continues_across_a_restart() {
     assert_eq!(v["problems"], json!([]));
     let recs = v["records"].as_array().unwrap();
     // The first read follows the head it returned (the summary); the event after the restart follows the read.
-    assert_eq!(recs.iter().map(|r| r["event"].as_str().unwrap()).collect::<Vec<_>>(), ["summary", "team-audit-read", "session-start"]);
-    assert_eq!(recs[1]["prev"], head);
+    assert_eq!(recs.iter().map(|r| r["event"].as_str().unwrap()).collect::<Vec<_>>(), ["team-publish", "summary", "team-audit-read", "session-start"]);
+    assert_eq!(recs[2]["prev"], head);
 }
 
 fn gunzip(b: &[u8]) -> Vec<u8> {

@@ -1582,3 +1582,54 @@ fn burst_of_connections_is_served() {
         assert!(got.starts_with("HTTP/1.1 404"), "connection {i}: {got}");
     }
 }
+
+/// The team audit log as an admin reads it.
+fn team_audit_records(s: &Srv, k: &SigningKey) -> Vec<serde_json::Value> {
+    let r = s.admin(k, "GET", "/api/admin/team-audit?limit=5000", b"");
+    assert_eq!(r.status, 200);
+    r.json()["records"].as_array().unwrap().clone()
+}
+
+#[test]
+fn every_admin_change_is_in_the_team_audit_log() {
+    let (s, k) = admin_server();
+    let kid = tether_trust::team::key_id(&k.verifying_key());
+    let rel = "/api/admin/release/stable/technician/windows-x86_64";
+    let tok = custom::new_token();
+    let member = generate_key();
+    let roster = serde_json::json!({"members": [{"name": "M", "key": key_to_b64(&member.verifying_key()), "write": false, "audit": true}]}).to_string();
+    let team = serde_json::json!({"team": envelope::sign(&serde_json::to_vec(&serde_json::json!({"serial": 3, "members": []})).unwrap(), &k)}).to_string();
+    // (method, path, body, event, detail, status)
+    let steps: Vec<(&str, String, Vec<u8>, &str, serde_json::Value, u16)> = vec![
+        ("PUT", "/api/admin/policy".into(), policy_doc(&k, r#"{"serial":7,"issued_at":1}"#), "policy-publish", serde_json::json!({"serial": 7}), 204),
+        ("PUT", "/api/admin/policy".into(), policy_doc(&k, r#"{"serial":6,"issued_at":1}"#), "policy-publish", serde_json::json!({"serial": 6}), 409),
+        ("PUT", "/api/admin/server-keys".into(), keys_doc(&k, 2, &[&key_to_b64(&generate_key().verifying_key())]), "server-keys-publish", serde_json::json!({"serial": 2}), 204),
+        ("PUT", "/api/admin/team".into(), roster.into_bytes(), "team-publish", serde_json::json!({"plain_roster": true, "members": 1}), 204),
+        ("PUT", "/api/admin/team".into(), team.into_bytes(), "team-publish", serde_json::json!({"serial": 3}), 204),
+        ("PUT", "/api/admin/download-page".into(), b"<p>x</p>".to_vec(), "download-page-publish", serde_json::json!({"bytes": 8}), 204),
+        ("POST", "/api/admin/diag-ticket".into(), br#"{"note":"n","ticket":"K7Q2M9XD"}"#.to_vec(), "diag-ticket", serde_json::json!({"ticket": "K7Q2M9XD"}), 200),
+        ("POST", "/api/admin/diag/K7Q2M9XD/close".into(), Vec::new(), "diag-close", serde_json::json!({"ticket": "K7Q2M9XD"}), 204),
+        ("DELETE", "/api/admin/diag/K7Q2M9XD".into(), Vec::new(), "diag-delete", serde_json::json!({"ticket": "K7Q2M9XD"}), 204),
+        ("PUT", "/api/admin/custom/acme-1".into(), custom_body(&k, "acme-1", "ACME", &tok, 2_000_000_000), "custom-app-publish", serde_json::json!({"id": "acme-1", "channel": "stable", "expires": 2_000_000_000u64}), 400),
+        ("DELETE", "/api/admin/custom/acme-1".into(), Vec::new(), "custom-app-delete", serde_json::json!({"id": "acme-1"}), 404),
+        ("PUT", format!("{rel}/Tether_0.5.24_x64-setup.exe"), b"exe".to_vec(), "release-upload", serde_json::json!({"path": "stable/technician/windows-x86_64/Tether_0.5.24_x64-setup.exe"}), 204),
+        ("PUT", "/api/admin/release/stable/releases.json".into(), index_doc(&k, "stable", 5), "release-index-publish", serde_json::json!({"channel": "stable", "file": "releases.json", "serial": 5, "expires": 2_000_000_000u64}), 204),
+        ("DELETE", format!("{rel}/Tether_0.5.24_x64-setup.exe"), Vec::new(), "release-delete", serde_json::json!({"path": "stable/technician/windows-x86_64/Tether_0.5.24_x64-setup.exe"}), 409),
+        ("POST", "/api/admin/releases/prune".into(), br#"{"dry_run":true}"#.to_vec(), "release-prune", serde_json::json!({"dry_run": true}), 200),
+    ];
+    for (m, p, b, _, _, code) in &steps {
+        assert_eq!(s.admin(&k, m, p, b).status, *code, "{m} {p}");
+    }
+    // Refused before the signature: nobody to name, nothing recorded.
+    assert_eq!(s.req("PUT", "/api/admin/policy", &[], &policy_doc(&k, r#"{"serial":9,"issued_at":1}"#)).status, 401);
+    let recs = team_audit_records(&s, &k);
+    let got: Vec<(&str, serde_json::Value, u64)> = recs.iter().map(|r| (r["event"].as_str().unwrap(), r["detail"].clone(), r["result"].as_u64().unwrap())).collect();
+    let want: Vec<(&str, serde_json::Value, u64)> = steps.iter().map(|(_, _, _, e, d, c)| (*e, d.clone(), *c as u64)).collect();
+    assert_eq!(got, want);
+    assert!(recs.iter().all(|r| r["actor"] == serde_json::json!({"key_fingerprint": kid, "name": "admin"})));
+    // Never a document's contents: the page, the roster's names and keys, the custom link.
+    let log: String = std::fs::read_dir(s.dir.join("team-audit")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl")).map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
+    for secret in ["<p>", &key_to_b64(&member.verifying_key()), &tok, "\"note\""] {
+        assert!(!log.contains(secret), "{secret} in the log");
+    }
+}
