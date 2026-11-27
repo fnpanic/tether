@@ -74,7 +74,7 @@ describe("runSoftware", () => {
     expect(r.calls[0]).toMatchObject({ q: "garnet", v: "" });
     expect(r.ids).toEqual(["m:dev-0001"]);
     expect(r.lines).toHaveLength(1);
-    expect(r.lines[0]).toMatch(/^Installed software “garnet”: 1 computer, as of \d.*\d \(lists as of each computer's last upload; 1 computer without a list\)$/);
+    expect(r.lines[0]).toMatch(/^Installed software “garnet”: 1 computer, as of \d[^()]* \(lists as of each computer's last upload; 1 computer without a list\)$/);
   });
   it("-software: only hosts that have a list without a match", async () => {
     const r = await run("-software:garnet", { "a.example": found(["dev-0001"]), "b.example": found([]) });
