@@ -1,0 +1,52 @@
+tether-api pid 116490 on 127.0.0.1:40643; 20000 devices, warm-up 60 s, baseline 60 s, run 900 s
+devices 20000 (100 enrolled through the API in 0.6 s), next 2000 s, posts about 10.0/s
+warm-up: 60 s of probes (not measured)
+  self-check: a 1 ms sleep in the generator woke up to 9.6 ms late, 0 times more than 20 ms late
+tether-api RSS: 34.6 MiB after enrolment, 35.4 MiB after the warm-up (the reference)
+baseline: 60 s of probes alone
+  self-check: a 1 ms sleep in the generator woke up to 0.7 ms late, 0 times more than 20 ms late
+run: 900 s, 8983 status posts scheduled, 600 new enrolments, summary every 30 s, metrics every 15 s
+members: 0 (0 limited to one of 500 customers, 10 % without gzip), 0 requests scheduled
+  self-check: a 1 ms sleep in the generator woke up to 14.0 ms late, 0 times more than 20 ms late
+
+heartbeat baseline       n=1200   p50=   0.51  p99=   0.88  p99.9=   1.37  max=   22.43 ms  codes={200: 1200}
+heartbeat during run     n=18000  p50=   0.51  p99=   0.90  p99.9=   4.30  max=  137.10 ms  codes={200: 18000}
+policy baseline          n=1200   p50=   0.50  p99=   0.90  p99.9=   1.25  max=   22.54 ms  codes={200: 1200}
+policy during run        n=18000  p50=   0.51  p99=   0.90  p99.9=   2.45  max=  137.09 ms  codes={200: 18000}
+status posts             n=8983   p50=   0.55  p99=  12.61  p99.9=  69.08  max=  154.18 ms  codes={200: 8983}
+new enrolments           n=600    p50=   1.90  p99=  71.25  p99.9=  89.93  max=   89.93 ms  codes={200: 600}
+team summary             n=30     p50= 494.54  p99=2931.44  p99.9=2931.44  max= 2931.44 ms  codes={200: 30}
+metrics scrapes          n=60     p50=   6.27  p99=  30.85  p99.9=  30.85  max=   30.85 ms  codes={200: 60}
+full summary: 20251940 bytes plain, 1767872 bytes gzip (11.5 x), 19949 hosts
+  metrics: tether_api_busy_rejected_total 0
+  metrics: tether_api_status_summary_builds_total 31
+  metrics: tether_api_status_summary_build_seconds_total 31.87616
+  metrics: tether_api_status_summary_build_seconds_max 2.890399
+  metrics: tether_api_team_audit_records_total 1
+  metrics: tether_api_team_audit_dropped_total 0
+  metrics: tether_api_team_audit_write_failed_total 0
+  metrics: requests endpoint="admin",code="204": 2
+  metrics: requests endpoint="heartbeat",code="200": 20400
+  metrics: requests endpoint="policy",code="200": 20400
+  metrics: requests endpoint="status",code="200": 9684
+  metrics: requests endpoint="team",code="200": 32
+tether-api RSS: reference 35.4 MiB, end 38.2 MiB, peak 38.7 MiB
+tether-api RSS each minute of the run (MiB): 35.5 36.5 37.0 37.4 37.8 38.3 38.3 38.3 38.4 38.4 38.4 38.5 38.7 38.7 38.7
+
+ok   heartbeat p99 0.90 ms <= 1.2 x 0.88 + 2 ms
+ok   heartbeat p99.9 4.30 ms <= 1.5 x 1.37 + 5 ms
+FAIL heartbeat slowest 137.10 ms <= 50 ms
+ok   policy p99 0.90 ms <= 1.2 x 0.90 + 2 ms
+ok   policy p99.9 2.45 ms <= 1.5 x 1.25 + 5 ms
+FAIL policy slowest 137.09 ms <= 50 ms
+ok   no 5xx (also no 503 busy) and no connection errors on any route
+ok   status 429: 0 of 8983 posts <= 0.1 %
+ok   every status post accepted or 429
+ok   every probe, enrolment, summary and scrape answered 200
+ok   every software list upload accepted (204) or 429
+ok   every member request answered 200 or 304 (no 429, no 5xx, no connection error)
+ok   peak RSS 38.7 MiB < 48 MiB
+ok   RSS at the end within 10 % of the reference (38.2 vs 35.4 MiB)
+FAIL
+cgroup: memory.max 67108864, memory.peak 67108864 bytes (page cache included), oom_kill 0
+team audit log: 1 lines, 12K

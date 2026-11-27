@@ -1,8 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
-import { Activity, FileCode2, History, KeyRound, Lock, Monitor, Package, Palette, ShieldCheck, Stethoscope, Users } from "lucide-react";
+import { Activity, FileCode2, History, KeyRound, ListChecks, Lock, LogOut, Monitor, Package, Palette, ShieldCheck, Stethoscope, Unlock, Users } from "lucide-react";
 import { api, emptyBundle, invoke, type AppState, type Bundle, type Change, type Live } from "./lib/ipc";
 import { incomplete } from "./lib/live";
-import type { Roster } from "./lib/team";
+import { toRenew, type GrantsInfo } from "./lib/grants";
+import type { TeamDoc } from "./lib/teamdoc";
+import { access, can, pageAllowed, ROLE_TEXT, type Access, type Action } from "./lib/roles";
 import { SELECTED, useToast } from "./components/ui";
 import { PolicyBar, PolicyPublish } from "./components/policy-publish";
 import { Gate } from "./pages/Gate";
@@ -15,6 +17,7 @@ import { Releases } from "./pages/Releases";
 import { DownloadPage } from "./pages/DownloadPage";
 import { CustomApps } from "./pages/CustomApps";
 import { Diagnostics } from "./pages/Diagnostics";
+import { TeamActivity } from "./pages/TeamActivity";
 import { Keys } from "./pages/Keys";
 
 interface Ctx {
@@ -36,9 +39,29 @@ interface Ctx {
   publish: () => void;
   toast: (m: string) => void;
   go: (p: PageId) => void;
-  /** Unpublished changes to the team roster: kept while another page is open (Team page). */
-  teamDraft: Roster | null;
-  setTeamDraft: React.Dispatch<React.SetStateAction<Roster | null>>;
+  /** Unpublished changes to the team document: kept while another page is open (Team page). */
+  teamDraft: TeamDoc | null;
+  setTeamDraft: React.Dispatch<React.SetStateAction<TeamDoc | null>>;
+  /** The keys on this PC and the sign-in's Tether Manage roles. */
+  access: Access;
+  can: (x: Action) => boolean;
+  /** The proposal a key holder loaded into the policy draft (removed from the relays once published). */
+  reviewing: Proposal | null;
+  setReviewing: (p: Proposal | null) => void;
+}
+
+/** A proposal as proposals_list merges it over the relays. */
+export interface Proposal {
+  kind: "policy" | "team" | "release";
+  author: { key_fingerprint: string; name: string; oid?: string; upn?: string };
+  created: number;
+  note: string;
+  serial?: number;
+  doc: any;
+  ids: Record<string, string>;
+  relays: string[];
+  /** Relays that serve something else now than what it was based on. */
+  stale: string[];
 }
 const AppCtx = createContext<Ctx>(null!);
 export const useApp = () => useContext(AppCtx);
@@ -48,6 +71,7 @@ const PAGES = [
   { id: "policy", label: "Policy", icon: ShieldCheck, el: Policy },
   { id: "devices", label: "Devices", icon: Monitor, el: Devices },
   { id: "sessions", label: "Sessions", icon: History, el: Sessions },
+  { id: "activity", label: "Team activity", icon: ListChecks, el: TeamActivity },
   { id: "team", label: "Team", icon: Users, el: Team },
   { id: "releases", label: "Releases", icon: Package, el: Releases },
   { id: "page", label: "Download page", icon: FileCode2, el: DownloadPage },
@@ -66,10 +90,15 @@ export function App() {
   const [changes, setChanges] = useState<Change[]>([]);
   const [invalid, setInvalid] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
-  const [teamDraft, setTeamDraft] = useState<Roster | null>(null);
+  const [teamDraft, setTeamDraft] = useState<TeamDoc | null>(null);
+  const [reviewing, setReviewing] = useState<Proposal | null>(null);
+  // A signed-in key holder unlocks the keys from here.
+  const [unlocking, setUnlocking] = useState(false);
   const { show, node } = useToast();
 
   const reload = useCallback(async () => setState(await api.state()), []);
+  const acc = access(!!state?.unlocked, state?.signin);
+  const usable = acc.vault || (acc.session && acc.roles.length > 0);
   useEffect(() => void reload(), [reload]);
 
   // Only the newest check's answer counts: an older, slower one must not overwrite it.
@@ -85,15 +114,25 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!state?.unlocked) return;
-    invoke<Bundle>("policy_draft").then(setDraftState, (e) => show(e.message));
+    if (!usable) return;
+    invoke<Bundle>("policy_draft").then(
+      (b) => {
+        setDraftState(b);
+        // Grants are renewed while the keys are unlocked (docs/management.md).
+        if (can(acc, "sign")) invoke<GrantsInfo>("grants_info", { bundle: b }).then((g) => {
+          const due = toRenew(g);
+          if (due.length) show(`Health monitoring: renew the enrolment grant of ${due.map(([k]) => k.replace(/^profile:(.*)$/, "the $1 profile").replace(/^group:/, "group ")).join(", ")} on the Policy page, then publish.`);
+        }, () => {});
+      },
+      (e) => show(e.message),
+    );
     reloadLive();
-  }, [state?.unlocked, state?.settings.server]);
+  }, [usable, state?.unlocked, state?.signin.signed_in, state?.settings.server]);
 
   // A check that failed or that a relay did not answer (network not up yet, a relay restarting)
   // is asked again every 30 s until every relay answers; before, it stayed as it was until a
   // manual "Check again".
-  const retry = !!state?.unlocked && incomplete(live, liveError);
+  const retry = usable && incomplete(live, liveError);
   useEffect(() => {
     if (!retry) return;
     const t = setTimeout(reloadLive, 30_000);
@@ -101,10 +140,10 @@ export function App() {
   }, [retry, checks]);
 
   useEffect(() => {
-    if (!state?.unlocked) return;
+    if (!usable) return;
     invoke<Change[]>("policy_diff", { from: live?.bundle ?? null, to: draft }).then(setChanges, () => setChanges([]));
     invoke("policy_check", { bundle: draft }).then(() => setInvalid(null), (e) => setInvalid(e.message));
-  }, [draft, live, state?.unlocked]);
+  }, [draft, live, usable]);
 
   const setDraft = (b: Bundle) => {
     setDraftState(b);
@@ -112,9 +151,25 @@ export function App() {
   };
 
   if (!state) return null;
-  if (!state.unlocked) return <Gate state={state} onDone={reload} />;
+  if (!usable || unlocking)
+    return (
+      <Gate
+        state={state}
+        onDone={() => {
+          setUnlocking(false);
+          reload();
+        }}
+        onCancel={unlocking ? () => setUnlocking(false) : undefined}
+      />
+    );
 
-  const Page = PAGES.find((p) => p.id === page)!.el;
+  const pages = PAGES.filter((p) => pageAllowed(p.id, acc));
+  const Page = (pages.find((p) => p.id === page) ?? pages[0]).el;
+  const signOut = async () => {
+    await invoke("signin_out");
+    setReviewing(null);
+    await reload();
+  };
   const ctx: Ctx = {
     state,
     reload,
@@ -126,11 +181,16 @@ export function App() {
     changes,
     dirty: changes.length > 0,
     invalid,
-    publish: () => setPublishing(true),
+    // Without signing rights the policy page proposes (policy editors) or only shows.
+    publish: () => (can(acc, "sign") ? setPublishing(true) : setPage("policy")),
     toast: show,
     go: setPage,
     teamDraft,
     setTeamDraft,
+    access: acc,
+    can: (x) => can(acc, x),
+    reviewing,
+    setReviewing,
   };
 
   return (
@@ -145,7 +205,7 @@ export function App() {
             </svg>
             <span className="text-callout font-semibold">Tether Manage</span>
           </div>
-          {PAGES.map(({ id, label, icon: Icon }) => (
+          {pages.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => setPage(id)}
@@ -165,15 +225,41 @@ export function App() {
             <p className="truncate text-footnote text-muted" title={state.servers.join("\n")}>
               {state.servers.length} relay{state.servers.length === 1 ? "" : "s"}
             </p>
-            <button
-              onClick={async () => {
-                await invoke("keys_lock");
-                await reload();
-              }}
-              className="mt-2 flex items-center gap-1.5 text-footnote text-accent"
-            >
-              <Lock size={12} /> Lock
-            </button>
+            {acc.session && (
+              <div className="mt-2 text-footnote">
+                <p className="truncate font-semibold" title={state.signin.upn}>
+                  {state.signin.name}
+                </p>
+                <p className="text-muted">{acc.roles.length ? acc.roles.map((r) => ROLE_TEXT[r]).join(", ") : "No Tether Manage role"}</p>
+                {state.signin.alarm && (
+                  <p role="alert" className="mt-1 text-danger">
+                    {state.signin.alarm}
+                  </p>
+                )}
+                <button onClick={signOut} className="mt-1 flex items-center gap-1.5 text-accent">
+                  <LogOut size={12} /> Sign out
+                </button>
+              </div>
+            )}
+            {acc.vault ? (
+              <button
+                onClick={async () => {
+                  await invoke("keys_lock");
+                  await reload();
+                }}
+                className="mt-2 flex items-center gap-1.5 text-footnote text-accent"
+              >
+                <Lock size={12} /> Lock
+              </button>
+            ) : (
+              acc.roles.includes("key-holder") &&
+              state.exists && (
+                <button onClick={() => setUnlocking(true)} className="mt-2 flex items-center gap-1.5 text-footnote text-accent">
+                  <Unlock size={12} /> Unlock the keys
+                </button>
+              )
+            )}
+            {acc.vault && acc.session && !can(acc, "sign") && <p className="mt-1 text-footnote text-warn">Signed in without the KeyHolder role: the keys do not sign.</p>}
           </div>
         </nav>
         <main className="flex min-w-0 flex-1 flex-col">

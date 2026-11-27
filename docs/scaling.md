@@ -106,6 +106,222 @@ Audit volume: ~7 records/s × ~450 B ≈ 120 MB per busy day, so the default `AU
 less than a day. For 90 days set `AUDIT_MAX_MB=12000` in `/etc/tether/api.env` (12 GB disk;
 the admin audit view reads files linearly, so keep `since` narrow).
 
+Device status (`/api/status`): the relay paces devices to `STATUS_TARGET_RPS` (10 posts/s) by
+the `next` it answers. `tools/load/status-run.sh` (same PC as below): 20 000 devices with 4
+products and 3 faults each (every 20th: 8 and 10), posting at that pace for 10 min with 5 % full
+reports, 2 new enrolments per second for 5 min, the team summary (member-signed) every 30 s and
+`/metrics` every 15 s (*measured*, 2026-11-24, after `nonces.json` moved out of the state lock):
+
+| | baseline p50 / p99 / p99.9 / max | during the run p50 / p99 / p99.9 / max |
+|---|---|---|
+| `POST /api/heartbeat` | 0.42 / 0.83 / 1.08 / 7.4 ms | 0.42 / 0.85 / 3.44 / 13.7 ms |
+| `GET /api/policy` | 0.41 / 0.80 / 1.27 / 7.4 ms | 0.42 / 0.84 / 3.09 / 16.2 ms |
+
+6 044 status posts, all 200 (no 429); 600 enrolments, all 200; no 5xx. All criteria passed,
+including "no request slower than 50 ms". With `SELF_CHECK=1` the generator reports its own
+pauses (a 1 ms sleep woke up at most 2.9 ms late during the run), and with `STATUS_TRACE_LOCK=1`
+tether-api logs every state-lock hold over 20 ms: none in this run. tether-api RSS: 30.6 MiB
+right after start with the 20 000 pins, 32.2 MiB after the warm-up (the reference), 34.2 MiB at
+the end and at the peak. The run before (2026-11-23) failed the 50 ms limit (117.7 ms): every
+member- or admin-signed request then wrote and fsynced `nonces.json` under the state lock; it is
+now written after the lock is released, before the answer.
+
+Software lists (`STATUS_SBOM=on`): *measured*, 2026-11-24, **a short run at 5 000 devices, not the
+20 000-device run above**: `DEVICES=5000 SECS=240 WARMUP=30 BASELINE=30 SELF_CHECK=1
+tools/load/status-run.sh`, the relay and the generator on one developer PC under WSL2 (the machine
+was not otherwise idle; made before the review fixes to the order of the upload checks, not
+repeated after them), once without and once with `STATUS_SBOM=on`. With it, one thread uploads
+a 60 KiB document for each device in turn (`PUT /api/status/sbom`, device-signed) at
+`STATUS_SBOM_RPS`, the default 2 per second, for the whole run: 480 uploads, 28 MiB. Everything
+else is as in the run above, but with 5 000 devices (2 351 and 2 393 status posts, 480 enrolments).
+p50 / p99 / p99.9 / max in ms, baseline then during the run:
+
+| | without uploads | with uploads |
+|---|---|---|
+| `POST /api/heartbeat`, baseline | 0.48 / 2.03 / 4.95 / 4.95 | 0.48 / 4.99 / 29.77 / 29.77 |
+| `POST /api/heartbeat`, during | 0.50 / 2.55 / 15.77 / 30.96 | 0.51 / 3.32 / 15.02 / 24.94 |
+| `GET /api/policy`, baseline | 0.48 / 1.16 / 6.00 / 6.00 | 0.47 / 10.57 / 18.26 / 18.26 |
+| `GET /api/policy`, during | 0.50 / 2.39 / 16.67 / 28.27 | 0.31 / 5.45 / 24.31 / 33.19 |
+| `PUT /api/status/sbom` | | 3.67 / 45.87 / 95.07 / 95.07 |
+
+478 of the 480 uploads were `204`; two were `429 busy` (the generator spaces them 500 ms apart and
+the relay counts per wall-clock second, so a second can get three). No `5xx` and no connection
+error in either run. The probes stayed under 50 ms; other requests did not: the slowest status post,
+enrolment and summary took 361.6, 486.4 and 116.0 ms without uploads and 39.6, 96.7 and 72.1 ms
+with them (a short run on a PC that was doing other things: single slow requests, not a trend). tether-api RSS: 12.0 MiB after the
+warm-up without uploads and 14.8 MiB at the end and at the peak; 12.1 MiB and 15.2 MiB with them.
+In both runs the generator's own criteria show FAIL on a short run: the RSS at the end is more
+than 10 % above the reference taken after a 30 s warm-up (it keeps growing for the first minutes
+of a run; the 20 000-device run above is 10 minutes with a 60 s warm-up) and, without uploads,
+the p99.9 of the probes is above 1.5 x the baseline's (a baseline of 600 samples has a noisy
+p99.9: with uploads the baseline itself had 29.8 ms). The two runs do not separate the uploads' cost from this machine's noise: the uploads were
+accepted (478 of 480) and no `5xx` occurred, and that is all they show. They do not show a pass of the
+20 000-device criteria, the run at 20 000 devices with uploads was **not done**, and both runs
+predate the two rounds of review fixes to the upload checks (the order of the checks, the budget,
+the device's hour, the record scan), which were not measured again. The differences between the two
+columns are within the spread of one run to the next here: do not read them as an effect of the
+uploads, in either direction.
+
+**1 000 technician desktops** (*measured*, 2026-11-25, same PC: i5-13600KF, WSL2 Ubuntu 24.04,
+kernel 6.18; the static musl `tether-api` of `scripts/build-relay.sh`, as deployed, in a systemd user
+scope with `MemoryMax=64M` and `MemorySwapMax=0`; team audit log on; raw output in
+`tools/load/results/status-members-2026-11-25-*.txt`). Command:
+
+```
+API_BIN=~/ha-build/bin/tether-api DEVICES=20000 SECS=900 WARMUP=60 BASELINE=60 MEMORY_MAX=64M \
+  STATUS_SBOM=on SBOM_DEVICES=2000 SBOM_UPLOAD_RPS=0 CUSTOMERS=500 SELF_CHECK=1 [STATUS_TRACE_LOCK=1] \
+  MEMBERS=1000 SCOPED=500 JUNK=32 tools/load/status-run.sh
+```
+
+20 000 devices in 500 customers post at the paced 10 per second (`next` 2 000 s, 5 % full reports),
+2 000 of them have a stored 60 KiB software list (none uploaded during the run), 600 enrol in the
+first 5 minutes. 1 000 members of a signed team document, each with its own key (`kid`) and
+address: 500 see every customer, 500 one customer each (40 devices), so 501 scopes. Each fetches
+the summary every 5 minutes with `If-None-Match` (90 % with `Accept-Encoding: gzip`, 10 % without,
+as a desktop before 0.7), opens one host's report every 5 minutes and one software list every 15.
+Meanwhile 32 junk requests a second (member signatures of unknown keys without `kid`) come at once
+from one address. The reference run is the same without members and junk (`MEMBERS=0`).
+
+| p50 / p99 / p99.9 / max, ms | devices only | with 1 000 desktops (final code) |
+|---|---|---|
+| `POST /api/heartbeat` probe, baseline | 0.51 / 0.88 / 1.37 / 22.4 | 0.46 / 0.84 / 1.94 / 6.9 |
+| `POST /api/heartbeat` probe, during the run | 0.51 / 0.90 / 4.30 / 137.1 | 0.46 / 0.91 / 4.02 / 32.4 |
+| `POST /api/status` (device posts, 9.9 per s) | 0.55 / 12.6 / 69.1 / 154.2 | 0.50 / 4.96 / 55.9 / 102.0 |
+| member summary (3.33 per s) | | 6.6 / 363 / 1 661 / 2 408 |
+| member host report (3.33 per s) | | 3.1 / 67 / 119 / 156 |
+| member software list (1.11 per s) | | 3.1 / 60 / 211 / 212 |
+| junk without `kid` (32 per s) | | 1.3 / 5.0 / 60 / 185; 28 727 `429` (the failure limit), 64 `401`, 9 `503 busy` |
+
+- **Summary size**: 20 257 KB plain, 1 756 KB gzip for 19 954 hosts (11.5 ×; the design's
+  estimate was 8 to 10 ×). Writing the gzip copy takes about 0.19 s and 0.25 MB of memory (RSS
+  +0.25 MB, peak +0.44 MB, flate2 1.1.11 with miniz_oxide 0.9.1, measured on its own on that file).
+- **Desktops before 0.7 and large fleets**: a 0.6 desktop reads at most 16 MiB of unpacked
+  summary, so its full host list fails above roughly 16 000 hosts in the member's scope (about
+  1 KB per host, from the size above); 0.7 desktops read up to 48 MiB.
+- **Bytes out for summaries**: 6.0 MB/s at 3.33 summaries a second: the 10 % of old desktops
+  without gzip took 3.4 of them (200 answers of 15.2 MB on average), the 90 % with gzip 2.6 MB/s.
+  All with gzip would be about 2.9 MB/s, all without about 34 MB/s (*computed* from these answers).
+  These are loopback numbers: TLS and Caddy were not in the path.
+- **304 share**: 33.3 % (1 000 of 3 000). In 15 minutes each member polls 3 times and its first poll
+  has no tag, so at most 67 % can be `304`. Members of one customer got `304` on every later poll
+  but the first after the enrolment phase; members who see every customer got almost none: at
+  20 000 devices something every one of them sees changes in every 30 s (here new hosts and their
+  first full reports; in a real fleet any change of health), so the whole-fleet summary is sent
+  again on nearly every poll. Rounding `last_seen` per entry, as the design proposed, would not
+  have given `304` either: with 20 000 devices about 3 per second cross such a rounding boundary.
+  The tag therefore leaves `last_seen` (and `next`) out and hashes the window of the stale threshold
+  instead ([api.md](api.md#get-apiteamstatus-member-signed)). At 20 000 devices that window is 90
+  minutes (3 × `next` of 2 000 s, rounded down to 15 minutes): while `304`s come, a desktop's
+  "reported N ago" can be up to that old; the `stale` flag is not affected (it is part of the tag). The next step for whole-fleet members
+  is a delta route, as the design says; not built.
+- **Rebuilds**: 1 497 summary builds in 900 s took 21.7 s together; a whole-fleet build takes about
+  1 s (31 builds took 31.9 s in the reference run, the longest 2.9 s), so the ~1 470 one-customer
+  builds took about a second together (*estimated* from the totals). Every one-customer poll
+  rebuilds its scope (its file is older than 30 s), walking the whole fleet in chunks of 1 000 under
+  the lock, but copying only its own hosts: cheap at this rate, so it was left so. With the
+  former limit of 32 cached scopes, a one-customer request that came while a whole-fleet build ran
+  found no file of its own and waited for the build holding a worker (the code then allowed up to
+  30 s): in that run 2 heartbeats, 3 posts and a host report got `503 busy`. Every scope now keeps
+  its file (up to 2 001, one per possible member) as long as all files together stay under the
+  256 MiB bound; at 20 000 devices one broad scope is about 22 MB (plain and gzip), so 12 or more
+  broad scopes evict each other. A request whose scope has no file waits for a build, but at most 4
+  requests wait at once relay-wide, each at most 5 s; any other gets `503 status summary not ready`
+  with `Retry-After: 5` at once, so waiting requests can hold at most 4 of the 32 workers.
+- **Memory**: RSS 35.9 MiB after the warm-up, 40.3 MiB at the peak (reference run: 38.7 MiB). The
+  scope's `memory.peak` was 64 MiB, its limit, in every run: the page cache of the files the relay
+  writes (summaries, `seen.json`, reports) counts against `MemoryMax`, and the kernel reclaimed it
+  (7 132 `max` events, no OOM kill; at the end 37.7 MiB anonymous, 18.9 MiB file). A **glibc** build
+  of the same code (the default of `status-run.sh` without `API_BIN`) grew to 61.6 MiB RSS and was
+  OOM-killed after 9 minutes of the same load: the deployed build is the musl one; do not run a
+  glibc build under `MemoryMax=64M` with this load.
+- **Audit log**: 5 017 records in 15 minutes (1.4 MB), none dropped, no failed write; the
+  summary is one record per member and hour, every report and software-list read one record.
+- **Refused**: no `429` for any member or device; `503 busy` for 10 requests in 900 s (1 device
+  post, 9 junk): 32 junk connections a second at once fill all 32 workers for a moment. The run's
+  own checks printed FAIL three times, for these: "no 5xx and no connection errors" (the 10
+  `503 busy`), "every status post accepted or 429" (the one device post with `503`) and "every
+  member request answered 200 or 304" (11 host reports `404`: devices enrolled during the run had no
+  report yet).
+  `STATUS_TRACE_LOCK=1`: 3 state-lock holds over 20 ms, all `maintain` (28 ms at most).
+- **One run stalled**: a repeat of the run (the same code) had a pause of about 10 s in which
+  every route waited (heartbeat max 9.5 s, 1 196 `503 busy`, among them 275 heartbeat probes and 167
+  device posts). The generator's own pauses stayed under 50 ms, so the relay (or its I/O) stood
+  still; the run with the lock trace did not show it again. *Not explained*: candidates are a
+  writeback stall of the WSL disk with the scope at its memory limit, or the host. Measure on a
+  real server before relying on more than one run here.
+
+Not measured: TLS and Caddy in front, real networks, more than 15 minutes, 2 000 members, desktops
+signed in through an identity provider (sessions), uploads of software
+lists during the member load, the fleet's real rate of health changes (which decides the 304 share
+of whole-fleet members).
+
+**Staff sign-in** (0.7.0; *measured* by hand, 2026-11-25, static musl build): the HTTPS client that
+fetches the provider's keys made `tether-api` 1.89 MB larger (3 085 408 to 4 973 808 bytes) and its
+RSS after start 0.7 MB larger (2 584 to 3 320 kB); one real key fetch from Microsoft's public
+endpoint (discovery and keys, 330 ms) raised the peak RSS by 0.8 MB. A session is about 300 to 400
+bytes in memory (*estimated*), at most 5 000 of them; a token is verified once per person, relay and
+renewal (about once an hour), not per request. Member lookup over 2 000 key entries: about 105 ms
+for the last key without `kid` (release build, outside the state lock), about 3 ms with `kid`.
+*Not measured*: a load run with 1 000 signed-in desktops, renewals at scale, the provider's answer
+times from a real relay.
+
+**Software search** (*measured*, 2026-11-25, same PC and build, `MemoryMax=64M`; raw output in
+`tools/load/results/status-search-2026-11-25-*.txt`). The run above with every one of the 20 000
+devices holding a stored list (60 KiB, 200 programs each, with install paths and a hardware serial),
+`SEARCH=1`: `STATUS_SOFTWARE_SEARCH=on`, the signed team document written before the start, no
+sidecar at the start (the scan builds them all), and one search every 10 s from the start of the
+warm-up (eight terms in turn: programs on most hosts, on a few, a version prefix, and terms nobody
+has). 600 s run, 60 s warm-up and baseline; the reference is the same run without the search.
+
+```
+API_BIN=~/ha-build/bin/tether-api DEVICES=20000 SECS=600 WARMUP=60 BASELINE=60 MEMORY_MAX=64M \
+  STATUS_SBOM=on SBOM_DEVICES=20000 SBOM_UPLOAD_RPS=0 CUSTOMERS=500 SELF_CHECK=1 STATUS_TRACE_LOCK=1 \
+  MEMBERS=1000 SCOPED=500 JUNK=32 SEARCH=1 SEARCH_S=10 tools/load/status-run.sh
+```
+
+- **Start-up scan**: 19 900 sidecars built (234 MB, about 12 KB each) in about 350 s, about 57 a
+  second, while the relay served the full load; searches meanwhile counted the rest as `pending`.
+- **Search time** over 19 900 sidecars once all were built: 2.1 to 4.3 s (p50 about 2.7 s); the
+  slowest are terms nobody has (every line of every sidecar is read). Cold and warm are the same
+  here: the 234 MB of sidecars do not fit in the page cache the scope's 64 MiB leaves, so every search
+  reads them from disk. Answers of 2 000 hosts were 176 to 206 KB.
+- **Memory**: peak RSS over the relay's life 46.5 MiB with the search (reached while the scan built
+  sidecars), 42.1 MiB without; RSS at the end 41.7 vs 40.2 MiB. A search itself moved RSS by less
+  than 1 MiB.
+- **Device requests**: heartbeat probe during the run p50 / p99 / p99.9 / max 0.45 / 3.29 / 16.7 /
+  41.2 ms with the search, 0.51 / 1.22 / 18.9 / 134.8 ms without; device posts p99 29.7 ms vs
+  13.8 ms. The p99 rise is the disk: reading 234 MB every 10 s inside the 64 MiB scope (91 420
+  `max` reclaim events against 4 797). No state-lock hold over 20 ms came from the search or the scan.
+  On a real server, the first thing to check is the disk.
+- **The run with the search FAILED the load tool's own latency checks** for heartbeats and policy
+  reads (the limits are derived from the baseline minute before the load): heartbeat p99 3.29 ms
+  against a limit of 3.03 ms (1.2 x 0.86 + 2), p99.9 16.67 ms against 14.71 ms (1.5 x 6.47 + 5);
+  policy p99 3.28 ms against 3.10 ms, p99.9 17.15 ms against 14.77 ms: 0.2 to 0.3 ms over at p99,
+  2 to 2.4 ms over at p99.9. The slowest-request check passed. (The reference run without the
+  search failed other checks, listed in its raw output.)
+- **Search time against the plan's limit**: 2.1 to 4.3 s per search once all sidecars were built,
+  against the 5 s the plan set. It grows with the size of the lists (this run had 200 programs per
+  machine; several hundred more per machine pass 5 s) and with the number of machines; past the
+  10 s budget a search answers `"partial": true`.
+- **Under contention**: one search runs at a time relay-wide, so at this size about 20 searches a
+  minute can run at all. Members with a customer scope do not share cached answers with each other
+  or with unscoped members (the cache key holds the scope). When many technicians search at once,
+  most are answered `429 busy` and their desktop retries a few times before it says the relay is
+  busy.
+
+Disk writes of the status store at 20 000 devices: `seen.json` (about 22 MB, *estimated* from the
+entry sizes) is rewritten at most every 5 minutes, about 6 GB a day; a hard kill loses at most 5
+minutes of last-seen times (a stop by systemd flushes it). Summary entries are capped at 2 KiB.
+
+Pre-existing, independent of device status: `maintain` writes and fsyncs `devices.json` (the
+Tether heartbeat list, about 1.4 MB per 10 000 devices, *measured* above) under the state lock
+once a minute when it changed. That hold grows with the fleet (*not measured* at 50 000; a few
+to some tens of ms *estimated*). Follow-up: flush it from a snapshot outside the lock, as
+`seen.json` is. The
+default `STATUS_MAX_DEVICES` is 20 000, the size tested within `MemoryMax=64M`; for more devices
+allow about 1.5 MiB per 1 000 devices above that (for example 50 000 devices: `MemoryMax=128M`,
+*not measured*).
+
 Releases: a 35 MB update to all 10 000 devices is 350 GB, normally spread over
 `update.check-hours` (6 h: 130 Mbit/s). A **forced** update or a policy change makes every device
 check within its 15-minute policy cycle: 350 GB in 15 min would need 3.1 Gbit/s, so one 1 Gbit

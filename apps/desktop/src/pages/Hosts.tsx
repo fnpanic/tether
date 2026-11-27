@@ -8,6 +8,7 @@ import {
   Download,
   Eye,
   FolderSync,
+  HeartPulse,
   HelpCircle,
   LayoutList,
   Monitor,
@@ -34,9 +35,13 @@ import { RecordingSaved } from "../components/RecordingSaved";
 import { UpdateCard } from "../components/UpdateCard";
 import { errorText, isOn, usePolicy } from "../lib/policy";
 import { buildHosts, label, type Host } from "../lib/hosts/model";
+import { linkHolder } from "../lib/hosts/health";
+import { healthAlerts, type Sent } from "../lib/hosts/notify";
 import { applyRules } from "../lib/hosts/rules";
 import { parse, search } from "../lib/hosts/query";
+import { asOf, chipLines, faultsHint, lookupFor, NEGATED_NOTE, negatedSoftware, runnable, searcher, softwareTerms, termsKey, type SwState } from "../lib/hosts/software";
 import { actions, flush, useHosts, useReadOnly } from "../lib/hosts/store";
+import { PERM_TEXT, usePerms } from "../lib/signin";
 import { HostTable, smartOrder, sortHosts, type Sort } from "../components/hosts/HostTable";
 import { Detail } from "../components/hosts/Detail";
 import { Palette, type Cmd } from "../components/hosts/Palette";
@@ -120,24 +125,63 @@ export function Hosts() {
 
   const hosts = useMemo(() => {
     const now = Date.now() / 1000;
-    const list = buildHosts(st.store, st.peers, st.store.team?.enabled ? st.org : [], st.online, now);
+    const team = st.store.team?.enabled;
+    const list = buildHosts(st.store, st.peers, team ? st.org : [], st.online, now, team ? st.status : []);
     applyRules(list, st.store.rules, now);
     return list;
-  }, [st.store, st.peers, st.org, st.online]);
+  }, [st.store, st.peers, st.org, st.online, st.status]);
   const byId = useMemo(() => new Map(hosts.map((h) => [h.id, h])), [hosts]);
+  const hasHealth = useMemo(() => hosts.some((h) => h.status || h.conflict), [hosts]);
+
+  // Health notifications (spec 10.5) after each status refresh; the first one only records states.
+  // Personal switch (store.team.healthNotify, default on). Sent through the backend (Windows toasts).
+  const sent = useRef<Sent | null>(null);
+  const hostsRef = useRef(hosts);
+  hostsRef.current = hosts;
+  useEffect(() => {
+    if (!st.status.length) return; // no data (yet, or a failed refresh): nothing changed state
+    const r = healthAlerts(sent.current, hostsRef.current, Date.now() / 1000);
+    sent.current = r.next;
+    if (useHosts.getState().store.team?.healthNotify === false) return;
+    for (const a of r.alerts) void invoke("health_notify", { title: a.title, body: a.body }).catch(() => {});
+  }, [st.status]);
   const tree = useMemo(() => tagTree(hosts), [hosts]);
   const known = useMemo(() => [...tree.count.keys()].sort(), [tree]);
   const parsed = useMemo(() => parse(q), [q]);
 
+  // software: terms ask the relays (spec 10.4): on Enter or after 800 ms without typing. Until the
+  // answer for exactly these terms is in, a software term is unknown for every host: it matches
+  // nothing, with or without `-` (an OR's other branch still can).
+  const [sw, setSw] = useState<SwState>({ key: "", results: null });
+  const finder = useMemo(() => searcher((c, a) => invoke(c, a), () => useHosts.getState().statusRelays, setSw), []);
+  useEffect(() => () => finder.dispose(), [finder]);
+  // Without the sbom permission nothing is sent (the relay would refuse it); the line says why.
+  const sbom = usePerms((p) => p.sbom);
+  useEffect(() => finder.typed(sbom ? q : ""), [finder, q, sbom]);
+  /** A query chosen, not typed (saved search, library, palette): searched at once. */
+  const openQuery = useCallback((x: string) => (setQ(x), sbom && finder.enter(x)), [finder, sbom]);
+  const swTerms = useMemo(() => softwareTerms(parsed.node), [parsed]);
+  const swReady = runnable(swTerms);
+  const swApplied = swReady.length > 0 && sw.key === termsKey(swReady) ? sw.results : null;
+  const swRetry = !!swApplied && [...swApplied.values()].some((m) => [...m.values()].some((a) => !a.ok && ["busy", "limit", "unavailable", "overloaded", "offline", "error"].includes(a.why)));
+  const swBusy = swReady.length > 0 && sw.key === termsKey(swReady) ? sw.busy : undefined;
+  const swLines = useMemo(() => {
+    if (!swTerms.length) return [];
+    if (!sbom) return [`Software search: ${PERM_TEXT.sbom.missing}`];
+    return [...chipLines(swTerms, swApplied, hosts, st.statusRelays, swBusy), ...(negatedSoftware(parsed.node) ? [NEGATED_NOTE] : [])];
+  }, [swTerms, swApplied, swBusy, hosts, st.statusRelays, parsed, sbom]);
+  const checkHint = useMemo(() => faultsHint(parsed.node, hosts), [parsed, hosts]);
+
   const rows = useMemo(() => {
     const t0 = performance.now();
-    const found = search(hosts, parsed);
+    // A software term not answered yet (or not sendable) matches nothing, with or without `-`.
+    const found = search(hosts, parsed, Date.now() / 1000, false, swApplied ? lookupFor(swApplied) : undefined);
     const r = sort.key === "smart" ? (parsed.words.length ? found : smartOrder(found)) : sortHosts(found, sort);
     perf.last = performance.now() - t0;
     perf.samples.push(perf.last);
     if (perf.samples.length > 500) perf.samples.shift();
     return r;
-  }, [hosts, parsed, sort]);
+  }, [hosts, parsed, sort, swApplied]);
 
   const counts = useMemo(
     () => ({
@@ -146,19 +190,28 @@ export function Hosts() {
       recent: hosts.filter((h) => h.recent).length,
       org: hosts.filter((h) => h.org).length,
       untagged: hosts.filter((h) => !h.tags.length && !h.auto.length).length,
+      attention: hosts.filter((h) => h.health === "crit" || h.health === "stale" || h.health === "conflict").length,
     }),
     [hosts],
   );
-  const searchCounts = useMemo(() => new Map(st.store.searches.map((s) => [s.id, search(hosts, s.query).length])), [hosts, st.store.searches]);
+  // A saved search with a software: term has no count until it is opened (the relays answer it).
+  const searchCounts = useMemo(() => new Map(st.store.searches.map((s) => [s.id, softwareTerms(parse(s.query).node).length ? undefined : search(hosts, s.query).length])), [hosts, st.store.searches]);
 
   // The cursor stays on a shown row.
   const cur = cursor && rows.some((h) => h.id === cursor) ? cursor : (rows[0]?.id ?? null);
   const curHost = cur ? byId.get(cur) : undefined;
+  const nameOf = useCallback((id: string) => {
+    const x = byId.get(id);
+    return x && !x.agentOnly && label(x) !== id ? label(x) : undefined;
+  }, [byId]);
+  const holderOf = useCallback((id: string) => linkHolder(byId.get(id)), [byId]);
   const sel = useMemo(() => [...selected].filter((id) => byId.has(id)), [selected, byId]);
-  const targets = sel.length ? sel : cur ? [cur] : [];
+  // Tags, pin and Remove: agent-only rows (`m:<uuid>`) are not hosts of the list.
+  const targets = (sel.length ? sel : cur ? [cur] : []).filter((id) => !id.startsWith("m:"));
 
   const connect = useCallback(
     (id: string, kind: Kind) => {
+      if (id.startsWith("m:")) return toast.show("No remote access: Tether is not installed on this machine.", 3000);
       if (!canConnect) return toast.show("Your organisation does not allow connecting to other devices.", 3000);
       invoke<string>("open_session", { peer: id, conn: kind === "file-transfer" ? "file-transfer" : "default", viewOnly: kind === "view-only" }).then(
         () => actions.logSession(id, kind),
@@ -256,6 +309,12 @@ export function Hosts() {
           e.preventDefault();
           return move(curIdx - page, e.shiftKey);
         case "Enter":
+          // In the search box Enter first searches installed software (again after a passing failure,
+          // or when the result shown is older than 5 minutes; the relay keeps answers 60 s).
+          if (inSearch && sbom && swReady.length && (!swApplied || swRetry || Date.now() - (asOf(swApplied) ?? Date.now()) > 5 * 60_000)) {
+            e.preventDefault();
+            return finder.enter(q);
+          }
           if (!cur) return;
           e.preventDefault();
           return connect(cur, e.shiftKey ? "file-transfer" : e.altKey ? "view-only" : "default");
@@ -335,7 +394,7 @@ export function Hosts() {
     { id: "online", title: "Refresh online status", icon: <Circle size={14} />, run: () => void actions.refreshOnline() },
     { id: "selall", title: "Select all shown", keys: "Ctrl A", run: () => setSelected(new Set(rows.map((h) => h.id))) },
     { id: "help", title: "Keyboard shortcuts and search syntax", keys: "?", icon: <HelpCircle size={14} />, run: () => setDlg("help") },
-    ...st.store.searches.map((s) => ({ id: `s${s.id}`, title: `Saved search: ${s.name}`, hint: s.query, icon: <Star size={14} />, run: () => setQ(s.query) })),
+    ...st.store.searches.map((s) => ({ id: `s${s.id}`, title: `Saved search: ${s.name}`, hint: s.query, icon: <Star size={14} />, run: () => openQuery(s.query) })),
   ];
 
   const lib: [string, string, number, React.ReactNode][] = [
@@ -345,6 +404,8 @@ export function Hosts() {
     ["Recent", "is:recent", counts.recent, <Clock size={15} />],
     ...(st.org.length ? ([["Organisation", "is:org", counts.org, <Users size={15} />]] as [string, string, number, React.ReactNode][]) : []),
     ["Untagged", "-has:tags", counts.untagged, <Tag size={15} />],
+    // Built in, not a saved search: saved searches sync to the whole team (spec 10.1).
+    ...(hasHealth ? ([["Needs attention", "health:crit | health:stale | health:conflict", counts.attention, <HeartPulse size={15} />]] as [string, string, number, React.ReactNode][]) : []),
   ];
 
   const navItem = (key: string, text: React.ReactNode, n: number | undefined, active: boolean, onClick: (e: React.MouseEvent) => void, icon?: React.ReactNode, extra?: React.ReactNode) => (
@@ -458,7 +519,7 @@ export function Hosts() {
                 s.name,
                 searchCounts.get(s.id),
                 q === s.query,
-                () => setQ(s.query),
+                () => openQuery(s.query),
                 <Star size={14} />,
                 !ro && <button
                   aria-label={`Delete saved search ${s.name}`}
@@ -516,6 +577,19 @@ export function Hosts() {
             </Button>
           </div>
 
+          {/* Always in the page (empty: hidden), so a screen reader announces each change. */}
+          <div role="status" data-testid="search-notes" className="mx-4 mb-2 shrink-0 rounded-xl bg-parchment px-3 py-2 text-caption text-ink empty:hidden">
+            {swLines.map((l) => (
+              <div key={l}>{l}</div>
+            ))}
+            {checkHint && <div>{checkHint}</div>}
+            {swTerms.length > 0 && sbom && <div className="text-footnote text-muted">Each software search is sent to the servers and recorded in the team's audit log with its text.</div>}
+          </div>
+          {st.team.signin?.alarm && (
+            <div role="alert" className="mx-4 mb-2 shrink-0 rounded-xl bg-danger/10 px-3 py-2 text-caption font-semibold text-danger" data-testid="signin-alarm-banner">
+              {st.team.signin.alarm}
+            </div>
+          )}
           {st.saveError && (
             <div role="alert" className="mx-4 mb-2 shrink-0 rounded-xl bg-danger/10 px-3 py-2 text-caption text-danger">
               {st.saveError}
@@ -578,7 +652,7 @@ export function Hosts() {
               </div>
             </div>
           ) : (
-            <HostTable rows={rows} cursor={cur} selected={selected} meta={st.store.tags} sort={sort} onSort={setSort} onRow={onRow} onToggle={onToggle} onToggleAll={() => setSelected(rows.every((h) => selected.has(h.id)) ? new Set() : new Set(rows.map((h) => h.id)))} onOpen={onOpen} />
+            <HostTable rows={rows} cursor={cur} selected={selected} meta={st.store.tags} sort={sort} onSort={setSort} onRow={onRow} onToggle={onToggle} onToggleAll={() => setSelected(rows.every((h) => selected.has(h.id)) ? new Set() : new Set(rows.map((h) => h.id)))} onOpen={onOpen} health={hasHealth} />
           )}
 
           <footer className="flex h-8 shrink-0 items-center gap-3 whitespace-nowrap border-t border-hairline px-4 text-footnote text-muted" data-testid="status-bar">
@@ -588,6 +662,7 @@ export function Hosts() {
             {st.onlineState === "ok" && <span>{counts.online.toLocaleString()} online</span>}
             {onlineNote && <span>{onlineNote}</span>}
             {st.store.team?.enabled && st.team.error && <span className="text-warn">Team: {st.team.error}</span>}
+            {st.store.team?.enabled && st.statusError && <span className={st.statusError === "this relay does not report health" ? "" : "text-warn"}>Health: {st.statusError}</span>}
             <span className="flex-1" />
             <span className="hidden tabular-nums text-faint xl:inline" data-testid="search-ms">
               search {perf.last.toFixed(1)} ms
@@ -601,14 +676,14 @@ export function Hosts() {
           </footer>
         </main>
 
-        {curHost && <Detail key={curHost.id} h={curHost} meta={st.store.tags} known={known} canConnect={canConnect} onConnect={connect} onToast={toast.show} onRemove={() => setDlg("remove")} />}
+        {curHost && <Detail key={curHost.id} h={curHost} meta={st.store.tags} known={known} canConnect={canConnect} onConnect={connect} onToast={toast.show} onRemove={() => setDlg("remove")} nameOf={nameOf} holderOf={holderOf} />}
       </div>
 
       {palette && <Palette hosts={hosts} commands={commands} onClose={() => setPalette(false)} onHost={connect} />}
       {dlg === "tags" && <BulkTags hosts={targets.map((id) => byId.get(id)!).filter(Boolean)} meta={st.store.tags} known={known} onClose={() => setDlg(null)} />}
       {dlg === "rules" && <Rules hosts={hosts} store={st.store} onClose={() => setDlg(null)} />}
       {dlg === "colors" && <TagColors tags={known} meta={st.store.tags} onClose={() => setDlg(null)} />}
-      {dlg === "export" && <Export store={st.store} selection={sel} onClose={() => setDlg(null)} onToast={toast.show} />}
+      {dlg === "export" && <Export store={st.store} selection={sel} shown={rows} hosts={byId} health={hasHealth} onClose={() => setDlg(null)} onToast={toast.show} />}
       {dlg === "import" && <Import store={st.store} onClose={() => setDlg(null)} onToast={toast.show} />}
       {dlg === "team" && <Team onClose={() => setDlg(null)} onToast={toast.show} />}
       {dlg === "add" && <AddHost known={known} onClose={() => setDlg(null)} onAdded={(id) => (setQ(""), setCursor(id))} />}

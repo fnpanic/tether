@@ -109,6 +109,7 @@ const ALARM: Record<number, string> = {
   8: "too many terminal logins",
   9: "session scope violation",
   10: "blocked by the ID whitelist",
+  30: "health monitoring agent: install or remove by the technician",
 };
 export const alarmLabel = (typ?: number) => (typ == null ? "" : ALARM[typ] ?? `type ${typ}`);
 

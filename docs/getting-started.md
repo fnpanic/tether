@@ -23,6 +23,12 @@ signatures it accepts.
 | `TETHER_UPDATER_PUB_KEY` | Update signing public key | Tether Manage, step 2 |
 | `TETHER_PUB_KEY` | The relay's server public key | The relay, step 3 |
 
+A fifth value is optional: `TETHER_INSTANCE` (for example `north`) builds a technician app that
+installs beside another organisation's on the same PC. It needs a `--config` from
+`scripts/instance-config.sh` as well; see
+[several-organisations.md](several-organisations.md#two-organisations-on-one-pc). Leave it unset
+for a single organisation.
+
 ## 1. Get the sources and the build tools
 
 Windows: Rust (MSVC), Node 22+, LLVM (`LIBCLANG_PATH`), VS Build Tools, vcpkg (`VCPKG_ROOT`).
@@ -100,7 +106,10 @@ with the same names and run the `desktop` workflow.
 
 ## 5. First session
 
-Install Tether on two PCs (or start a second instance on one PC with `TETHER_PROFILE=b`). Both
+Install Tether on two PCs (or, to test on one PC, start the same Tether a second time with the
+development profile `TETHER_PROFILE=b`, which gives it a second ID and settings folder; this is not
+an instance build for a second organisation,
+[several-organisations.md](several-organisations.md#two-organisations-on-one-pc)). Both
 should show **Ready**. Enter the other device's ID, then its one-time password or accept the
 request on its screen.
 

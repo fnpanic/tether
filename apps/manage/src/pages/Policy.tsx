@@ -5,6 +5,9 @@ import { useApp } from "../App";
 import { api, host, invoke, PROFILES, when, type Bundle, type Device, type Effective, type Feature, type Layer, type Rule } from "../lib/ipc";
 import { byArea, FeatureRow, sameRule, shown, type Lang } from "../components/features";
 import { ChangeList } from "../components/publish";
+import { Proposals, useProposals } from "../components/proposals";
+import { GrantRow, PendingLines } from "../components/grant";
+import { GRANT, layerKey, type GrantsInfo } from "../lib/grants";
 import { liveCount, unchecked } from "../lib/live";
 import { Badge, Button, Card, ErrorText, IconButton, Label, Modal, PageHeader, SELECTED, Segmented, Select, StatusDot, Table, TextField } from "../components/ui";
 
@@ -193,7 +196,8 @@ function History() {
 }
 
 export function Policy() {
-  const { draft, setDraft, live, invalid, dirty, changes } = useApp();
+  const { draft, setDraft, live, invalid, dirty, changes, toast, can, reviewing, setReviewing, state } = useApp();
+  const proposals = useProposals("policy", can("read-proposals-policy"));
   const [features, setFeatures] = useState<Feature[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [tab, setTab] = useState<Tab>("editor");
@@ -201,6 +205,11 @@ export function Policy() {
   const [lang, setLang] = useState<Lang>("en");
   const [only, setOnly] = useState<"all" | "set" | "unpublished">("all");
   const [newGroup, setNewGroup] = useState<{ name: string; profile: string } | null>(null);
+  const [grants, setGrants] = useState<GrantsInfo>({ layers: {}, pending: [] });
+  const reloadGrants = () => invoke<GrantsInfo>("grants_info", { bundle: draft, live: live?.bundle ?? null }).then(setGrants, () => {});
+  useEffect(() => void reloadGrants(), [draft, live]);
+  // Still to revoke for a group that was deleted since: shown once, at the top of the health area.
+  const orphans = grants.pending.filter((p) => p.layer.startsWith("group:") && !draft.groups[p.layer.slice(6)]);
 
   useEffect(() => {
     invoke<Feature[]>("features").then(setFeatures);
@@ -224,6 +233,9 @@ export function Policy() {
     const next: Layer = { ...layer };
     if (rule) next[id] = rule;
     else delete next[id];
+    setLayer(next);
+  };
+  const setLayer = (next: Layer) => {
     if (scope.kind === "profile") setDraft({ ...draft, profiles: { ...draft.profiles, [scope.name]: next } });
     else setDraft({ ...draft, groups: { ...draft.groups, [scope.name]: { ...group!, overrides: next } } });
   };
@@ -256,9 +268,37 @@ export function Policy() {
 
   return (
     <>
-      <PageHeader title="Policy" sub="Edit the draft, compare it with what is live, publish from the bar above.">
+      <PageHeader title="Policy" sub={can("sign") ? "Edit the draft, compare it with what is live, publish from the bar above." : can("propose-policy") ? "Edit the draft, compare it with what is live, propose it from the bar above: a key holder signs and publishes it." : "The live policy and its history. Changes made here are not published or proposed."}>
         <Segmented<Lang> label="Label language" value={lang} onChange={setLang} options={[{ value: "en", label: "EN" }, { value: "de", label: "DE" }]} />
       </PageHeader>
+      <Proposals
+        kind="policy"
+        list={proposals.list}
+        error={proposals.error}
+        reload={proposals.load}
+        review={
+          can("sign")
+            ? (p) => {
+                // The draft becomes the proposal; the bar and the publish sheet show its exact difference against what is live.
+                setDraft({ ...p.doc, serial: draft.serial, issued_at: draft.issued_at });
+                setReviewing(p);
+                toast(`Loaded the proposal of ${p.author.name}: review the changes, then publish from the bar.`);
+              }
+            : undefined
+        }
+      />
+      {reviewing?.kind === "policy" && (
+        <p className="mb-4 text-caption" role="status">
+          <Badge tone="ink">Reviewing</Badge> the proposal of {reviewing.author.name}
+          {reviewing.author.upn ? ` (${reviewing.author.upn})` : ""}, {when(reviewing.created)}
+          {reviewing.stale.length > 0 && <span className="text-warn"> · the live policy changed since it was made: its changes are shown against what is live now</span>}
+          {state.signin.upn && reviewing.author.upn === state.signin.upn && <span className="text-warn"> · you proposed it yourself (no second person checks it)</span>}
+          {" "}
+          <button className="text-accent" onClick={() => setReviewing(null)}>
+            Stop reviewing
+          </button>
+        </p>
+      )}
       <div className="mb-6 flex items-center gap-4">
         <Segmented<Tab>
           label="View"
@@ -321,9 +361,27 @@ export function Policy() {
               {areas.map(([area, list]) => (
                 <div key={area} className="mt-4">
                   <h3 className="mb-1 text-caption font-semibold capitalize text-muted">{area}</h3>
-                  {list.map((f) => (
-                    <FeatureRow key={f.id} f={f} rule={layer[f.id]} lang={lang} live={live ? liveRule(f.id) : undefined} onChange={(r) => setRule(f.id, r)} />
-                  ))}
+                  {area === "health" && <PendingLines pending={orphans} named onReload={reloadGrants} toast={toast} />}
+                  {list.map((f) =>
+                    f.id === GRANT ? (
+                      <GrantRow
+                        key={`${scope.kind}:${scope.name}`}
+                        f={f}
+                        lang={lang}
+                        layerKey={layerKey(scope.kind, scope.name)}
+                        layer={layer}
+                        profile={scope.kind === "group" ? draft.profiles[profile] ?? {} : undefined}
+                        info={grants.layers[layerKey(scope.kind, scope.name)]}
+                        pending={grants.pending.filter((p) => p.layer === layerKey(scope.kind, scope.name))}
+                        liveRevoked={!!grants.live_revoked?.includes(layerKey(scope.kind, scope.name))}
+                        onChange={setLayer}
+                        onReload={reloadGrants}
+                        toast={toast}
+                      />
+                    ) : (
+                      <FeatureRow key={f.id} f={f} rule={layer[f.id]} lang={lang} live={live ? liveRule(f.id) : undefined} onChange={(r) => setRule(f.id, r)} />
+                    ),
+                  )}
                 </div>
               ))}
               {!areas.length && <p className="py-8 text-center text-caption text-muted">{only === "set" ? "Nothing set in this layer: every feature uses the default." : "This layer matches the live policy."}</p>}

@@ -7,6 +7,301 @@ from 0.6.0 Tether, TetherQS and Tether Manage share one version, kept in sync in
 
 ## [Unreleased]
 
+### Device health (not in a numbered version yet)
+
+- **Health of supported machines in the host list.** A relay can now store health reports from a
+  monitoring agent, a separate program that is not part of Tether: a device enrols once with a
+  short-lived token an administrator creates (`scripts/status-token.sh`), signing the enrolment
+  with its own key, then signs every report with it (`Tether-Sig: device-v1`; an enrolment without
+  it gets `401 enrolment needs the device's signature`, so enrolling proves possession of the key
+  being pinned). The host list shows a health dot and Health,
+  Products and Agent columns, finds hosts with `health:`, `product:`, `version:`, `role:`,
+  `check:`, `agent:` and `since:`, and has a built-in view *Needs attention* (critical, not
+  reporting, or in a link conflict). The host detail gains a Health section with the failing checks first, setup items,
+  90 days of history, all checks and the raw report; a session window has a Health button; the
+  export adds health fields and a CSV with one row per failing check. On Windows Tether notifies
+  when a host turns critical or stops reporting, at most once per host and hour; a switch in the
+  team dialog turns it off. Machines with an agent but without Tether appear as rows without a
+  connect action. `role:` used to be a plain word that found tags; it now means the detected
+  role (`#role:server` still finds the tag) in the search box; in tag rules all the new terms stay
+  plain words as before, so shared rules tag the same hosts on older desktops.
+  Needs the technician to be in the team roster. Report format, relay settings and operation:
+  [docs/health.md](docs/health.md).
+- **Relay (tether-api).** New routes `POST /api/status/enroll`, `POST` and `DELETE /api/status`,
+  `GET /api/team/status[/<uuid>]` and `DELETE /api/admin/status/<uuid>`
+  ([docs/api.md](docs/api.md#device-status-health-reports)). The relay paces the devices
+  (`STATUS_TARGET_RPS`, default 10 posts per second), keeps heartbeats in memory, writes
+  `seen.json`, the summary cache, the compaction of `status/keys.jsonl` and history trimming
+  off the request path, caps enrolment (`STATUS_MAX_DEVICES`, default 20 000) and can switch the
+  whole feature off (`STATUS=off`). A pin or revocation file it cannot read (`keys.jsonl`, `revoked.json`) locks only the status routes (503);
+  sessions, policy and updates are not affected. New gauges `tether_api_status_hosts` and
+  `tether_api_status_write_errors`; `/api/team/*` requests are now counted as endpoint `team`
+  instead of `other`. Privacy and security: [PRIVACY.md](PRIVACY.md),
+  [SECURITY.md](SECURITY.md#device-status-health-reports).
+- **A second signed release index per channel, `monitor.json`,** carries the agent
+  (`monitor/windows-x86_64`) and its check packs (`monitor-packs/any`). `releases.json` refuses
+  these keys and `monitor.json` refuses Tether's, so the agent is never offered as a Tether update
+  and Tether's release generation does not move (from 0.7.0 Tether reads it to install the agent,
+  below). Publish with `scripts/monitor-publish.sh` (it runs
+  `tools/monitor-publish`, which reads Tether Manage's key file); Tether Manage has no screen for
+  it yet. The new `Caddyfile` and `nginx.conf` route `monitor.json` to tether-api,
+  so they go out with it ([docs/updates.md](docs/updates.md#device-status-agent-monitorjson-and-enrolment-tokens)).
+  It expires 30 days after a publish: `monitor-publish refresh` (`scripts/monitor-refresh.sh`)
+  signs it again with a new expiry, the tool never publishes below the highest serial it ever
+  published (`monitor-serials.json`), and `tether_api_release_index_expires_timestamp{index="monitor"}`
+  shows the expiry.
+- **Tokens can be revoked, Tether IDs are verified, devices can be removed.** An enrolment token
+  now carries a random id (required; tokens without one are refused) and can be issued for one
+  Tether ID (`--tether-id`): that token enrols one device, with exactly that ID. Tokens are
+  revoked with `monitor-publish revoke` (admin route `POST /api/admin/status/revoke`, kept in
+  `status/revoked.json`; a revoked token gets `401 token revoked`); devices that enrolled with it
+  stay until removed. A Tether ID that a device names with any other token is only a claim: the
+  host list shows the agent on a row of its own with "Claims to be …" and **Link to this host**,
+  which a team member with `write` confirms once (`POST /api/team/status/<uuid>/link`; the relay
+  records who and when, and the detail shows it with **Unlink**, which also dismisses the claim
+  until a member chooses **Allow a new claim**). Nothing links by itself, and a report cannot
+  change a link. Two devices linked to one Tether ID on different relays are shown as a **link
+  conflict**, joined to neither. Pins from before this change keep their Tether ID only as a claim. **Remove from health monitoring…** in the Health section (members
+  with `write`, `DELETE /api/team/status/<uuid>`) and `monitor-publish remove` remove a device on
+  every relay; `monitor-publish devices` lists them (`GET /api/admin/status/devices`, paged) and
+  `monitor-publish tokens` the issued tokens (a local journal without the tokens themselves).
+  A bound token or a technician's confirmation is the word of a trusted person, not a proof by
+  Tether on the machine ([SECURITY.md](SECURITY.md#device-status-health-reports)).
+- **Customer reference.** An enrolment token can name a customer (`monitor-publish token
+  --customer 4711`, or the 4th argument of `scripts/status-token.sh`; 1 to 32 characters
+  `A-Z a-z 0-9 . _ -`). The relay sets it on the device that enrols with the token, also on one
+  that is already enrolled (the journal says so). As every enrolment is signed with the device's
+  own key, a token holder who knows another device's uuid and public key can neither move it nor
+  create a pin for it. A token without one changes nothing, and a device
+  cannot name it. The team summary, the host detail and `GET /api/admin/status/devices` return
+  it; the host list has a Customer column, the search term `customer:` and the field in both
+  exports; `monitor-publish devices --customer` lists one customer's devices. A relay from before
+  this refuses a token with a customer: update tether-api first. Once a token with a customer has
+  been used, an older tether-api can no longer read `status/keys.jsonl` and locks the status
+  routes (503). It groups devices inside one
+  deployment and is not a security boundary
+  ([docs/health.md](docs/health.md#customer-reference),
+  [SECURITY.md](SECURITY.md#device-status-health-reports)). Separate organisations need separate
+  deployments: [docs/several-organisations.md](docs/several-organisations.md).
+- **Software list on the relay (tether-api; off by default).** With `STATUS_SBOM=on` a device can
+  upload the list of its installed software as one JSON document (`PUT /api/status/sbom`,
+  device-signed; `DELETE` removes it, also while the feature is off, so a list stored earlier does
+  not come back when it is switched on again) and team members read it
+  (`GET /api/team/status/<uuid>/sbom`: the stored bytes, `Content-Type:
+  application/vnd.cyclonedx+json`, `ETag`). The relay checks only that the document is a JSON
+  object (so valid JSON that is deeply nested or not CycloneDX is stored as it is), writes it
+  to `status/<uuid>.sbom.json` before the `204`, and applies, in this order: the switch (`404`),
+  `Content-Length` (required, `411`; at most `STATUS_SBOM_MAX_KB`, default 512, `413`), the key
+  lookup (`401` for a uuid not enrolled here), one accepted upload per device per hour, a global
+  budget (`STATUS_SBOM_RPS`, default 2 per second, `429` with `Retry-After`), then the body, the
+  signature (a refused one, or a body that does not arrive, gives its slot back and counts against
+  the IP; 60 such failures a minute make `429` for that address on every device-signed status
+  route) and the JSON check (`400` and `507 store full` after a valid signature use the device's
+  hour); the total is capped by `STATUS_SBOM_MAX_TOTAL_MB`
+  (default 2048, `507`). The file goes with the pin (removal, 180 days without a report). Records and files are matched at
+  start and at most hourly, on a thread of its own (a list lost from `seen.json` by a hard stop is
+  rebuilt from the file; one journal line per pass). A device
+  may upload before its first report. The answer to a post carries `"sbom": true` when the
+  feature is on, the team summary a host's `sbom: {at, sha}`, and `/metrics` has
+  `tether_api_status_sbom_files` and `tether_api_status_sbom_bytes`. The technician app shows
+  it in the host's Health section: a Software part with the programs in a table and a filter, and
+  the device's manufacturer, model, serial number and memory; **Export SBOM** saves the document
+  exactly as the relay holds it as `<host>-<yyyy-mm-dd>.cdx.json` (a document over 1 MiB is
+  neither shown nor exported; when the app cannot read one it says so and still offers the export)
+  ([docs/health.md](docs/health.md#software)).
+  `tools/load/status-run.sh` can now upload lists for every simulated device
+  (`STATUS_SBOM=on`). Operation: [docs/health.md](docs/health.md#the-software-list); wire:
+  [docs/api.md](docs/api.md#put-apistatussbom-device-signed); what it holds and who can read it:
+  [PRIVACY.md](PRIVACY.md), [SECURITY.md](SECURITY.md#the-software-list).
+  Checked: the relay's integration tests (`server/api/tests/status.rs`, on Linux under WSL) and a
+  short load run (made before both rounds of review fixes to the upload checks and the rebuild of records,
+  and not repeated after them) of 5 000 devices for 240 s, once without and once with uploads at the default
+  budget, on a developer PC under WSL ([docs/scaling.md](docs/scaling.md#tether-api)): 478 of 480
+  uploads accepted, two `429 busy`, no `5xx`, memory about 15 MiB. Not checked: the run at
+  20 000 devices with uploads, a relay on a real server, an upload by a real agent against a
+  real relay (none was tried), and the 40 to 80 KiB per machine and 1.2 GB at 20 000 machines, which stay an
+  estimate. The short runs failed two of the generator's own criteria (RSS at the end against a
+  30 s warm-up, p99.9 of the probes against a noisy baseline), with and without uploads; they
+  are not a pass.
+- Checked and not checked: to be filled in at release.
+
+### Software search in the host list (for 0.7.0; off by default; not in a numbered version yet)
+
+- **Find every computer that has a program.** New search term `software:<text>[@<version
+  prefix>]` in the host list, quotes for spaces (`software:chrome`,
+  `software:"garnet browser"@126`): hosts with an installed program whose name or publisher
+  contains the text, as of each computer's last upload of its software list. It combines with every
+  other term; hosts without a list, or that a relay could not answer for, match neither
+  `software:x` nor `-software:x`. The desktop asks every relay on Enter or 800 ms after typing, one
+  term after the other per relay, retries a busy relay up to 3 times, and says every outcome in a
+  line under the search box, with a note that each search is recorded in the team's audit log.
+  Saved searches with the term run when opened; in tag rules it stays a plain word
+  ([docs/health.md](docs/health.md#searching-installed-software)).
+- **Relay (tether-api): `GET /api/team/status/software?q=&v=`** and the switch
+  `STATUS_SOFTWARE_SEARCH` (needs `STATUS_SBOM=on` and a signed team document in force at start and
+  at each search). The relay now reads three fields of each software list (program name, version,
+  publisher; no hardware identity) into a sidecar `status/<uuid>.sw`, written when the list is
+  stored, removed with it, built for older lists by the start-up and hourly scan. Members with the
+  `sbom` permission, within their customers; one `search` audit record per search with the term;
+  one search at a time relay-wide (`429 busy`, not counted against the member), 6 a minute per
+  member key, 60 s cache per scope, at most 2 000 hosts, 10 s budget. A device uuid `software` is
+  refused at enrolment. Wire: [docs/api.md](docs/api.md#get-apiteamstatussoftwareqtextvversion-prefix-member-signed);
+  what is read and who can search: [PRIVACY.md](PRIVACY.md),
+  [SECURITY.md](SECURITY.md#the-software-list).
+- **`check:<text>=crit|warn`**: the check must be in that state. With a `check:` term, hosts whose
+  summary left failing checks out (`more_faults`) are counted under the search box.
+- **Measured** (one PC, WSL2, static musl build under `MemoryMax=64M`, 20 000 devices each with a
+  60 KiB list of 200 programs, 1 000 member desktops; [docs/scaling.md](docs/scaling.md#tether-api)):
+  a search over all 19 900 sidecars takes 2.1 to 4.3 s (p50 about 2.7 s) against the plan's limit of
+  5 s, growing with list size and fleet; building the sidecars for all lists at start took about
+  350 s under load; peak memory 46.5 MiB against 42.1 MiB without the search. With one search every
+  10 s the run **FAILED the load tool's own latency checks** for heartbeats and policy (heartbeat
+  p99 3.29 ms against a limit of 3.03, p99.9 16.67 against 14.71); no `503` on device routes.
+  Relay integration tests and the desktop's unit, Rust and mock end-to-end tests (Chromium) pass.
+- **Not checked:** no real relay with real technicians and real software lists; the desktop's UI
+  test was not run in WebKit (it does not run on the build PC); the desktop app itself ran only
+  against a mock relay (the relay's tests replay the desktop's request, not the app).
+
+### Staff sign-in, roles and the team audit log (for 0.7.0; not in a numbered version yet)
+
+- **Sign-in with the organisation's account (OpenID Connect; Microsoft Entra ID documented).**
+  The desktop app and Tether Manage sign in through the system browser (authorization code with
+  PKCE, redirect `http://localhost:<port>/`) and post the access token, signed with the app's own
+  key, to every relay (`POST /api/team/session`). Each relay checks the token itself (RS256 against
+  the provider's keys, `ver` 2.0, issuer, tenant, audience, client, time, no groups overage) and
+  opens a session bound to that key for at most the token's life and `TEAM_SESSION_MAX_MINUTES`
+  (60). The refresh token only in the OS credential store; renewal five minutes before the end;
+  sign-out on every relay. The relays need outbound HTTPS to the provider (no proxy). Off until a
+  team document with sign-in settings is published. Set-up for a tenant administrator and residual
+  risks: [docs/sign-in.md](docs/sign-in.md).
+- **Signed team document** replaces the plain roster: admin-signed, serial must rise; per member
+  `write`, `audit`, `sbom`, `agent`, `customers`, `service`; directory roles mapped to permissions
+  or Tether Manage roles; a deny list; `oidc_only`; up to 2 000 entries. The relay enforces `sbom`
+  and the customer scope on every status route, the summary (one cached summary per scope) and the
+  search; a device outside a member's customers answers as unknown. `kid` in `Tether-Sig` selects
+  one key ([docs/api.md](docs/api.md#team-technician-endpoints)).
+- **Tether Manage roles** Auditor, Operator, PolicyEditor, Publisher, KeyHolder: signed-in staff
+  read and operate through the relay's admin routes, store unsigned **proposals** (policy, team
+  document, release with file names and hashes only) for a key holder to review, sign and publish;
+  the keys stay in the key holder's vault; the review lists security-relevant changes first. The
+  Team page is the team document editor; new **Team activity** page with a chain check per relay
+  ([docs/management.md](docs/management.md#sign-in-and-roles)).
+- **Team audit log** on every relay (`team-audit/<day>.jsonl`, hash chain, journal copy; 90 days /
+  2 GB): sign-ins, reads, searches, changes, every admin change, with person, time, device,
+  customer and IP address, never contents ([docs/api.md](docs/api.md#team-audit-log),
+  [PRIVACY.md](PRIVACY.md)).
+- **Load**: the summary is also served gzip-compressed (20.3 MB plain, 1.76 MB gzip at 20 000
+  devices) with a weak ETag that ignores `last_seen` churn; no-`kid` signature checks outside the
+  state lock. Measured at 20 000 devices and 1 000 desktops under `MemoryMax=64M` (one PC, WSL2,
+  loopback): heartbeat p99 0.91 ms against 0.84 ms without members, peak RSS 40.3 MiB, one
+  unexplained 10 s stall in a repeat run ([docs/scaling.md](docs/scaling.md#tether-api)).
+- **Bounds against anonymous sign-ins** (final review): a refused sign-in keeps no nonce; tokens
+  refused before their own signature verified count against the source address; `sign-in-refused`
+  records without a verified person are capped at 60 a minute relay-wide. The nonce set holds at
+  most 100 000 (then `503`) and is appended to `nonces.log` per request instead of rewriting
+  `nonces.json` under the lock. One proposal list (`429`, `Retry-After: 1`) and one team-audit read
+  (`429`, `Retry-After: 2`) at a time; proposals listed without parsing their documents, a release
+  proposal at most 64 KiB, an unreadable one listed and deletable by id; `GET /api/admin/devices`
+  recorded as `device-list`.
+- **Checked**: relay tests with the mock provider `tools/oidc-mock` (every refused token shape,
+  sessions, deny list, `oidc_only`, Manage roles at the admin routes, audit records); desktop and
+  Tether Manage unit tests against the mock and stand-in relays; one run by hand of the desktop
+  code against the mock and two real relays (debug builds, WSL); one TLS key fetch by hand from
+  Microsoft's public endpoint.
+- **Not checked**: no real Entra tenant (registrations, group assignment, MFA, Conditional Access,
+  real lifetimes, key rollover); the real Windows Credential Manager and macOS Keychain (tests use
+  an in-memory store); no test of the desktop sign-in or of Tether Manage in a real window with a
+  real browser; no load run with signed-in sessions. The list of checks a real tenant must pass:
+  [docs/sign-in.md](docs/sign-in.md#what-was-checked).
+
+### The health monitoring agent through Tether (for 0.7.0; not in a numbered version yet)
+
+- **Tether installs, upgrades and removes the agent (Windows).** Two new policy features:
+  `health.agent` (`manual` default and exactly as before, `on-request`, `install`, `remove`) and
+  `health.enrol-grant` (the layer's grant). With Tether's service its LocalSystem `--server`
+  process installs the organisation's signed agent from `monitor.json` at its next policy check
+  (staged rollout), raises an agent it installed that stays 48 hours below the index's
+  `minimumVersion` with the agent's `upgrade`, enrols it again when the relays forgot it (at most
+  once a day, and once per new grant) and removes it with `remove`; failures back off 1 h, 6 h,
+  24 h. It runs only the `monitor/windows-x86_64` entry of an admin-signed, unexpired, not halted
+  index at or above its serial floor, verified (size, SHA-256, minisign, trusted comment) into a
+  SYSTEM/Administrators-only folder and verified again through a write-denying handle right before
+  it runs; nothing from the network reaches a command line. A removal on the computer
+  (*Settings › Apps*) or by a technician is never undone by policy; agents installed by hand are
+  touched only by `remove`; a machine policy `health.agent` = `manual` blocks everything. State in
+  `%ProgramData%\Tether\health-agent.json`, a read-only copy for Settings beside it. macOS ignores
+  the features ([docs/health.md](docs/health.md#installing-the-agent-through-tether),
+  [docs/policy.md](docs/policy.md#the-health-monitoring-agent-healthagent-healthenrol-grant)).
+- **Linked by proof, not by a person's word.** A grant is an enrolment token with `tether_proof`
+  (`make_token(…, tether_proof, admin)`; never with `tether_id`; at most 1024 characters). The
+  enrolment carries `tether_proof`, Tether's signature over `"tether-agent-link-v1\n<id>\n<uuid>\n<pubkey>"`;
+  tether-api asks hbbs for the ID's key (`GET /peer-pk/<id>` on the health port, loopback and
+  `PEER_LOOKUP_FROM` only, IDs of 6 to 16 `A-Za-z0-9_-`) outside its state lock (setting
+  `HBBS_PEER_URL`, default `http://127.0.0.1:21122`, plain HTTP, 2 s, at most 4 lookups at once)
+  and links the pin with `linked_proof` (stored as `linked_token` `proof:<grant id>`, so a 0.6
+  relay can still read `keys.jsonl`). New answers: `400 tether proof required`, `401 tether proof
+  does not match`, `409 tether id unknown to this relay` (both counted against the IP), `503 tether
+  proof unavailable`, `503 tether proof needs HBBS_PEER_URL`. The host list says "Health linked by
+  Tether on that computer" ([docs/api.md](docs/api.md#post-apistatusenroll-token-and-device-signature)).
+- **In a session.** **Remote actions › Health monitoring agent…** asks the remote computer and
+  installs or removes the agent there (session message `Misc` 1001/1002, only with control, one at
+  a time, at most every 10 s); the host's connection window says what the technician did, and the
+  session audit log gets an `alarm` record of type 30 (`running` followed by the outcome when it
+  takes longer than 3 minutes). An old host answers nothing ("too old" after 10 s).
+- **Without Tether's service, and TetherQS.** Only on a technician's request or the person's click
+  on the home card (policy `install`): Tether's window asks first, then the Windows elevation
+  prompt starts the verified agent, which checks its own copy in `%ProgramFiles%\Tether Monitor`
+  against the signed index it gets over a named pipe before it creates its service. No prompt by
+  policy alone; refused for a session where Windows would not prompt, for 10 minutes after a no,
+  where `customer.elevate` is off (TetherQS) or the machine policy says `manual`. The agent is
+  linked to the asking program's Tether ID (TetherQS: its own).
+- **Tether Manage.** The Health monitoring area makes the layer's grant (365 days, optional
+  customer, journal `health-grants.json`), shows its state, **Renew** (the old grant is revoked on
+  every relay once all of them serve the new policy) and **Revoke** (every relay at once; the layer
+  goes to `manual`), refuses to publish `on-request`/`install` without a valid grant, reminds after
+  unlocking when fewer than 60 days are left, and explains an old relay's `400 unknown feature`.
+  Custom apps cannot carry the features. Loading an older History version without a group marks
+  that group's grants revoked ([docs/management.md](docs/management.md#health-monitoring-agent)).
+- **Order.** Relays first (tether-api and hbbs; an old relay refuses a policy with the features,
+  the grant and the proof), then the agent 0.2.0 or later to `monitor.json`, then Manage and the
+  apps, the policy last ([docs/updates.md](docs/updates.md#relay-deploy-notes),
+  [docs/deployment.md](docs/deployment.md#update-the-agent-through-tether-070)). Security and privacy:
+  [SECURITY.md](SECURITY.md#installing-the-agent-through-tether), [PRIVACY.md](PRIVACY.md).
+- **Checked:** unit and integration tests on this PC: `tether-trust` (token flag, proof, features),
+  hbbs's lookup and tether-api's proof enrolment against a stub hbbs (Linux under WSL, whole relay
+  suite), the desktop backend (the manager and the elevated path with fake processes, services,
+  downloads and pipes; one real named pipe and one real locked file), TetherQS's backend, Tether
+  Manage's backend and front end, the desktop front end (vitest) and the mock end-to-end host list
+  (Chromium). **Not checked:** nothing has run on a real machine yet: no real service install,
+  upgrade or removal, no real Windows elevation prompt, no TetherQS install, no session round trip
+  between two machines, no relay with a real hbbs; no macOS or Linux build of the new code (the
+  Linux check stopped at a missing system package); the vendored core's own tests could not be
+  built here, so the session message's logic is tested from the desktop crate; WebKit e2e not run.
+
+### Instances: two organisations' Tether on one PC (not in a numbered version yet)
+
+- **`TETHER_INSTANCE`**, an optional build value (1 to 16 characters `a-z 0-9`), builds a
+  technician app that installs beside the default one or beside another instance: with `north`
+  it is `Tether-north` (`tether-north.exe`, identifier `app.tether.desktop.north`, link scheme
+  `tether-north://`) with its own device ID, settings folder, Windows service, firewall rule,
+  machine policy key (`HKLM\SOFTWARE\Policies\Tether-north`, macOS `net.tether.app.north`) and
+  recording folder. Unset, the build is unchanged. It must be built together with the
+  `--config` that `scripts/instance-config.sh` prints; the `desktop` workflow (repository
+  variable `TETHER_INSTANCE`) and `scripts/build-macos.sh` do both and rename the files to the
+  usual `Tether_<version>_…` names. The installer hooks name the app through `${PRODUCTNAME}`
+  only (`scripts/check-hooks.sh` in CI). Limits: of two builds on one PC only the one started
+  first gets direct connections (both use TCP 21118 and UDP 21119), `tether://` links open only
+  the default build, an existing install cannot become an instance, and each organisation
+  publishes only its own build
+  ([docs/several-organisations.md](docs/several-organisations.md#two-organisations-on-one-pc)).
+  A release build also checks that the Tauri product name matches the instance (`Tether` for
+  none, `Tether-<instance>` otherwise) and stops with a message when it does not. Checked: the
+  unit tests with and without the value, refused values, three real Windows bundle runs
+  (none installed): `north` with its `--config` built `Tether-north_0.6.3_x64-setup.exe`;
+  `north` without it stopped at the product-name check; the default build with north's
+  `--config` stopped at it. Not checked: installing it, two builds side by side, the service and firewall
+  rule on a real PC, updates, the macOS build.
+
 ### 0.6.3 (2026-11-23; files in dist/, ready to publish; frozen)
 
 Six files in `dist/` (Windows setup and TetherQS signed; Mac files universal, as built by the

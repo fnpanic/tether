@@ -65,7 +65,8 @@ export function readShared(raw: unknown): SharedDoc | null {
   const d = raw as Partial<SharedDoc>;
   const hosts: SharedDoc["hosts"] = {};
   for (const [id, e] of Object.entries(d.hosts ?? {})) {
-    if (!okId(id) || !e || typeof e !== "object") continue;
+    // Agent-only rows (`m:<uuid>`) are never shared; one an earlier version wrote is dropped.
+    if (!okId(id) || id.startsWith("m:") || !e || typeof e !== "object") continue;
     const tags = cleanTags(e.tags);
     const name = typeof e.name === "string" ? e.name.slice(0, 64) : "";
     if (name || tags.length) hosts[id] = { ...(name ? { name } : {}), ...(tags.length ? { tags } : {}) };

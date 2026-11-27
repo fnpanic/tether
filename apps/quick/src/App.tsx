@@ -2,7 +2,7 @@
 import { type ButtonHTMLAttributes, type ReactNode, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, Copy, Eye, EyeOff, FolderSync, HelpCircle, Keyboard, Minus, RefreshCw, Send, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { onAccent } from "./color";
-import { api, type Client, type Diagnostics, formatId, type Probe, inTauri, onCm, type State } from "./ipc";
+import { type AgentConsent, api, type Client, type Diagnostics, formatId, type Probe, inTauri, onAgentConsent, onCm, type State } from "./ipc";
 
 type Consent = { conn_id: number; peer_name: string; text: string };
 type Msg = { me: boolean; text: string };
@@ -16,6 +16,7 @@ export function App() {
   const [s, setS] = useState<State | null>(null);
   const [help, setHelp] = useState(false);
   const [consent, setConsent] = useState<Consent | null>(null);
+  const [agentAsk, setAgentAsk] = useState<AgentConsent | null>(null);
   const [rec, setRec] = useState<Set<number>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
   const [chat, setChat] = useState<Record<number, Msg[]>>({});
@@ -45,9 +46,14 @@ export function App() {
       else if (name === "refused") say(p.reason === "update-required" ? "A connection was refused: update TetherQS first." : "Incoming sessions are turned off by your administrator.");
       refresh();
     });
+    // The health agent's pre-dialog: on the event, and once at start (a reload while it waits).
+    const ask = () => api.agentConsent().then(setAgentAsk, () => {});
+    ask();
+    const unAsk = onAgentConsent(ask);
     return () => {
       clearInterval(t);
       un.then((f) => f());
+      unAsk.then((f) => f());
     };
   }, []);
 
@@ -143,6 +149,19 @@ export function App() {
             } catch (e) {
               say(String(e));
             }
+          }}
+        />
+      )}
+      {agentAsk && !consent && (
+        <AgentConsentDialog
+          key={agentAsk.id}
+          d={agentAsk}
+          onAnswer={(yes) => {
+            setAgentAsk(null);
+            api.agentConsentAnswer(agentAsk.id, yes).then(
+              (ok) => !ok && say("That question is no longer open."),
+              (e) => say(String(e)),
+            );
           }}
         />
       )}
@@ -730,6 +749,53 @@ function UpdateCheck({ last, stale }: { last: string | null; stale?: boolean }) 
         Check for updates
       </button>
     </span>
+  );
+}
+
+/** Control, bidi, line-separator and zero-width characters out (the backend's `invisible` set in
+ *  agent_elevated.rs, as in the desktop's AgentHere.tsx): they could reorder or hide what is read. */
+function plainText(s: string): string {
+  return s.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "");
+}
+
+/** The health agent's pre-dialog (spec 11.2): only the person here answers it (remote input never
+ *  reaches this window). Like the recording consent: Escape and the first, focused button decline. */
+function AgentConsentDialog({ d, onAnswer }: { d: AgentConsent; onAnswer: (yes: boolean) => void }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    if (!ref.current?.open) ref.current?.showModal();
+  }, []);
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby="qs-agent-title"
+      aria-describedby="qs-agent-text"
+      className="animate-rise m-auto max-h-[calc(100%-2rem)] w-[calc(100%-3rem)] max-w-none overflow-y-auto rounded-2xl border border-hairline bg-tile p-8 text-ink shadow-float backdrop:bg-black/40"
+      onCancel={(e) => {
+        e.preventDefault();
+        onAnswer(false);
+      }}
+    >
+      <h2 id="qs-agent-title" className="text-headline font-semibold">
+        {plainText(d.title)}
+      </h2>
+      <div id="qs-agent-text">
+        {d.paragraphs.map((p, i) => (
+          <p key={i} className="mt-2 text-callout text-ink-80">
+            {plainText(p)}
+          </p>
+        ))}
+      </div>
+      <div className="mt-6 flex gap-2">
+        {/* First, with the focus: a key typed as the question appears must not install. */}
+        <Button className="flex-1" autoFocus onClick={() => onAnswer(false)}>
+          {plainText(d.no)}
+        </Button>
+        <Button variant="primary" className="flex-1" onClick={() => onAnswer(true)}>
+          {plainText(d.yes)}
+        </Button>
+      </div>
+    </dialog>
   );
 }
 

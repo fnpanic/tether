@@ -308,6 +308,100 @@ The ramp covers the usual case. For pilots that should always go first:
 
 Test-channel builds are not linked from the download page, which always uses `stable`.
 
+## Device-status agent: monitor.json and enrolment tokens
+
+The device-status agent (`monitor/windows-x86_64`, `tether-monitor-<v>.exe`) and its check packs
+(`monitor-packs/any`, `monitor-packs-<v>.json`) have their own signed index,
+`download/<channel>/monitor.json`: same format, rules, admin key and updater signature as
+`releases.json`, but only these two apps (tether-api refuses Tether's apps in it and these in
+`releases.json` and `releases-v2.json`). Entries list relay URLs only (no CDN copy). Tether Manage
+has no screen for it; `tools/monitor-publish` (wrapped by `scripts/status-token.sh`,
+`scripts/monitor-publish.sh` and `scripts/monitor-refresh.sh`, which build it, rebuild it when its
+sources changed, and ask the passphrase) publishes it:
+
+- It reads the admin and updater keys from Tether Manage's key file (`MANAGE_KEYS`, default
+  `%APPDATA%\Tether-Manage\keys.json`) with the passphrase from `MANAGE_PASSPHRASE`, never from
+  an argument. Build it with `TETHER_ADMIN_PUB_KEY` set as for Tether Manage, so indexes signed
+  with an older admin key (after a rotation) are still read.
+- `index` needs the build's `<file>.sig` and checks it against the updater key before anything is
+  sent. It reads every relay's `monitor.json` (all must answer), refuses a version below the
+  published one and the same version with other bytes, adds the entry, signs serial + 1 and
+  uploads the file, its `.sig` and the index to every relay. A relay that lacks a file the index
+  names gets the file but not the index (the output says which release to publish there again).
+- `refresh --channel <c> --relay <relays>` signs the published index again, unchanged but for
+  serial + 1 and a new expiry, and uploads it to every relay that holds the files it names; it
+  refuses when nothing is published and prints the new expiry.
+- Both keep the highest serial they ever published per channel in `monitor-serials.json` next to
+  the key file, and refuse to publish or refresh below it, also when every relay answers 404 or an
+  older index (a relay that lost or rolled back its `monitor.json`: restore it from a backup).
+  A missing `monitor-serials.json` means no floor: keep the file with the key file, and copy it
+  along when another machine takes over publishing.
+
+- `token --label <text> --days <1-30> [--tether-id <id>] [--customer <ref>]` prints an enrolment
+  token; with a Tether ID it enrols one device, with that ID; with a customer reference (1 to 32
+  characters `A-Z a-z 0-9 . _ -`) the relay sets it on the devices that enrol with it
+  ([health.md](health.md#customer-reference)). Its id, label, expiry and customer go to stderr and to the
+  journal `monitor-tokens.json` next to the key file (never the token itself); `tokens` lists the
+  journal and marks expired and revoked tokens.
+- `revoke (--id <token id> [--exp <unix>] | --token-file <path> | --token -) --relay <relays>`
+  revokes a token on every relay (expiry from the journal or from the token itself; an `--exp`
+  earlier than the journal's is refused; an expired token is refused). It prints "revoked on N of M
+  relays" and marks the journal "revoked" only when every relay accepted, else "partly revoked". Devices that enrolled with it stay enrolled: `devices [--token
+  <id>] [--customer <ref>] --relay <relays>` lists the enrolled devices, `remove --uuid <uuid> --relay <relays>`
+  removes one from every relay. Each prints one line per relay and exits non-zero if one failed
+  ([health.md](health.md#revoking-a-token)).
+
+```
+read -rs MANAGE_PASSPHRASE && export MANAGE_PASSPHRASE
+bash scripts/status-token.sh office 7
+bash scripts/monitor-publish.sh stable monitor 0.1.0 dist/tether-monitor-0.1.0.exe https://relay1,https://relay2
+bash scripts/monitor-publish.sh stable monitor-packs 2026.11.23 dist/monitor-packs-2026.11.23.json https://relay1,https://relay2
+bash scripts/monitor-refresh.sh stable https://relay1,https://relay2
+```
+
+`monitor.json` expires 30 days after the last publish or refresh. Run `refresh` (or publish a new
+release) about once a month: it is a manual admin step, run from the admin's own machine, because
+it needs the admin key's passphrase. `tether_api_release_index_expires_timestamp{index="monitor"}`
+shows the expiry ([monitoring.md](monitoring.md)). What an agent does with an expired index is
+defined by the agent, not by the relay or this tool.
+
+**Tether reads `monitor.json` too** (from 0.7.0, Windows only), never as a Tether update: to install
+the agent and to keep an agent it installed at the minimum version, when the policy feature
+`health.agent` asks for it ([health.md](health.md#installing-the-agent-through-tether)). It fetches
+`download/<channel>/monitor.json` (its `update.channel`; the agent has `stable` and `test`) from its
+relays and opens it with the same code as its own index (`release::choose_for` with the two monitor
+apps only, admin signature, serial floor `monitor-<channel>.serial` beside its state). For this it
+is stricter than for its own updates: it refuses an **expired** index (so a relay cannot have an
+agent version from an old index installed), a halted entry and an unexpected file name, and the
+artifact is checked for size, SHA-256, minisign signature with the compiled-in updater key and the
+trusted comment (file and version), then checked again right before it runs. The staged rollout
+applies to installs by policy, not to a technician's install in a session.
+
+**The minimum version and `upgrade`.** `monitor-publish index … --min-version <v>` sets the entry's
+`minimumVersion` (the wrapper `scripts/monitor-publish.sh` does not pass it; call the tool). Tether's
+service reads the index at most every 6 hours; when the agent it installed (service program or
+worker) has been below that version for 48 hours, it downloads the entry's version and runs that
+program's `upgrade`, which keeps the agent's data, key, enrolment and switches. It never installs a
+version that is not above the installed one. To move every machine: publish the new version with
+`--min-version` set to it. The agent's own updater keeps working as before; Tether only enforces the
+floor. Agents installed by hand, and machines without Tether's service, are never upgraded by
+Tether.
+
+**What must be published first.** Tether installs only what `monitor.json` offers, so the version
+published there must be 0.2.0 or later (the first that knows the commands Tether uses) before a
+policy says `install`. Agents 0.1.x installed by hand keep working and update themselves.
+
+Deploy order, on every relay, before the first monitor publish: the new tether-api binary first,
+then the proxy configuration (the Caddyfile or nginx.conf route below, which sends `monitor.json`
+to tether-api). An older tether-api stores an uploaded `monitor.json` like any file, without
+checking its signature or serial. Rolled back to a tether-api from before `monitor.json`, a relay
+no longer serves it through tether-api (with the new proxy route: 404; with the old one Caddy
+serves the file from disk) and leaves the files in place; the new binary serves them again.
+A publish that reached only some relays (one down, a network error) is repaired by running the
+same command again: the same version with the same bytes is not published anew, the current
+index goes unchanged (rollout start kept) to the relays that lack it. Tokens are valid 1-30 days
+and, unless issued for one Tether ID, reusable until they expire or are revoked.
+
 ## Relay deploy notes
 
 - tether-api writes `/var/lib/tether-api/release-generation` (group-readable); hbbs (user
@@ -322,8 +416,26 @@ Test-channel builds are not linked from the download page, which always uses `st
   are missing. On 2026-11-09 relay 1's Caddyfile had no `@index` route at all and relay 2's still
   the releases.json-only pattern (`scripts/caddy-index-v2.sh`, run on the relay, updates it, validated
   before the reload).
+- `download/<channel>/monitor.json`, the device-status agent's signed index (apps `monitor` and
+  `monitor-packs` only; Tether's apps are refused in it and its apps in `releases.json`), needs
+  the route too: `^/download/[a-z0-9-]+/(releases(-v2)?|monitor)\.json$` (Caddyfile and
+  nginx.conf in the repo). Without it Caddy serves `monitor.json` as a plain file: still
+  verifiable, but without the serial ETag. A `monitor.json` upload does not move the release
+  generation G (Tether clients never take it as a Tether update; only Tether's agent manager reads
+  it, above); its serials, summed over all channels, are the `releases` hint of status answers.
 - Order: tether-api (+ Caddyfile) first, then hbbs; clients and Manage after. Each step works
   without the next ones; old clients ignore `ReleaseHint` and the heartbeat body.
+- **Release order for the agent through Tether (0.7.0):** relays first (the relay update of release 0.7.0:
+  tether-api and hbbs, a relay has it when `GET /api/team/config` answers `200` or `404 no sign-in
+  configured`, not `404 not found`; with `HBBS_PEER_URL` and `PEER_LOOKUP_FROM` where they run apart,
+  [deployment.md](deployment.md#update-the-agent-through-tether-070)), then the agent 0.2.0 or later to
+  `monitor.json`, then Tether Manage and the apps 0.7.0, **the policy with `health.agent` last**. An
+  old relay refuses to store that policy (`400 unknown feature "health.agent"`), refuses the grant
+  (`401 enrollment token: not an enrollment token`) and an enrolment with a proof (`400`); an old hbbs
+  answers `404` to every lookup, so the relay answers `409 tether id unknown to this relay`. An old
+  Tether skips the two features (logged as rules not applied) and does nothing; a technician asking it
+  in a session gets "Tether on the remote computer is too old (needs 0.7.0)." An old viewer has no
+  menu item and shows a proof link as linked by the token issued for the host.
 
 ## End-to-end test
 

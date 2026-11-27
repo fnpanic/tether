@@ -3,6 +3,9 @@
 //! no installation, no service, no tray. The host server and the connection manager both run in
 //! this one process (see app.rs).
 
+mod agent;
+#[path = "../../../desktop/src-tauri/src/agent_elevated.rs"]
+mod agent_elevated;
 mod app;
 mod commands;
 mod custom;
@@ -56,6 +59,8 @@ fn main() -> ExitCode {
     security::apply_policy();
     netpolicy::apply();
     policy::load_cached();
+    // A technician's health agent request in a session: the elevated path (spec 11).
+    librustdesk::ui::agent::set_handler(agent::host_agent);
     if std::env::args().nth(1).as_deref() == Some("--diagnostics") {
         // Same archive as the technician app's `--diagnostics` (docs/troubleshooting.md).
         let Some(out) = std::env::args().nth(2) else {

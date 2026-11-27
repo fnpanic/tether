@@ -9,7 +9,8 @@
 # MAC_ARCH=arm64 (Apple silicon only: half the build time, no Intel slice, no Rosetta/sudo),
 # SKIP_QS=1 (technician app only), PREBUILT_FRONTEND=<dir> (technician UI built elsewhere with
 # `npm run build`: no npm here; the Tauri CLI comes from crates.io), PREBUILT_QS_FRONTEND=<dir>
-# (same for TetherQS; PREBUILT_FRONTEND needs it or SKIP_QS=1).
+# (same for TetherQS; PREBUILT_FRONTEND needs it or SKIP_QS=1), TETHER_INSTANCE=<a-z0-9, max 16>
+# (a technician app installable beside the default one, Tether-<i>.app; file names stay Tether_…).
 # Safe to run again: every step skips what is already in place.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -51,6 +52,9 @@ EOF
   exit 1
 fi
 export TETHER_SERVER TETHER_PUB_KEY TETHER_ADMIN_PUB_KEY TETHER_UPDATER_PUB_KEY
+export TETHER_INSTANCE=${TETHER_INSTANCE:-}
+INSTANCE_CONFIG=$(bash scripts/instance-config.sh "$TETHER_INSTANCE") || exit 1
+APP=Tether${TETHER_INSTANCE:+-$TETHER_INSTANCE} # product name, = APP_NAME (build.rs)
 [ -z "${PREBUILT_FRONTEND:-}" ] || [ -n "${SKIP_QS:-}${PREBUILT_QS_FRONTEND:-}" ] || die "PREBUILT_FRONTEND covers the technician app only: set PREBUILT_QS_FRONTEND (or SKIP_QS=1) too."
 
 # ---------------------------------------------------------------- prerequisites
@@ -171,13 +175,14 @@ tauri_build() {
 
 step "Tether technician app ($ARCH_NAME .app, .dmg, updater .app.tar.gz)"
 cd "$ROOT/apps/desktop"
-tauri_build "${PREBUILT_FRONTEND:-}" --target $TARGET --bundles app,dmg
+tauri_build "${PREBUILT_FRONTEND:-}" --target $TARGET --bundles app,dmg ${INSTANCE_CONFIG:+--config "$INSTANCE_CONFIG"}
 V=$(version)
 B="src-tauri/target/$TARGET/release/bundle"
-cp "$B/dmg/Tether_${V}_${ARCH_NAME}.dmg" "$OUT/"
+# Published as Tether_… for an instance build too: the release index takes only these names.
+cp "$B/dmg/${APP}_${V}_${ARCH_NAME}.dmg" "$OUT/Tether_${V}_${ARCH_NAME}.dmg"
 # Tauri's updater format: a gzipped tar with the .app at the top.
 rm -f "$OUT/Tether_${V}_${ARCH_NAME}.app.tar.gz.sig"
-COPYFILE_DISABLE=1 tar -czf "$OUT/Tether_${V}_${ARCH_NAME}.app.tar.gz" -C "$B/macos" Tether.app
+COPYFILE_DISABLE=1 tar -czf "$OUT/Tether_${V}_${ARCH_NAME}.app.tar.gz" -C "$B/macos" "$APP.app"
 sign "$OUT/Tether_${V}_${ARCH_NAME}.app.tar.gz"
 
 if [ -z "${SKIP_QS:-}" ]; then

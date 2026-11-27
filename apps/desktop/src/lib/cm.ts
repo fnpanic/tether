@@ -64,3 +64,13 @@ export function requestText(c: CmClient, id: string): string {
           : "see and control this screen";
   return c.name ? `${c.name} (ID ${id}) asks to ${what}. The name is chosen by the other side and is not verified.` : `The device with ID ${id} asks to ${what}.`;
 }
+
+/** The `health_agent` CM event (`{id, action, outcome}`, sent only when the host acted on a
+ *  technician's install or remove): one line for this computer's user. Its fields come from the
+ *  core but are not shown: only a known action gives a line, only its known success a specific one. */
+export function agentLine(p: unknown): string | null {
+  const { action, outcome } = (p && typeof p === "object" ? p : {}) as { action?: unknown; outcome?: unknown };
+  if (action === "install") return outcome === "installed" ? "The technician installed the health monitoring agent." : "The technician asked to install the health monitoring agent.";
+  if (action === "remove") return outcome === "removed-by-tether" ? "The technician removed the health monitoring agent." : "The technician asked to remove the health monitoring agent.";
+  return null;
+}

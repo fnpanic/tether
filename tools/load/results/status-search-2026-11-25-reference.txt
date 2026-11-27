@@ -1,0 +1,88 @@
+tether-api pid 80837 on 127.0.0.1:34877; 20000 devices, warm-up 60 s, baseline 60 s, run 600 s
+devices 20000 (100 enrolled through the API in 0.3 s), next 2000 s, posts about 10.0/s
+warm-up: 60 s of probes (not measured)
+  self-check: a 1 ms sleep in the generator woke up to 1.2 ms late, 0 times more than 20 ms late
+tether-api RSS: 35.8 MiB after enrolment, 36.6 MiB after the warm-up (the reference)
+baseline: 60 s of probes alone
+  self-check: a 1 ms sleep in the generator woke up to 0.7 ms late, 0 times more than 20 ms late
+run: 600 s, 5912 status posts scheduled, 600 new enrolments, summary every 30 s, metrics every 15 s
+members: 1000 (500 limited to one of 500 customers, 10 % without gzip), 4662 requests scheduled
+  self-check: a 1 ms sleep in the generator woke up to 24.5 ms late, 2 times more than 20 ms late
+
+heartbeat baseline       n=1200   p50=   0.51  p99=   0.86  p99.9=   5.72  max=   21.46 ms  codes={200: 1200}
+heartbeat during run     n=12000  p50=   0.51  p99=   1.22  p99.9=  18.85  max=  134.77 ms  codes={200: 12000}
+policy baseline          n=1200   p50=   0.50  p99=   0.86  p99.9=  11.71  max=   21.46 ms  codes={200: 1200}
+policy during run        n=12000  p50=   0.52  p99=   1.17  p99.9=  16.54  max=  134.81 ms  codes={200: 11999, 503: 1}
+status posts             n=5912   p50=   0.55  p99=  13.78  p99.9=  52.92  max=  282.27 ms  codes={200: 5912}
+new enrolments           n=600    p50=   2.31  p99=  39.68  p99.9=  70.18  max=   70.18 ms  codes={200: 600}
+team summary             n=20     p50=  50.41  p99=2543.72  p99.9=2543.72  max= 2543.72 ms  codes={200: 20}
+metrics scrapes          n=40     p50=  67.39  p99= 130.09  p99.9= 130.09  max=  130.09 ms  codes={200: 40}
+member summary           n=2000   p50=   7.86  p99= 838.87  p99.9=2689.76  max= 3118.41 ms  codes={200: 1499, 304: 497, 503: 4}
+  3.33 requests/s, 6479028 bytes/s out
+member host open         n=2000   p50=   3.17  p99=  85.31  p99.9=1604.79  max= 1740.67 ms  codes={200: 1994, 404: 6}
+  3.33 requests/s, 1143 bytes/s out
+member software list     n=662    p50=   3.53  p99= 207.26  p99.9=1158.27  max= 1158.27 ms  codes={200: 662}
+  1.10 requests/s, 67508 bytes/s out
+summary answers: 1349 200 gzip (1314864 bytes avg), 150 200 plain (14091098 bytes avg), 497 304: 304 share 24.9 %
+junk without kid         n=19200  p50=   1.40  p99=  82.44  p99.9= 159.21  max=  193.62 ms  codes={401: 660, 429: 18535, 503: 5}
+full summary: 21129945 bytes plain, 1978606 bytes gzip (10.7 x), 19927 hosts
+  metrics: tether_api_busy_rejected_total 6
+  metrics: tether_api_status_summary_builds_total 991
+  metrics: tether_api_status_summary_build_seconds_total 28.417693
+  metrics: tether_api_status_summary_build_seconds_max 3.01667
+  metrics: tether_api_status_software_searches_total 0
+  metrics: tether_api_status_software_search_seconds_total 0
+  metrics: tether_api_status_software_search_seconds_max 0
+  metrics: tether_api_team_audit_records_total 3674
+  metrics: tether_api_team_audit_dropped_total 0
+  metrics: tether_api_team_audit_write_failed_total 0
+  metrics: requests endpoint="admin",code="204": 2
+  metrics: requests endpoint="heartbeat",code="200": 14400
+  metrics: requests endpoint="policy",code="200": 14399
+  metrics: requests endpoint="status",code="200": 6613
+  metrics: requests endpoint="team",code="200": 4177
+  metrics: requests endpoint="team",code="304": 497
+  metrics: requests endpoint="team",code="401": 660
+  metrics: requests endpoint="team",code="404": 6
+  metrics: requests endpoint="team",code="429": 18535
+  metrics: requests endpoint="team",code="503": 4
+tether-api RSS: reference 36.6 MiB, end 40.2 MiB, peak 40.8 MiB
+tether-api RSS each minute of the run (MiB): 36.6 36.7 37.3 37.5 38.3 38.9 39.3 39.5 39.4 39.3
+
+ok   heartbeat p99 1.22 ms <= 1.2 x 0.86 + 2 ms
+FAIL heartbeat p99.9 18.85 ms <= 1.5 x 5.72 + 5 ms
+FAIL heartbeat slowest 134.77 ms <= 50 ms
+ok   policy p99 1.17 ms <= 1.2 x 0.86 + 2 ms
+ok   policy p99.9 16.54 ms <= 1.5 x 11.71 + 5 ms
+FAIL policy slowest 134.81 ms <= 50 ms
+FAIL no 5xx (also no 503 busy) and no connection errors on any route
+ok   status 429: 0 of 5912 posts <= 0.1 %
+ok   every status post accepted or 429
+FAIL every probe, enrolment, summary and scrape answered 200
+ok   every software list upload accepted (204) or 429
+FAIL every member request answered 200 or 304 (no 429, no 5xx, no connection error)
+ok   every software search answered 200
+ok   peak RSS 40.8 MiB < 48 MiB
+FAIL RSS at the end within 10 % of the reference (40.2 vs 36.6 MiB)
+FAIL
+cgroup: memory.max 67108864, memory.peak 67112960 bytes (page cache included), events: low 0 high 0 max 4797 oom 0 oom_kill 0 oom_group_kill 0; file 18669568, anon 39788544
+team audit log: 3674 lines, 980K
+tether-api peak RSS over its life (VmHWM): 42100 kB
+tether-api: team: signed team document 1 accepted (1002 members, 1002 with a key here)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none, unverified)
+state-lock holds over 20 ms: 5
+  lock held 486 ms: PUT /api/admin/policy
+  lock held 59 ms: maintain
+  lock held 25 ms: PUT /api/admin/team
+  lock held 24 ms: maintain
+  lock held 21 ms: GET /api/policy

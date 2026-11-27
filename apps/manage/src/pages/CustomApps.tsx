@@ -3,6 +3,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { ImageOff, Link2, Plus, RefreshCw } from "lucide-react";
 import { useApp } from "../App";
 import { invoke, when, type Feature, type Layer, type RelayResult } from "../lib/ipc";
+import { withoutHealth } from "../lib/grants";
 import { byArea, FeatureRow } from "../components/features";
 import { PublishSheet, RelayResults } from "../components/publish";
 import { Badge, Button, Card, CopyField, ErrorText, IconButton, Label, Modal, PageHeader, TextArea, TextField } from "../components/ui";
@@ -84,10 +85,10 @@ function Logo({ png, accent, size = 40 }: { png?: string; accent?: string; size?
   );
 }
 
-function Editor({ form, set, features, onReview, onClose }: { form: Form; set: (f: Form) => void; features: Feature[]; onReview: () => void; onClose: () => void }) {
+function Editor({ form, set, features, removed, onReview, onClose }: { form: Form; set: (f: Form) => void; features: Feature[]; removed: boolean; onReview: () => void; onClose: () => void }) {
   const [logoError, setLogoError] = useState<string | null>(null);
   // Name, colour and welcome text have their own fields above.
-  const areas = byArea(features, "customer", (f) => !["customer.title", "customer.accent-color", "customer.welcome"].includes(f.id));
+  const areas = byArea(features, "customer", (f) => !["customer.title", "customer.accent-color", "customer.welcome", "health.agent", "health.enrol-grant"].includes(f.id));
   const ok = form.name.trim() && form.days >= 1 && form.days <= 366 && (!form.accent || /^#[0-9a-fA-F]{6}$/.test(form.accent));
   return (
     <Modal
@@ -108,6 +109,7 @@ function Editor({ form, set, features, onReview, onClose }: { form: Form; set: (
         </div>
       }
     >
+      {removed && <p className="mb-3 text-caption text-muted">The health monitoring agent settings were removed from this app because custom apps cannot carry them.</p>}
       <div className="grid grid-cols-2 gap-x-6 gap-y-4">
         <Label text="Name" hint="Window title and company name in TetherQS; also the download's file name. 1–64 characters.">
           <TextField data-autofocus maxLength={64} value={form.name} onChange={(e) => set({ ...form, name: e.target.value })} placeholder="ACME Support" />
@@ -199,6 +201,7 @@ export function CustomApps() {
   const [features, setFeatures] = useState<Feature[]>([]);
   const [form, setForm] = useState<Form | null>(null);
   const [step, setStep] = useState<"edit" | "review" | null>(null);
+  const [removed, setRemoved] = useState(false);
   const [link, setLink] = useState<string | null>(null);
   const [results, setResults] = useState<RelayResult[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -215,7 +218,7 @@ export function CustomApps() {
     accent: r.local!.accent,
     welcome: r.local!.welcome,
     logo_png: r.local!.logo_png,
-    layer: r.local!.layer,
+    layer: withoutHealth(r.local!.layer).layer,
     channel: r.channel,
     days: Math.max(1, Math.min(366, days(r.expires))),
     new_link: false,
@@ -250,6 +253,7 @@ export function CustomApps() {
           variant="primary"
           onClick={() => {
             setForm({ name: "", accent: "", welcome: "", logo_png: "", layer: {}, channel: "stable", days: 30, new_link: false });
+            setRemoved(false);
             setStep("edit");
           }}
         >
@@ -288,7 +292,7 @@ export function CustomApps() {
                 <p className="text-footnote text-muted">{r.last_download ? `last ${when(r.last_download)}` : "none yet"}</p>
               </div>
               <div className="flex gap-1.5">
-                <Button size="sm" disabled={!r.local} title={r.local ? undefined : "Created on another PC: its settings are not here"} onClick={() => (setForm(fromRow(r)), setStep("edit"))}>
+                <Button size="sm" disabled={!r.local} title={r.local ? undefined : "Created on another PC: its settings are not here"} onClick={() => (setForm(fromRow(r)), setRemoved(withoutHealth(r.local!.layer).removed), setStep("edit"))}>
                   Edit
                 </Button>
                 <Button size="sm" disabled={!r.local} onClick={() => quick(fromRow(r, { days: Math.min(366, Math.max(left, 0) + 30) }), `${r.name}: link valid 30 days longer`)}>
@@ -326,7 +330,7 @@ export function CustomApps() {
         {rows && !rows.length && <p className="py-10 text-center text-caption text-muted">No custom apps yet.</p>}
       </div>
 
-      {form && step === "edit" && <Editor form={form} set={setForm} features={features} onClose={() => setStep(null)} onReview={() => setStep("review")} />}
+      {form && step === "edit" && <Editor form={form} set={setForm} features={features} removed={removed} onClose={() => setStep(null)} onReview={() => setStep("review")} />}
       {form && step === "review" && (
         <PublishSheet
           title={form.id ? `Save ${form.name}` : `Create ${form.name}`}

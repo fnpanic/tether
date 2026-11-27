@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { mockInvoke } from "./mock";
+import type { SignIn } from "./roles";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -72,6 +73,8 @@ export interface AppState {
   /** The relay list parsed from settings.server (first = reads). */
   servers: string[];
   data_dir: string;
+  /** Staff sign-in (no token): offered by the relays, the person and their Tether Manage roles. */
+  signin: SignIn;
 }
 /** Outcome of one operation on one relay. */
 export interface RelayResult {
@@ -113,6 +116,10 @@ export interface Change {
   from: string | null;
   to: string | null;
   text: string;
+  /** Security-relevant (live.rs `risky`): listed first, shown as a warning. */
+  risk?: boolean;
+  /** Where devices connect: an explicit tick before publishing. */
+  confirm?: boolean;
 }
 
 export const PROFILES = ["technician", "customer"] as const;
@@ -140,6 +147,10 @@ export function ago(unix?: number | null): string {
   if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
   return `${Math.floor(s / 86400)} d ago`;
 }
+
+// Text from elsewhere without hidden characters: one helper (activity.ts, where Manage's node tests
+// can load it without this file's imports), for every page.
+export { visible } from "./activity";
 
 /** Host of a relay address, for compact labels. */
 export const host = (server: string) => server.replace(/^https?:\/\//, "").replace(/\/.*$/, "");

@@ -1,0 +1,86 @@
+tether-api pid 682 on 127.0.0.1:40553; 20000 devices, warm-up 60 s, baseline 60 s, run 900 s
+devices 20000 (100 enrolled through the API in 0.7 s), next 2000 s, posts about 10.0/s
+warm-up: 60 s of probes (not measured)
+  self-check: a 1 ms sleep in the generator woke up to 14.8 ms late, 0 times more than 20 ms late
+tether-api RSS: 35.1 MiB after enrolment, 35.9 MiB after the warm-up (the reference)
+baseline: 60 s of probes alone
+  self-check: a 1 ms sleep in the generator woke up to 1.1 ms late, 0 times more than 20 ms late
+run: 900 s, 8882 status posts scheduled, 600 new enrolments, summary every 30 s, metrics every 15 s
+members: 1000 (500 limited to one of 500 customers, 10 % without gzip), 7000 requests scheduled
+  self-check: a 1 ms sleep in the generator woke up to 16.6 ms late, 0 times more than 20 ms late
+
+heartbeat baseline       n=1200   p50=   0.46  p99=   0.84  p99.9=   1.94  max=    6.91 ms  codes={200: 1200}
+heartbeat during run     n=18000  p50=   0.46  p99=   0.91  p99.9=   4.02  max=   32.39 ms  codes={200: 18000}
+policy baseline          n=1200   p50=   0.48  p99=   0.83  p99.9=   1.80  max=    6.94 ms  codes={200: 1200}
+policy during run        n=18000  p50=   0.47  p99=   0.90  p99.9=   4.12  max=   32.38 ms  codes={200: 18000}
+status posts             n=8882   p50=   0.50  p99=   4.96  p99.9=  55.88  max=  101.98 ms  codes={200: 8881, 503: 1}
+new enrolments           n=600    p50=   2.03  p99=  57.55  p99.9= 126.63  max=  126.63 ms  codes={200: 600}
+team summary             n=30     p50=  25.98  p99= 809.73  p99.9= 809.73  max=  809.73 ms  codes={200: 30}
+metrics scrapes          n=60     p50=   9.27  p99=  30.02  p99.9=  30.02  max=   30.02 ms  codes={200: 60}
+  refused or failed status post x1: 503 busy
+member summary           n=3000   p50=   6.62  p99= 363.26  p99.9=1661.28  max= 2408.38 ms  codes={200: 2000, 304: 1000}
+  3.33 requests/s, 5996519 bytes/s out
+member host open         n=3000   p50=   3.05  p99=  67.24  p99.9= 118.93  max=  156.08 ms  codes={200: 2989, 404: 11}
+  3.33 requests/s, 1337 bytes/s out
+member software list     n=1000   p50=   3.13  p99=  60.24  p99.9= 211.42  max=  212.38 ms  codes={200: 1000}
+  1.11 requests/s, 68094 bytes/s out
+summary answers: 1800 200 gzip (1311417 bytes avg), 200 200 plain (15181578 bytes avg), 1000 304: 304 share 33.3 %
+junk without kid         n=28800  p50=   1.32  p99=   5.00  p99.9=  60.44  max=  184.64 ms  codes={401: 64, 429: 28727, 503: 9}
+full summary: 20256710 bytes plain, 1755943 bytes gzip (11.5 x), 19954 hosts
+  metrics: tether_api_busy_rejected_total 10
+  metrics: tether_api_status_summary_builds_total 1497
+  metrics: tether_api_status_summary_build_seconds_total 21.707009
+  metrics: tether_api_status_summary_build_seconds_max 2.401892
+  metrics: tether_api_team_audit_records_total 5017
+  metrics: tether_api_team_audit_dropped_total 0
+  metrics: tether_api_team_audit_write_failed_total 0
+  metrics: requests endpoint="admin",code="204": 2
+  metrics: requests endpoint="heartbeat",code="200": 20400
+  metrics: requests endpoint="policy",code="200": 20400
+  metrics: requests endpoint="status",code="200": 9582
+  metrics: requests endpoint="team",code="200": 6021
+  metrics: requests endpoint="team",code="304": 1000
+  metrics: requests endpoint="team",code="401": 64
+  metrics: requests endpoint="team",code="404": 11
+  metrics: requests endpoint="team",code="429": 28727
+tether-api RSS: reference 35.9 MiB, end 39.3 MiB, peak 40.3 MiB
+tether-api RSS each minute of the run (MiB): 35.9 36.1 36.7 37.2 37.7 38.6 38.2 38.7 38.9 38.8 38.7 38.9 38.8 39.7 39.1
+
+ok   heartbeat p99 0.91 ms <= 1.2 x 0.84 + 2 ms
+ok   heartbeat p99.9 4.02 ms <= 1.5 x 1.94 + 5 ms
+ok   heartbeat slowest 32.39 ms <= 50 ms
+ok   policy p99 0.90 ms <= 1.2 x 0.83 + 2 ms
+ok   policy p99.9 4.12 ms <= 1.5 x 1.80 + 5 ms
+ok   policy slowest 32.38 ms <= 50 ms
+FAIL no 5xx (also no 503 busy) and no connection errors on any route
+ok   status 429: 0 of 8882 posts <= 0.1 %
+FAIL every status post accepted or 429
+ok   every probe, enrolment, summary and scrape answered 200
+ok   every software list upload accepted (204) or 429
+FAIL every member request answered 200 or 304 (no 429, no 5xx, no connection error)
+ok   peak RSS 40.3 MiB < 48 MiB
+ok   RSS at the end within 10 % of the reference (39.3 vs 35.9 MiB)
+FAIL
+cgroup: memory.max 67108864, memory.peak 67108864 bytes (page cache included), events: low 0 high 0 max 7132 oom 0 oom_kill 0 oom_group_kill 0; file 19779584, anon 39555072
+team audit log: 5017 lines, 1.4M
+tether-api: team: signed team document 1 accepted (1001 members, 1001 with a key here)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+tether-api: team: failed member signatures from 198.51.100.66 reached 60 per minute (kid none)
+state-lock holds over 20 ms: 3
+  lock held 28 ms: maintain
+  lock held 28 ms: maintain
+  lock held 23 ms: maintain

@@ -54,6 +54,28 @@ pub fn set_field(id: i32, key: &str, value: bool) {
     }
 }
 
+/// The health agent's pre-dialog (agent_elevated.rs): the window comes up and reads it with
+/// `health_agent_consent_pending`. False before the window exists.
+#[cfg(windows)]
+pub fn show_agent_consent() -> bool {
+    let Some(s) = SINK.get() else { return false };
+    if front_main_window() == 0 {
+        return false;
+    }
+    let _ = s.app.emit_to("main", "health_agent_consent", ());
+    true
+}
+
+/// The window brought to the front, as the owner of the health agent's Windows prompt (0: none).
+#[cfg(windows)]
+pub fn front_main_window() -> usize {
+    let Some(w) = SINK.get().and_then(|s| s.app.get_webview_window("main")) else { return 0 };
+    let _ = w.unminimize();
+    let _ = w.show();
+    let _ = w.set_focus();
+    w.hwnd().map_or(0, |h| h.0 as usize)
+}
+
 pub fn has_session() -> bool {
     !clients().is_empty()
 }

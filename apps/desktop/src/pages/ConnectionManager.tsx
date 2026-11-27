@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Clipboard, FolderSync, Keyboard, MessageSquare, Mic, RotateCcw, Send, ShieldAlert, Video } from "lucide-react";
+import { Activity, Clipboard, FolderSync, Keyboard, MessageSquare, Mic, RotateCcw, Send, ShieldAlert, Video } from "lucide-react";
 import { formatId, invoke, subscribe } from "../lib/ipc";
 import { Button, Logo, Modal, Segmented, StatusDot, TitleBar, Toggle, useToast } from "../components/ui";
 import { errorText, isOn, usePolicy } from "../lib/policy";
-import { cmAdd, cmEmpty, cmNote, cmRemove, cmShow, requestText, type CmClient, type CmState } from "../lib/cm";
+import { agentLine, cmAdd, cmEmpty, cmNote, cmRemove, cmShow, requestText, type CmClient, type CmState } from "../lib/cm";
 
 /** The core's `Client` (ui_cm_interface.rs), as sent with `add_connection`. */
 interface Client extends CmClient {
@@ -42,6 +42,8 @@ export function ConnectionManager() {
   const [since] = useState(() => new Map<number, number>());
   const [chat, setChat] = useState<Record<number, { me: boolean; text: string }[]>>({});
   const [consents, setConsents] = useState<ConsentRequest[]>([]);
+  // The last health agent action of each connection (`health_agent`), as a sentence of ours.
+  const [agent, setAgent] = useState<Record<number, string>>({});
 
   const answerConsent = (r: ConsentRequest, allow: boolean) => {
     invoke("cm_record_consent", { connId: r.conn_id, allow });
@@ -64,6 +66,9 @@ export function ConnectionManager() {
         // The backend sink restores the window and flashes the taskbar (no focus change).
         setChat((c) => ({ ...c, [p.id]: [...(c[p.id] ?? []), { me: false, text: p.text }] }));
         setCm((s) => cmNote(s, p.id));
+      } else if (e.name === "health_agent") {
+        const line = agentLine(p);
+        if (line && Number.isSafeInteger(p?.id)) setAgent((x) => ({ ...x, [p.id]: line }));
       }
     });
     (async () => {
@@ -113,7 +118,7 @@ export function ConnectionManager() {
         </div>
       )}
       {c ? (
-        <ClientView key={c.id} c={c} since={since.get(c.id) ?? Date.now()} msgs={chat[c.id] ?? []} onMsg={(m) => setChat((x) => ({ ...x, [c.id]: [...(x[c.id] ?? []), m] }))} />
+        <ClientView key={c.id} c={c} since={since.get(c.id) ?? Date.now()} agent={agent[c.id]} msgs={chat[c.id] ?? []} onMsg={(m) => setChat((x) => ({ ...x, [c.id]: [...(x[c.id] ?? []), m] }))} />
       ) : (
         // The shown connection ended and only requests are left: none is put under the pointer.
         <div className="grid flex-1 place-items-center px-6 text-center text-caption text-muted">The connection ended. Choose a waiting request above.</div>
@@ -154,7 +159,7 @@ function RecordConsent({ r, onAnswer }: { r: ConsentRequest; onAnswer: (allow: b
   );
 }
 
-function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs: { me: boolean; text: string }[]; onMsg: (m: { me: boolean; text: string }) => void }) {
+function ClientView({ c, since, agent, msgs, onMsg }: { c: Client; since: number; agent?: string; msgs: { me: boolean; text: string }[]; onMsg: (m: { me: boolean; text: string }) => void }) {
   const elapsed = useElapsed(since);
   const [perm, setPerm] = useState(c);
   const [text, setText] = useState("");
@@ -215,6 +220,12 @@ function ClientView({ c, since, msgs, onMsg }: { c: Client; since: number; msgs:
             <span>
               {requestText(c, formatId(c.peer_id))} Accept only if you expect it; End session stops it at any time.
             </span>
+          </div>
+        )}
+        {agent && (
+          <div role="status" data-testid="cm-agent" className="mb-3 flex shrink-0 items-start gap-2 rounded-xl bg-parchment px-3 py-2.5 text-caption text-ink">
+            <Activity size={16} className="mt-0.5 shrink-0 text-muted" />
+            <span>{agent}</span>
           </div>
         )}
         {tab === "perm" || !chatOn ? (

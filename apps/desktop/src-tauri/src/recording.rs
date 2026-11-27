@@ -59,15 +59,19 @@ pub fn set_user_folder(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+const DEFAULT_FOLDER: &str = concat!("%HOME%/Movies/", env!("TETHER_APP_NAME"));
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_FOLDER: &str = concat!(r"%USERPROFILE%\Videos\", env!("TETHER_APP_NAME"));
+
 /// The folder picked in Settings, else `recording.folder` with `%VAR%` expanded, else
-/// `%USERPROFILE%\Videos\Tether` (macOS `~/Movies/Tether`).
+/// `%USERPROFILE%\Videos\Tether` (macOS `~/Movies/Tether`; an instance build `Tether-<i>`).
 pub fn folder() -> PathBuf {
     if let Some(f) = user_folder() {
         return PathBuf::from(f);
     }
     let f = policy::get("recording.folder");
-    let default = if cfg!(target_os = "macos") { "%HOME%/Movies/Tether" } else { r"%USERPROFILE%\Videos\Tether" };
-    let f = if f.trim().is_empty() { default.to_owned() } else { f };
+    let f = if f.trim().is_empty() { DEFAULT_FOLDER.to_owned() } else { f };
     PathBuf::from(expand_env(&f, |k| std::env::var(k).ok()))
 }
 
@@ -483,6 +487,13 @@ fn collect(dir: &Path, q: &Path, now: SystemTime) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_folder_is_named_after_the_app() {
+        let name = if env!("TETHER_INSTANCE").is_empty() { "Tether" } else { crate::APP_NAME };
+        let want = if cfg!(target_os = "macos") { format!("%HOME%/Movies/{name}") } else { format!(r"%USERPROFILE%\Videos\{name}") };
+        assert_eq!(DEFAULT_FOLDER, want);
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("tether-rec-test-{name}-{}", std::process::id()));

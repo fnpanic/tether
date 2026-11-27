@@ -30,7 +30,7 @@ use tether_trust::{
 
 use crate::policy;
 
-const PUBKEY: Option<&str> = option_env!("TETHER_UPDATER_PUB_KEY");
+pub(crate) const PUBKEY: Option<&str> = option_env!("TETHER_UPDATER_PUB_KEY");
 #[cfg(not(target_os = "macos"))]
 const PLATFORM: &str = "windows-x86_64";
 #[cfg(target_os = "macos")]
@@ -455,7 +455,7 @@ fn index_path(channel: &str) -> PathBuf {
 }
 
 /// The release index `name` of one relay (`Ok(None)`: none published there).
-fn get_index(client: &reqwest::blocking::Client, base: &str, channel: &str, name: &str) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn get_index(client: &reqwest::blocking::Client, base: &str, channel: &str, name: &str) -> Result<Option<Vec<u8>>, String> {
     let url = format!("{base}/download/{channel}/{name}");
     let etag = INDEX_ETAGS.lock().unwrap().as_ref().and_then(|m| m.get(&url)).map(|e| e.0.clone());
     let mut rq = client.get(&url);
@@ -652,11 +652,25 @@ pub fn install() -> Result<(), String> {
 }
 
 /// Each source in turn (the packed copy first, https only), then the verified bytes.
-fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
+    download_within(c, key, None)
+}
+
+/// `within`: every source together (the health agent, agent.rs); None: up to 30 minutes per source.
+pub(crate) fn download_within(c: &Candidate, key: &str, within: Option<Duration>) -> Result<Vec<u8>, String> {
+    const PER_SOURCE: Duration = Duration::from_secs(1800);
+    let end = within.map(|w| (std::time::Instant::now() + w, w));
     let mut last = String::from("no download URL");
     for (url, packed) in c.sources() {
         let url = &url;
-        match download_one(url, c, packed).and_then(|b| c.accept(b, packed, key, unpack)) {
+        let timeout = match end {
+            None => PER_SOURCE,
+            Some((end, w)) => match end.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero()) {
+                Some(left) => left.min(PER_SOURCE),
+                None => return Err(format!("the download did not finish within {} s", w.as_secs())),
+            },
+        };
+        match download_one(url, c, packed, timeout).and_then(|b| c.accept(b, packed, key, unpack)) {
             Ok(b) => return Ok(b),
             Err(e) => {
                 hbb_common::log::warn!("update download {url}: {e}");
@@ -684,13 +698,13 @@ fn unpack(encoding: &str, data: &[u8], max: u64) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn download_one(url: &str, c: &Candidate, packed: bool) -> Result<Vec<u8>, String> {
+fn download_one(url: &str, c: &Candidate, packed: bool, timeout: Duration) -> Result<Vec<u8>, String> {
     if !url.starts_with("https://") && policy::dev_apis().is_none() {
         return Err("update URL must be https".to_owned());
     }
     let mut resp = policy::http()?
         .get(url)
-        .timeout(Duration::from_secs(1800))
+        .timeout(timeout)
         .send()
         .and_then(|r| r.error_for_status())
         .map_err(|e| format!("download failed: {}", crate::commands::with_causes(&e)))?;
@@ -774,6 +788,15 @@ mod tests {
 
     fn cand(v: &str, mandatory: bool, min: &str) -> Candidate {
         Candidate { version: v.into(), mandatory, minimum_version: min.into(), ..Default::default() }
+    }
+
+    /// The health agent's download (agent.rs) has the desktop's total deadline over every source.
+    #[test]
+    fn the_agents_download_has_a_total_deadline() {
+        let c = Candidate { urls: vec!["https://127.0.0.1:9/a.exe".into(), "https://127.0.0.1:9/b.exe".into()], ..Default::default() };
+        let e = download_within(&c, "k", Some(Duration::ZERO)).unwrap_err();
+        assert!(e.contains("did not finish within 0 s"), "{e}");
+        assert_eq!(crate::agent_elevated::download_time(tether_trust::release::MAX_ARTIFACT), Duration::from_secs(600));
     }
 
     #[test]

@@ -4,14 +4,19 @@
 import { create } from "zustand";
 import { invoke } from "../ipc";
 import { errorText } from "../policy";
-import { cleanTags, emptyStore, MAX_NAME, MAX_NOTES, shared, applyShared, STORE_VERSION, type HostEntry, type OrgDevice, type Peer, type SharedDoc, type Store } from "./model";
+import { mergeStatus, statusNote } from "./health";
+import { cleanTags, emptyStore, MAX_NAME, MAX_NOTES, storeId, shared, applyShared, STORE_VERSION, type HostEntry, type OrgDevice, type Peer, type SharedDoc, type StatusSummary, type Store } from "./model";
 import { merge3, readShared } from "./sync";
+import { loadPerms, type SignIn } from "../signin";
 
 export type OnlineState = "idle" | "loading" | "ok" | "unsupported" | "error";
 
 export interface TeamInfo {
   identity?: { key: string; fingerprint: string };
-  me?: { name: string; write: boolean; audit: boolean } | null;
+  /** `GET /api/team/me`: the signed-in person's or the roster entry's permissions (`sbom`, `agent`
+   *  and `customers` only from relays with a signed team document). */
+  me?: { name: string; write: boolean; audit: boolean; sbom?: boolean; agent?: boolean; customers?: string[] } | null;
+  signin?: SignIn;
   error?: string;
   syncing?: boolean;
 }
@@ -25,6 +30,12 @@ interface S {
   onlineState: OnlineState;
   team: TeamInfo;
   saveError?: string;
+  /** Health summaries of all relays, merged (one per uuid). */
+  status: StatusSummary[];
+  /** The relays the summary was asked from (the software search asks the same). */
+  statusRelays: string[];
+  /** Why no health data could be read (e.g. reporting switched off on the server). */
+  statusError?: string;
 }
 
 export const useHosts = create<S>(() => ({
@@ -32,6 +43,8 @@ export const useHosts = create<S>(() => ({
   store: emptyStore(),
   peers: [],
   org: [],
+  status: [],
+  statusRelays: [],
   online: null,
   onlineState: "idle",
   team: {},
@@ -54,7 +67,9 @@ export function readStore(raw: string): { store: Store; block?: string } {
     /* handled below */
   }
   if (!d || typeof d !== "object" || Array.isArray(d)) return { store: emptyStore(), block: `The host list (${FILE}) is damaged, so it was not loaded and changes are not saved. Restore the file from a backup, or rename or delete it and restart Tether to start a new list.` };
-  const store = { ...emptyStore(), ...d, v: STORE_VERSION, hosts: d.hosts ?? {}, tags: d.tags ?? {}, rules: d.rules ?? [], searches: d.searches ?? [] };
+  // Agent-only rows (`m:<uuid>`) are never stored; an entry for one (an earlier version) is dropped.
+  const hosts = Object.fromEntries(Object.entries(d.hosts ?? {}).filter(([id]) => !id.startsWith("m:")));
+  const store = { ...emptyStore(), ...d, v: STORE_VERSION, hosts, tags: d.tags ?? {}, rules: d.rules ?? [], searches: d.searches ?? [] };
   return typeof d.v === "number" && d.v > STORE_VERSION ? { store, block: `The host list (${FILE}) was saved by a newer version of Tether: it is shown, but changes are not saved. Update Tether to change it.` } : { store };
 }
 
@@ -100,7 +115,8 @@ function edit(ids: string[], f: (e: HostEntry, id: string) => HostEntry, sharedC
   const hosts = { ...s.hosts };
   const ro = sharedChange && readOnly();
   for (const id of ids) {
-    const old = hosts[id] ?? {};
+    if (!storeId(id)) continue; // never `hosts["__proto__"] = …`, nor an agent-only row
+    const old = (Object.hasOwn(hosts, id) && hosts[id]) || {};
     const e = f({ ...old }, id);
     if (ro) Object.assign(e, { name: old.name, tags: old.tags });
     // Drop keys that became empty so the file stays small.
@@ -112,6 +128,22 @@ function edit(ids: string[], f: (e: HostEntry, id: string) => HostEntry, sharedC
     else delete hosts[id];
   }
   commit({ ...s, hosts }, sharedChange && !ro);
+}
+
+/** Sign-in, sign-out and cancel (the backend runs the browser flow); then the team view again. */
+async function signInCall(cmd: "team_sign_in" | "team_sign_out" | "team_signin_cancel") {
+  const t = get().team;
+  set({ team: { ...t, signin: t.signin && { ...t.signin, busy: cmd === "team_sign_in" } } });
+  let signin: SignIn | undefined;
+  try {
+    signin = await invoke<SignIn>(cmd);
+  } catch {
+    // The reason is in the state's note.
+    signin = await invoke<SignIn>("team_signin_status", { check: false }).catch(() => undefined);
+  }
+  set({ team: { ...get().team, signin: signin ?? get().team.signin } });
+  if (get().store.team?.enabled) await actions.teamRefresh();
+  else void loadPerms();
 }
 
 export const actions = {
@@ -183,22 +215,35 @@ export const actions = {
     const s = get().store;
     commit({ ...s, team: { enabled: false, ...s.team, ...p } }, false);
   },
+  signIn: () => signInCall("team_sign_in"),
+  signOut: () => signInCall("team_sign_out"),
+  signInCancel: () => signInCall("team_signin_cancel"),
   /** Identity, membership and org devices; then a tag sync. */
   async teamRefresh() {
     const team: TeamInfo = { ...get().team, error: undefined };
     try {
       team.identity ??= await invoke<{ key: string; fingerprint: string }>("team_identity");
+      // The relays' sign-in settings first (also takes up a stored sign-in), then who this app is.
+      team.signin = (await invoke<SignIn>("team_signin_status", { check: true }).catch(() => undefined)) ?? team.signin;
       team.me = await invoke<TeamInfo["me"]>("team_me");
     } catch (e) {
       team.me = null;
-      team.error = errorText(e).replace(/^(not-member|unsupported): /, "");
-      set({ team, org: [] });
+      team.error = errorText(e).replace(/^(not-member|unsupported|expired): /, "");
+      set({ team, org: [], status: [], statusRelays: [], statusError: undefined });
+      void loadPerms();
       return;
     }
     set({ team });
+    void loadPerms();
     if (get().store.team?.showOrg !== false) {
       const org = await invoke<OrgDevice[]>("team_devices").catch(() => null);
       if (org) set({ org });
+      try {
+        const r = await invoke<Parameters<typeof mergeStatus>[0]>("team_status");
+        set({ status: mergeStatus(r), statusRelays: (r ?? []).map((x) => x.relay), statusError: statusNote(r) });
+      } catch (e) {
+        set({ status: [], statusRelays: [], statusError: statusNote([{ relay: "", error: errorText(e) }]) });
+      }
     }
     await teamSync();
   },

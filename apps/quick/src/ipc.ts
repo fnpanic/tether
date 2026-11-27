@@ -88,7 +88,25 @@ export const api = {
   diagnosticsProbe: (server: string) => invoke<Probe>("diagnostics_probe", { server }),
   /** Upload the diagnostics bundle for a support ticket code; rejects with the message to show. */
   diagUpload: (ticket: string) => invoke("diag_upload", { ticket }),
+  /** The health agent's pre-dialog waiting for an answer (spec 11.2), or null. */
+  agentConsent: () => invoke<AgentConsent | null>("health_agent_consent_pending"),
+  /** false: that dialog no longer waits (answered elsewhere or timed out). */
+  agentConsentAnswer: (id: number, yes: boolean) => invoke<boolean>("health_agent_consent_answer", { id, yes }),
 };
+
+/** The health agent's pre-dialog: plain text from TetherQS's own backend. */
+export interface AgentConsent {
+  id: number;
+  title: string;
+  paragraphs: string[];
+  yes: string;
+  no: string;
+}
+
+/** A pre-dialog is waiting: fetch it with `api.agentConsent`. */
+export function onAgentConsent(cb: () => void) {
+  return listen("health_agent_consent", () => cb());
+}
 
 /** Connection-manager events: add_connection, remove_connection, refused, policy, record_consent_request. */
 export function onCm(cb: (name: string, payload: any) => void) {

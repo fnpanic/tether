@@ -38,6 +38,8 @@ async function run(name) {
   await ctx.addInitScript(() => {
     window.__mockCalls = [];
     window.open = () => null; // the mock's open_session opens a window; not needed here
+    // The clipboard as the page wrote it (no permission prompt in either engine).
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (t) => void (window.__clip = t), readText: async () => window.__clip ?? "" } });
   });
   const p = await ctx.newPage();
   const errors = [];
@@ -232,6 +234,282 @@ async function run(name) {
   const exp = await p.evaluate(() => window.__lastExport);
   check(tag("export: JSON without notes"), !!exp && exp.name.endsWith(".json") && exp.content.includes('"tether-hosts"') && !exp.content.includes("front desk before restarting"));
 
+  // ---- Health: built-in view, column sort, a search term, the Health section, raw report, rules, export.
+  const SHOTS = process.env.SHOTS; // a folder: screenshots of the health views
+  const shot = async (n) => SHOTS && (await p.screenshot({ path: `${SHOTS}/${name}-${n}.png` }));
+  const nav = p.getByRole("navigation", { name: "Library" });
+  const attention = nav.getByRole("button", { name: /^Needs attention/ });
+  const navCount = Number((await attention.textContent()).replace(/\D/g, ""));
+  await attention.click();
+  check(tag("Needs attention applies health:crit | health:stale | health:conflict"), (await search.inputValue()) === "health:crit | health:stale | health:conflict");
+  check(tag("Needs attention count equals its result count"), navCount > 0 && navCount === (await shown()), `${navCount} vs ${await shown()}`);
+  const dotsOf = () => rows().evaluateAll((rs) => rs.map((r) => r.querySelector("[role=img][aria-label^='Health:']")?.getAttribute("aria-label")));
+  check(tag("every row of the view is critical, not reporting or in a link conflict"), (await dotsOf()).every((d) => d === "Health: Critical" || d === "Health: Not reporting" || d === "Health: Link conflict"));
+  await setQuery("health:crit");
+  check(tag("health:crit finds only critical hosts"), (await shown()) > 0 && (await dotsOf()).every((d) => d === "Health: Critical"));
+  await setQuery("check:db-service");
+  const db = await shown();
+  check(tag("check:db-service finds hosts with that failing check"), db > 0 && db <= navCount, `${db}`);
+  const notes = p.getByTestId("search-notes");
+  check(tag("a check: term names the hosts with more failing checks than the summary holds"), /\d+ computers? (has|have) more failing checks than the summary holds; open (it|them) to see all/.test(await notes.textContent()));
+  await setQuery("check:db-service=warn");
+  check(tag("check:<text>=warn matches only that state"), (await shown()) === 0);
+  await setQuery("check:backup=warn");
+  check(tag("check:backup=warn finds the hosts with the backup check in warning"), (await shown()) > 0);
+
+  // ---- software: search terms (spec 10.4), answered by the mock relays.
+  const swCalls = async () => (await calls("team_status_software")).length;
+  await setQuery("health:crit");
+  const crit = await shown();
+  await clearCalls();
+  await setQuery("software:g");
+  await sleep(1000);
+  check(tag("software: under 2 characters is not sent, says so and matches nothing"), (await swCalls()) === 0 && /needs at least 2 characters \(“g”\), so it matches no computer/.test(await notes.textContent()) && (await shown()) === 0);
+  await setQuery("-software:g health:crit");
+  await sleep(1000);
+  check(tag("-software: under 2 characters matches nothing either"), (await swCalls()) === 0 && (await shown()) === 0, `${await shown()}`);
+  await setQuery("software:garnet");
+  await sleep(300);
+  check(tag("software: waits for a pause in typing"), (await swCalls()) === 0);
+  check(tag("while it searches, a software term matches nothing and the line says so"), /Searching installed software on 2 servers… Until it answers, software terms match no computer\./.test(await notes.textContent()) && (await shown()) === 0, `${await shown()}`);
+  check(tag("software: is searched after 800 ms, once per relay"), await until(async () => (await swCalls()) === 2, 3000), `${await swCalls()}`);
+  check(tag("software:garnet finds the host whose list has it (an unknown uuid ignored)"), await until(async () => (await shown()) === 1 && (await rows().first().textContent()).includes("LAB-ANALYZER-01")));
+  check(tag("the result says when it is from, that it is as of the last upload and that searches are audited"), /Installed software “garnet”: 1 computer, as of \d.*\d \(lists as of each computer's last upload; [\d,]+ computers without a list\)/.test(await notes.textContent()) && /recorded in the team's audit log/.test(await notes.textContent()));
+  check(tag("a plain software term adds no note about negation"), !/are not shown either way/.test(await notes.textContent()));
+  await setQuery("-software:garnet");
+  check(tag("-software: only the hosts with a list without a match, from the cache"), (await until(async () => (await shown()) === 2)) && (await swCalls()) === 2, `${await shown()}`);
+  check(tag("-software: says that hosts it cannot say anything about are left out"), /Computers without a software list, or whose list is not indexed yet or could not be read, are not shown either way\./.test(await notes.textContent()));
+  // While a negated term is searched, nothing matches through it; an OR's other branch still does.
+  await setQuery("-software:quarry | health:crit");
+  await sleep(300);
+  check(tag("while searching, -software: matches nothing, the OR's other branch still matches"), /Searching installed software/.test(await notes.textContent()) && (await shown()) === crit, `${await shown()} vs ${crit}`);
+  await until(async () => !/Searching installed software/.test(await notes.textContent()), 3000);
+  // Two terms: each relay is asked one after the other (it runs one search at a time): no busy answer, no retry.
+  await clearCalls();
+  await setQuery("software:oakham -software:thistle");
+  await search.press("Enter");
+  check(tag("two software terms: one at a time per relay, all answered without a retry"), (await until(async () => /Installed software “thistle”/.test(await notes.textContent()), 3000)) && (await swCalls()) === 4 && !/busy/.test(await notes.textContent()), `${await swCalls()} calls`);
+  // A result older than 5 minutes is asked again on Enter (the relay keeps answers 60 s).
+  await setQuery("software:garnet");
+  await until(async () => /Installed software “garnet”: 1 computer/.test(await notes.textContent()), 3000);
+  await clearCalls();
+  await p.evaluate(() => {
+    const real = Date.now;
+    window.__realNow = real;
+    Date.now = () => real() + 6 * 60_000;
+  });
+  await search.press("Enter");
+  check(tag("Enter refreshes a result older than 5 minutes"), await until(async () => (await swCalls()) === 2, 3000), `${await swCalls()} calls`);
+  await until(async () => /Installed software “garnet”: 1 computer/.test(await notes.textContent()), 3000);
+  await p.evaluate(() => (Date.now = window.__realNow));
+  await setQuery('software:"garnet browser"@126 health:crit');
+  await search.press("Enter");
+  check(tag("Enter searches at once; quotes and @version"), (await until(async () => (await swCalls()) === 4, 600)) && (await calls("team_status_software")).at(-1).q === "garnet browser" && (await calls("team_status_software")).at(-1).v === "126");
+  const swState = async (states, q, wait = 6000) => {
+    await p.evaluate((s) => (window.__mockSoftware = s), states);
+    await setQuery(q);
+    await search.press("Enter");
+    await until(async () => !/Searching installed software/.test(await notes.textContent()), wait);
+    return notes.textContent();
+  };
+  check(tag("an old relay: named, the other relay's result shown"), /relay2\.example\.com does not support software search \(needs the relay update of release 0.7.0\)/.test(await swState({ "relay2.example.com": "unsupported" }, "software:aster")) && /Results from relay\.example\.com only\./.test(await notes.textContent()));
+  check(tag("switched off"), /software search is switched off on relay2\.example\.com/.test(await swState({ "relay2.example.com": "off" }, "software:birch")));
+  check(tag("no permission: the reason, not an error dialog"), /your team membership does not allow software search on relay\.example\.com/.test(await swState({ "relay.example.com": "forbidden", "relay2.example.com": "forbidden" }, "software:cobalt")) && !(await p.getByRole("alertdialog").isVisible()));
+  check(tag("too many searches of this member: the wait, no retry"), /you ran more than 6 software searches a minute on relay\.example\.com: wait 5 s, then press Enter/.test(await swState({ "relay.example.com": "limit" }, "software:dunmore")));
+  await p.evaluate(() => (window.__mockSoftware = { "relay.example.com": "busy" }));
+  await clearCalls();
+  await setQuery("software:kestrel");
+  await search.press("Enter");
+  check(tag("a relay busy with another search: tried again, and it says so"), await until(async () => /relay\.example\.com is busy with another search; trying again…/.test(await notes.textContent()), 2000));
+  check(tag("still busy after 3 more tries: a line that offers to try again"), (await until(async () => /relay\.example\.com stayed busy with other searches: press Enter to try again/.test(await notes.textContent()), 12000)) && (await calls("team_status_software")).filter((c) => c.relay === "relay.example.com").length === 4);
+  check(tag("relay not ready (503)"), /relay2\.example\.com is not ready to search yet \(it is preparing its status data\): press Enter to try again in 5 s/.test(await swState({ "relay2.example.com": "notready" }, "software:larch")));
+  check(tag("health reporting off (503)"), /health reporting is switched off on relay2\.example\.com: it holds no software lists to search/.test(await swState({ "relay2.example.com": "reportoff" }, "software:meadow")));
+  check(tag("more than 2000"), /more than 2000 computers match on relay\.example\.com: refine the search/.test(await swState({ "relay.example.com": "more" }, "software:elm")));
+  check(tag("still indexing"), /relay\.example\.com is still indexing 3,400 lists: until it is done, its computers that it did not name are left out/.test(await swState({ "relay.example.com": "pending" }, "software:fenwick")));
+  check(tag("incomplete"), /stopped before it searched every list: the result is incomplete/.test(await swState({ "relay.example.com": "partial" }, "software:hollin")));
+  check(tag("not reachable"), /relay2\.example\.com could not be reached/.test(await swState({ "relay2.example.com": "offline" }, "software:iron")));
+  await p.evaluate(() => (window.__mockSoftware = {}));
+  // A saved search with a software: term searches again when opened.
+  await setQuery("software:juniper");
+  await p.getByRole("button", { name: "Save this search" }).click();
+  await p.getByRole("dialog").getByRole("textbox", { name: "Search name" }).fill("Juniper mail");
+  await p.keyboard.press("Enter");
+  await setQuery("");
+  await nav.getByRole("button", { name: /^Juniper mail/ }).click();
+  // At once (well before the 800 ms of typing), from the relays or their cached answer.
+  check(tag("a saved software search runs when opened"), await until(async () => /Installed software “juniper”: 1 computer/.test(await notes.textContent()), 700));
+  await setQuery("");
+  await p.getByRole("columnheader", { name: "Health" }).click();
+  check(tag("sorting by Health puts the link conflict, then a critical row first"), (await dotsOf())[0] === "Health: Link conflict" && (await dotsOf())[1] === "Health: Critical", (await dotsOf()).slice(0, 2).join());
+  check(tag("Health column says it in words"), /Link conflict/.test(await rows().first().locator("[role=gridcell]").nth(5).textContent()) && /critical/.test(await rows().nth(1).locator("[role=gridcell]").nth(5).textContent()));
+  // The conflicted host: nothing joined, the conflict explained.
+  await rows().first().click();
+  check(tag("a host with two linked devices shows the link conflict"), await until(() => p.getByTestId("health-conflict-host").isVisible()));
+  await shot("conflict-host");
+  await rows().nth(1).click();
+  const sec = p.getByTestId("health-section");
+  check(tag("detail shows the Health section"), await until(() => sec.locator("li[data-check]").first().isVisible()));
+  check(tag("detail shows the customer reference"), /Customer 471[12]/.test(await sec.textContent()), (await sec.textContent()).slice(0, 120));
+  // Every fault (all groups) and the setup items come before the first "checks passed" fold.
+  const order = await sec.evaluate((s) => {
+    const items = [...s.querySelectorAll("li[data-check]")];
+    const passed = [...s.querySelectorAll("button")].filter((b) => /checks? passed/.test(b.textContent));
+    const groups = [...s.querySelectorAll("li[data-check]")].map((li) => li.closest("div").firstElementChild?.textContent);
+    return { ok: items.length > 1 && passed.length > 0 && items.every((li) => !!(li.compareDocumentPosition(passed[0]) & Node.DOCUMENT_POSITION_FOLLOWING)), n: items.length, groups: new Set(groups).size };
+  });
+  check(tag("all faults are listed before checks passed"), order.ok && order.groups > 1, JSON.stringify(order));
+  await shot("detail");
+  await sec.getByRole("button", { name: "History (90 days)" }).click();
+  check(tag("history lists changes"), (await sec.getByRole("list", { name: "History" }).locator("li").count()) > 0);
+  await sec.getByRole("button", { name: "Raw report" }).click();
+  await sec.getByRole("button", { name: "Copy raw report" }).click();
+  const clip = await p.evaluate(() => window.__clip ?? "");
+  let raw = null;
+  try {
+    raw = JSON.parse(clip);
+  } catch {}
+  check(tag("raw report Copy writes the report JSON"), raw?.v === 1 && Array.isArray(raw?.body?.checks), clip.slice(0, 60));
+  await shot("raw");
+  await p.keyboard.press("Escape");
+  // Agent-only rows: no connect actions, Enter only explains.
+  await setQuery("id:m:");
+  check(tag("agent-only rows are listed (two of them in a conflict)"), (await shown()) === 7);
+  await rows().first().click();
+  await clearCalls();
+  check(tag("an m: row has no Connect button"), (await p.getByText("No remote access: Tether is not installed").first().isVisible()) && !(await p.getByRole("button", { name: /^Connect/ }).isVisible()));
+  const det = p.getByRole("complementary", { name: "Host details" });
+  check(tag("an m: row has no name, tags, notes, pin or Remove host"), !(await det.locator("#host-name").count()) && !(await det.locator("#host-notes").count()) && !(await det.getByRole("button", { name: /^(Pin|Unpin|Remove host)$/ }).count()));
+  await p.keyboard.press("Delete");
+  await sleep(100);
+  check(tag("Delete on an m: row opens no Remove dialog"), !(await p.getByRole("dialog").count()));
+  await p.keyboard.press("Enter");
+  await sleep(100);
+  check(tag("Enter on an m: row opens nothing"), (await calls("open_session")).length === 0);
+  // Software list (SBOM): collapsed until opened, then the table, the filter, the device line and the export.
+  await setQuery("LAB-ANALYZER-01");
+  await rows().first().click();
+  const sw = p.getByTestId("software-section");
+  check(tag("Software is collapsed and says when the list is from"), (await until(() => sw.isVisible())) && /as of /.test(await sw.textContent()) && (await sw.getByRole("table").count()) === 0 && (await calls("team_status_sbom")).length === 0);
+  await sw.getByRole("button", { name: /^Software/ }).click();
+  check(tag("opening Software asks the relay and lists the programs"), (await until(() => sw.getByRole("table").isVisible())) && (await calls("team_status_sbom")).length === 1 && (await sw.getByRole("row").count()) === 201, `${await sw.getByRole("row").count()} rows`);
+  check(tag("Software header counts the programs"), /226 programs, as of /.test(await sw.getByRole("button", { name: /^Software/ }).textContent()));
+  check(tag("the product comes first, then by name"), /^Records Server/.test(await sw.getByRole("row").nth(1).textContent()) && /^Aster Notes/.test(await sw.getByRole("row").nth(2).textContent()));
+  check(tag("Software shows the device line and the truncated line"), (await sw.getByText("Example Devices Analyzer Station 7010, serial 7XK2LAB0001, 16 GB").isVisible()) && (await sw.getByText("12 more programs are not in the list").isVisible()));
+  check(tag("Software draws 200 rows and offers Show all"), await sw.getByRole("button", { name: "Show all 226" }).isVisible());
+  await sw.getByRole("button", { name: "Show all 226" }).click();
+  check(tag("Show all draws every program"), (await sw.getByRole("row").count()) === 227 && !(await sw.getByRole("button", { name: /^Show all/ }).isVisible()), `${await sw.getByRole("row").count()} rows`);
+  const swFilter = sw.getByRole("textbox", { name: "Filter software by name or publisher" });
+  await swFilter.fill("oAk");
+  check(tag("the filter matches the name, case-insensitive"), (await sw.getByRole("row").count()) === 2 && (await sw.getByRole("cell", { name: "Oakham Image Editor" }).isVisible()));
+  await swFilter.fill("ravenscar security");
+  check(tag("the filter matches the publisher"), (await sw.getByRole("row").count()) === 2 && (await sw.getByRole("cell", { name: "Ravenscar Antivirus" }).isVisible()));
+  await swFilter.fill("");
+  await sw.getByRole("button", { name: "Export SBOM" }).click();
+  await until(async () => /\.cdx\.json$/.test((await p.evaluate(() => window.__lastExport?.name)) ?? ""));
+  const sx = await p.evaluate(() => window.__lastExport);
+  check(tag("Export SBOM saves the document as <host>-<date>.cdx.json, unchanged"), /^LAB-ANALYZER-01-\d{4}-\d{2}-\d{2}\.cdx\.json$/.test(sx?.name ?? "") && JSON.parse(sx.content).bomFormat === "CycloneDX" && sx.content.includes('"Aster Notes"'), sx?.name);
+  check(tag("Export SBOM is reported to the team audit log (rows, host)"), await until(async () => (await calls("team_audit_export")).some((c) => c.what === "sbom" && c.rows === 226 && typeof c.uuid === "string")), JSON.stringify(await calls("team_audit_export")));
+  await shot("software");
+  await setQuery("SCAN-STATION-02");
+  await rows().first().click();
+  await p.getByTestId("software-section").getByRole("button", { name: /^Software/ }).click();
+  check(tag("a list the relay dropped meanwhile says so, no export"), (await until(() => p.getByText("No software list on the server.").isVisible())) && !(await p.getByRole("button", { name: "Export SBOM" }).isVisible()));
+  await setQuery("NAS-BACKUP-01");
+  await rows().first().click();
+  await p.getByTestId("software-section").getByRole("button", { name: /^Software/ }).click();
+  check(tag("a document that is not a software list says so and still offers the export"), (await until(() => p.getByText("The software list could not be read.").isVisible())) && (await p.getByRole("button", { name: "Export SBOM" }).isVisible()));
+  // A report without body: an empty state, no error.
+  await setQuery("NAS-BACKUP-01");
+  await rows().first().click();
+  check(tag("a report without checks shows an empty state"), await until(() => p.getByText("This report lists no checks.").isVisible()));
+  // The other device of the conflict: its own row, marked, with Unlink and Remove.
+  await setQuery("SHADOW-PC");
+  await rows().first().click();
+  check(tag("a conflicting agent row says which host it is in conflict for"), await p.getByText(/^In conflict with another agent for host /).isVisible());
+  check(tag("a conflicting agent is its own row with the conflict line and Unlink"), (await rows().first().getAttribute("data-id")) === "m:agent-dup-1" && (await until(() => p.getByTestId("health-conflict").isVisible())) && (await until(() => p.getByTestId("health-section").getByRole("button", { name: "Unlink" }).isVisible())));
+  await shot("conflict-agent");
+  // A claim to a host whose health agent is linked already cannot be linked (it would hide that host's health).
+  await setQuery("IMPOSTER-PC");
+  await rows().first().click();
+  check(tag("Link is refused for a host that already has a linked health agent"), (await until(() => p.getByText(/This host already has a linked health agent \(.+\)\. Unlink that one first/).isVisible())) && (await p.getByTestId("health-claim").getByRole("button", { name: "Link to this host" }).isDisabled()));
+  await shot("link-blocked");
+  // Verified links: an agent that only claims a Tether ID keeps its own row until a member confirms it.
+  await setQuery("FRONT-DESK-AGENT");
+  await rows().first().click();
+  const claimLine = p.getByTestId("health-claim");
+  // The enrolment time comes with the host's report (asked for once the cursor rests).
+  const claimText = (await until(async () => /enrolled/.test(await claimLine.textContent()))) ? await claimLine.textContent() : await claimLine.textContent().catch(() => "");
+  check(tag("a claimed agent stays an m: row with the claim line"), (await rows().first().getAttribute("data-id")) === "m:agent-only-4" && /Claims to be \d{9} \(.+\)\. Confirm only if this is that computer\./.test(claimText) && /enrolled/.test(claimText), claimText);
+  await shot("claim");
+  await claimLine.getByRole("button", { name: "Link to this host" }).click();
+  const ldlg = p.getByRole("dialog");
+  check(tag("Link asks for one explicit confirmation"), await until(() => ldlg.getByText("The agent's claim is not proof").isVisible()));
+  if (SHOTS) await sleep(500); // past the dialog's fade-in
+  await shot("link-dialog");
+  await clearCalls();
+  await ldlg.getByRole("button", { name: "Link", exact: true }).click();
+  await until(async () => (await calls("team_status_link")).length > 0);
+  const la = (await calls("team_status_link"))[0];
+  check(tag("Link calls team_status_link with the claimed ID"), la?.uuid === "agent-only-4" && claimText.includes(`Claims to be ${la?.tetherId} `), JSON.stringify(la));
+  await setQuery(`id:${la?.tetherId}`);
+  await rows().first().click();
+  check(tag("the linked host shows who linked it"), await until(() => p.getByText("Health linked by Anna (Helpdesk)").isVisible()));
+  await setQuery("id:m:");
+  check(tag("the linked agent no longer has its own row"), (await shown()) === 6);
+  // An agent Tether installed and linked on that computer (relay proof): said so, no member named.
+  await setQuery("id:327660915");
+  await rows().first().click();
+  check(tag("a proof-linked host says it was linked by Tether on that computer"), await until(() => p.getByText(/^Health linked by Tether on that computer, /).isVisible()));
+  await setQuery(`id:${la?.tetherId}`);
+  await rows().first().click();
+  await p.getByTestId("health-section").getByRole("button", { name: "Unlink" }).click();
+  await clearCalls();
+  await p.getByRole("dialog").getByRole("button", { name: "Unlink" }).click();
+  check(tag("Unlink calls team_status_unlink"), await until(async () => (await calls("team_status_unlink"))[0]?.uuid === "agent-only-4"));
+  await setQuery("FRONT-DESK-AGENT");
+  check(tag("an unlinked agent is its own row again, link dismissed, no claim"), (await until(async () => (await rows().first().getAttribute("data-id")) === "m:agent-only-4")) && (await rows().first().click(), await until(() => p.getByTestId("health-dismissed").isVisible())) && !(await claimLine.isVisible()));
+  check(tag("a dismissed row says so in its banner"), await p.getByText("Link dismissed. This agent is not linked to a host.").isVisible());
+  await shot("dismissed");
+  await clearCalls();
+  await p.getByRole("button", { name: "Allow a new claim" }).click();
+  check(tag("Allow a new claim calls team_status_allow_claim"), await until(async () => (await calls("team_status_allow_claim"))[0]?.uuid === "agent-only-4"));
+  await rows().first().click();
+  await p.getByRole("button", { name: "Remove from health monitoring…" }).click();
+  const rmdlg = p.getByRole("dialog");
+  check(tag("Remove names the host and asks to uninstall the agent"), (await rmdlg.getByText("Remove FRONT-DESK-AGENT from health monitoring?").isVisible()) && (await rmdlg.getByText(/enrols again by itself.*Uninstall the agent there, or ask an admin to revoke the token/).isVisible()) && (await rmdlg.getByText(/Tether on that computer enrols it again while its policy says install; to remove the agent, use the session menu or change the policy\./).isVisible()));
+  await clearCalls();
+  await rmdlg.getByRole("button", { name: "Remove", exact: true }).click();
+  check(tag("Remove calls team_status_remove"), await until(async () => (await calls("team_status_remove"))[0]?.uuid === "agent-only-4"));
+  check(tag("a removed agent leaves the list"), await until(async () => (await setQuery("FRONT-DESK-AGENT"), (await shown()) === 0)));
+  // In tag rules health terms are plain words, as older desktops read them; the dialog says so.
+  await setQuery("");
+  await p.getByRole("button", { name: "Tag rules" }).click();
+  const rdlg = p.getByRole("dialog");
+  await rdlg.getByRole("textbox", { name: "Rule tag" }).fill("plain");
+  await rdlg.getByRole("textbox", { name: "Rule search" }).fill("health:crit");
+  check(tag("rules dialog says health terms are not available in rules"), (await rdlg.getByText("are not available in rules: there they are plain words").isVisible()) && !(await rdlg.getByRole("button", { name: "Add rule" }).isDisabled()));
+  await rdlg.getByRole("button", { name: "Close" }).click();
+  // Export: failing checks, one row per host and failing check.
+  await setQuery("health:crit");
+  const ncrit = await shown();
+  await p.keyboard.press("Control+k");
+  await pal.fill("export hosts");
+  await p.keyboard.press("Enter");
+  const edlg = p.getByRole("dialog");
+  await edlg.getByRole("radio", { name: "Failing checks (CSV)" }).click();
+  await edlg.getByRole("radio", { name: /^Shown/ }).click();
+  await shot("export");
+  await edlg.getByRole("button", { name: "Export…" }).click();
+  const fx = await p.evaluate(() => window.__lastExport);
+  const lines = fx?.content.trim().split("\r\n") ?? [];
+  check(tag("failing checks export reported to the team audit log"), await until(async () => (await calls("team_audit_export")).some((c) => c.what === "failing" && c.rows === lines.length - 1)), JSON.stringify(await calls("team_audit_export")));
+  check(tag("export: failing checks CSV"), /^tether-health-faults-\d{4}-\d{2}-\d{2}\.csv$/.test(fx?.name ?? "") && lines[0] === "id,name,uuid,check,state,since" && lines.length - 1 >= ncrit && lines.some((l) => l.includes(",app/db-service,crit,")), `${fx?.name} ${lines.length - 1} rows, ${ncrit} hosts`);
+  await setQuery("");
+  // Team dialog: the notification switch.
+  await p.getByRole("button", { name: "Team", exact: true }).click();
+  check(tag("Team dialog has the notification switch (on)"), (await p.getByRole("switch", { name: "Notify me when a host turns critical or stops reporting" }).getAttribute("aria-checked")) === "true");
+  await p.keyboard.press("Escape");
+
   // ---- Help and sessions dialogs open from the keyboard / title bar.
   await rows().first().click();
   await p.keyboard.press("?");
@@ -242,6 +520,71 @@ async function run(name) {
   await clearCalls();
   await p.getByRole("button", { name: "Send Ctrl+Alt+Del" }).click();
   check(tag("Ctrl+Alt+Del goes to that session"), await until(async () => (await calls("session_ctrl_alt_del"))[0]?.key === "k1"));
+  await p.keyboard.press("Escape");
+
+  // A member without write sees the claim, but cannot link, unlink or remove.
+  await p.goto(`${base}?hosts=5000&team=ro#/`);
+  await search.waitFor({ timeout: 60000 });
+  await until(async () => (await total()) > 4000, 30000);
+  await setQuery("FRONT-DESK-AGENT");
+  await rows().first().click();
+  await until(() => claimLine.isVisible());
+  check(tag("read-only member: Link is disabled with a reason, no Remove"), (await claimLine.getByRole("button", { name: "Link to this host" }).isDisabled()) && (await claimLine.getByText("Only team members who may edit shared tags can link").isVisible()) && !(await p.getByRole("button", { name: "Remove from health monitoring…" }).isVisible()));
+  await setQuery("health:crit");
+  await rows().first().click();
+  await until(() => p.getByTestId("health-section").locator("li[data-check]").first().isVisible());
+  check(tag("read-only member: no Unlink or Remove on a linked host"), !(await p.getByRole("button", { name: "Unlink" }).isVisible()) && !(await p.getByRole("button", { name: "Remove from health monitoring…" }).isVisible()));
+
+  // ---- Staff sign-in (mock relays offer it): Sign in in the Team dialog, the person, roles and
+  // permissions; without sbom no Software part and no software search, each with the reason; the
+  // alarm when a relay saw the sign-in used by another key; Sign out; no role.
+  const signinPage = async (qs) => {
+    await p.goto(`${base}?hosts=5000&${qs}#/`);
+    await search.waitFor({ timeout: 60000 });
+    await until(async () => (await total()) > 4000, 30000);
+  };
+  const si = p.getByTestId("signin");
+  const openTeam = async () => {
+    await p.getByRole("button", { name: "Team", exact: true }).click();
+    await until(() => si.isVisible());
+  };
+  await signinPage("perm=write,audit,sbom,agent");
+  await p.getByRole("button", { name: "Team", exact: true }).click();
+  await sleep(500);
+  check(tag("no relay offers sign-in: no sign-in part, the key roster as before"), !(await si.isVisible()) && /Signed in as Anna \(Helpdesk\)/.test(await p.getByTestId("team-status").textContent()));
+  await p.keyboard.press("Escape");
+  await signinPage("signin=offered&perm=agent");
+  await openTeam();
+  check(tag("sign-in offered: Sign in, and that the roster key works without it"), (await si.getByRole("button", { name: "Sign in" }).isVisible()) && /Not signed in/.test(await si.textContent()) && /key is on your team's list/.test(await si.textContent()));
+  await si.getByRole("button", { name: "Sign in" }).click();
+  check(tag("signed in: the person, roles, what the role allows and not, the expiry, Sign out"), (await until(async () => /Signed in as Software Technician \(software@tether\.test\)/.test(await si.textContent()))) && /Roles: Tether\.Technician, Tether\.Agent\./.test(await si.textContent()) && /Not: change shared tags and links, read a computer's session log, software lists and software search\./.test(await si.textContent()) && /Session until .+; renewed automatically\./.test(await si.textContent()) && (await si.getByRole("button", { name: "Sign out" }).isVisible()), await si.textContent());
+  check(tag("the team status names the signed-in person"), await until(async () => /Signed in as Software Technician \(read only\)/.test(await p.getByTestId("team-status").textContent())));
+  await p.keyboard.press("Escape");
+  await clearCalls();
+  await setQuery("software:garnet");
+  await sleep(1200);
+  check(tag("without sbom: no software search is sent, the line says why"), /Software search: Your team role does not include software lists \(sbom\)\./.test(await notes.textContent()) && (await calls("team_status_software")).length === 0, await notes.textContent());
+  await search.focus();
+  await p.keyboard.press("Enter");
+  await sleep(800);
+  check(tag("without sbom: Enter in the search box sends no software search either"), (await calls("team_status_software")).length === 0);
+  await setQuery("LAB-ANALYZER-01");
+  await rows().first().click();
+  check(tag("without sbom: the host's Software part is replaced by the reason"), (await until(() => p.getByTestId("software-not-permitted").isVisible())) && !(await p.getByTestId("software-section").isVisible()) && (await calls("team_status_sbom")).length === 0);
+  await openTeam();
+  await si.getByRole("button", { name: "Sign out" }).click();
+  check(tag("Sign out: back to Sign in, says signed out"), (await until(() => si.getByRole("button", { name: "Sign in" }).isVisible())) && /Signed out\./.test(await si.textContent()));
+  await p.keyboard.press("Escape");
+  await signinPage("signin=alarm");
+  await openTeam();
+  await si.getByRole("button", { name: "Sign in" }).click();
+  check(tag("a sign-in used by another key: the alarm in the Team dialog, and the relay's line"), (await until(() => p.getByTestId("signin-alarm").isVisible())) && /already used at relay2\.example\.com: someone may have your sign-in\. Sign out and tell your administrator\./.test(await p.getByTestId("signin-alarm").textContent()) && /relay2\.example\.com: This sign-in was already used/.test(await si.textContent()));
+  await p.keyboard.press("Escape");
+  check(tag("the alarm also above the host list"), await p.getByTestId("signin-alarm-banner").isVisible());
+  await signinPage("signin=noroles");
+  await openTeam();
+  await si.getByRole("button", { name: "Sign in" }).click();
+  check(tag("no role: refused, with the reason per relay, still Sign in"), (await until(async () => /no Tether role/.test(await si.textContent()))) && (await si.getByRole("button", { name: "Sign in" }).isVisible()));
   await p.keyboard.press("Escape");
 
   check(tag("no page errors"), errors.length === 0, errors.join(" | "));

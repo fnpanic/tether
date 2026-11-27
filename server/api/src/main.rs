@@ -4,7 +4,8 @@
 //! list, docs/key-rotation.md), `devices.json`, `nonces.json`,
 //! `diag/tickets.json` + `diag/<ticket>.zip`, `custom/<id>.json` (custom TetherQS apps),
 //! `audit/<YYYY-MM-DD>.jsonl` (session audit log, `audit.rs`), `team/roster.json` + `team/tags.json`
-//! (technician access, `team.rs`), `download/…` (served by Caddy; `download/<channel>/releases.json`,
+//! (technician access, `team.rs`), `team-audit/<YYYY-MM-DD>.jsonl` + `team-audit/head` (what support
+//! staff read and changed, `teamaudit.rs`), `download/…` (served by Caddy; `download/<channel>/releases.json`,
 //! the signed release index, by this server with `ETag: "<serial>"`), `release-generation` (the
 //! release generation G, bumped on every index or manifest change, read by hbbs for its push hint;
 //! docs/update-design.md), `tmp/`.
@@ -12,8 +13,12 @@
 mod audit;
 mod maczip;
 mod metrics;
+mod oidc;
 mod prune;
+mod proposals;
+mod status;
 mod team;
+mod teamaudit;
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -35,6 +40,9 @@ use tether_trust::{custom, envelope, policy::Bundle, release, reqauth, serverkey
 use tiny_http::{Header, Request, Response, Server};
 
 const DAY: u64 = 86_400;
+/// Test-only settings (`TETHER_TEST_*`) are compiled in: debug builds and the `test-hooks` feature
+/// (`scripts/test-relay.sh`), never a production build (`cargo build --release`).
+pub(crate) const TEST_HOOKS: bool = cfg!(any(debug_assertions, feature = "test-hooks"));
 /// Devices kept (oldest seen dropped first). 10 000 users plus reinstalls within DEVICE_TTL need
 /// headroom; 50 000 is ~7 MB of devices.json and ~30 MB of memory, 40 MB at the peak while
 /// loading (measured, docs/scaling.md; MemoryMax=64M).
@@ -225,13 +233,16 @@ enum Body {
     /// The large uploads (release, diagnostics), streamed to a temp file that is removed on drop
     /// unless the handler renamed it into place. `nonce`: of the admin signature already
     /// verified over the file (release uploads), still to be checked for replay.
-    File { path: PathBuf, len: u64, nonce: Option<String> },
+    File { path: PathBuf, len: u64, nonce: Option<(String, usize)> },
+    /// A software list (`PUT /api/status/sbom`) and the second whose global budget slot it took;
+    /// the handler takes the buffer out (no copy under the state lock).
+    Sbom(Vec<u8>, u64),
 }
 
 impl Body {
     fn bytes(&self, limit: u64) -> Result<&[u8], Resp> {
         match self {
-            Body::Mem(b) if b.len() as u64 <= limit => Ok(b),
+            Body::Mem(b) | Body::Sbom(b, _) if b.len() as u64 <= limit => Ok(b),
             _ => Err(too_large()),
         }
     }
@@ -239,7 +250,7 @@ impl Body {
     fn file(&self) -> Result<(&Path, u64), Resp> {
         match self {
             Body::File { path, len, .. } => Ok((path, *len)),
-            Body::Mem(_) => Err(internal("upload not streamed to a file")),
+            Body::Mem(_) | Body::Sbom(..) => Err(internal("upload not streamed to a file")),
         }
     }
 }
@@ -281,12 +292,12 @@ impl<R: Read> Read for Deadline<R> {
     }
 }
 
-/// One of the MAX_UPLOADS upload slots of a pool, released on drop.
-struct UploadSlot(&'static AtomicUsize);
+/// One of the `max` slots of a pool (uploads, hbbs lookups, list reads), released on drop.
+pub(crate) struct UploadSlot(&'static AtomicUsize);
 
 impl UploadSlot {
-    fn take(pool: &'static AtomicUsize) -> Option<Self> {
-        if pool.fetch_add(1, Ordering::SeqCst) < MAX_UPLOADS {
+    pub(crate) fn take(pool: &'static AtomicUsize, max: usize) -> Option<Self> {
+        if pool.fetch_add(1, Ordering::SeqCst) < max {
             return Some(UploadSlot(pool));
         }
         pool.fetch_sub(1, Ordering::SeqCst);
@@ -335,28 +346,45 @@ struct App {
     /// Set by a handler (`App::defer`) whose file work runs after the state lock is released.
     later: Option<Later>,
     nonces: HashMap<String, u64>,
+    /// Per source address (`rate_ip`) of member, sign-in and Manage-session requests: when each of
+    /// its nonces leaves the replay window, oldest first ([`NONCES_PER_IP`]).
+    nonce_ips: HashMap<String, std::collections::VecDeque<u64>>,
+    /// Nonces used since they were last written: `serve` appends them to `nonces.log` after the
+    /// state lock is released and before the answer goes out ([`persist_nonces`]).
+    nonces_new: Vec<(String, u64)>,
+    /// Lines in `nonces.log`: beyond [`NONCE_LOG_MAX`] the map is written to `nonces.json` instead.
+    nonces_logged: usize,
+    /// Nonces recorded since start: `serve` compares it around `route`, so only a request that
+    /// recorded one waits for `nonces.json` (an unsigned request never does).
+    nonces_used: u64,
     tickets: Vec<Ticket>,
     policy_serial: Option<u64>,
     server_keys_serial: Option<u64>,
     team: team::Team,
+    /// The team audit log, and this request's record (submitted by `serve` with the answer's status).
+    team_audit: teamaudit::Log,
+    audit_pending: Option<teamaudit::Rec>,
+    status: status::Status,
     /// Release generation G (`release-generation`).
     release_gen: u64,
     /// Per channel: serial and expiry of the stored `releases.json`.
     indexes: HashMap<String, (u64, u64)>,
     /// The same for `releases-v2.json` (release::INDEX_V2_FILE: with xz copies, for new builds).
     indexes_v2: HashMap<String, (u64, u64)>,
+    /// The same for `monitor.json` (release::MONITOR_INDEX_FILE: the device-status agent's index).
+    monitor_indexes: HashMap<String, (u64, u64)>,
     /// Devices that reported a newly staged update, by (profile, version), since start.
     downloads: std::collections::BTreeMap<(String, String), u64>,
 }
 
-/// `/download/<channel>/releases.json` (or `releases-v2.json`) → (channel, file name).
+/// `/download/<channel>/releases.json` (or `releases-v2.json`, `monitor.json`) → (channel, file name).
 fn release_index_channel(p: &str) -> Option<(&str, &str)> {
     let (ch, rest) = p.strip_prefix("/download/")?.split_once('/')?;
     (is_index_file(rest) && valid_channel(ch)).then_some((ch, rest))
 }
 
 fn is_index_file(name: &str) -> bool {
-    name == release::INDEX_FILE || name == release::INDEX_V2_FILE
+    release::index_apps(name).is_some()
 }
 
 /// Distinct (profile, version) series in the download counter; heartbeats are unauthenticated.
@@ -364,10 +392,10 @@ const MAX_DOWNLOAD_SERIES: usize = 64;
 
 /// Serial and expiry of a stored release index (verified against the key it names: it was
 /// checked against the trusted keys on upload).
-fn index_meta(raw: &[u8]) -> Option<(u64, u64)> {
+fn index_meta(raw: &[u8], name: &str) -> Option<(u64, u64)> {
     let doc: envelope::Signed = serde_json::from_slice(raw).ok()?;
     let key = tether_trust::key_from_b64(&doc.key).ok()?;
-    let i = release::Index::from_json(&envelope::open(&doc, &[key]).ok()?).ok()?;
+    let i = release::Index::from_json_for(&envelope::open(&doc, &[key]).ok()?, release::index_apps(name)?).ok()?;
     Some((i.serial, i.expires))
 }
 
@@ -525,18 +553,19 @@ pub(crate) fn sig_relay() -> reqauth::Relay<'static> {
 
 /// The admin signature of a request under any of `keys`. Needs no state, so a large body is
 /// checked before the state lock; the returned nonce still goes through `App::use_nonce`.
-fn verify_sig(keys: &[VerifyingKey], rq: &Request, method: &str, url: &str, body: &[u8], t: u64) -> Result<String, Resp> {
+/// The nonce and the index of the key that signed.
+fn verify_sig(keys: &[VerifyingKey], rq: &Request, method: &str, url: &str, body: &[u8], t: u64) -> Result<(String, usize), Resp> {
     let sig = header(rq, reqauth::HEADER).ok_or_else(|| text(401, "missing signature"))?;
     let mut err = String::new();
     // Once, not per key: the body may be a 200 MiB upload.
     let digest = reqauth::body_digest(body);
-    for key in keys {
+    for (i, key) in keys.iter().enumerate() {
         let mut nonce = String::new();
         match reqauth::verify_request_for(&sig, key, sig_relay(), method, url, &digest, t, |n| {
             nonce = n.to_owned();
             true
         }) {
-            Ok(()) => return Ok(nonce),
+            Ok(()) => return Ok((nonce, i)),
             // A mismatch under one key says nothing; keep the more specific reason.
             Err(e) if err.is_empty() || e != "signature does not match" => err = e,
             Err(_) => {}
@@ -558,9 +587,32 @@ fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<
             lock(app).open_ticket(&p["/api/diag/".len()..], now())?;
             (LIMIT_DIAG, 0o600, None, &DIAG_UPLOADS)
         }
+        // Status: off and size answered before the body is read.
+        ("POST" | "DELETE", "/api/status") | ("POST", "/api/status/enroll") | ("PUT" | "DELETE", "/api/status/sbom") if status::conf().off => return Err(status::off()),
+        // A device's own DELETE is honoured also with STATUS_SBOM off: a list stored before must not come back.
+        ("PUT", "/api/status/sbom") if !status::conf().sbom => return Err(not_found()),
+        // The software list: size from Content-Length (required), the cheap checks and the global
+        // budget, then the body; only the declared bytes are read, and all of them.
+        ("PUT", "/api/status/sbom") => {
+            let Some(n) = rq.body_length() else { return Err(text(411, "length required")) };
+            if n as u64 > status::conf().sbom_max {
+                return Err(too_large());
+            }
+            let slot = lock(app).sbom_precheck(rq)?;
+            // A body that does not arrive costs its sender a failure, not the budget.
+            return match read_body(rq, n as u64) {
+                Ok(b) if b.len() == n => Ok(Body::Sbom(b, slot)),
+                r => {
+                    lock(app).sbom_unread(rq, slot);
+                    Err(r.err().unwrap_or_else(|| text(400, "request body incomplete")))
+                }
+            };
+        }
+        ("POST", "/api/status") => return read_body(rq, status::LIMIT_STATUS).map(Body::Mem),
+        ("POST", "/api/status/enroll") => return read_body(rq, tether_trust::status::ENROLL_MAX as u64).map(Body::Mem),
         _ => return read_body(rq, LIMIT_PAGE).map(Body::Mem),
     };
-    let _slot = UploadSlot::take(pool).ok_or_else(|| text(503, "too many uploads at once, retry later").with_header(hdr("Retry-After", "30")))?;
+    let _slot = UploadSlot::take(pool, MAX_UPLOADS).ok_or_else(|| text(503, "too many uploads at once, retry later").with_header(hdr("Retry-After", "30")))?;
     // The timestamp was current when the upload began (precheck); a slow upload may outlast the skew.
     let t = now();
     let mut body = body_to_file(rq, data, limit, mode)?;
@@ -568,6 +620,165 @@ fn read_request_body(app: &Mutex<App>, rq: &mut Request, data: &Path) -> Result<
         *nonce = Some(with_mapped(path, |b| verify_sig(&keys, rq, "PUT", &url, b, t)).map_err(internal)??);
     }
     Ok(body)
+}
+
+/// `STATUS_TRACE_LOCK=1` (a diagnosis setting, off by default): every state-lock hold over 20 ms
+/// is logged with what held it (`lock held <ms> ms: <what>`).
+pub(crate) fn traced(what: impl FnOnce() -> String, held: Duration) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var("STATUS_TRACE_LOCK").as_deref() == Ok("1")) && held > Duration::from_millis(20) {
+        eprintln!("lock held {} ms: {}", held.as_millis(), what());
+    }
+}
+
+/// Serialises the writers of `nonces.json` and `nonces.log`: what is written is taken inside it,
+/// so lines are appended in order and an older snapshot never replaces a newer file.
+static NONCE_FILE: Mutex<()> = Mutex::new(());
+
+/// Nonces remembered at most (every signed request's for the replay window, 601 s; an upload's
+/// longer): a map full of live nonces refuses new signed requests `503` rather than grow.
+const NONCES_MAX: usize = 100_000;
+/// Lines appended to `nonces.log` before the whole map is written to `nonces.json` again.
+const NONCE_LOG_MAX: usize = 10_000;
+/// A `nonces.json` larger than this is not read (this relay writes at most `NONCES_MAX` entries).
+const NONCE_FILE_MAX: u64 = 16 << 20;
+/// Live nonces of member, sign-in and Manage-session requests from one source address (`rate_ip`):
+/// beyond it that address is refused `429`, so many keys from one address cannot fill the map. One
+/// key holds at most about `KEY_PER_MIN` (120) x the replay window (601 s), about 1 200.
+const NONCES_PER_IP: usize = 10_000;
+
+/// `n`, or in test builds `TETHER_TEST_<name>` (`NONCES_MAX`, `NONCE_LOG_MAX`).
+fn test_or(name: &str, n: usize) -> usize {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    if let Some(n) = std::env::var(format!("TETHER_TEST_{name}")).ok().and_then(|v| v.parse().ok()) {
+        return n;
+    }
+    let _ = name;
+    n
+}
+
+fn nonces_max() -> usize {
+    test_or("NONCES_MAX", NONCES_MAX)
+}
+
+fn nonces_per_ip() -> usize {
+    test_or("NONCES_PER_IP", NONCES_PER_IP)
+}
+
+/// Writes the nonces used since the last write without the state lock: appended to `nonces.log`
+/// (synced), or, once the log has `NONCE_LOG_MAX` lines, the whole map to `nonces.json` (synced,
+/// renamed) and the log removed. The lock is held only to take the new nonces (the map is copied
+/// only for the full write). Persisted so a restart does not reopen the replay window; called
+/// before the answer, so a nonce is durable when its request is answered. A failed write (disk
+/// full) is only logged: the nonce still blocks replays in memory, and deletes that free space
+/// must work.
+fn persist_nonces(app: &Mutex<App>) {
+    let _file = NONCE_FILE.lock().unwrap_or_else(|e| e.into_inner());
+    let (new, snap, data, logged) = {
+        let mut a = lock(app);
+        if a.nonces_new.is_empty() {
+            return; // a request that came later wrote it already, with this nonce in it
+        }
+        let new = std::mem::take(&mut a.nonces_new);
+        a.nonces_logged += new.len();
+        // Only the copy is made under the lock (NONCES_MAX entries of 32 characters, measured: about
+        // 9 MB more and 8 ms in a release build); it is serialised and written outside.
+        let snap = (a.nonces_logged > test_or("NONCE_LOG_MAX", NONCE_LOG_MAX)).then(|| a.nonces.clone());
+        let logged = std::mem::take(&mut a.nonces_logged);
+        if snap.is_none() {
+            a.nonces_logged = logged;
+        }
+        (new, snap, a.data.clone(), logged)
+    };
+    let append = || {
+        let f = OpenOptions::new().append(true).create(true).mode(0o600).open(data.join("nonces.log"))?;
+        let mut w = BufWriter::new(&f);
+        for n in &new {
+            serde_json::to_writer(&mut w, n).map_err(io::Error::other)?;
+            w.write_all(b"\n")?;
+        }
+        w.flush()?;
+        drop(w);
+        f.sync_data()
+    };
+    let r = match snap {
+        Some(snap) => {
+            let tmp = tmp_path(&data);
+            let r = (|| {
+                let f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+                let mut w = BufWriter::new(&f);
+                serde_json::to_writer(&mut w, &snap).map_err(io::Error::other)?;
+                w.flush()?;
+                drop(w);
+                f.sync_all()?;
+                fs::rename(&tmp, data.join("nonces.json"))?;
+                // A crash before this leaves lines that are in nonces.json too: read twice, harmless.
+                match fs::remove_file(data.join("nonces.log")) {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                    _ => Ok(()),
+                }
+            })();
+            match r {
+                Ok(()) => Ok(()),
+                // The log stays in force: these nonces go to it too, and its line count is kept,
+                // so the next request tries again.
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp);
+                    eprintln!("error: nonces.json: {e}");
+                    lock(app).nonces_logged += logged;
+                    append()
+                }
+            }
+        }
+        None => append(),
+    };
+    if let Err(e) = r {
+        eprintln!("error: nonces.json/nonces.log: {e}");
+    }
+}
+
+/// `nonces.json` and the lines appended to `nonces.log` since (all of them: the map bounds what a
+/// request adds, and a log that could not be compacted keeps growing; a torn last line is skipped
+/// and ended, so the next line is not glued to it), the expired left out; and the number of lines.
+fn load_nonces(data: &Path) -> (HashMap<String, u64>, usize) {
+    let p = data.join("nonces.json");
+    let mut m: HashMap<String, u64> = if fs::metadata(&p).is_ok_and(|m| m.len() > NONCE_FILE_MAX) {
+        eprintln!("error: nonces.json is too large; not read");
+        HashMap::new()
+    } else {
+        load_json(&p)
+    };
+    let mut lines = 0;
+    let log = data.join("nonces.log");
+    if let Ok(f) = File::open(&log) {
+        let (mut r, mut l, mut ended) = (BufReader::new(f), Vec::new(), true);
+        while io::BufRead::read_until(&mut r, b'\n', &mut l).is_ok_and(|n| n > 0) {
+            lines += 1;
+            ended = l.ends_with(b"\n");
+            if let Ok((n, t)) = serde_json::from_slice::<(String, u64)>(&l) {
+                m.insert(n, t);
+            }
+            l.clear();
+        }
+        // A last line without its newline (a crash while appending) is ended before anything is
+        // appended, or the next line would be glued to it.
+        if !ended {
+            if let Err(e) = OpenOptions::new().append(true).open(&log).and_then(|mut f| f.write_all(b"\n").and_then(|_| f.sync_data())) {
+                eprintln!("error: nonces.log: {e}");
+            }
+        }
+    }
+    let t = now();
+    m.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
+    (m, lines)
+}
+
+/// Tests only (`TETHER_TEST_ADMIN_READ_PAUSE`, ms): a list read holds its slot this long.
+pub(crate) fn test_pause() {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    if let Some(ms) = std::env::var("TETHER_TEST_ADMIN_READ_PAUSE").ok().and_then(|v| v.parse().ok()) {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
 }
 
 fn lock(app: &Mutex<App>) -> MutexGuard<'_, App> {
@@ -606,17 +817,37 @@ fn serve(app: &Mutex<App>, data: &Path, mut rq: Request) {
             None => not_found(),
         })
     } else {
-        read_request_body(app, &mut rq, data).map(|body| {
-            let (r, later) = {
+        read_request_body(app, &mut rq, data).map(|mut body| {
+            // A member signature is checked before the lock (up to 2000 keys without `kid`).
+            let verified = team::member_verify(app, &rq, &body);
+            let (r, later, nonce, pending, sessions) = {
                 let mut a = lock(app);
-                let r = a.route(&mut rq, &body);
-                (r, a.later.take())
+                let held = Instant::now();
+                let used = a.nonces_used;
+                a.team.verified = verified;
+                let r = a.route(&mut rq, &mut body);
+                a.team.verified = None;
+                let pending = a.audit_pending.take().map(|rec| (a.team_audit.clone(), rec));
+                let out = (r, a.later.take(), a.nonces_used != used, pending, std::mem::take(&mut a.team.sessions_dirty));
+                traced(|| format!("{} {}", rq.method(), rq.url().split('?').next().unwrap_or("")), held.elapsed());
+                out
             };
-            match (r, later) {
+            if nonce {
+                persist_nonces(app);
+            }
+            if sessions {
+                team::persist_sessions(app);
+            }
+            let resp = match (r, later) {
                 (Ok(_), Some(f)) => f(app),
                 (r, _) => r,
             }
-            .unwrap_or_else(|e| e)
+            .unwrap_or_else(|e| e);
+            // Before the answer goes out: a later request sees it.
+            if let Some((log, rec)) = pending {
+                log.submit(rec.answered(resp.status_code().0));
+            }
+            resp
         })
     };
     // Err: refused before (all of) the body was read.
@@ -767,6 +998,77 @@ fn stored_meta(raw: &[u8]) -> Option<BundleMeta> {
     serde_json::from_slice(&envelope::open(&doc, &[key]).ok()?).ok()
 }
 
+/// A signed-in person's request for an admin route their Tether Manage roles do not allow.
+const SESSION_REFUSED: &str = "your Tether Manage role does not allow this; signing and publishing need a key holder's Tether Manage with its keys unlocked";
+
+/// Whether a session with Tether Manage `roles` may use admin route `method rest` (design 12.4):
+/// every role reads status, devices, session and team audit, policy history and releases; Operator
+/// also diagnostics tickets, device removal and revocations; PolicyEditor policy and team
+/// proposals (and reads the team document), Publisher release proposals, KeyHolder reads and
+/// deletes every proposal. Nothing else: publishing anything needs the admin signature.
+fn session_may(method: &str, rest: &str, roles: &[tether_trust::team::ManageRole]) -> bool {
+    use tether_trust::team::ManageRole::{KeyHolder, Operator, PolicyEditor, Publisher};
+    let any = |set: &[tether_trust::team::ManageRole]| roles.iter().any(|r| set.contains(r));
+    match (method, rest) {
+        ("GET", "status" | "devices" | "status/devices" | "status/revoked" | "audit" | "team-audit" | "policy-history" | "releases") | ("POST", "audit-event") => !roles.is_empty(),
+        ("GET", r) if r.starts_with("policy-history/") => !roles.is_empty(),
+        ("GET", "diag") | ("POST", "diag-ticket" | "status/revoke") => any(&[Operator]),
+        ("GET" | "POST" | "DELETE", r) if r.starts_with("diag/") => any(&[Operator]),
+        ("DELETE", r) if r.starts_with("status/") => any(&[Operator]),
+        ("GET", "team") => any(&[PolicyEditor, KeyHolder]),
+        (m, r) if r.starts_with("proposals/") => {
+            let editor = match r["proposals/".len()..].split('/').next() {
+                Some("policy" | "team") => PolicyEditor,
+                Some("release") => Publisher,
+                _ => return false,
+            };
+            if m == "PUT" { any(&[editor]) } else { any(&[editor, KeyHolder]) }
+        }
+        _ => false,
+    }
+}
+
+/// The `serial` of a signed envelope's payload, opened with the key it names: only for an
+/// audit record of an admin-signed request (the handler verifies it against the trusted keys).
+fn envelope_serial(v: &serde_json::Value) -> Option<u64> {
+    let doc: envelope::Signed = serde_json::from_value(v.clone()).ok()?;
+    let key = tether_trust::key_from_b64(&doc.key).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&envelope::open(&doc, &[key]).ok()?).ok()?["serial"].as_u64()
+}
+
+/// The team audit event and detail of an admin route that changes something (or reads a
+/// diagnostics upload): serials, versions, ids and paths, never the documents themselves. `None`:
+/// a read the log does not record.
+fn admin_change(method: &str, rest: &str, body: &[u8]) -> Option<(&'static str, serde_json::Value)> {
+    use serde_json::{json, Value};
+    let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let serial = |v: &Value| envelope_serial(v).map_or(Value::Null, |s| json!({"serial": s}));
+    let t = |s: &str| Value::from(teamaudit::text(s));
+    let ticket = |r: &str| json!({"ticket": t(r.trim_start_matches("diag/").trim_end_matches("/close"))});
+    Some(match (method, rest) {
+        ("PUT", "policy") => ("policy-publish", serial(&v)),
+        ("PUT", "server-keys") => ("server-keys-publish", serial(&v)),
+        // A signed document names its serial; a plain roster (before the first one) only its size.
+        ("PUT", "team") if v.get("team").is_some() => ("team-publish", serial(&v["team"])),
+        ("PUT", "team") => ("team-publish", json!({"plain_roster": true, "members": v["members"].as_array().map_or(0, |m| m.len())})),
+        ("PUT", "download-page") => ("download-page-publish", json!({"bytes": body.len()})),
+        ("POST", "diag-ticket") => ("diag-ticket", v["ticket"].as_str().map_or(Value::Null, |k| json!({"ticket": t(k)}))),
+        ("POST", r) if r.starts_with("diag/") => ("diag-close", ticket(r)),
+        ("DELETE", r) if r.starts_with("diag/") => ("diag-delete", ticket(r)),
+        ("GET", r) if r.starts_with("diag/") => ("diag-download", ticket(r)),
+        ("POST", "releases/prune") => ("release-prune", json!({"dry_run": v["dry_run"].as_bool().unwrap_or(true)})),
+        ("PUT", r) if r.starts_with("custom/") => ("custom-app-publish", json!({"id": t(&r["custom/".len()..]), "channel": v["channel"].as_str().map(t), "expires": v["expires"].as_u64()})),
+        ("DELETE", r) if r.starts_with("custom/") => ("custom-app-delete", json!({"id": t(&r["custom/".len()..])})),
+        // An index upload becomes `release-index-publish` with its serial (put_release).
+        ("PUT", r) if r.starts_with("release/") => ("release-upload", json!({"path": t(&r["release/".len()..])})),
+        ("DELETE", r) if r.starts_with("release/") => ("release-delete", json!({"path": t(&r["release/".len()..])})),
+        // The id (and serial, author) are added by the handler (proposals.rs).
+        ("PUT", r) if r.starts_with("proposals/") => ("proposal-put", json!({"kind": t(&r["proposals/".len()..])})),
+        ("DELETE", r) if r.starts_with("proposals/") => ("proposal-delete", json!({"kind": t(r["proposals/".len()..].split('/').next().unwrap_or(""))})),
+        _ => return None,
+    })
+}
+
 fn load_json<T: for<'de> Deserialize<'de> + Default>(p: &Path) -> T {
     // From a reader: devices.json at MAX_DEVICES is ~7 MB, not read into memory first.
     match File::open(p) {
@@ -779,7 +1081,7 @@ fn load_json<T: for<'de> Deserialize<'de> + Default>(p: &Path) -> T {
 }
 
 impl App {
-    fn open(data: PathBuf, keys: Vec<VerifyingKey>, audit_days: u64, audit_max: u64) -> io::Result<Self> {
+    fn open(data: PathBuf, keys: Vec<VerifyingKey>, audit_days: u64, audit_max: u64, team_audit: (u64, u64)) -> io::Result<Self> {
         mkdirs(&data, 0o750)?;
         mkdirs(&data.join("download"), 0o750)?;
         for d in ["policy-history", "diag", "custom", "audit", "tmp"] {
@@ -792,14 +1094,13 @@ impl App {
         let policy_serial = fs::read(data.join("policy.json")).ok().and_then(|b| stored_meta(&b)).map(|m| m.serial);
         let server_keys_serial = fs::read(data.join("server-keys.json")).ok().and_then(|b| stored_meta(&b)).map(|m| m.serial);
         let release_gen = fs::read_to_string(data.join("release-generation")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-        let (mut indexes, mut indexes_v2) = (HashMap::new(), HashMap::new());
+        let (mut indexes, mut indexes_v2, mut monitor_indexes) = (HashMap::new(), HashMap::new(), HashMap::new());
         for e in fs::read_dir(data.join("download"))?.flatten() {
             let ch = e.file_name().to_string_lossy().into_owned();
-            if let Some(m) = fs::read(e.path().join(release::INDEX_FILE)).ok().and_then(|b| index_meta(&b)) {
-                indexes.insert(ch.clone(), m);
-            }
-            if let Some(m) = fs::read(e.path().join(release::INDEX_V2_FILE)).ok().and_then(|b| index_meta(&b)) {
-                indexes_v2.insert(ch, m);
+            for (name, map) in [(release::INDEX_FILE, &mut indexes), (release::INDEX_V2_FILE, &mut indexes_v2), (release::MONITOR_INDEX_FILE, &mut monitor_indexes)] {
+                if let Some(m) = fs::read(e.path().join(name)).ok().and_then(|b| index_meta(&b, name)) {
+                    map.insert(ch.clone(), m);
+                }
             }
         }
         let mut custom: Vec<CustomMeta> = Vec::new();
@@ -812,24 +1113,33 @@ impl App {
                 }
             }
         }
+        let (nonces, nonces_logged) = load_nonces(&data);
         Ok(App {
             q_hits: HashMap::new(),
             audit_ip_hits: HashMap::new(),
             audit_dev_hits: HashMap::new(),
             audit: audit::Log::open(data.join("audit"), audit_days, audit_max)?,
             team: team::Team::open(&data)?,
+            team_audit: teamaudit::Log::start(data.join("team-audit"), team_audit.0, team_audit.1, true)?,
+            audit_pending: None,
+            status: status::Status::open(&data),
             custom,
             later: None,
             devices: devices.into_iter().map(|d| (d.uuid.clone(), d)).collect(),
             devices_dirty: false,
             ip_hits: HashMap::new(),
-            nonces: load_json(&data.join("nonces.json")),
+            nonces,
+            nonce_ips: HashMap::new(),
+            nonces_new: Vec::new(),
+            nonces_logged,
+            nonces_used: 0,
             tickets: load_json(&data.join("diag/tickets.json")),
             policy_serial,
             server_keys_serial,
             release_gen,
             indexes,
             indexes_v2,
+            monitor_indexes,
             downloads: Default::default(),
             started: now(),
             keys,
@@ -881,28 +1191,56 @@ impl App {
         check_space(&self.data, incoming)
     }
 
-    fn auth(&mut self, rq: &Request, method: &str, url: &str, body: &[u8]) -> Result<(), Resp> {
-        let nonce = verify_sig(&self.keys, rq, method, url, body, now())?;
-        self.use_nonce(nonce, 0)
+    /// The admin signature; the index of the admin key that made it.
+    fn auth(&mut self, rq: &Request, method: &str, url: &str, body: &[u8]) -> Result<usize, Resp> {
+        let (nonce, i) = verify_sig(&self.keys, rq, method, url, body, now())?;
+        self.use_nonce(nonce, 0, None)?;
+        Ok(i)
     }
 
     /// Replay check of a verified signature's nonce, remembered `keep` s longer than
     /// NONCE_TTL_SECS (stored as seen that much later; a refused replay does not renew it).
-    fn use_nonce(&mut self, nonce: String, keep: u64) -> Result<(), Resp> {
+    fn use_nonce(&mut self, nonce: String, keep: u64, ip: Option<&str>) -> Result<(), Resp> {
         if self.nonces.contains_key(&nonce) {
             return Err(text(401, "replayed request"));
         }
-        self.nonces.insert(nonce, now() + keep);
-        self.save_nonces();
+        self.remember_nonce(nonce, now() + keep, ip)
+    }
+
+    /// Whether one more nonce may be remembered: a map full of nonces still in their window is
+    /// `503`; `ip` (a member, sign-in or Manage-session request's `rate_ip`) with `NONCES_PER_IP`
+    /// live ones is `429`. The admin key's own requests pass `None`.
+    pub(crate) fn nonce_room(&mut self, ip: Option<&str>) -> Result<(), Resp> {
+        let t = now();
+        if self.nonces.len() >= nonces_max() {
+            self.nonces.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
+            if self.nonces.len() >= nonces_max() {
+                eprintln!("error: {} signed requests within the replay window: new ones refused until older ones expire", self.nonces.len());
+                return Err(text(503, "too many signed requests, retry later").with_header(hdr("Retry-After", "60")));
+            }
+        }
+        if let Some(q) = ip.and_then(|ip| self.nonce_ips.get_mut(ip)) {
+            while q.front().is_some_and(|&e| e <= t) {
+                q.pop_front();
+            }
+            if q.len() >= nonces_per_ip() {
+                return Err(text(429, "too many signed requests from this address").with_header(hdr("Retry-After", "60")));
+            }
+        }
         Ok(())
     }
 
-    /// Persisted so a restart does not reopen the replay window. A failed save (disk full) is
-    /// only logged: the nonce still blocks replays in memory, and deletes that free space must work.
-    pub(crate) fn save_nonces(&self) {
-        if let Err(e) = self.save("nonces.json", &self.nonces) {
-            eprintln!("error: nonces.json: {e}");
+    /// Remembers a nonce (not seen before) as seen at `at`; it is written before this request is
+    /// answered. No room ([`App::nonce_room`]): refused, nothing remembered.
+    pub(crate) fn remember_nonce(&mut self, nonce: String, at: u64, ip: Option<&str>) -> Result<(), Resp> {
+        self.nonce_room(ip)?;
+        if let Some(ip) = ip {
+            self.nonce_ips.entry(ip.to_owned()).or_default().push_back(at + reqauth::NONCE_TTL_SECS);
         }
+        self.nonces_new.push((nonce.clone(), at));
+        self.nonces.insert(nonce, at);
+        self.nonces_used += 1;
+        Ok(())
     }
 
     /// The checks a release upload must pass before its body is read (the signature covers the
@@ -918,7 +1256,9 @@ impl App {
         if !ts.is_some_and(|ts| now().abs_diff(ts) <= reqauth::MAX_SKEW_SECS) {
             return Err(text(401, "request timestamp outside allowed clock skew"));
         }
-        Ok(self.keys.clone())
+        // A sign-in session's upload is verified with its key, then refused and recorded (`admin`),
+        // like every other admin route a session may not use.
+        Ok(self.release_session(rq).map_or_else(|| self.keys.clone(), |(k, _)| vec![k]))
     }
 
     /// Index of the open diagnostics ticket `ticket`, or 404: body `ticket not open` when this
@@ -939,7 +1279,7 @@ impl App {
         Ok(empty(500))
     }
 
-    fn route(&mut self, rq: &mut Request, body: &Body) -> Result<Resp, Resp> {
+    fn route(&mut self, rq: &mut Request, body: &mut Body) -> Result<Resp, Resp> {
         let url = rq.url().to_owned();
         let path = url.split('?').next().unwrap_or("");
         let method = rq.method().as_str().to_owned();
@@ -953,11 +1293,17 @@ impl App {
                 Ok(r.with_header(hdr("Cache-Control", "no-cache")))
             }
             ("POST", "/api/heartbeat") => self.heartbeat(rq, body),
+            ("POST", "/api/status/enroll") => self.status_enroll(rq, body, &url),
+            ("POST", "/api/status") => self.status_post(rq, body, &url),
+            ("DELETE", "/api/status") => self.status_delete(rq, body, &url),
+            ("PUT", "/api/status/sbom") => self.status_sbom_put(rq, body, &url),
+            ("DELETE", "/api/status/sbom") => self.status_sbom_delete(rq, body, &url),
             ("POST", "/api/audit/conn") => self.audit_post(rq, body, "conn"),
             ("POST", "/api/audit/file") => self.audit_post(rq, body, "file"),
             ("POST", "/api/audit/alarm") => self.audit_post(rq, body, "alarm"),
             ("POST", p) if p.starts_with("/api/diag/") => self.diag_upload(body, &p["/api/diag/".len()..]),
             ("GET", p) if p.starts_with("/q/") => self.q(rq, &p["/q/".len()..]),
+            ("GET", "/api/team/config") => self.team_config(rq),
             (m, p) if p.starts_with("/api/team/") => self.team_route(rq, body, m, &url, &p["/api/team/".len()..]),
             (m, p) if p.starts_with("/api/admin/") => self.admin(rq, body, m, &url, &p["/api/admin/".len()..]),
             _ => Err(not_found()),
@@ -1076,6 +1422,70 @@ impl App {
         self.defer(move |_| Ok(audit::response(&dir, since, limit, &device)))
     }
 
+    /// A session's request for an admin route its roles do not allow: recorded (the route's own
+    /// event, or `admin-refused` with the route) and answered `403`.
+    fn session_refused(&mut self, rq: &Request, c: team::ManageCaller, method: &str, url: &str, rest: &str, body: &[u8]) -> Resp {
+        self.audit_admin(rq, c.actor.clone(), method, url, rest, body);
+        if self.audit_pending.is_none() {
+            let route = format!("{method} /api/admin/{}", teamaudit::text(rest));
+            self.audit_pending = Some(teamaudit::Rec::new("admin-refused", Some(c.actor), Some(client_ip(rq)), teamaudit::Target::default(), serde_json::json!({"route": route})));
+        }
+        text(403, SESSION_REFUSED)
+    }
+
+    /// The actor of a request with the admin signature of key `key`.
+    fn admin_actor(&self, key: usize) -> teamaudit::Actor {
+        teamaudit::Actor { key_fingerprint: tether_trust::team::key_id(&self.keys[key]), name: "admin".into(), oid: None, upn: None }
+    }
+
+    /// The team audit record of an admin request that reads or changes a device's data.
+    fn audit_admin(&mut self, rq: &Request, actor: teamaudit::Actor, method: &str, url: &str, rest: &str, body: &[u8]) {
+        if let ("GET", r @ ("status/devices" | "devices")) = (method, rest) {
+            self.audit_pending = self.team.reads.read(if r == "devices" { "device-list" } else { "status-device-list" }, actor, Some(client_ip(rq)), now());
+            return;
+        }
+        let (event, target, detail) = match (method, rest) {
+            ("DELETE", r) if r.starts_with("status/") => ("remove", self.audit_target(&r["status/".len()..]), serde_json::Value::Null),
+            ("POST", "status/revoke") => {
+                let id = serde_json::from_slice::<serde_json::Value>(body).ok().and_then(|v| v["id"].as_str().filter(|i| tether_trust::status::valid_token_id(i)).map(str::to_owned));
+                ("revoke", teamaudit::Target::default(), id.map_or(serde_json::Value::Null, |i| serde_json::json!({"token": i})))
+            }
+            ("GET", "audit") => ("session-audit-read", team::query_param(url, "device").map(|d| teamaudit::Target::asked(&d)).unwrap_or_default(), serde_json::Value::Null),
+            ("GET", "team-audit") => ("team-audit-read", teamaudit::Target::default(), teamaudit::Query::parse(url).map(|q| q.detail()).unwrap_or_default()),
+            // Every change an admin makes (design 12.5: what changed, never a document's contents).
+            (m, r) => match admin_change(m, r, body) {
+                Some((event, detail)) => (event, teamaudit::Target::default(), detail),
+                None => return,
+            },
+        };
+        self.audit_pending = Some(teamaudit::Rec::new(event, Some(actor), Some(client_ip(rq)), target, detail));
+    }
+
+    /// `GET /api/admin/team-audit?since&until&actor&device&customer&event&limit&cursor` (teamaudit.rs
+    /// `read`): written into an unlinked temp file after the state lock is released, then sent.
+    fn team_audit_read(&mut self, url: &str) -> Result<Resp, Resp> {
+        static READING: AtomicUsize = AtomicUsize::new(0);
+        let q = teamaudit::Query::parse(url).map_err(|e| text(400, &e))?;
+        // One at a time relay-wide: each may wait 2 s for the queue and scan the whole log.
+        let slot = UploadSlot::take(&READING, 1).ok_or_else(|| text(429, "busy").with_header(hdr("Retry-After", "2")))?;
+        let (log, data) = (self.team_audit.clone(), self.data.clone());
+        self.defer(move |_| {
+            let _slot = slot;
+            test_pause();
+            // Everything submitted before this read is in the files.
+            log.flush(Duration::from_secs(2));
+            let head = log.head();
+            let tmp = tmp_path(&data);
+            let mut f = OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&tmp).map_err(internal)?;
+            let _ = fs::remove_file(&tmp);
+            let mut w = BufWriter::new(&f);
+            teamaudit::read(&log.dir, &q, &head, &mut w).and_then(|_| w.flush()).map_err(internal)?;
+            drop(w);
+            f.rewind().map_err(internal)?;
+            Ok(Response::from_file(f).with_header(hdr("Content-Type", "application/json")).with_chunked_threshold(usize::MAX).boxed())
+        })
+    }
+
     fn diag_upload(&mut self, body: &Body, ticket: &str) -> Result<Resp, Resp> {
         let t = now();
         let idx = self.open_ticket(ticket, t)?;
@@ -1095,9 +1505,27 @@ impl App {
         if let Some(rel) = rest.strip_prefix("release/") {
             let dest = release_path(&self.data, rel)?;
             return match method {
-                "PUT" => self.put_release(body, &dest),
+                "PUT" => {
+                    if let Body::File { nonce: Some((nonce, key)), .. } = body {
+                        // Verified with the session's key (release_precheck): a person never uploads.
+                        if let Some((k, c)) = self.release_session(rq) {
+                            let ip = rate_ip(rq);
+                            self.key_limit(tether_trust::key_to_b64(&k), now())?;
+                            self.use_nonce(nonce.clone(), 0, Some(ip.as_str()))?;
+                            return Err(self.session_refused(rq, c, method, url, rest, &[]));
+                        }
+                        self.audit_admin(rq, self.admin_actor(*key), method, url, rest, &[]);
+                    }
+                    self.put_release(body, &dest)
+                }
                 "DELETE" => {
-                    self.auth(rq, method, url, body.bytes(LIMIT_SMALL)?)?;
+                    let b = body.bytes(LIMIT_SMALL)?;
+                    // Only with the admin signature (a session's release upload already failed it).
+                    if let Some(c) = self.manage_session(rq, method, url, b) {
+                        return Err(self.session_refused(rq, c?, method, url, rest, b));
+                    }
+                    let key = self.auth(rq, method, url, b)?;
+                    self.audit_admin(rq, self.admin_actor(key), method, url, rest, b);
                     self.delete_guarded(&dest, url)
                 }
                 _ => Err(not_found()),
@@ -1107,20 +1535,51 @@ impl App {
             ("PUT", "policy") => LIMIT_POLICY,
             ("PUT", "server-keys") => LIMIT_SERVER_KEYS,
             ("PUT", "download-page") => LIMIT_PAGE,
-            ("PUT", "team") => team::LIMIT_ROSTER,
+            ("PUT", "team") => team::LIMIT_TEAM,
             ("POST", "diag-ticket") => LIMIT_SMALL,
             ("POST", "releases/prune") => prune::LIMIT_PRUNE,
             ("PUT", r) if r.starts_with("custom/") => LIMIT_CUSTOM,
             ("DELETE", r) if r.starts_with("custom/") => LIMIT_SMALL,
-            ("GET", "policy-history" | "devices" | "diag" | "releases" | "status" | "custom" | "audit" | "team") => LIMIT_SMALL,
+            ("GET", "policy-history" | "devices" | "diag" | "releases" | "status" | "custom" | "audit" | "team" | "team-audit") => LIMIT_SMALL,
             ("GET", r) if r.starts_with("diag/") || r.starts_with("policy-history/") => LIMIT_SMALL,
             ("POST", r) if r.starts_with("diag/") && r.ends_with("/close") => LIMIT_SMALL,
             ("DELETE", r) if r.starts_with("diag/") => LIMIT_SMALL,
+            ("DELETE", r) if r.starts_with("status/") => LIMIT_SMALL,
+            ("POST", "status/revoke") | ("GET", "status/revoked" | "status/devices") => LIMIT_SMALL,
+            ("PUT", r) if r.starts_with("proposals/") => proposals::LIMIT_PROPOSAL,
+            ("POST", "audit-event") => LIMIT_SMALL,
+            ("GET" | "DELETE", r) if r.starts_with("proposals/") => LIMIT_SMALL,
             _ => return Err(not_found()),
         };
         let body = body.bytes(limit)?;
-        self.auth(rq, method, url, body)?;
+        // A person signed in at this relay (a session key named by `kid`) with a Tether Manage role,
+        // for the routes their role allows; every other admin route needs the admin signature.
+        let session = match self.manage_session(rq, method, url, body) {
+            Some(c) => {
+                let c = c?;
+                if !session_may(method, rest, &c.roles) {
+                    return Err(self.session_refused(rq, c, method, url, rest, body));
+                }
+                Some(c)
+            }
+            None => None,
+        };
+        let actor = match &session {
+            Some(c) => c.actor.clone(),
+            None => {
+                let key = self.auth(rq, method, url, body)?;
+                self.admin_actor(key)
+            }
+        };
+        self.audit_admin(rq, actor.clone(), method, url, rest, body);
         match (method, rest) {
+            (m, r) if r.starts_with("proposals/") => self.proposals(m, &r["proposals/".len()..], body, &actor, session.as_ref()),
+            // What Tether Manage did on its own (an export): recorded as it says, marked self-reported.
+            ("POST", "audit-event") => {
+                let (event, detail) = teamaudit::manage_posted(body).map_err(|e| text(400, &e))?;
+                self.audit_pending = Some(teamaudit::Rec { self_reported: true, ..teamaudit::Rec::new(event, Some(actor), Some(client_ip(rq)), teamaudit::Target::default(), detail) });
+                Ok(empty(204))
+            }
             ("PUT", "policy") => self.put_policy(body),
             ("PUT", "server-keys") => self.put_server_keys(body),
             ("PUT", "team") => self.put_team(body),
@@ -1145,7 +1604,15 @@ impl App {
             ("GET", "diag") => self.list_tickets(url),
             ("POST", r) if r.starts_with("diag/") => self.close_ticket(r["diag/".len()..].strip_suffix("/close").unwrap_or_default()),
             ("DELETE", r) if r.starts_with("diag/") => self.delete_ticket(&r["diag/".len()..]),
+            ("DELETE", r) if r.starts_with("status/") => {
+                let by = session.as_ref().map_or("an admin".to_owned(), |c| format!("{} (Tether Manage)", c.actor.name));
+                self.admin_status_delete(&r["status/".len()..], &by, false, None)
+            }
+            ("POST", "status/revoke") => self.status_revoke(body),
+            ("GET", "status/revoked") => self.status_revoked(),
+            ("GET", "status/devices") => self.status_devices(url),
             ("GET", "audit") => self.audit_read(url),
+            ("GET", "team-audit") => self.team_audit_read(url),
             ("GET", "releases") => self.list_releases(),
             ("GET", r) if r.starts_with("policy-history/") => {
                 // The signed document exactly as published, so another admin PC can restore it.
@@ -1412,10 +1879,10 @@ impl App {
 
     /// The signature over the body was verified before the state lock (`read_request_body`).
     fn put_release(&mut self, body: &Body, dest: &Path) -> Result<Resp, Resp> {
-        let Body::File { path: tmp, len, nonce: Some(nonce) } = body else { return Err(internal("release upload not verified")) };
+        let Body::File { path: tmp, len, nonce: Some((nonce, _)) } = body else { return Err(internal("release upload not verified")) };
         // A replay that began while the timestamp was current may still be sending for as long
         // as a body may take (`Deadline`), so the nonce is kept that much longer, plus the skew.
-        self.use_nonce(nonce.clone(), 60 + LIMIT_RELEASE / (64 << 10) + reqauth::MAX_SKEW_SECS)?;
+        self.use_nonce(nonce.clone(), 60 + LIMIT_RELEASE / (64 << 10) + reqauth::MAX_SKEW_SECS, None)?;
         let index = self.index_channel(dest);
         let mut new_index = None;
         if let Some(ch) = &index {
@@ -1426,13 +1893,18 @@ impl App {
             // The signed release index: verified like a policy, serials only go up. The same
             // document again (Manage's "publish to missing relays") is accepted unchanged.
             let raw = fs::read(tmp).map_err(internal)?;
-            let ix = release::Index::open(&raw, &self.keys, &ch.0).map_err(|e| text(400, &e))?;
+            let apps = release::index_apps(&ch.1).expect("index_channel names an index file");
+            let ix = release::Index::open_for(&raw, &self.keys, &ch.0, apps).map_err(|e| text(400, &e))?;
             if let Some((cur, _)) = self.index_map(&ch.1).get(&ch.0) {
                 if ix.serial < *cur || (ix.serial == *cur && fs::read(dest).ok().as_deref() != Some(&raw[..])) {
                     return Err(text(409, "serial must be greater than the current release index's"));
                 }
             }
             new_index = Some((ch.clone(), (ix.serial, ix.expires)));
+            if let Some(rec) = self.audit_pending.as_mut() {
+                rec.event = "release-index-publish";
+                rec.detail = serde_json::json!({"channel": ch.0, "file": ch.1, "serial": ix.serial, "expires": ix.expires});
+            }
         }
         mkdirs(dest.parent().expect("under download/"), 0o750).map_err(internal)?;
         fs::rename(tmp, dest).map_err(internal)?;
@@ -1445,14 +1917,29 @@ impl App {
     }
 
     fn index_map(&self, name: &str) -> &HashMap<String, (u64, u64)> {
-        if name == release::INDEX_V2_FILE { &self.indexes_v2 } else { &self.indexes }
+        match name {
+            release::INDEX_V2_FILE => &self.indexes_v2,
+            release::MONITOR_INDEX_FILE => &self.monitor_indexes,
+            _ => &self.indexes,
+        }
     }
 
     fn index_map_mut(&mut self, name: &str) -> &mut HashMap<String, (u64, u64)> {
-        if name == release::INDEX_V2_FILE { &mut self.indexes_v2 } else { &mut self.indexes }
+        match name {
+            release::INDEX_V2_FILE => &mut self.indexes_v2,
+            release::MONITOR_INDEX_FILE => &mut self.monitor_indexes,
+            _ => &mut self.indexes,
+        }
     }
 
-    /// `download/<channel>/releases.json` (or `releases-v2.json`) → (channel, file name).
+    /// The `releases` hint of status answers: the sum of the stored `monitor.json` serials over
+    /// all channels (a status post names no channel). It changes on every upload but can also go
+    /// down (an index deleted, a relay rebuilt), so agents compare it with `!=`, never `>`.
+    fn status_releases(&self) -> u64 {
+        self.monitor_indexes.values().map(|m| m.0).sum()
+    }
+
+    /// `download/<channel>/releases.json` (or `releases-v2.json`, `monitor.json`) → (channel, file name).
     fn index_channel(&self, dest: &Path) -> Option<(String, String)> {
         let rel = dest.strip_prefix(self.data.join("download")).ok()?;
         let mut it = rel.iter();
@@ -1461,10 +1948,11 @@ impl App {
         (is_index_file(&name) && it.next().is_none()).then_some((ch, name))
     }
 
-    /// Every change of an index or a `latest.json` bumps G, written for hbbs (`release-generation`,
-    /// group-readable: hbbs's user is in group tether-api, see install.sh).
+    /// Every change of a Tether index or a `latest.json` bumps G, written for hbbs
+    /// (`release-generation`, group-readable: hbbs's user is in group tether-api, see install.sh).
+    /// `monitor.json` does not: Tether clients do not read it (its hint is [`Self::status_releases`]).
     fn bump_generation(&mut self, dest: &Path) {
-        if !dest.file_name().and_then(|n| n.to_str()).is_some_and(|n| is_index_file(n) || n == "latest.json") {
+        if !dest.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == release::INDEX_FILE || n == release::INDEX_V2_FILE || n == "latest.json") {
             return;
         }
         self.release_gen += 1;
@@ -1537,14 +2025,24 @@ impl App {
             devices_24h: active.len(),
             release_generation: self.release_gen,
             indexes: self.indexes.iter().map(|(c, (s, e))| (c.clone(), *s, *e)).collect(),
+            monitor_expires: self.monitor_indexes.iter().map(|(c, (_, e))| (c.clone(), *e)).collect(),
             by_version: metrics::top(by_version, metrics::MAX_VERSION_SERIES),
             update_states: states.into_iter().collect(),
             downloads: self.downloads.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            status_hosts: self.status_hosts(t),
+            status_sbom: self.status_sbom(),
+            team_audit: [&self.team_audit.counters.written, &self.team_audit.counters.queue_full, &self.team_audit.counters.log_full, &self.team_audit.counters.write_failed].map(|c| c.load(Ordering::Relaxed)),
         })
     }
 
     /// Periodic housekeeping: expiry, rate-limit and nonce pruning, device flush.
     fn maintain(&mut self) {
+        let held = Instant::now();
+        self.maintain_now();
+        traced(|| "maintain".into(), held.elapsed());
+    }
+
+    fn maintain_now(&mut self) {
         let t = now();
         let before = self.devices.len();
         self.devices.retain(|_, d| d.last_seen + DEVICE_TTL > t);
@@ -1555,12 +2053,18 @@ impl App {
         self.audit_dev_hits.retain(|_, (start, _)| t < *start + 60);
         self.audit.prune(t, 0);
         self.team.maintain(t);
-        let n = self.nonces.len();
-        self.nonces.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
-        if self.nonces.len() != n {
-            let nonces = self.nonces.clone();
-            let _ = self.save("nonces.json", &nonces).map_err(internal);
+        for r in self.team.reads.due(t, false) {
+            self.team_audit.submit(r);
         }
+        // Pruned in memory only: the file keeps the old entries until the next write (harmless:
+        // the first maintain after a restart prunes them again).
+        self.nonces.retain(|_, seen| t < *seen + reqauth::NONCE_TTL_SECS);
+        self.nonce_ips.retain(|_, q| {
+            while q.front().is_some_and(|&e| e <= t) {
+                q.pop_front();
+            }
+            !q.is_empty()
+        });
         let diag = self.data.join("diag");
         let n = self.tickets.len();
         self.tickets.retain(|k| {
@@ -1575,6 +2079,8 @@ impl App {
             let _ = self.save("diag/tickets.json", &tickets).map_err(internal);
         }
         self.flush_devices();
+        // Last: it queues the status writer's tick, whose writes then do not overlap the fsyncs above.
+        self.status_maintain(t);
     }
 
     fn flush_devices(&mut self) {
@@ -1708,6 +2214,137 @@ extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
 }
 
+const HBBS_PEER_DEFAULT: &str = "127.0.0.1:21122";
+/// The whole lookup of an ID's key at hbbs, all URLs together.
+const HBBS_TIMEOUT: Duration = Duration::from_secs(2);
+/// hbbs's answer is about 130 bytes; anything longer is not one.
+const HBBS_ANSWER_MAX: usize = 256;
+/// hbbs lookups running at once (their threads, until each really ends); more are refused at
+/// once, so a hung hbbs or a dropped address cannot hold the relay's workers.
+const HBBS_LOOKUPS_MAX: usize = 4;
+static HBBS_LOOKUPS: AtomicUsize = AtomicUsize::new(0);
+
+/// `HBBS_PEER_URL`: comma-separated `http://<host>:<port>[/]`, or `off`; `host:port` of each.
+/// Plain HTTP only: hbbs's health port has no TLS, and the relay carries no TLS client (it runs
+/// in 64 MB; hbbs is on the same host or its private network, `PEER_LOOKUP_FROM`).
+fn hbbs_peer_urls(v: &str) -> Result<Vec<String>, String> {
+    match v.trim() {
+        "" => return Ok(vec![HBBS_PEER_DEFAULT.into()]),
+        "off" => return Ok(Vec::new()),
+        _ => {}
+    }
+    v.split(',')
+        .map(|u| {
+            let u = u.trim();
+            if u.get(..8).is_some_and(|p| p.eq_ignore_ascii_case("https://")) {
+                return Err(format!("{u}: https is not supported: hbbs's health port is plain HTTP"));
+            }
+            let a = u.strip_prefix("http://").ok_or_else(|| format!("{u}: not an http:// URL"))?;
+            let a = a.strip_suffix('/').unwrap_or(a);
+            if a.contains(['/', '?', '#', '@']) {
+                return Err(format!("{u}: no path, query or user name: expected http://<host>:<port>"));
+            }
+            let Some((h, Ok(_))) = a.rsplit_once(':').map(|(h, p)| (h, p.parse::<u16>())) else {
+                return Err(format!("{u}: expected http://<host>:<port>"));
+            };
+            match h.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+                Some(v6) if v6.parse::<std::net::Ipv6Addr>().is_ok() => Ok(a.to_owned()),
+                None if h.contains(':') => Err(format!("{u}: an IPv6 address must be in brackets, as http://[::1]:21122")),
+                None if !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b)) => Ok(a.to_owned()),
+                _ => Err(format!("{u}: expected http://<host>:<port>")),
+            }
+        })
+        .collect()
+}
+
+/// The key hbbs holds for `id` (already checked against hbbs's ID rule), asking `hosts` in
+/// order, all within [`HBBS_TIMEOUT`]: `Ok(Some(key))` from the first that has it, `Ok(None)`
+/// when one answered 404 and none had it, `Err` when none gave a usable answer, or at once when
+/// [`HBBS_LOOKUPS_MAX`] lookups are running.
+pub(crate) fn hbbs_peer_pk(hosts: &[String], id: &str) -> Result<Option<String>, ()> {
+    let slot = UploadSlot::take(&HBBS_LOOKUPS, HBBS_LOOKUPS_MAX).ok_or(())?;
+    let deadline = Instant::now() + HBBS_TIMEOUT;
+    let (hosts, id) = (hosts.to_vec(), id.to_owned());
+    let (tx, rx) = std::sync::mpsc::channel();
+    // On its own thread: a host name lookup has no timeout of its own. The thread holds the slot
+    // until it ends, so threads stuck there are bounded too.
+    std::thread::spawn(move || {
+        let r = ask_in_turn(&hosts, deadline, |h, until| peer_pk_from(h, &id, until));
+        drop(slot);
+        let _ = tx.send(r);
+    });
+    rx.recv_timeout(HBBS_TIMEOUT).unwrap_or(Err(()))
+}
+
+/// `ask` each of `hosts` in order until one has the key, each an equal share of the time left
+/// until `deadline` (a hung or dropping one leaves the next its turn); none once it has passed.
+fn ask_in_turn(hosts: &[String], deadline: Instant, mut ask: impl FnMut(&str, Instant) -> Result<Option<String>, ()>) -> Result<Option<String>, ()> {
+    let mut r = Err(());
+    for (i, h) in hosts.iter().enumerate() {
+        // Time is up (a host name lookup has no timeout and may have outlasted it): no further
+        // host name is resolved, the caller has stopped waiting.
+        if Instant::now() >= deadline {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        match ask(h, Instant::now() + left / (hosts.len() - i) as u32) {
+            Ok(Some(k)) => return Ok(Some(k)),
+            Ok(None) => r = Ok(None),
+            Err(()) => {}
+        }
+    }
+    r
+}
+
+/// One `GET /peer-pk/<id>`: every step within `deadline`, at most [`HBBS_ANSWER_MAX`] bytes read,
+/// a redirect is no answer.
+fn peer_pk_from(host: &str, id: &str, deadline: Instant) -> Result<Option<String>, ()> {
+    use std::net::ToSocketAddrs;
+    let left = || deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or(());
+    let addrs: Vec<_> = host.to_socket_addrs().map_err(drop)?.collect();
+    // Every address of the host in turn, each with an equal share of the time left.
+    let mut s = (0..addrs.len()).find_map(|i| TcpStream::connect_timeout(&addrs[i], left().ok()? / (addrs.len() - i) as u32).ok()).ok_or(())?;
+    s.set_write_timeout(Some(left()?)).map_err(drop)?;
+    s.write_all(format!("GET /peer-pk/{id} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes()).map_err(drop)?;
+    let mut buf = [0u8; HBBS_ANSWER_MAX + 1];
+    let mut n = 0;
+    while n < buf.len() {
+        s.set_read_timeout(Some(left()?)).map_err(drop)?;
+        match s.read(&mut buf[n..]).map_err(drop)? {
+            0 => return peer_pk_answer(&buf[..n]),
+            k => n += k,
+        }
+    }
+    Err(())
+}
+
+/// hbbs's answer, strictly: `404`, or `200` with a `Content-Length` and the body
+/// `<standard base64 of a 32-byte key>\n`. Anything else is no answer.
+fn peer_pk_answer(raw: &[u8]) -> Result<Option<String>, ()> {
+    let raw = std::str::from_utf8(raw).map_err(drop)?;
+    let (head, body) = raw.split_once("\r\n\r\n").ok_or(())?;
+    let mut lines = head.split("\r\n");
+    let mut status = lines.next().ok_or(())?.split(' ');
+    if !matches!(status.next(), Some("HTTP/1.1" | "HTTP/1.0")) {
+        return Err(());
+    }
+    match status.next() {
+        Some("404") => return Ok(None),
+        Some("200") => {}
+        _ => return Err(()),
+    }
+    let len = lines.find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("content-length")).map(|(_, v)| v.trim()));
+    if len != Some(body.len().to_string().as_str()) {
+        return Err(());
+    }
+    let key = body.strip_suffix('\n').ok_or(())?;
+    if key.bytes().any(|b| b.is_ascii_whitespace()) {
+        return Err(());
+    }
+    tether_trust::key_from_b64(key).map_err(drop)?;
+    Ok(Some(key.to_owned()))
+}
+
 fn main() {
     let mut data = PathBuf::from("/var/lib/tether-api");
     let mut listen = "127.0.0.1:21120".to_owned();
@@ -1741,6 +2378,9 @@ fn main() {
     if sig_relay().hosts.is_empty() {
         eprintln!("warning: RELAY_HOST is not set; v2 request signatures (current apps) are refused");
     }
+    if TEST_HOOKS && !cfg!(debug_assertions) {
+        eprintln!("warning: built with the test-hooks feature (test-only settings): not a production build");
+    }
     // AUDIT_RETENTION_DAYS (default 90, 0 = do not store) and AUDIT_MAX_MB (default 50), api.env.
     let env_num = |k: &str, d: u64| match std::env::var(k) {
         Ok(v) if !v.trim().is_empty() => v.trim().parse().unwrap_or_else(|_| {
@@ -1750,7 +2390,24 @@ fn main() {
         _ => d,
     };
     let (audit_days, audit_max) = (env_num("AUDIT_RETENTION_DAYS", 90), env_num("AUDIT_MAX_MB", 50).saturating_mul(1 << 20));
-    let mut app = App::open(data.clone(), keys, audit_days, audit_max).unwrap_or_else(|e| {
+    // The team audit log (teamaudit.rs): TEAM_AUDIT_RETENTION_DAYS (90), TEAM_AUDIT_MAX_MB (2048).
+    let team_audit = (env_num("TEAM_AUDIT_RETENTION_DAYS", 90), env_num("TEAM_AUDIT_MAX_MB", 2048).saturating_mul(1 << 20));
+    // Staff sign-in sessions last at most this long (1 to 1440 minutes; default 60), whatever the token says.
+    let _ = team::SESSION_MAX_MINUTES.set(env_num("TEAM_SESSION_MAX_MINUTES", 60).clamp(1, 1440));
+    status::set_conf(status::Conf {
+        off: std::env::var("STATUS").is_ok_and(|v| v.trim() == "off"),
+        rps: env_num("STATUS_TARGET_RPS", 10).max(1),
+        max_devices: env_num("STATUS_MAX_DEVICES", 20_000) as usize,
+        sbom: std::env::var("STATUS_SBOM").is_ok_and(|v| v.trim() == "on"),
+        sbom_max: env_num("STATUS_SBOM_MAX_KB", 512).saturating_mul(1 << 10),
+        sbom_rps: env_num("STATUS_SBOM_RPS", 2).max(1),
+        sbom_total: env_num("STATUS_SBOM_MAX_TOTAL_MB", 2048).saturating_mul(1 << 20),
+        hbbs: hbbs_peer_urls(&std::env::var("HBBS_PEER_URL").unwrap_or_default()).unwrap_or_else(|e| {
+            eprintln!("HBBS_PEER_URL: {e}");
+            std::process::exit(1);
+        }),
+    });
+    let mut app = App::open(data.clone(), keys, audit_days, audit_max, team_audit).unwrap_or_else(|e| {
         eprintln!("data dir: {e}");
         std::process::exit(1);
     });
@@ -1758,6 +2415,18 @@ fn main() {
         eprintln!("listen {listen}: {e}");
         std::process::exit(1);
     });
+    // Software search: only with the software lists on and a signed team document in force (its
+    // `sbom` permission and customer scopes; the plain roster has neither), decided once at start.
+    if std::env::var("STATUS_SOFTWARE_SEARCH").is_ok_and(|v| v.trim() == "on") {
+        if !status::conf().sbom {
+            eprintln!("warning: STATUS_SOFTWARE_SEARCH=on needs STATUS_SBOM=on: software search stays off");
+        } else if !app.team.signed() {
+            eprintln!("warning: STATUS_SOFTWARE_SEARCH=on needs a signed team document (permission sbom, customer scopes): none is in force, software search stays off until one is published and the relay restarted");
+        } else {
+            status::SEARCH.store(true, Ordering::Relaxed);
+            eprintln!("status: software search on");
+        }
+    }
     app.maintain(); // before announcing readiness: retention applies from the first request
     match server.server_addr().to_ip() {
         Some(a) => println!("listening on {a}"),
@@ -1768,6 +2437,7 @@ fn main() {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
     }
     let app = Arc::new(Mutex::new(app));
+    status::start_writer(&app);
     let data = Arc::new(data);
     let busy = Arc::new(AtomicUsize::new(0));
     let mut last_maint = now();
@@ -1803,4 +2473,38 @@ fn main() {
         std::thread::sleep(Duration::from_millis(50));
     }
     lock(&app).flush_devices();
+    status::flush_at_exit(&app);
+    let log = {
+        let mut a = lock(&app);
+        for r in a.team.reads.due(now(), true) {
+            a.team_audit.submit(r);
+        }
+        a.team_audit.clone()
+    };
+    log.flush(Duration::from_secs(5));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hbbs_hosts_are_not_asked_once_the_time_is_up() {
+        let hosts = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let mut asked = Vec::new();
+        // The first one overruns (as a hung host name lookup does): the others are not asked.
+        let r = ask_in_turn(&hosts, Instant::now() + Duration::from_millis(50), |h, _| {
+            asked.push(h.to_owned());
+            std::thread::sleep(Duration::from_millis(80));
+            Ok(None)
+        });
+        assert_eq!((r, asked), (Ok(None), vec!["a".to_owned()]));
+        // In time: in order, until one has the key.
+        let mut asked = Vec::new();
+        let r = ask_in_turn(&hosts, Instant::now() + Duration::from_secs(5), |h, _| {
+            asked.push(h.to_owned());
+            if h == "b" { Ok(Some("k".into())) } else { Err(()) }
+        });
+        assert_eq!((r, asked), (Ok(Some("k".to_owned())), vec!["a".to_owned(), "b".to_owned()]));
+    }
 }

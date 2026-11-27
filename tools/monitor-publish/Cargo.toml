@@ -1,0 +1,31 @@
+[package]
+name = "monitor-publish"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Publish the device-status agent and its check packs to download/<channel>/monitor.json, and issue status enrolment tokens, with the admin key from Tether Manage's sealed key file"
+publish = false
+
+[dependencies]
+tether-trust = { path = "../../crates/tether-trust" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The crates Tether Manage's key file code (keys.rs, included by path) needs, same versions.
+base64 = "0.22"
+minisign = "0.9"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+zeroize = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
+
+[dev-dependencies]
+# keys.rs's own tests.
+minisign-verify = "0.3"
+
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+
+# Not part of any workspace.
+[workspace]

@@ -159,6 +159,20 @@ async function run(name) {
   await sleep(600);
   r = await drag({ x: 600, y: Math.ceil(canvas.y) + 20 }, { x: 800, y: 300 });
   check(tag("second drag starting at the top edge reaches the remote side"), r.ok, r.detail);
+
+  // ---- The agent menu item follows the team's agent permission (the host cannot check it).
+  for (const [perm, allowed] of [["sbom", false], ["sbom,agent", true]]) {
+    await p.goto(`http://localhost:${PORT}/?perm=${perm}#/session/mock?peer=184392571`);
+    await until(() => p.evaluate(() => getComputedStyle(document.querySelector("canvas")).opacity === "1"));
+    await p.getByRole("button", { name: "Remote actions" }).click({ timeout: 5000 }).catch(async () => {
+      await p.getByRole("button", { name: "Show toolbar" }).hover();
+      await p.getByRole("button", { name: "Remote actions" }).click();
+    });
+    const item = p.getByRole("menu").getByRole("button", { name: /^Health monitoring agent/ });
+    await until(async () => (await item.isDisabled()) === !allowed, 3000);
+    const hint = await item.innerText();
+    check(tag(`agent menu item with permissions ${perm}: ${allowed ? "enabled" : "disabled with the reason"}`), (await item.isDisabled()) === !allowed && hint.includes("does not allow installing or removing") === !allowed, hint);
+  }
   await browser.close();
 }
 

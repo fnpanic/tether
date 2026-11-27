@@ -41,6 +41,25 @@ pub fn take_notice() -> Option<String> {
     NOTICE.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
+/// The health agent's pre-dialog (agent_elevated.rs): the main window comes up (also during a host
+/// session) and reads it with `health_agent_consent_pending`. False without a window in this process.
+#[cfg(windows)]
+pub fn show_agent_consent() -> bool {
+    let Some(app) = APP.get() else { return false };
+    if let Err(e) = main_window(app) {
+        hbb_common::log::warn!("health agent dialog: {e}");
+        return false;
+    }
+    emit("health_agent_consent", ());
+    true
+}
+
+/// The main window brought to the front, as the owner of the health agent's Windows prompt (0: none).
+#[cfg(windows)]
+pub fn front_main_window() -> usize {
+    APP.get().and_then(|app| main_window(app).ok()).and_then(|w| w.hwnd().ok()).map_or(0, |h| h.0 as usize)
+}
+
 /// Broadcast an event to every window (no-op before the UI is up or in headless roles).
 pub fn emit<S: Serialize + Clone>(event: &str, payload: S) {
     if let Some(app) = APP.get() {

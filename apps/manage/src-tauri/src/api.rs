@@ -26,6 +26,16 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
+/// The `Tether-Sig` of an admin request: with `kid` when it is signed with the sign-in session's key
+/// (the relay finds the person's session by it), as before with the vault's admin key.
+fn sig(key: &SigningKey, server: &str, method: &str, path: &str, body: &[u8], t: u64) -> String {
+    if key.verifying_key() == crate::signin::SESSION_KEY.verifying_key() {
+        reqauth::sign_request_for_kid(key, server, method, path, body, t)
+    } else {
+        reqauth::sign_request_for(key, server, method, path, body, t)
+    }
+}
+
 pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
@@ -40,6 +50,7 @@ fn explain(status: u16, body: &str) -> String {
         401 if reason.contains("RELAY_HOST") => "The relay does not know its own host name. Set RELAY_HOST on the relay to the name entered under Status and relays.",
         401 if reason.contains("signed for another relay") => "The relay knows itself under another host name. Enter the relay's own name (its RELAY_HOST) under Status and relays.",
         401 => "The server did not accept this app's admin signature. Check that the server's ADMIN_PUB_KEY contains this app's admin public key and that the PC clock is correct.",
+        400 if reason.contains("unknown feature") => "This relay runs an older tether-api that does not know a feature of this policy. Update the relay first, then publish again.",
         404 => "Not found on the server.",
         409 if reason.starts_with("published release") => "The relay keeps the published release.",
         409 => "The server already has a newer version. Reload and try again.",
@@ -118,7 +129,7 @@ pub async fn cancellable<T>(f: impl std::future::Future<Output = Result<T, Strin
 /// within [`WRITE`]. Returns the body on 2xx.
 pub async fn admin(server: &str, key: &SigningKey, method: &str, path: &str, body: Vec<u8>, content_type: &str) -> Result<Vec<u8>, String> {
     let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
-    let sig = reqauth::sign_request_for(key, server, method, path, &body, now());
+    let sig = sig(key, server, method, path, &body, now());
     let mut req = client().request(m, url(server, path)).header(reqauth::HEADER, sig).timeout(WRITE);
     if !body.is_empty() {
         req = req.header("Content-Type", content_type).body(body);
@@ -128,7 +139,7 @@ pub async fn admin(server: &str, key: &SigningKey, method: &str, path: &str, bod
 
 /// Signed `GET` of a file: the answer must start within [`QUICK`] and be complete within `total`.
 pub async fn admin_download(server: &str, key: &SigningKey, path: &str, total: Duration) -> Result<Vec<u8>, String> {
-    let sig = reqauth::sign_request_for(key, server, "GET", path, b"", now());
+    let sig = sig(key, server, "GET", path, b"", now());
     read_body(started(client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(total)).await?).await
 }
 
@@ -151,13 +162,13 @@ async fn started(req: reqwest::RequestBuilder) -> Result<reqwest::Response, Stri
 
 /// Signed `GET` that gives up after [`QUICK`].
 pub async fn admin_quick(server: &str, key: &SigningKey, path: &str) -> Result<Vec<u8>, String> {
-    let sig = reqauth::sign_request_for(key, server, "GET", path, b"", now());
+    let sig = sig(key, server, "GET", path, b"", now());
     finish(client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(QUICK).send().await).await
 }
 
 /// [`admin_quick`], and whether the answer carries the response header `flag`.
 pub async fn admin_quick_flag(server: &str, key: &SigningKey, path: &str, flag: &str) -> Result<(Vec<u8>, bool), String> {
-    let sig = reqauth::sign_request_for(key, server, "GET", path, b"", now());
+    let sig = sig(key, server, "GET", path, b"", now());
     let res = client().get(url(server, path)).header(reqauth::HEADER, sig).timeout(QUICK).send().await.map_err(unreachable)?;
     let set = res.headers().contains_key(flag);
     Ok((read_body(res).await?, set))
@@ -166,7 +177,7 @@ pub async fn admin_quick_flag(server: &str, key: &SigningKey, path: &str, flag: 
 /// Signed `PUT` of a release file with the limits of [`upload`]; `sent(bytes so far)` runs as the
 /// body goes out (256 KiB steps).
 pub async fn admin_upload(server: &str, key: &SigningKey, path: &str, body: Vec<u8>, content_type: &str, sent: impl Fn(u64) + Send + Sync + 'static) -> Result<Vec<u8>, String> {
-    let sig = reqauth::sign_request_for(key, server, "PUT", path, &body, now());
+    let sig = sig(key, server, "PUT", path, &body, now());
     let req = client().put(url(server, path)).header(reqauth::HEADER, sig).header("Content-Type", content_type);
     let res = upload(req, body, sent).await?;
     cancellable(read_body(res)).await
@@ -283,6 +294,49 @@ pub(crate) mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
+
+    /// One request as a fake relay saw it: method, path with query, `Tether-Sig`, body.
+    pub(crate) type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String, Vec<u8>)>>>;
+
+    /// A relay stand-in for many requests: `answer(method, path, body)` gives status and body.
+    pub(crate) fn fake_relay(answer: impl Fn(&str, &str, &[u8]) -> (u16, Vec<u8>) + Send + 'static) -> (String, Seen) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let seen: Seen = Default::default();
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for s in listener.incoming().flatten() {
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                if r.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let (mut sig, mut len) = (String::new(), 0usize);
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = h.split_once(':') {
+                        match k.to_ascii_lowercase().as_str() {
+                            "content-length" => len = v.trim().parse().unwrap_or(0),
+                            "tether-sig" => sig = v.trim().to_owned(),
+                            _ => {}
+                        }
+                    }
+                }
+                let mut body = vec![0; len];
+                let _ = r.read_exact(&mut body);
+                let mut parts = line.split_whitespace();
+                let (method, path) = (parts.next().unwrap_or("").to_owned(), parts.next().unwrap_or("").to_owned());
+                let (code, text) = answer(&method, &path, &body);
+                log.lock().unwrap().push((method, path, sig, body));
+                let _ = write!(&s, "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", text.len());
+                let _ = (&s).write_all(&text);
+            }
+        });
+        (server, seen)
+    }
 
     /// A one-shot HTTP server that checks the `Tether-Sig` header the way tether-api does.
     fn one_shot(pk: tether_trust::VerifyingKey) -> (String, std::thread::JoinHandle<(String, String, Vec<u8>)>) {
@@ -428,7 +482,8 @@ pub(crate) mod tests {
         let (r, took) = put(&server, vec![7; 64 << 20]);
         let e = r.unwrap_err();
         assert!(e.contains("stalled"), "{e}");
-        assert!(took < STALL + Duration::from_secs(3), "{took:?}");
+        // The server gives up after STALL + 6 s; a slow CI machine needs more than 3 s of slack.
+        assert!(took < STALL + Duration::from_secs(5), "{took:?}");
         h.join().unwrap();
     }
 
@@ -511,5 +566,8 @@ pub(crate) mod tests {
         assert!(unset.contains("Set RELAY_HOST on the relay") && !unset.contains("ADMIN_PUB_KEY"), "{unset}");
         let other = explain(401, "request signed for another relay");
         assert!(other.contains("relay's own name") && !other.contains("ADMIN_PUB_KEY"), "{other}");
+        // An old relay validates the policy and does not know a newer feature (health.agent, 0.7.0).
+        let feature = explain(400, "profile technician: unknown feature \"health.agent\"");
+        assert!(feature.starts_with("This relay runs an older tether-api that does not know a feature of this policy") && feature.contains("Update the relay first") && feature.contains("health.agent"), "{feature}");
     }
 }

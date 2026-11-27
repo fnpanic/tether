@@ -113,10 +113,30 @@ conn, connection closed:      {"action":"close","session_id":<u64>,…}
 file, files sent/received:    {"peer_id":"…","type":0,"path":"<folder or file>","is_file":false,
                                "info":"{\"ip\":\"…\",\"name\":\"<technician name>\",\"num\":12,\"files\":[[\"name\",size],…≤10]}",…}
 alarm (whitelist block, …):   {"typ":0,"info":"<JSON text ≤ 1024>",…}
+alarm, health agent:          {"typ":30,"info":"{\"agent\":\"install\",\"result\":\"installed\"}",…}
 ```
 `type` (conn): 0 remote, 1 file transfer, 2 port forward, 3 camera, 4 terminal. `type` (file):
 0 = the host sent files to the technician, 1 = the host received files. `primary_auth`: 1 click,
 2 one-time password, 3 permanent password, 4 switch sides. Optional `conn_audit_ref` (≤ 128).
+`typ` (alarm): 0-10 as upstream's `AlarmAuditType`; 30 = a technician installed or removed the
+health monitoring agent in a remote session (`TetherAgentRequest`, `src/tauri_ui/agent.rs`):
+`agent` is `install` or `remove`, `result` the host's answer state (`installed`, `removed-by-tether`,
+`failed`, `not-installed`, …, or `running`); nothing else (no version, path or agent output).
+`running`: the action had not ended when the host stopped waiting (3 minutes, `HOST_WAIT`) and
+answered the technician; it goes on, and when it ends one more record with the same `conn_id`
+holds its outcome (posted also when the session has ended by then; lost only if Tether stops
+first). `conn_id` ties it to the session's `conn` records. Only an action the host acted on is
+recorded: not a status request, nor one refused (`not-allowed`, `needs-service`, `not-supported`)
+or `busy`; a connection gets an install or remove through at most every 10 s, and one action runs
+on the computer at a time. Each post is one attempt of at most 10 s (no retries); a relay that
+refuses it only loses the record; the session goes on.
+The session message itself (end to end in the session, never through tether-api): the viewer sends
+`Misc.tether_agent_request` (tag 1001, `{action: Status | Install | Remove}`, nothing else), the host
+answers `Misc.tether_agent_answer` (tag 1002, `{state, version, installed_by, detail, at, action}`;
+`detail` without control characters, at most 512 characters, cut again by the viewer). The host takes
+it only on a logged-in remote-control connection whose keyboard control is on, one at a time per
+connection. The viewer waits 10 s for a `status` answer (none: "too old", a host before 0.7.0 ignores
+the message) and 190 s for an install or remove.
 
 Answers: `204` with an empty body when stored (also when the same `nonce` was stored in the last
 10 minutes: a client retry), `400` invalid (the client drops it), `413` too large, `429` more than
@@ -156,7 +176,10 @@ rejects a nonce seen in the last 601 s (longer than the whole window a signature
 The nonce of a release upload is remembered for about 70 minutes, longer than the slowest upload
 the server lets finish, so a captured upload cannot be replayed as a slow upload that ends after
 the nonce was forgotten.
-Failure: `401` with a short reason. Bodies over the limits: `413`.
+Failure: `401` with a short reason. Bodies over the limits: `413`. Devices that report their health
+sign with the same layout under their own prefix and header version (`Tether-Sig: device-v1`, see
+[Device status](#device-status-health-reports)); a device signature never passes on an admin or
+team route, and an admin or member signature never on a device route.
 
 **The relay must know its own name.** tether-api accepts a v2 signature only when `host` is one of
 the names in its environment variable `RELAY_HOST` (comma-separated; an entry may be a host name
@@ -176,9 +199,20 @@ fall back to v1 by themselves. **Rollout order:** first every relay, with `RELAY
 host name(s) entered for it in Tether Manage; then Tether Manage and the apps; last
 `TETHER_SIG_V1=off` on every relay.
 
-Used nonces are stored in `nonces.json`, so a restart does not reopen the replay window. When that
-file cannot be written (disk full) the request still succeeds and the error is logged; the nonce
-keeps blocking replays in memory.
+Used nonces are stored, so a restart does not reopen the replay window: each request's nonce is
+appended to `nonces.log` (synced before the answer), and after 10 000 lines the whole set is
+written to `nonces.json` and the log starts again (a restart reads both; a `nonces.json` over
+16 MiB is not read). When they cannot be written (disk full) the request still succeeds and the
+error is logged; the nonce keeps blocking replays in memory. At most 100 000 nonces are kept (every
+signed request's for 601 s, an upload's longer): when that many are still inside their window, a
+new admin, member or session request is refused `503 too many signed requests, retry later` with
+`Retry-After: 60` rather than the set growing. So that no one fills it for everyone: a member or
+session key's request limit (120 a minute) is counted before its nonce is kept, so one key holds at
+most about 1 200; one source address (IPv6: one /64) holds at most 10 000 live nonces of member,
+sign-in and Manage-session requests, whatever keys sign them, and beyond that gets `429 too many
+signed requests from this address` with `Retry-After: 60` (the admin key's own requests are not
+counted per address; the count starts again at a restart). A sign-in (`POST /api/team/session`)
+leaves its nonce only when it succeeds.
 
 | Method & path | Body | Result |
 | --- | --- | --- |
@@ -198,11 +232,62 @@ keeps blocking replays in memory.
 | `GET /api/admin/releases` | – | `[{channel,path,size,modified}]` |
 | `PUT /api/admin/download-page` | HTML (≤ 512 KiB) | `204`, stored as `download/index.html` |
 | `GET /api/admin/audit?since=<unix>&limit=<n>&device=<id or uuid>` | – | Session audit records (above), newest first. All optional: `since` (default 0), `limit` 1–5000 (default 1000), `device` matches `id` or `uuid` exactly (URL-encoded). Unknown parameter or bad value: `400`. One answer holds at most about 8 MiB of records; when older ones were left out for that, it carries the header `X-Audit-Truncated: 1` (the Sessions page of Tether Manage then names the relay). |
+| `GET /api/admin/team-audit?since&until&actor&device&customer&event&limit&cursor` | – | The team audit log, oldest first, with the current chain head and the chain problems found: see [Team audit log](#team-audit-log). One read at a time for the whole relay: another meanwhile gets `429 busy` with `Retry-After: 2`. |
 | `GET /api/admin/status` | – | `{version, disk_free, devices, policy_serial, server_keys_serial, release_generation, release_indexes: {<channel>: {serial, expires}}, uptime, last_prune: {time, files, bytes} \| null}` |
-| `PUT /api/admin/team` | team roster (≤ 64 KiB, below) | `204`. Validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600). `{"members":[]}` turns team access off. |
-| `GET /api/admin/team` | – | the roster (`{"members":[]}` when none) |
+| `DELETE /api/admin/status/<uuid>` | – | `204`: the device's pin (with its link or claim), last report and history are removed (journal line `status: pin of <uuid> removed by an admin`). `404` for an invalid or unknown uuid. `503` while `STATUS=off` or the status store is locked. See [Device status](#device-status-health-reports). |
+| `POST /api/admin/status/revoke` | `{"id":"<token id>","exp":<the token's exp>}` | `204`, also when the id is revoked already (the later `exp` is kept). `400 exp has passed` when `exp` is not in the future (an expired token is refused anyway; nothing is stored). The relay refuses that token from then on (`401 token revoked`); devices that enrolled with it stay enrolled. Kept in `status/revoked.json` until `exp`. `400` for a bad id or body, `507 too many revoked tokens` with 10 000 kept (expired ones leave within a minute), `503` as above. |
+| `GET /api/admin/status/revoked` | – | `{"<token id>":<exp>,…}`, the revocations that have not expired. |
+| `GET /api/admin/status/devices[?token=<id>][&after=<uuid>]` | – | The pins, sorted by uuid: `{"devices":[{"uuid","token","label","tether_id","claimed_id","linked_by","linked_at","linked_token","no_claim","customer","host","enrolled","last_seen"}],"next":"<uuid>" \| null}`; `customer` is `null` when none. Each request looks at no more than 1000 pins: `token` keeps only the pins enrolled with that token among them, so a page can be short or empty while `next` is set. `next`: pass it as `after` for the next page; `null` when no pin follows. `host` (the last full report's) and `last_seen` are `null` before the first post; `token` is `null` for pins from before token ids. `400` for an unknown parameter or a bad value. |
+| `PUT /api/admin/team` | a signed team document upload (≤ 360 KiB) or a plain team roster (≤ 64 KiB, below) | `204`. A signed upload: verified against `ADMIN_PUB_KEY` (`401` when not signed by one of its keys or the signature does not match), validated (`400`), serial above the stored one (`409 serial must be greater than the current team document's`); stored atomically as `team/team.json` (0600) exactly as received, and `team/roster.json` is deleted. A plain roster: validated (`tether_trust::team::Roster::validate`), stored atomically as `team/roster.json` (0600); `{"members":[]}` turns team access off; refused with `409` once a signed document was accepted (below). |
+| `GET /api/admin/team` | – | the plain roster (`{"members":[]}` when none), or the signed upload exactly as published |
+| `PUT /api/admin/proposals/<kind>` | `{"base":"<sha256 hex or empty>","note":"…","doc":<payload>}` (≤ 400 KiB) | A proposal ([below](#tether-manage-sessions-on-admin-routes)): `200 {"id":"<16 hex>"}`. `<kind>` `policy`, `team` or `release` (else `404`). `400` for a bad body, a `base` that is not 64 lower-case hex digits or empty, a `note` over 500 characters or with control characters other than line breaks, or a `doc` that would not pass a publish (`not a valid <kind>: …`; a release `doc` over 64 KiB as stored); `409 10 <kind> proposals are waiting: delete one first`. |
+| `GET /api/admin/proposals/<kind>` | – | `{"live":"<sha256 hex of what the relay serves now>" \| null,"proposals":[…oldest first]}`; each `{"id","kind","author":{"key_fingerprint","name","oid"?,"upn"?},"created","base","note","serial"?,"doc"}` (`doc` as stored, not parsed again), a file that cannot be read `{"id","unreadable":true}` (first). One list read at a time for the whole relay: another meanwhile gets `429 busy` with `Retry-After: 1`. |
+| `DELETE /api/admin/proposals/<kind>/<id>` | – | `204`; `404` unknown; `403 only its author or a key holder may delete a proposal` (an unreadable one: a key holder or the admin signature) |
+| `POST /api/admin/audit-event` | `{"event":"export","what":"team-activity"\|"sessions"\|"devices","rows":<≤ 10 000 000>}` | `204`: Tether Manage's own export, written to the team audit log marked `self_reported`; `400` for anything else |
 
 The server refuses uploads that would leave less than 2 GiB free on the disk (`507`).
+
+### Tether Manage sessions on admin routes
+
+A person signed in with a Tether Manage role ([staff sign-in](#staff-sign-in-sessions-postdelete-apiteamsession),
+roles with `manage` in the team document) reaches some admin routes without the admin key. Tether
+Manage signs such a request with the key the session is bound to, in the same `Tether-Sig` format,
+and names it with `kid`. A relay that has a live session for that `kid` checks the request as that
+session: the signature with that one key, the nonce, the session's life (`401 session expired: sign
+in again`), 120 requests a minute per key, failures counted against the address as on member
+routes, and the person's Tether Manage roles from the document in force. Any other request is
+checked against the admin keys as before.
+
+| Admin route | Auditor | Operator | PolicyEditor | Publisher | KeyHolder |
+| --- | --- | --- | --- | --- | --- |
+| `GET` `status`, `devices`, `status/devices`, `status/revoked`, `audit`, `team-audit`, `policy-history[/<serial>]`, `releases`; `POST audit-event` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `GET diag`, `GET diag/<ticket>`, `POST diag-ticket`, `POST diag/<ticket>/close`, `DELETE diag/<ticket>`, `DELETE status/<uuid>`, `POST status/revoke` | – | ✓ | – | – | – |
+| `GET team` | – | – | ✓ | – | ✓ |
+| `PUT proposals/policy`, `PUT proposals/team` | – | – | ✓ | – | – |
+| `GET`, `DELETE proposals/policy`, `proposals/team` | – | – | ✓ | – | ✓ |
+| `PUT proposals/release` | – | – | – | ✓ | – |
+| `GET`, `DELETE proposals/release` | – | – | – | ✓ | ✓ |
+| everything else (`PUT policy`, `team`, `server-keys`, `download-page`, `custom/…`, `release/…`; `DELETE custom/…`, `release/…`; `POST releases/prune`; `GET custom`) | – | – | – | – | – |
+
+A session's request for a route its roles do not allow gets `403 your Tether Manage role does not
+allow this; signing and publishing need a key holder's Tether Manage with its keys unlocked` and is
+recorded (as the route's own event, else `admin-refused` with the route). A release upload is
+verified with the session's key before the relay's lock and then refused the same way. A session
+never signs anything: what is live still changes only with an admin-signed publish.
+
+**Proposals** are drafts a person without the keys stores for a key holder: a policy (a `Bundle`),
+a team document (a `TeamDoc`), both validated as a publish would be, or a release (any JSON object
+of at most 64 KiB; Tether Manage puts `{channel, app, platform, version, notes, where, files:[{name, sha256}]}`, never
+the files). Stored unsigned in `proposals/<kind>/<id>.json` (`0600`) with the author (the session's
+person, or `admin` for an admin signature, which is accepted too), the time, `base` and the
+document's `serial`; at most 10 per kind. A proposal is never served as live and never applied.
+`base` is the SHA-256 of what the relay served when the proposal was made (`GET /api/policy`,
+`GET /api/admin/team`; empty: nothing); `live` in the `GET` answer is the same hash now, so a
+proposal whose `base` differs is stale. `DELETE`: its author (by `oid`), a KeyHolder session or the
+admin signature. A file that cannot be read still counts toward the 10; the list names it by id
+and a key holder or the admin signature can delete it. Records: `proposal-put`
+(`{"kind","id","serial"}`), `proposal-delete` (`{"kind","id","serial","author_oid","same_person"}`:
+whether the remover proposed it; `{"kind","id","unreadable":true}` for an unreadable file).
 
 ## Team (technician) endpoints
 
@@ -222,19 +307,784 @@ groups of 4 (`630D-CD29-66C4-3366` for the key bytes `00 01 … 1f`;
 Member requests carry the same `Tether-Sig` header as admin requests (same message, v2 or v1 under the same rules, ±300 s skew),
 signed with the member's key. The relay tries every roster key; the nonce cache is the one admin
 requests use. Unknown key, bad signature, no roster or an empty roster: `401` with a short reason.
-Limits: 120 requests/min per member key and 60 failed signatures/min per IP (IPv6: per /64; `429`). Unknown path:
-`404`.
+Limits: 120 requests/min per member key (counted before the request's nonce is kept, replays too) and 60 failed signatures/min per IP (IPv6: per /64; `429`). Unknown path:
+`404`. The per-IP failure limit refuses every `/api/team` route except `config` (sign-ins too) and
+every admin route signed by a Tether Manage session from that address for the rest of the minute;
+heartbeats, status reports and requests signed with the admin key are not affected. So one machine
+behind a practice's NAT can lock the technicians there out for a minute with junk signatures or
+junk sign-ins. This is by design: the limit is what keeps unauthenticated junk cheap for the relay,
+and the address is all the relay knows about a sender before a signature verified.
+
+**`kid`.** A member header may end with ` kid=<16 hex>`: the key's fingerprint digits in lower case
+(`tether_trust::team::key_id`, `630dcd2966c43366` for the vector above; `reqauth::sign_request_for_kid`).
+It is not signed; it only selects the key: the relay checks the signature against that one roster key
+and no other. A `kid` that names no key accepted here (unknown, removed, or not a service entry under
+`oidc_only`) or one that is not 16 lower-case hex digits: `401 not a team member`. Without `kid` the
+relay tries every key as before: about 105 ms for the last of 2000 keys (release build on the test
+machine; a request with `kid` about 3 ms). Signatures are checked before the relay's state lock is taken,
+on a snapshot of the member keys (replaced whole when a roster or document is accepted; a key removed
+meanwhile is refused, `401 not a team member`), so device heartbeats and reports never wait for them.
+At most two requests without `kid` are checked at a time for the whole relay, at most one per client
+address (as the per-IP limits count it); at most two more wait for a slot (at most one per address),
+up to 1 s, and then get `429 busy` with `Retry-After: 1`; any request beyond that gets the same `429`
+at once, so a burst from one address holds at most two of the relay's 32 workers. A `429 busy` is
+not a failed signature (none was checked): several old desktops behind one address never lock it
+out. Requests with `kid` are not limited by this. Send `kid` only to relays with the relay update of release 0.7.0 (they answer `GET /api/team/config`): an older relay refuses the header as
+malformed (`401`).
+
+**The signed team document** (relay update of release 0.7.0) replaces the roster. Tether Manage publishes an upload
+(`tether_trust::team::Upload`, unknown fields rejected everywhere):
+```json
+{"team":{"payload":"<b64 of the document>","sig":"…","key":"<admin key>"},
+ "config":{"payload":"<b64 of {\"serial\":7,\"oidc\":{…}}>","sig":"…","key":"<admin key>"}}
+```
+The document (payload ≤ 256 KiB):
+```json
+{"serial":7,
+ "oidc":{"issuer":"https://login.microsoftonline.com/<tenant id>/v2.0","tenant":"<tenant id>","audience":"<API client id>","client_id":"<apps client id>","scope":"api://<API client id>/access"},
+ "roles":{"Tether.Technician":{},"Tether.Software":{"sbom":true},"Tether.Customer.4711":{"customers":["4711"]},"Tether.Manage.Auditor":{"manage":"auditor"}},
+ "deny":["<object id>"], "oidc_only":false,
+ "members":[{"name":"Bridge","key":"<b64>","write":false,"audit":false,"sbom":true,"agent":false,"customers":["47*"],"service":true}]}
+```
+`serial` at least 1 and above the relay's stored one; at most 2000 members (name and key as in the
+roster; no name, key or key id twice, no role twice: `400`); `oidc`, `roles`, `deny`, `oidc_only`
+optional. `config` is there exactly when `oidc` is, signed by an admin key too, and says the same
+`serial` and `oidc`. Every member entry must name `sbom`, `agent` and `customers` (`400 member <name>:
+<field> is required in a signed team document`): the plain roster's compatible defaults (`sbom` and
+`agent` true, `customers` `["*"]`) would give everything to an entry that forgot one, so they apply only
+to plain roster entries. `write`, `audit` and `service` default to false. Which parser answers is
+decided by the body's top level: a JSON object with a `team` field is a signed upload (and gets the
+signed upload's errors), anything else a plain roster. Customer patterns: `*` (every device, also those without a customer reference), a
+customer reference (1–32 of `A-Za-z0-9._-`, matched exactly, case-sensitive), or a customer reference
+followed by one `*` (every reference starting with it: `47*` covers `47`, `4711`, `47-B`); nothing else,
+at most 64 per member or role. `oidc_only` true needs `oidc` (`400`): then only `service` entries
+keep their keys and people sign in ([below](#staff-sign-in-sessions-postdelete-apiteamsession)).
+`oidc.issuer` must be `https://`, in normal form, and not `localhost` or a loopback, private or
+link-local address (`400`; only debug and `test-hooks` builds also take `http://` on loopback, for
+the mock provider). `oidc.audience` is the API registration's client id (a v2.0 token's `aud`; its
+App ID URI is not accepted); the set-up: [sign-in.md](sign-in.md). `roles` maps app role values (1–128
+printable ASCII characters) to what they grant: `write`, `audit`, `sbom`, `agent` (missing: false)
+and `customers` (missing or empty: names none), or `manage`, one Tether Manage role (`auditor`,
+`operator`, `policy-editor`, `publisher`, `key-holder`), which grants no team permission (a role
+with `manage` and any team permission: `400`). `roles` and `deny` apply to sign-in sessions; `deny` does not affect key members. Once a relay has accepted a signed document it refuses plain rosters
+(`409`) for as long as `team/team.json` exists, also after a restart; an unreadable `team.json`
+leaves nobody admitted (and plain rosters still refused) until a new document is published. The
+stored document is checked against the key it names at start, so it stays in force across an admin
+key rotation; new documents need a key in `ADMIN_PUB_KEY`.
+
+**Permissions** (relay-enforced): `write` as before; `audit` as before; `sbom` the software lists
+(`403 this member may not read software lists`; without it the summary has no `sbom` fields);
+`customers` limits the summary, the report and history, the software list and the device actions
+(link, unlink, allow a claim, remove) to devices whose customer reference a pattern covers (no
+reference: only `*`). A device outside a member's customers answers exactly as an unknown uuid
+(`404 not found`), on every route; `customers: []` sees no device at all. The session audit
+(`GET /api/team/audit`) follows the scope too: a member without `*` gets records only for a device
+whose pin is in its scope, named by the Tether ID the pin is verified for (a team link or a Tether
+proof) or by its uuid (the records of that Tether ID); anything else, also a machine without a health
+agent (no pin, so no customer: `*` only), answers exactly as an unknown device (`200 []`). Linking
+an ID that a device outside the member's scope holds answers `409 tether_id is not the one this device
+claims`, as for a wrong ID. Fleet-wide by design (and recorded in the team audit log as
+`device-list`): the device list (`/api/team/devices`, from heartbeats, which carry no customer) and the shared tags (one document for the whole team). `agent`
+is checked by the viewer's desktop, not the relay: without it the session menu item **Health
+monitoring agent…** is disabled and the desktop refuses the request; the host decides by its own
+policy ([health.md](health.md#in-a-session-technician)). A sign-in session with only Tether Manage
+roles gets `403 this sign-in has only Tether Manage roles` on every team route but `GET
+/api/team/me` and sign-out.
+
+**What the signature on the team document protects.** The document is signed with an admin key, not
+trusted because of the request that carries it: another relay, or a desktop or Manage reading
+`GET /api/admin/team` or `GET /api/team/config`, can check it against the admin key and cannot be given
+a forged one; and its serial cannot go back by a `PUT` (`409`). It does not protect a relay from
+whoever can write that relay's data folder (`/var/lib/tether-api`) or its `ADMIN_PUB_KEY`: they control
+that relay's members (they can put back an older `team.json`, delete it and write a plain roster, or
+trust another admin key). The relay is trusted to enforce the permissions it serves.
 
 | Method & path | Body | Result |
 | --- | --- | --- |
-| `GET /api/team/me` | – | `{"name":…, "write":bool, "audit":bool}` |
+| `GET /api/team/config` | no signature | The `config` envelope of the signed document as published (`{"payload","sig","key"}`, payload `{"serial","oidc"}`); verify it with the admin key, not the relay. `ETag: "<serial>"`, `304` on `If-None-Match`. `404 no sign-in configured` without a document with `oidc`. |
+| `POST /api/team/session` | `{"access_token":"<JWT>","key":"<std base64 of the member key>"}` (≤ 32 KiB), signed with that key, the header naming its `kid` | Staff sign-in ([below](#staff-sign-in-sessions-postdelete-apiteamsession)): `200` the session as `me` answers it; a refusal `{"reason","message"}` |
+| `DELETE /api/team/session` | – | Sign-out: the signing key's session ends (an expired one too), `204`; a roster key without a session: `204`, nothing changes |
+| `GET /api/team/me` | – | `{"name":…, "write":bool, "audit":bool}`; with a signed document also `"sbom","agent":bool, "customers":[…], "service":bool`; signed in: `{"name","write","audit","sbom","agent","customers","service":false,"oid","upn","exp":<unix>,"roles":[…],"manage":[…]}` (`roles`: the token's roles the document maps; `manage`: the Tether Manage roles, left out when none) |
 | `GET /api/team/devices` | – | `[{uuid,id,profile,version,os,last_seen}]` newest first, from the heartbeats (no IP, no serials) |
 | `GET /api/team/tags` | – | `{"rev":<u64>,"doc":<JSON or null>,"updated_by":"<name>","updated_at":<unix>}`; `rev` 0, `doc` null, `updated_by` "" and `updated_at` 0 when none was stored |
 | `PUT /api/team/tags` | a JSON object (≤ 512 KiB), header `If-Match: <rev>` (decimal, quotes tolerated) | `200 {"rev":<new>}`. Member without `write`: `403`. Missing or bad `If-Match`, body not a JSON object: `400`. `rev` is not the current one: `409` with the current `{"rev","doc","updated_by","updated_at"}`. Too large: `413`. Stored atomically as `team/tags.json` (0600) with `rev + 1`, `updated_by` = the member's roster name. The relay does not look inside the document. |
-| `GET /api/team/audit?device=<id or uuid>&since=<unix>&limit=<n>` | – | Session audit records of one device, same format as `GET /api/admin/audit`, newest first. Members with `audit` only (else `403`). `device` required (`400` without); `since` default 0; `limit` 1–500, default 200; unknown parameter `400`. |
+| `GET /api/team/audit?device=<id or uuid>&since=<unix>&limit=<n>` | – | Session audit records of one device, same format as `GET /api/admin/audit`, newest first. Members with `audit` only (else `403`); a member without `*` only of devices in its scope (above). `device` required (`400` without); `since` default 0; `limit` 1–500, default 200; unknown parameter `400`. |
+| `GET /api/team/status` | – | The health summary of every host that has a full report (below). Any member; `ETag`, `304` on `If-None-Match`. |
+| `GET /api/team/status/<uuid>` | – | One device's last report and its history (below). Any member. `404` for an invalid or unenrolled uuid. |
+| `GET /api/team/status/software?q=<text>[&v=<version prefix>]` | – | The hosts with an installed program whose name or publisher contains `q` (below). Members with `sbom`, within their customers; off unless `STATUS_SOFTWARE_SEARCH=on`. |
+| `POST /api/team/status/<uuid>/link` | `{"tether_id":"…"}` (must equal the device's claim) | `204`: the claim is confirmed, the device's Tether ID is now that one, with the member's roster name and the time as `linked_by` and `linked_at`; the same link again is `204`. Members with `write` only (else `403`). `400` bad body or Tether ID; `404` unknown uuid; `409 tether_id is not the one this device claims`, `409 tether_id is pinned to another device`. Journal line `status: <uuid> linked to <id> by team member <name>`. |
+| `DELETE /api/team/status/<uuid>/link` | – | `204`: the link and the claim are removed and the pin gets `no_claim`: the device claims nothing again (not by enrolling, also not with the token issued for that ID after its first use, not by reports, whose `tether_id` is then ignored) until a member allows it. When such a device then releases its own pin (`DELETE /api/status`), the relay keeps its key (a `dismissed` line, 180 days, at most 10 000): enrolling again with that key and a token not issued for a Tether ID gives a pin with `no_claim` and no claim, whatever uuid or claim it names. `write` only (`403`); `404` unknown uuid. Journal line `status: … of <uuid> dismissed by team member <name>`. A new key enrolled with a valid token can always claim: revoke the token to stop that. |
+| `POST /api/team/status/<uuid>/allow-claim` | – | `204`: clears `no_claim` on this pin; the device's next enrolment or report names its claim again (still only a claim), unless another pin of the same device key is still dismissed: then allow or remove those too. `write` only (`403`); `404` unknown uuid. Journal line. |
+| `DELETE /api/team/status/<uuid>` | – | `204`: as `DELETE /api/admin/status/<uuid>` (pin, link or claim, report, history), journal line `status: pin of <uuid> removed by team member <name>`. `write` only (`403`); `404` unknown uuid. |
+| `POST /api/team/audit-event` | `{"event", …}` (≤ 4 KiB, below) | `204`: the member's desktop reports what it did itself; written to the team audit log marked `self_reported`. Any member; 30 per minute and member key (`429`, refused ones count). `400` for an unknown event or field, a missing or bad value. |
 
 The roster is per relay: publish it to every relay (Tether Manage does). Tags are stored per relay
 too: a client should read and write them on one relay (the first that answers).
+
+### Staff sign-in sessions (`POST`/`DELETE /api/team/session`)
+
+With an `oidc` part in the team document, staff sign in with that OpenID Connect provider
+(Microsoft Entra ID is the documented one): the desktop gets an access token for the API (scope
+`oidc.scope`) and posts it, signed with its member key, to every relay. **Any key may present a
+token**: the token is the authorisation, the request signature the proof that the desktop holds
+the key the session is bound to. The relay checks:
+
+- the request: a `Tether-Sig` with `kid` (required here), made by the key in the body, whose key
+  id `kid` names (`401`); the body exactly `{"access_token","key"}` (`400`);
+- the token: at most 16 KiB, three parts in strict base64url (no padding); header `alg` exactly
+  `RS256` (the relay's choice; `none`, `HS256` or anything else refused) and a `kid` (a token
+  without one matches no key); no `crit`; the signature over the exact signing input with the
+  provider's key of that `kid` (`kty` RSA, `use` sig and `alg` RS256 when present, modulus 2048 to
+  4096 bits); then the claims: `ver` `2.0`, `iss` exactly `oidc.issuer`, `tid` exactly
+  `oidc.tenant`, `aud` exactly `oidc.audience` (the API's client id: a string, or an array holding
+  only it; the App ID URI form is not accepted), `azp` exactly `oidc.client_id`, `exp`, `nbf`, `iat`
+  with 300 s of skew, a lifetime (`exp - nbf`) of at most 28 h, no groups overage
+  (`_claim_names`, `_claim_sources`, `hasgroups`), a delegated `scp`, an `oid` and a `uti` (at most
+  128 printable characters each);
+- the document: `oid` not in `deny` (`403`); the token's `roles` (only these, never groups) mapped
+  through `roles`: a role not in the table gives nothing, the permissions are the union of the
+  mapped roles, `customers` the union of theirs and `*` when none names any; no mapped role:
+  `403`; a token (`uti`) binds one key until it expires: another key presenting it gets `409`.
+
+The session lasts until min(token `exp`, `TEAM_SESSION_MAX_MINUTES`, default 60, 1 to 1440); the
+desktop posts a fresh token before then. Its permissions are recomputed from the document in force
+on every request. A key with a live session is that person on every member route, also when the
+key is on the roster too (the session wins while it lasts; after it, the roster entry again unless
+`oidc_only` removed it). A session needs `kid` in every request. An expired session answers
+`401 session expired: sign in again` (for a day; then `401 not a team member`). Sessions are kept
+in `team/sessions.json` (0600, written before the answer) and survive a restart until they expire;
+at most 5 000 sessions (8 per person: a ninth key replaces that person's oldest) and 20 000 bound
+tokens (`503 too-many-sessions` when full). A new document ends at once the sessions of a denied
+`oid`, those left without a mapped role, and all of them when the provider (`oidc`) changed. A
+`deny` entry ends a person's sessions, but the same key then falls back to its roster entry if it
+has one: remove that entry too. `sessions.json` is read entry by entry, unknown fields ignored (a
+downgrade keeps the token bindings); a file that is not JSON is kept as `sessions.json.bad` and
+its sessions and bindings are lost.
+
+Refusals: `{"reason":"<code>","message":"<text for an administrator>"}`, `Content-Type:
+application/json`. `401`: `malformed`, `alg`, `no-kid`, `unknown-kid`, `bad-signature`, `v1-token`
+(the API registration issues v1.0 tokens: set `requestedAccessTokenVersion` to 2 in its manifest),
+`wrong-version`, `wrong-audience` (also a token for Microsoft Graph: the sign-in did not request
+the API scope), `wrong-issuer`, `wrong-tenant`, `wrong-client`, `expired`, `not-yet-valid`,
+`lifetime`, `overage`, `no-scope`, `no-oid`, `no-uti`; `403`: `denied`, `no-role`; `404`:
+`not-configured` (no `oidc` in the document); `409`: `token-used`; `503` with `Retry-After`:
+`provider-unavailable` (the provider's keys cannot be fetched), `provider-address` (the provider's
+name resolves to a loopback or private address: a production build never connects there),
+`config-changed` (the document changed during the check; retry), `too-many-sessions`. Any key may
+sign a sign-in, so what a refused one leaves is bounded: its nonce is not kept (only a sign-in
+that succeeds keeps it; a replay of a refused one is refused the same way again), and the signing
+key's request limit counts it only once its token verified. A sign-in refused after its token
+verified (`denied`, `no-role`, `token-used`, `expired`, `too-many-sessions`, …: it names a person)
+counts against that person's `oid`: the 21st within a minute gets `429 too many refused sign-ins for
+this person` with `Retry-After: 60` and leaves no record (anyone the tenant lets get a token for the
+API could otherwise send them with a fresh key each). A token
+refused before its own signature verified (`malformed`, `alg`, `no-kid`, `unknown-kid`,
+`bad-signature`) and `not-configured` count against the source address like a failed request
+signature (60 a minute, then `429 too many failed requests` on every team route from that address).
+A token refused with a `401` after its signature verified (a token from the provider refused for
+its claims) counts against the signing key, not the address (which would refuse every team route
+to an office behind one NAT with skewed clocks): the 21st within a minute from one key gets
+`429 too many refused tokens from this key` with `Retry-After: 60`, also for a good token. Replays
+and failed request signatures count per address.
+
+**What is trusted from where.** Issuer, tenant, audience and client id come only from the
+admin-signed team document, never from the request or the provider. From the provider's discovery
+document (`<issuer>/.well-known/openid-configuration`, whose `issuer` must be exactly the
+document's) only `jwks_uri` is taken, and only when it has the issuer's scheme, host and port. Both
+are fetched by the relay with certificate checks (rustls, the webpki root set), a 5 s connect and
+request timeout each, at most 64 KiB, no redirect followed, no proxy (proxy environment variables
+are ignored); the address is checked when the name is resolved for the connection. The keys are
+kept 24 h and fetched again earlier only for an unknown `kid`, at most once a minute; one fetch at
+a time for the whole relay, a sign-in meanwhile gets `503` at once, and none of it runs under the
+relay's state lock, so heartbeats and reports never wait for the provider. When the keys cannot be
+fetched, sign-ins get `503`, sessions already made keep working until they expire, and roster
+members are not affected; after 24 h without a successful key refresh the old keys are not used any
+more and every new sign-in gets `503` (`provider-unavailable`). The relay needs outbound HTTPS to
+the provider, directly: it trusts the compiled-in web PKI roots, not the system's store, and uses
+no proxy, so a TLS-inspecting proxy (or any middlebox presenting its own certificate) between the
+relay and Microsoft breaks sign-in.
+
+**Limits of the design.** A role removed in Entra takes effect at the next sign-in (the session
+keeps the roles of the token it was made with, at most `TEAM_SESSION_MAX_MINUTES`, so 60 minutes by
+default); only `deny` ends a session at once. A token is bound to the first key that presents it
+on a relay, but the same access token is accepted by every relay of the tenant within its
+lifetime: whoever obtains one (from a log, a proxy, a memory dump) can present it to a relay that
+has not seen it, with a key of their own. This is mitigated, not removed: the desktop posts the
+token to all relays at once, so a replay on any of them meets `409 token-used`, and it alarms on
+that answer.
+
+**Audit** (team audit log): `sign-in` (`actor` with `oid` and `upn`, `detail` `{"roles","exp"}`),
+`sign-in-refused` (`detail` `{"reason"}`; `actor` only the key id and `"name":"-"` unless the token
+was verified: then the person; those without a verified person at most 60 a minute for the whole
+relay, those with one at most 20 a minute per person, the ones left out counted as `"more":n` in
+the next one written), `sign-out`, `session-ended` (`detail` `{"reason":"deny-list"|
+"no-role"|"document-changed","serial"}`; `{"reason":"replaced","kid"}` when a person's ninth key
+replaced the oldest session, `kid` the key that lost its session). Never the token. Every other record of a signed-in
+member names the person (`actor.oid`, `actor.upn`) and the key id.
+
+## Team audit log
+
+Every request of a team member or an admin that reads or changes a device's data is recorded, with
+refused ones (`403` for a missing permission, `404` for an unknown or out-of-scope device), and so
+are staff sign-ins and every admin change (below), one JSON line per request in `/var/lib/tether-api/team-audit/<YYYY-MM-DD>.jsonl` (UTC day; folder `0700`,
+files `0600`), also with a plain roster. Fields, in this order (absent ones left out):
+
+`{"ts":<unix>,"event":"…","actor":{"key_fingerprint":"<16 hex>","name":"…"},"ip":"…","target":{"uuid","tether_id","customer"},"detail":{…},"result":<HTTP status>,"self_reported":true,"prev":"<64 hex>"}`
+
+- `actor`: the member's name in the roster or team document and the id of the key that signed
+  (`tether_trust::team::key_id`, the `kid`), and for a signed-in person also `oid` and `upn`; the
+  admin as `"name":"admin"` with its key's id. The
+  writer's own records (`dropped`, `chain-gap`) and `signature-limit` have none. `ip`: the client
+  address (design 12.5).
+- `target`: the uuid as the request named it (at most 128 bytes); for an answer below `400` also
+  the pin's Tether ID and customer. A refused request keeps only what it named, so the record
+  confirms nothing about a device the member may not see.
+- Never in a record: report or history content, host names, software lists, summary content.
+- Not recorded: requests without a valid member or admin signature (no person to name; only an
+  address reaching the failed-signature limit is, as `signature-limit`) or refused by a rate limit,
+  and `me` and `tags`. The device lists are recorded like the summary: the heartbeat list
+  (`GET /api/team/devices`, every Tether device with its ID, version and last contact) and the admin's
+  pin list (`GET /api/admin/status/devices`, with host names).
+
+| Event | Route | `detail` |
+|---|---|---|
+| `summary` | `GET /api/team/status` | `{"reads":n}`: one record for the first read of an hour, with `n` the reads since the member's previous summary record, this one included; reads after it are written by the relay's hourly maintenance (and at a clean stop) as a record without `result`, whose `ip` is the address of the last of those reads only. A hard kill loses at most an hour of such counts |
+| `device-list`, `status-device-list` | `GET /api/team/devices` and `GET /api/admin/devices` (heartbeats with addresses), `GET /api/admin/status/devices` | `{"reads":n}`, folded per reader and hour as `summary` |
+| `signature-limit` | any member route | `{"kid":"<16 hex>"\|null,"unverified":true}`, no `actor`, `result` `429`: an address reached 60 failed member signatures a minute; at most one record (and one journal line `team: failed member signatures from <ip> …`) per address and minute, and at most 60 such records (and lines) a minute for the whole relay: the ones left out are counted and the next record carries their number as `"more":n`; `kid` the one the refused request named (not verified), only when it has the key-id form (16 lower-case hex), else `null`; the journal line ends `(kid …, unverified)` |
+| `report` | `GET /api/team/status/<uuid>` (report and history) | – |
+| `software-list` | `GET /api/team/status/<uuid>/sbom` | – |
+| `search` | `GET /api/team/status/software` | `{"q":"<term>","v":"<version>"\|null,"hits":n}`: the term and version as asked (trimmed, control and direction characters dropped, at most 128 bytes), and for an answered search the number of matching hosts (`hosts` + `more`), never the hosts; refused searches (`400`, `403`, `429`) are recorded without `hits`, a search answered from the cache with them; no `target` |
+| `link` | `POST /api/team/status/<uuid>/link` | `{"tether_id"}` asked for |
+| `unlink`, `allow-claim` | `DELETE …/link`, `POST …/allow-claim` | – |
+| `remove` | `DELETE /api/team/status/<uuid>`, `DELETE /api/admin/status/<uuid>` | – |
+| `revoke` | `POST /api/admin/status/revoke` | `{"token":"<id>"}` |
+| `session-audit-read` | `GET /api/team/audit`, `GET /api/admin/audit` | – (`target`: the `device` asked for; digits only: a Tether ID) |
+| `team-audit-read` | `GET /api/admin/team-audit` | the filters given |
+| `export`, `session-start`, `agent-request`, `token-used` | `POST /api/team/audit-event` (`self_reported`) | `{"what":"hosts"\|"failing"\|"sbom","rows":n}`; –; `{"action":"install"\|"remove","outcome"?}`; `{"relay":"<host>"}` (a relay answered `409 token-used` to this person's sign-in) |
+| `dropped` | the writer | `{"since":<unix>,"queue_full":n,"log_full":n,"write_failed":n}`: records lost since `since` (the previous `dropped` record, or the writer's start) |
+| `chain-gap` | the writer at start | `{"expected","found"}`: the files no longer reach the head written before |
+
+Posted events: `{"event":"export","what":…,"rows":<≤ 10 000 000>,"uuid"?}`,
+`{"event":"session-start","tether_id","uuid"?}`, `{"event":"agent-request","tether_id","action","outcome"?,"uuid"?}`, `{"event":"token-used","relay"}`
+(`outcome` `[a-z-]{1,32}`); nothing else is accepted. The desktop app (0.7.0) posts them: `export`
+when it exports the host list, the failing checks or a software list (SBOM), `session-start` when it
+starts a session to a host, `agent-request` when the session's agent install or removal is asked
+(also when the app refused it, outcome `not-permitted`), `token-used` when a relay answered `409
+token-used` to the person's sign-in. They go in the background to the first relay it reaches
+(`token-used` to every relay), only while the app is a member; they are what the app says it did, not something the relay saw (the host's own record of an
+agent install or remove is the session audit `alarm` of type 30 above). Tether Manage's own
+exports go to `POST /api/admin/audit-event` (`export` with `what` `team-activity`, `sessions` or
+`devices`).
+
+**Admin and Tether Manage records.** Every admin change is recorded with what changed (serials,
+ids, paths), never the documents, with the admin key (`"name":"admin"`) or the signed-in person as
+`actor`, refused ones too:
+
+| Event | Route | `detail` |
+|---|---|---|
+| `policy-publish`, `server-keys-publish` | `PUT /api/admin/policy`, `server-keys` | `{"serial"}` |
+| `team-publish` | `PUT /api/admin/team` | `{"serial"}`; a plain roster `{"plain_roster":true,"members":n}` |
+| `download-page-publish` | `PUT /api/admin/download-page` | `{"bytes"}` |
+| `diag-ticket`, `diag-close`, `diag-delete`, `diag-download` | `POST diag-ticket`, `POST diag/<t>/close`, `DELETE diag/<t>`, `GET diag/<t>` | `{"ticket"}` |
+| `release-prune` | `POST /api/admin/releases/prune` | `{"dry_run"}` |
+| `custom-app-publish`, `custom-app-delete` | `PUT`, `DELETE /api/admin/custom/<id>` | `{"id","channel","expires"}` (never the link token); `{"id"}` |
+| `release-upload`, `release-index-publish`, `release-delete` | `PUT`, `DELETE /api/admin/release/<path>` | `{"path"}`; an index `{"channel","file","serial","expires"}` (rollouts and halts are in the index); `{"path"}` |
+| `proposal-put`, `proposal-delete` | `PUT /api/admin/proposals/<kind>`, `DELETE …/<kind>/<id>` | [above](#tether-manage-sessions-on-admin-routes) |
+| `admin-refused` | a route a session's roles do not allow and that has no event of its own | `{"route"}` |
+| `export` | `POST /api/admin/audit-event` (`self_reported`) | `{"what","rows"}` |
+
+Sign-in records (`sign-in`, `sign-in-refused`, `sign-out`, `session-ended`):
+[above](#staff-sign-in-sessions-postdelete-apiteamsession).
+
+**Writing.** One writer thread takes records from a queue of 10 000; a request never waits for it.
+When the queue is full, today's file alone reaches `TEAM_AUDIT_MAX_MB`, or a line cannot be written
+(disk full, folder not writable), records are dropped and counted (`tether_api_team_audit_dropped_total`,
+failed writes also in `tether_api_team_audit_write_failed_total`; a journal line
+`team-audit: N records dropped since <unix> (…)` and, for failed writes, `error: team-audit: a record could
+not be written: …`, each at most every 10 s) and a `dropped` record in the log says how many (when
+that record cannot be written either, its counts go into the next one). A failed write is cut back to
+the file's length before it, so no torn line is left for a reader to report as a break; a line cut by
+a crash is ended at the next start (journal line `team-audit: <day>.jsonl ended in a cut line …`).
+Lines are synced every second; each is also written to the journal as `team-audit: <line>`, and the
+head as `team-audit: head <hash>` every 10 minutes. The journal copy is not complete under load:
+journald's rate limit (by default 10 000 messages per 30 s per service) drops lines silently; set
+`LogRateLimitIntervalSec=0` in the unit (`[Service]`) when the journal is the copy a SIEM relies on.
+
+**Fails open.** While running, the relay keeps answering when it cannot write the audit log: support
+for practices goes on, and the outage is visible as dropped counts in the log itself (the next
+`dropped` record), in the metrics and in the journal. At start it refuses to run (exits with
+`data dir: …`) when the `team-audit` folder cannot be created or written. A record is about 280 bytes (measured); 50 000 records at once raised the
+memory by about 5 MB (the full queue), the rest was dropped and counted.
+
+**The chain.** `prev` is the SHA-256 (lower-case hex) of the line before (its bytes without the
+newline); the first line of a day names the last line of the day before, the first line ever 64
+zeros. After a restart the chain continues from the newest line; the head is also kept in
+`team-audit/head`, and when the files no longer reach it a `chain-gap` record is written. What it
+gives: an edited, removed or inserted line, a removed day or a cut file shows as a break to
+whoever reads the log, as long as the lines after the change were not all rewritten. What it does
+not give: whoever controls the relay can rewrite the log from any point on, or stop it; only a head
+kept elsewhere shows that. `GET /api/admin/team-audit` returns the current head: Tether Manage (or
+a script) should store it and check that the next read still reaches it; forwarding the journal to
+a separate SIEM keeps a copy of every line and head the relay cannot change afterwards.
+
+**Reading** (`GET /api/admin/team-audit`, admin-signed or a session with any Tether Manage role;
+team members `401`):
+`?since=<unix>&until=<unix>&actor=<name, key id, oid or upn>&device=<uuid or Tether ID>&customer=<ref>&event=<event>&limit=<1–5000, default 1000>&cursor=<next>`,
+all optional, exact matches; unknown parameter or bad value `400`. Answer, oldest first:
+`{"head":"<hash>","records":[…],"next":"<cursor>"|null,"problems":[{"day","at":<byte offset>,"problem"}]}`.
+Read from the files line by line (never a whole day in memory), at most `limit` records and about
+8 MiB of records per answer and 256 MiB of log read; `next` continues there. One read at a time
+for the whole relay (each may wait up to 2 s for the writer's queue): another meanwhile gets
+`429 busy` with `Retry-After: 2`. Every line read is
+checked against the chain (`problems`, at most 100): `prev-mismatch` (the line before was changed or
+removed, or this one inserted), `unreadable`, `truncated`, `starts-after-removed-day` (the oldest
+line follows one no longer kept: retention or the size cap, not a break), `head-not-found` (the
+newest lines are not those last written). The read is itself recorded.
+
+| Setting (`/etc/tether/api.env`) | Default | |
+|---|---|---|
+| `TEAM_AUDIT_RETENTION_DAYS` | `90` | whole UTC days older than this are removed (checked hourly and at each new day) |
+| `TEAM_AUDIT_MAX_MB` | `2048` | all day files together; above it the oldest day goes, never today's; today's file alone at the cap: new records are dropped and counted |
+| `TEAM_SESSION_MAX_MINUTES` | `60` | the longest staff sign-in session (1 to 1440 minutes), whatever the token's lifetime ([sign-in](#staff-sign-in-sessions-postdelete-apiteamsession)) |
+
+Backup: copy `team-audit/` with the rest of `/var/lib/tether-api`. A restored older copy is a
+shorter chain: a head stored elsewhere after the backup is no longer reached, so note the restore
+where the heads are kept. Retention and who may read the
+log (staff personal data) are for the organisation to agree on (works council, data protection).
+
+## Device status (health reports)
+
+A monitoring agent on a machine enrols with an admin-signed token and then posts signed reports;
+members of the team roster read them. Overview, operation and what the report fields mean:
+[health.md](health.md). Status is per relay, like tags: an agent enrols on every relay it knows
+and posts to one at a time; the technician app reads every relay and keeps the newest answer for
+each device. While `STATUS=off` every route in this section answers `503 status reporting is off`
+with `Retry-After: 3600`; while the store is locked (`status/keys.jsonl` or `status/revoked.json`
+unreadable) every one answers `503 status store unavailable`, also with `Retry-After: 3600`.
+
+**Identity.** `uuid` is 8–64 characters `[A-Za-z0-9-]` (the Tether install uuid when Tether is
+installed, else one the agent makes up). The device key is an Ed25519 key the agent generates; its
+public half goes to the relay as standard base64 (padded) of the 32 raw bytes, the encoding of
+`tether_trust::key_to_b64`. Weak (small-order) keys are refused. `tether_id` is optional,
+1–32 printable ASCII characters without spaces.
+
+**Tether IDs are verified.** A device's `tether_id` (what the technician app joins a host row by)
+comes from a grant with a valid Tether proof (below), from a token issued for it, or from a team
+member's confirmation (`POST /api/team/status/<uuid>/link`). A `tether_id` the device names with any other token is kept
+as its `claimed_id` and shown as a claim only. Reports never change either.
+
+**Enrolment token.** The base64url string, without padding, of the JSON of a
+`tether_trust::envelope::Signed` document signed with an admin key, whose payload is
+`{"purpose":"status-enroll","exp":<unix seconds>,"label":"<1–64 characters, no control characters>","id":"<16–32 [A-Za-z0-9]>","tether_id":"<optional>","customer":"<optional>","tether_proof":true}`
+(unknown fields refused, `id` required; `tether_proof` is written only when true, so a token
+without it is byte for byte what older relays know). `id` is random; it is what a relay revokes and records
+on each pin made with the token. With `tether_id` (a Tether ID, never starting with `m:`) the token
+is issued for that ID: it enrols one device, which gets exactly that ID. With `customer`
+(1–32 characters `[A-Za-z0-9._-]`, `tether_trust::status::valid_customer`) the relay sets that
+customer reference on the pin of every device that enrols with the token
+([health.md](health.md#customer-reference)); a relay from before the field refuses such a token
+(`401 enrollment token: not an enrollment token`). `scripts/status-token.sh`
+and `tools/monitor-publish token` issue tokens valid 1 to 30 days
+([health.md](health.md#creating-an-enrolment-token)); the relay accepts one until `exp` or until
+it is revoked, for any number of devices unless it is issued for a Tether ID.
+`tether_trust::status::make_token(label, exp, tether_id, customer, tether_proof, admin_key)` makes one and answers
+`(token, id)`; `tether_trust::status::verify_token(token, admin_keys, now)` checks one.
+
+**Grant (a token with `"tether_proof":true`).** Never with `tether_id`. It links a device only to
+the Tether ID whose key signed the request's `tether_proof`: standard base64 of an Ed25519
+signature over `"tether-agent-link-v1\n<tether_id>\n<uuid>\n<pubkey>"` (`tether_trust::status::sign_agent_link`),
+checked against the key hbbs holds for that ID (`GET /peer-pk/<id>` on hbbs's health port, see
+`HBBS_PEER_URL` below). Not single-use. A relay from before the flag refuses such a token
+(`401 enrollment token: not an enrollment token`) and a request with `tether_proof` (`400`).
+`make_token` and `verify_token` refuse a token with both the flag and a `tether_id` (`a
+tether_proof token names no tether_id`), and `make_token` one longer than 1024 characters, the
+size the policy feature `health.enrol-grant` holds. Tether Manage makes grants (label
+`policy:<layer>`, 365 days); `tools/monitor-publish` makes none.
+`tether_trust::status::verify_agent_link(pk, sig, tether_id, uuid, pubkey)` checks a proof
+strictly (weak keys and non-canonical signatures refused; `tether_id`, `uuid` and `pubkey` must be
+valid and `pubkey` in its canonical encoding).
+
+**hbbs's key lookup.** `GET /peer-pk/<id>` on hbbs's health port (21122, IPv4 only) answers
+`200` with `<std base64 of the 32-byte key>\n` for an ID hbbs knows, and `404 not found\n` for
+anything else: an unknown ID, an ID outside 6–16 characters `A-Za-z0-9_-`, a caller that is
+neither loopback nor inside hbbs's `PEER_LOOKUP_FROM` (comma-separated CIDRs, default empty; a bad
+entry stops hbbs at start). hbbr answers `404` always. tether-api reads at most 256 bytes, follows
+no redirect and takes only `200` with exactly that body, or `404`.
+
+### `POST /api/status/enroll` (token and device signature)
+
+Body (JSON, ≤ 4096 bytes, unknown fields rejected):
+```json
+{"uuid":"3f2a9c4e-0b1d-4e57-9d1a-6c2f8a7b5e10","pubkey":"<std base64, 32 bytes>","token":"<token>","tether_id":"123456789"}
+```
+Required header `Tether-Sig: device-v1 uuid=… host=… ts=… nonce=… sig=…`, made as for
+`POST /api/status` (`tether_trust::reqauth::sign_device_request`) over `POST`, the path
+`/api/status/enroll` and the exact body, with the private key of the key in `pubkey`; its `uuid`
+must be the body's. Every enrolment needs it, the first one too: enrolling proves possession of the
+key being pinned. A request without the header is refused after the body checks and the enrolment
+limit, before the token is checked, and counts against the IP as a refused token does. A request
+with it is checked after the token (for an existing pin the key in `pubkey` is the pinned one), with
+the same clock skew, nonce cache, `RELAY_HOST` rule and failure limit as a status post.
+The relay pins the key to the uuid and answers `200` `{"releases":<u64>,"next":<u64>}`, the same
+answer as a status post. With a token issued for a Tether ID, the pin gets that ID (a `tether_id`
+in the request must be the same); with any other token a `tether_id` in the request becomes the
+pin's `claimed_id`, unless the device's key is dismissed (a member unlinked a pin of that key, still
+there or released by the device itself): then the new pin gets `no_claim` and no claim. Enrolling the same uuid with the same key again is `200` and changes nothing,
+except that a claim is added when the pin has no Tether ID, no claim and no `no_claim`, and a token issued for a
+Tether ID sets it on a pin without one, on its first use only, and a token with `customer` sets
+that customer, also over another one (when that changes the customer of a pin that existed, the
+journal gets `status: customer of <uuid> set to <customer> by token <id>`); a token without `customer` leaves the pin's customer as it is. A pin
+cannot be replaced by another key. The request has no customer field: a device cannot name its
+customer.
+
+With a grant the body also needs `"tether_proof":"<std base64>"` and a `tether_id` of hbbs's ID
+rule (6–16 of `A-Z a-z 0-9 _ -`). After the token and the device signature are checked, hbbs is
+asked for the ID's key without holding the relay's state lock (2 s for all of `HBBS_PEER_URL`,
+each URL getting an equal share of the time left, and every address of its host in turn; the first
+answer with a key wins; at most 4 lookups run at once, more are answered `503 tether proof
+unavailable` at once), and the token, the pin and the ID are checked again after it. A valid proof gives the pin that
+`tether_id` with `linked_token` (the grant's id) and `linked_proof`, unless the pin has `no_claim` or
+the key is dismissed (a member's Unlink holds); another uuid holding the ID is `409 tether_id is
+enrolled with another key`. Journal: `status: <uuid> linked to <id> by Tether proof (token <id>)`.
+With any other token `tether_proof` is ignored.
+
+| Status | Body | Meaning |
+|---|---|---|
+| `400` | `bad uuid`, `bad pubkey`, `bad tether_id`, or the JSON error | malformed |
+| `400` | `tether proof required` | a grant without `tether_id` or `tether_proof` |
+| `401` | `tether proof does not match` | the proof is not signed by the key hbbs holds for the ID, over this request; counts against the IP as a refused token does |
+| `409` | `tether id unknown to this relay` | hbbs answered `404` for the ID; counts against the IP as a refused token does. hbbs also answers `404` to a relay outside its `PEER_LOOKUP_FROM`, so that misconfiguration shows as this error |
+| `503` | `tether proof unavailable` | no hbbs of `HBBS_PEER_URL` gave a usable answer within 2 s, or 4 lookups are already running; try again later |
+| `503` | `tether proof needs HBBS_PEER_URL` | `HBBS_PEER_URL=off` |
+| `401` | `enrollment token: <reason>` (`signed by an untrusted key`, `expired`, `not an enrollment token`, `bad label`, `bad id`, `bad tether_id`, `bad customer`) | token refused |
+| `401` | `token revoked` | the token was revoked |
+| `401` | `enrolment needs the device's signature` | no `Tether-Sig` header |
+| `401` | `signature names another uuid`, or a status post's signature refusals (`signature does not match`, `replayed request`, `request timestamp outside allowed clock skew`, `malformed signature header`, …) | the header is invalid, or not made with the key in `pubkey` |
+| `429` | `too many failed requests` | after too many failed device signatures from this IP |
+| `409` | `token is issued for another id` | the request names another `tether_id` than the token |
+| `409` | `token already used` | a token issued for a Tether ID was used by another uuid (or by this one, whose pin was removed since) |
+| `409` | `uuid is enrolled with another key`, `tether_id is pinned to another value`, `tether_id is enrolled with another key` | an admin must remove the pin first (`DELETE /api/admin/status/<uuid>`), or the device does it itself |
+| `413` | `body too large` | |
+| `429` | `too many requests`, `Retry-After: 60` | more than 30 new enrolments, refused tokens or unsigned enrolments per minute from one IP (IPv6: per /64). The same uuid and key again is never counted. |
+| `503` | `status enrollment needs ADMIN_PUB_KEY` | the relay has no admin key |
+| `503` | `status reporting is off`, `status store unavailable` | see above |
+| `507` | `too many devices (STATUS_MAX_DEVICES)` | the cap is reached; pins that exist are not affected |
+| `507` | `insufficient storage` | the data disk is nearly full |
+
+### Request signature `device-v1`
+
+Status requests from a device carry
+```
+Tether-Sig: device-v1 uuid=<uuid> host=<relay host> ts=<unix secs> nonce=<16-64 [A-Za-z0-9]> sig=<std base64 of the 64-byte signature>
+```
+The signed message has the layout of the admin v2 message under its own prefix:
+```
+tether-device-v1\n<host>\n<METHOD>\n<path with query>\n<ts>\n<nonce>\n<hex sha256 of the body>
+```
+`host` is `reqauth::host_of` of the relay's base URL (lower case, no scheme, port or path) and must
+be one of the relay's `RELAY_HOST` names. `METHOD` is upper case, `path` includes the query string
+(`/api/status`), the body hash covers the exact bytes sent (an empty body hashes zero bytes).
+`uuid` is not part of the message: the relay picks the key by it, and the body's `uuid` must equal
+it. Build it with `tether_trust::reqauth::sign_device_request(key, uuid, relay_base, method, path,
+body, ts)`. The relay allows ±300 s of clock skew and refuses a nonce it saw in the last 601 s.
+Device nonces are kept in memory only (not in `nonces.json`): `seq` must increase on every post,
+so a replay after a restart still fails unless it is newer than the last one the relay flushed.
+
+Every answer, whatever its status, carries the HTTP `Date` header. An agent can keep
+`offset = Date − local time` and sign with `ts = local now + offset`; a post answered
+`401 request timestamp outside allowed clock skew` shows the clock is off.
+
+### `POST /api/status` (device-signed)
+
+Body ≤ 65 536 bytes (`413` answered from `Content-Length` before the body is read), JSON, in one
+of two shapes: a **full report** and a **heartbeat** that leaves out `products`, `changes` and
+`body`. All fields and rules: [health.md](health.md#the-report-format). The relay never reads
+`body` beyond checking that it is a JSON object (it must be valid UTF-8); the file it stores is
+the bytes that were sent.
+
+Order of work, so that cheap refusals come first: off or locked (`503`), size (`413`), the header
+(its uuid must be valid before it is used), the per-uuid limit, the per-IP failure limit, the key
+lookup, the signature, and only then the body is parsed and the rules applied. A heartbeat writes
+no file, except that the first post naming a Tether ID for a device with neither an ID nor a claim
+(claims allowed) appends that claim to `keys.jsonl`, once per device. A full report is written and synced before the answer, and its `changes` are appended to
+the device's history.
+
+| Status | Body | Meaning |
+|---|---|---|
+| `200` | `{"releases":<u64>,"next":<u64>}`, plus `"sbom":true` when the relay takes software lists | accepted |
+| `400` | the reason: `report is not UTF-8`, a JSON error, a field rule (`next must be 60-3600`, `at most 50 faults`, `a full report has products, changes and body, a heartbeat none of them`, …), `uuid does not match the signature` | refused; the agent has a bug |
+| `401` | `missing signature`, `unsupported signature version`, `malformed signature header`, `unknown device`, `signature does not match`, `request timestamp outside allowed clock skew`, `request signed for another relay`, `replayed request`, `this relay does not know its own host name …` | not enrolled here, or the signature or clock is wrong |
+| `409` | `seq must increase` | `seq` is not above the last accepted one |
+| `409` | `send a full report` | a heartbeat without a stored full report: the next post must be a full one |
+| `409` | `tether_id is pinned to another value` | the report names another Tether ID than the device's (or, without one, than its claim); a report never sets or changes it. A device with neither: the ID becomes its claim (only once the report is accepted and stored), unless the device's link was dismissed (`no_claim`, also for its key under any uuid): then the field is ignored |
+| `413` | `body too large` | |
+| `429` | `report too frequent`, `Retry-After: <s>` | an accepted post from this uuid less than 60 s ago |
+| `429` | `too many refused reports`, `Retry-After: 60` | more than 10 correctly signed posts from this uuid that were refused with `400` or `409` in a minute |
+| `429` | `too many failed requests`, `Retry-After: 60` | more than 60 failed device signatures or unknown uuids per minute from this IP (IPv6: per /64) |
+| `503` | `status reporting is off`, `status store unavailable`, `busy` | back off |
+| `507` | `insufficient storage` | the data disk is nearly full |
+
+Only accepted posts count for the 60 s limit, so a post forged with a device's uuid cannot lock
+that device out; a signed post counts for the refused limit only after the signature checked out.
+
+`next` is `min(3600, max(300, ceil(enrolled / STATUS_TARGET_RPS)))` seconds, with `enrolled` the
+number of pins on this relay. It is the interval the device should follow: it spreads the devices
+over time, 10 posts per second by default. A device is **stale** when `now > last_seen + 3 × next`
+with the `next` it was last told; the relay computes that on read and keeps no timers. An agent
+should post at `next` with jitter over the interval, and on `429`, `503`, a timeout or a connection
+error back off exponentially from 60 s to 3600 s, honouring `Retry-After`, with one connection at a
+time. It may post a full report early after a change of state, but not twice within 60 s. A relay
+from before device status answers `404` to `/api/status` and `/api/status/enroll`: it cannot take
+reports, so the agent treats it like a relay that refused (enrolment there failed; post to another
+relay of its list) and tries it again with its normal backoff, as it may be updated later.
+
+`releases` is an opaque change hint for the monitor index ([below](#monitor-release-index-downloadchannelmonitorjson)):
+the sum of the serials of the stored `monitor.json` files over all channels. Compare it for
+inequality only; when it changes, fetch your channel's `monitor.json`. It is not the release
+generation of the heartbeat.
+
+### `DELETE /api/status` (device-signed, no body)
+
+Releases the device's pin and deletes its stored report, history and last-seen entry on this
+relay. `204`; the `401`, `429` and `503` answers are those of a post. An agent sends it to every
+relay on uninstall.
+
+### `PUT /api/status/sbom` (device-signed)
+
+The device's software list: any JSON object, at most `STATUS_SBOM_MAX_KB` KiB (default 512). The
+agent sends CycloneDX 1.6; the relay reads no field of it (with `STATUS_SOFTWARE_SEARCH=on` it
+reads the components' names, versions and publishers into a sidecar for the search, below), and a document that is valid JSON but
+deeply nested, or not CycloneDX, is stored as it is. It is written and synced as
+`status/<uuid>.sbom.json` before the `204`. The route exists only with `STATUS_SBOM=on`
+(operator: [health.md](health.md#the-software-list)); an agent uploads only to a relay whose answer
+to a post carries `"sbom":true`. A device may upload before its first report.
+
+Signed as a post (`Tether-Sig: device-v1`, over the host name, `PUT`, `/api/status/sbom`, the time,
+a nonce and the SHA-256 of the body). Order of work, cheapest first:
+
+1. `STATUS=off` (`503`), then the switch (`404`);
+2. `Content-Length` must be there (`411`) and at most `STATUS_SBOM_MAX_KB` KiB (`413`), both before
+   the body is read;
+3. a locked status store (`503`);
+4. the header (`401`), the per-IP failure limit (`429 too many failed requests`) and the key lookup
+   (`401 unknown device`, counted as a failure for the IP);
+5. one accepted upload per uuid per hour (`429 upload too frequent`), then the global budget
+   (`STATUS_SBOM_RPS`, default 2 per second, all devices; `429 busy`);
+6. the body, read for exactly the declared bytes (`400 request body incomplete` or
+   `400 could not read body`; either counts as a failure for the IP and gives the budget slot back);
+7. the signature (`401`; a refused request gives its budget slot back and counts as a failure for
+   the IP), then the check that the body is a JSON object (`400`; it uses the device's hour);
+8. the hour again (a second upload from the same device in the meantime), the total cap (`507`; it
+   uses the device's hour), the write; `204`.
+
+For `DELETE` the order is `STATUS=off` (`503`), the locked store (`503`) and then the signature
+checks of a post; `STATUS_SBOM` does not matter. For `GET /api/team/status/<uuid>/sbom` the `503` of an off
+or locked store comes before the `404`, as for every team route.
+
+The hash, the signature and the write happen outside the state lock.
+
+| Status | Body | Meaning |
+|---|---|---|
+| `204` | | stored (replaces the device's earlier list) |
+| `400` | `not a JSON object` | the body is not one JSON object (an array, a string, text, trailing data, empty). The signature was valid, so this uses the device's hour: its next `PUT` within the hour is `429 upload too frequent`, a replay of the same request too |
+| `400` | `request body incomplete`, `could not read body` | fewer bytes arrived than `Content-Length` declared, or the read failed. Counts as a failure for the sender's IP (60 a minute lead to `429 too many failed requests`) and gives the budget slot back. A body declared up to 1 KiB that is cut short may get no answer at all |
+| `401` | `missing signature`, `unsupported signature version`, `malformed signature header` | the header; answered before the body is read, not counted as a failure for the IP |
+| `401` | `unknown device` | not enrolled here; answered before the body is read, counted as a failure for the IP |
+| `401` | `signature does not match`, `request timestamp outside allowed clock skew`, `request signed for another relay`, `replayed request`, `this relay does not know its own host name …` | answered after the body was read; counted as a failure for the IP, and the budget slot goes back |
+| `401` | `unknown device` (after the body) | the device was removed (its pin released or deleted) while its upload was read or written; nothing is stored |
+| `404` | `not found` | `STATUS_SBOM` is not `on` |
+| `411` | `length required` | no `Content-Length` (a chunked body is refused) |
+| `413` | `body too large` | more than `STATUS_SBOM_MAX_KB` KiB |
+| `429` | `upload too frequent`, `Retry-After: <s>` | an accepted upload from this uuid, or one refused with `400 not a JSON object` or `507 sbom store full` after a valid signature, less than an hour ago (the seconds left; 60 while an upload from this uuid is being written, also when a second upload of the same device raced this one). A `DELETE` does not reset it (until the relay restarts, see below) |
+| `429` | `busy`, `Retry-After: 60` | more than `STATUS_SBOM_RPS` uploads in this second, all devices together. A request refused for its signature gives its slot back |
+| `429` | `too many failed requests`, `Retry-After: 60` | as for a post: 60 failed requests in a minute from this IP (IPv6: this /64): failed device signatures, unknown uuids and software lists whose body did not arrive. It is the same counter for every device-signed status route, so while it is tripped every status post, removal and upload from that address is refused until the minute is over |
+| `500` | `internal error` | the relay could not write, sync or rename the file (its journal has the error); nothing is stored and the device's hour is not used |
+| `503` | `status reporting is off`, `status store unavailable`, `busy` | back off |
+| `507` | `sbom store full (STATUS_SBOM_MAX_TOTAL_MB)` | the stored lists would exceed `STATUS_SBOM_MAX_TOTAL_MB`; a device that already has a list can still replace it with one that is not larger. Uses the device's hour |
+| `507` | `insufficient storage` | the data disk is nearly full (the relay's fault: uses no hour) |
+
+A `429` or `503` is retried with the agent's backoff, `413` not until the list changes.
+
+### `DELETE /api/status/sbom` (device-signed, no body)
+
+Deletes the device's list. `204`, also when it has none, and also while `STATUS_SBOM` is not `on`:
+a list stored while the feature was on is deleted then and does not come back when it is switched on
+again (a relay before this change answered `404` and kept it). The `401`, `429` (`too many failed
+requests`) and `503` answers are those of a post. The hour of
+`PUT` stays in force after it. For a device that has no document the hour is kept in memory only,
+so a restart of tether-api ends it.
+
+### `GET /api/team/status/<uuid>/sbom` (member-signed)
+
+Any member of the roster. The stored document byte for byte, `200` with `Content-Type:
+application/vnd.cyclonedx+json` and `ETag: "<16 hex>"`, the first 16 hex digits of its SHA-256
+(the `sha` of the summary entry). `If-None-Match` with that tag answers `304`. `404` when the device
+has no list, for an invalid uuid, one that is not enrolled, and while `STATUS_SBOM` is not `on`.
+`401` for a request that is not member-signed (a device key does not pass), `503` as for every
+status route. Treat the content as untrusted: it is whatever the device sent.
+
+### `GET /api/team/status/software?q=<text>[&v=<version prefix>]` (member-signed)
+
+Which hosts have a program installed, by their last uploaded software list. `q` and `v` are
+percent-encoded UTF-8 (a space `%20` or `+`); after decoding and trimming, `q` has 2 to 64
+characters and `v` at most 32, neither a control character nor a direction or zero-width mark
+(else `400`; also for a parameter other than one `q` and one `v`, a `%` not followed by two hex
+digits, and percent-encoded bytes that are not UTF-8). A host matches when a program of
+its list has a name or publisher that contains `q` and a version that starts with `v` (no `v`: any
+version). Both sides are compared lower-cased: ASCII letters as such, any other character by
+Unicode's lower-case mapping of that one character (Rust `char::to_lowercase`; no normalisation,
+so `é` written as `e` plus a combining accent does not match `é`, and no case folding: `ß` does not
+match `ss`). Everything is plain text: `.*`, quotes or `%` match only themselves.
+
+```json
+{"sbom":true,"built":1795000000,"hosts":[{"uuid":"…","name":"Google Chrome","version":"120.0.6099.71"}],"more":0,"pending":0,"partial":false}
+```
+
+- `hosts`: at most 2 000, in uuid order, each with the first matching program of its list (`name`
+  and `version` as the sidecar holds them, below). `uuid` is the device's uuid as in the summary.
+- `more`: matching hosts left out beyond the 2 000. `pending`: hosts for which the relay cannot
+  say whether they have the program: a list without a sidecar for it yet (stored before the switch
+  was on, until the scan has read it), a list that could not be read as a software list, and a list
+  cut at 5 000 programs where none of those kept matches. A client must not count these hosts as
+  having no match (a negated search leaves them out). `built`: when the
+  search ran (a cached answer keeps its time). `partial`: `true` when the search stopped at its time
+  budget (10 s) before it read every sidecar; such an answer is not cached, and a client must not
+  treat the hosts it lacks as having no match.
+- Only hosts in the member's customers are looked at: a host outside them is not read and counts
+  nowhere (not in `hosts`, `more` or `pending`), so its answer is the one for a program nobody has.
+- The answer is at most about 1 MB (2 000 hosts with names and versions at their bounds, every
+  character escaped: 2 000 x 483 bytes, 966 KB); one of 2 000 hosts with ordinary names under 200 KB.
+
+Order of checks: the member signature (`401`), `q` and `v` (`400`), a locked or off status store
+(`503`), the switch (`200 {"sbom":false,"hosts":[]}` exactly, so a client can tell "not on this
+relay" from `404`, which a relay without the relay update of release 0.7.0 answers; also when no signed team document is in
+force), the member's `sbom` (`403 this member may not read software lists`), one search at a time
+for the whole relay unless the answer is in the cache (`429 busy`, `Retry-After: 5`; it does not
+count against the member), 6 searches a minute per member key, cached answers included
+(`429 too many searches`, `Retry-After` the seconds left of that minute), then the cache (60 s per
+member scope, `q` and `v`: members of different customers never share an answer) or the search.
+Every request that passed the signature leaves one `search` record in the team audit log (above).
+
+A device uuid `software` is refused at enrolment (`400 bad uuid`): the search route has that path.
+
+The switch is `STATUS_SOFTWARE_SEARCH=on` (default off) and needs `STATUS_SBOM=on` and a signed
+team document in force **when tether-api starts** (the plain roster has no `sbom` permission and no
+customer scope to apply); otherwise it stays off, with one journal line
+`warning: STATUS_SOFTWARE_SEARCH=on needs …: software search stays off …`. A document published
+later takes effect at the next start.
+
+**Sidecars.** With the switch on, each stored list has a sidecar `status/<uuid>.sw`: one line
+`name<TAB>version<TAB>publisher` per entry of the document's top-level `components` that has a name
+or publisher, at most 5 000 lines, each field cut to 128, 64 and 128 bytes on a character boundary,
+control and direction characters removed; nothing else of the document (hardware properties,
+hashes, `purl`, the device component) is in it. A list with more entries gets a last line holding
+only the control character U+0001 after the 5 000; a document that is not such a list (not an
+object, `components` not an array, a field that is not a string, too deeply nested) gets a sidecar
+of that one line. A search that reaches that line without a match counts the host as `pending`.
+An object without `components` is a list without programs (an empty sidecar). Empty sidecars from
+a relay before this rule are rebuilt by the scan. It is written from the uploaded bytes after the list is synced,
+outside the state lock, as the document is parsed (no copy of it), with the list's modification
+time; a search uses a sidecar only when its time is the list's. It goes with the list (the device's
+`DELETE`, the device's removal by itself, an admin or a member, expiry); the start-up and hourly
+scan builds the missing ones (one at a time, 10 ms apart) and removes those without a list, and all
+of them while the switch is off.
+
+The search runs after the state lock is released, on the requesting worker: the in-scope devices are
+copied out 1 000 at a time and their sidecars read one at a time, so memory stays flat and device
+requests do not wait. `/metrics`: `tether_api_status_software_searches_total` (searches run, cache
+answers not counted), `tether_api_status_software_search_seconds_total` and `_max`.
+
+### `GET /api/team/status` (member-signed)
+
+Any member of the roster. The summary of every host that has a full report, sorted by uuid:
+```json
+{"built":1795000200,"hosts":[
+ {"uuid":"3f2a9c4e-0b1d-4e57-9d1a-6c2f8a7b5e10","tether_id":"123456789","claimed_id":null,"linked_at":1794999000,"no_claim":false,"customer":"4711","last_seen":1795000123,"next":300,"stale":false,
+  "host":"FRONT-DESK-1","agent":"0.1.0","overall":"crit",
+  "counts":{"ok":31,"warn":2,"crit":1,"unknown":3,"setup":1},
+  "products":[{"name":"Example App","version":"26.3.2","role":"server"}],
+  "faults":[{"id":"app/db-service","state":"crit","since":"2026-11-23T07:55:00Z"}]}]}
+```
+`tether_id` is the verified one (`null` when none), `claimed_id` the one the device claims and nobody
+confirmed yet (`null` when none; never both), `linked_at` when the verified link was made, `no_claim`
+`true` when a member dismissed its link (it claims nothing until a member allows a new claim),
+`customer` the customer reference an enrolment token set (`null` when none; a relay from before
+it sends no `customer` field), `linked_proof` `true` (only then present) when a grant with a Tether
+proof made the link; `last_seen` and `built` are the relay's unix time. An entry holds at most 8 products and 10 faults; when more were reported it also has
+`more_products` and `more_faults` with the number left out (the host's report has them all). The
+summary is rebuilt at most every 30 s from a snapshot and sent from `status/summary.json`, so
+`stale` is as of that build. Each build also writes `status/summary.json.gz`; a client whose
+`Accept-Encoding` lists `gzip` (the desktop does) gets that copy with `Content-Encoding: gzip`, any
+other the plain file exactly as before; both with `Vary: Accept-Encoding`. `ETag` is
+`W/"<16 hex>"` (weak: the same for both copies), the first 16 hex digits of a SHA-256 over what a
+technician sees: every entry without its `last_seen` and `next` (its `stale` is in it), and the window of the
+stale threshold the build falls in (build time divided by 3 × the relay's current `next`, rounded down to 15 minutes, so the pace changing with enrolments moves it only every 3 000 devices). So
+heartbeats of healthy devices keep the tag and `If-None-Match` answers `304` (the file is not
+opened); a host turning stale or reporting again changes it at the first build after; and the
+`last_seen` a client keeps from an earlier answer is at most one window (15 minutes up to 3 000
+devices, `3 × next` above) plus its polling interval old. `stale` is decided by the relay; a client
+must not compute it from `last_seen` and its own clock.
+With a signed team document each member scope (its customer patterns sorted without repeats, `*`
+alone when `*` is among them, and whether it has `sbom`) has its own summary file
+(`status/summary-<16 hex>.json`; the scope of every customer with `sbom` keeps `summary.json`), built
+only from that scope's hosts, with its own ETag; at most 2 001 scopes (one per possible member) and 256 MiB of them (plain files
+and gzip copies), least recently used dropped first, one build at a time for all scopes. A request
+whose scope has no file (its first build, or dropped by the 256 MiB bound) waits for a build; at
+most 4 such requests wait at once for the whole relay, each at most 5 s; any other, and a waiter
+whose 5 s are over, gets `503 status summary not ready` with `Retry-After: 5`. A scope without a
+file whose last build failed less than 30 s ago gets the same answer at once with `Retry-After: 30`
+(no build is tried before then). `If-None-Match: *`
+answers `304` when the scope has a summary.
+A host whose device has a software list (with `STATUS_SBOM=on`) also has `"sbom":{"at":<unix time>,"sha":"<16 hex>"}` (`at` is the modification time of the stored file, which is when it was uploaded), outside the 2 KiB entry; the list itself is
+`GET /api/team/status/<uuid>/sbom`.
+
+### `GET /api/team/status/<uuid>` (member-signed)
+
+```json
+{"uuid":"…","tether_id":"123456789","claimed_id":null,"enrolled":1794990000,"linked_by":"Anna Berger","linked_at":1794999000,"linked_token":null,"no_claim":false,"customer":"4711",
+ "last_seen":1795000123,"next":300,"stale":false,
+ "report":{…the last full report, byte for byte…},
+ "history":[{"id":"app/db-service","from":"ok","to":"crit","time":"2026-11-23T07:55:00Z","at":1795000100}]}
+```
+`report` is `null` before the first full report; `last_seen` and `next` are `null` for a device that
+never posted. `linked_by` and `linked_at` say who confirmed the Tether ID and when the link was
+made; for a link by a token issued for that ID `linked_by` is `null` and `linked_token` is that
+token's id. All three are `null` without a Tether ID. `linked_proof` is `true` (only then
+present) when a grant with a Tether proof made the link, also after a restart. `keys.jsonl` has no
+field for it (a relay of 0.6 locks its store on an unknown field there): it stores `linked_token` as
+`proof:<grant id>`, which this relay reads back as the grant id with `linked_proof`; a relay of 0.6
+shows that text as `linked_token`. `no_claim` is `true` after a member
+dismissed the link. `customer` is the customer reference, `null` when none. `history` is the state changes of the last 90 days, oldest first; `at` is the
+relay's time when the change was stored. `404` for an invalid uuid or one that is not enrolled.
+
+### Storage, limits and settings
+
+`/var/lib/tether-api/status/` (`0700`, files `0600`): `keys.jsonl` (the pins), `revoked.json`
+(revoked token ids with their expiry; unreadable, it locks the status routes like `keys.jsonl`), `<uuid>.json` (the
+last full report), `<uuid>.sbom.json` (the software list, with `STATUS_SBOM=on`; removed with the pin), `<uuid>.history.jsonl` (changes, appended; at most 2000 lines and 90 days, cut
+in the background), `seen.json` (last post of each device, flushed at most every 5 minutes), and
+`summary.json`. A pin without a post for 180 days (never posted: since enrolment) is removed with
+its files. `keys.jsonl` or `revoked.json` that cannot be read locks the status routes (503) until it is repaired or
+moved away and tether-api is restarted; the rest of the relay is not affected. Details and backup:
+[health.md](health.md#storage-and-backup).
+
+| Setting (`/etc/tether/api.env`) | Default | |
+|---|---|---|
+| `STATUS` | on | `off`: every route above answers `503 status reporting is off`, `Retry-After: 3600`; posts are refused before the body is read |
+| `STATUS_TARGET_RPS` | `10` | posts per second the devices are paced to (at least 1); sets `next` |
+| `STATUS_MAX_DEVICES` | `20000` | pins at most; more is `507`, existing pins keep working |
+| `HBBS_PEER_URL` | `http://127.0.0.1:21122` | hbbs health ports asked for an ID's key (enrolment with a grant), comma separated, tried in order; only `http://<host>:<port>`, an IPv6 address in brackets (`http://[::1]:21122`), no path, query or user name (hbbs's health port is plain HTTP; another form stops tether-api at start). Plain HTTP: point it only to loopback or a trusted private network, since whoever is on that path decides which ID a device is linked to; with several URLs the first answer with a key wins. `off`: grants answer `503 tether proof needs HBBS_PEER_URL`. hbbs answers only loopback and `PEER_LOOKUP_FROM` |
+| `STATUS_SBOM` | off | `on`: the software-list routes exist and the answer to a post says `"sbom":true`; otherwise `PUT /api/status/sbom` and `GET /api/team/status/<uuid>/sbom` answer `404`, while a device's `DELETE /api/status/sbom` still deletes (`204`). `STATUS=off` wins |
+| `STATUS_SBOM_MAX_KB` | `512` | largest software list in KiB; more is `413` |
+| `STATUS_SBOM_RPS` | `2` | software-list uploads taken per second, all devices (at least 1); more is `429 busy` |
+| `STATUS_SBOM_MAX_TOTAL_MB` | `2048` | sum of all stored lists in MiB; an upload that would exceed it is `507` |
+| `STATUS_SOFTWARE_SEARCH` | off | `on`: the software search and its sidecars, with `STATUS_SBOM=on` and a signed team document in force at start ([above](#get-apiteamstatussoftwareqtextvversion-prefix-member-signed)) |
+
+The team audit log's settings: [Team audit log](#team-audit-log).
+
+Metrics: `tether_api_status_hosts{state}`, `tether_api_status_write_errors`,
+`tether_api_status_sbom_files`, `tether_api_status_sbom_bytes`, and the request
+counters of the endpoints `status` and `team` ([monitoring.md](monitoring.md#tether-api-12700121120metrics)).
 
 ## Download layout and update manifests
 
@@ -362,6 +1212,44 @@ old format for them.
 - These builds skip a `packed` copy whose encoding they do not know (the index stays valid), so a
   later encoding needs no third file.
 
+### Monitor release index (`download/<channel>/monitor.json`)
+
+The device-status agent and its check packs have a signed index of their own, so that nothing a
+Tether client reads changes when they are published. It is the document, envelope, signature and
+rollout of the Tether index above (`tether-releases/1`, `Index::open_for`), with these differences:
+
+- The only keys are `monitor/windows-x86_64` and `monitor-packs/any`. `releases.json` and
+  `releases-v2.json` refuse these keys, and `monitor.json` refuses Tether's (`400`, the reason
+  from the index check). A Tether client never reads `monitor.json`.
+- Artifacts are `download/<channel>/monitor/windows-x86_64/tether-monitor-<version>.exe` and
+  `download/<channel>/monitor-packs/any/monitor-packs-<version>.json`, each with a `.sig`
+  (minisign, the updater key; the trusted comment names the file and the version). A pack version
+  passes the same version rule as Tether's (`2026.11.23`, `2026.11.23.2`). There are no packed
+  copies, and entries list relay URLs only (no CDN copy).
+- Upload, serial rule (`409` unless above the stored serial), `ETag: "<serial>"`, `304` on
+  `If-None-Match`, `Cache-Control: no-cache` and `404` when none: as for `releases.json`
+  (`PUT /api/admin/release/<channel>/monitor.json`, signed request). Caddy and nginx route
+  `GET /download/<channel>/monitor.json` to tether-api like the two Tether index files.
+- Uploading or deleting it does not move the release generation of the heartbeat. The sum of its
+  serials over all channels is the `releases` hint in the answers to status posts.
+- The agent verifies it the way Tether verifies its own: `release::Index::open_for(raw,
+  admin_keys, channel, release::MONITOR_APPS)`, `release::choose_for` for the cache and serial
+  floor, and each artifact's size, SHA-256 and signature before it is installed.
+- Release clean-up ([release-cleanup.md](release-cleanup.md)) reads `monitor.json` for the
+  `monitor` and `monitor-packs` folders and protects the versions it publishes.
+
+```json
+{"type":"tether-releases/1","channel":"stable","serial":3,"issued":1795000000,"expires":1797592000,
+ "releases":{
+  "monitor/windows-x86_64":{"version":"0.1.0","file":"tether-monitor-0.1.0.exe","size":4200000,
+    "sha256":"<64 lowercase hex>","signature":"<base64 of the .sig>",
+    "urls":["https://{relay}/download/stable/monitor/windows-x86_64/tether-monitor-0.1.0.exe"],
+    "notes":"","mandatory":false,"minimumVersion":"","forced":false,"security":false,
+    "rollout":{"start":1795000000,"steps":[[0,1],[3600,10],[21600,50],[86400,100]]},"halted":false},
+  "monitor-packs/any":{"version":"2026.11.23","file":"monitor-packs-2026.11.23.json","…":"same fields"}}}
+```
+Publishing it: [updates.md](updates.md#device-status-agent-monitorjson-and-enrolment-tokens).
+
 ## Custom apps (branded TetherQS downloads)
 
 A custom app is a signed `tether_trust::custom::CustomProfile` (id, name, accent colour, welcome
@@ -436,3 +1324,14 @@ Per-IP limits (heartbeats of new devices, audit posts, `/q/`, failed team signat
 client by its /64; an IPv4 client reported in the mapped form (`::ffff:a.b.c.d`) is counted as
 that IPv4 address. Device lists are written through a temp file, not a buffer; custom-app profiles
 stay on disk (`custom/<id>.json`). Every JSON write is temp file + rename; no database.
+
+Device status ([above](#device-status-health-reports)) is built so that it cannot starve the rest:
+a post is refused for size from `Content-Length` before its body is read (64 KiB; `STATUS=off`
+refuses before any read), and the cheap checks (header, 60 s per uuid, refused posts per uuid,
+failed signatures per IP, key lookup) come before the signature and the parse. Heartbeats touch no
+disk, apart from a device's first claim (one appended `keys.jsonl` line, once per device); a full report is written without the state lock held. `seen.json`, the team summary
+(rebuilt at most every 30 s, from a snapshot), the compaction of `keys.jsonl` and the trimming of
+history files run on a background thread or after the lock is released, so no request does work in
+proportion to the number of devices while holding it. Memory grows with the pins: each holds its
+key and a summary entry of at most 8 products and 10 faults, which is why `STATUS_MAX_DEVICES`
+defaults to 20 000, the size load-tested within `MemoryMax=64M` ([scaling.md](scaling.md)).

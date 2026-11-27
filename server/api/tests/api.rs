@@ -1104,7 +1104,13 @@ fn slow_uploads_leave_workers_for_heartbeats() {
     let (s, k) = admin_server();
     let p = "/api/admin/release/stable/technician/windows-x86_64/big.exe";
     let sig = reqauth::sign_request(&k, "PUT", p, b"", now());
-    let mut conns: Vec<TcpStream> = (0..40).map(|_| partial_upload(&s, "PUT", p, &[(reqauth::HEADER, &sig)], 100_000_000)).collect();
+    // Paced: 40 at the same instant can exceed MAX_WORKERS (32) on a slow machine, which answers a plain 503 "busy".
+    let mut conns: Vec<TcpStream> = (0..40)
+        .map(|_| {
+            std::thread::sleep(Duration::from_millis(10));
+            partial_upload(&s, "PUT", p, &[(reqauth::HEADER, &sig)], 100_000_000)
+        })
+        .collect();
     std::thread::sleep(Duration::from_millis(500));
     let refused: Vec<String> = conns.iter_mut().filter_map(|c| head_of(c, Duration::from_millis(1500))).collect();
     assert_eq!(refused.len(), 36, "{refused:?}");
@@ -1529,8 +1535,7 @@ fn release_upload_nonce_outlives_a_slow_replay() {
     assert_eq!(put(), 204);
     assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").status, 200);
     assert_eq!(put(), 401);
-    let nonces: std::collections::HashMap<String, u64> = serde_json::from_slice(&std::fs::read(s.dir.join("nonces.json")).unwrap()).unwrap();
-    let mut seen: Vec<u64> = nonces.values().map(|t| t.saturating_sub(now())).collect();
+    let mut seen: Vec<u64> = stored_nonces(&s.dir).iter().map(|(_, t)| t.saturating_sub(now())).collect();
     seen.sort_unstable();
     // The status request's nonce: now. The upload's: the body deadline (3260 s) and the skew later.
     assert!(seen.len() == 2 && seen[0] < 5 && (3500..3600).contains(&seen[1]), "{seen:?}");
@@ -1558,7 +1563,7 @@ fn audit_read_is_cut_with_a_header() {
 #[test]
 fn unsaved_nonces_do_not_stop_admin_requests() {
     let k = generate_key();
-    let s = start_env(&key_to_b64(&k.verifying_key()), &[], |d| std::fs::create_dir(d.join("nonces.json")).unwrap());
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[], |d| ["nonces.json", "nonces.log"].iter().for_each(|f| std::fs::create_dir(d.join(f)).unwrap()));
     let sig = reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now());
     assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 200);
     assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 401);
@@ -1574,5 +1579,264 @@ fn burst_of_connections_is_served() {
         c.write_all(b"GET /api/policy HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
         let got = head_of(c, Duration::from_secs(3)).unwrap_or_default();
         assert!(got.starts_with("HTTP/1.1 404"), "connection {i}: {got}");
+    }
+}
+
+/// The team audit log as an admin reads it.
+fn team_audit_records(s: &Srv, k: &SigningKey) -> Vec<serde_json::Value> {
+    let r = s.admin(k, "GET", "/api/admin/team-audit?limit=5000", b"");
+    assert_eq!(r.status, 200);
+    r.json()["records"].as_array().unwrap().clone()
+}
+
+#[test]
+fn every_admin_change_is_in_the_team_audit_log() {
+    let (s, k) = admin_server();
+    let kid = tether_trust::team::key_id(&k.verifying_key());
+    let rel = "/api/admin/release/stable/technician/windows-x86_64";
+    let tok = custom::new_token();
+    let member = generate_key();
+    let roster = serde_json::json!({"members": [{"name": "M", "key": key_to_b64(&member.verifying_key()), "write": false, "audit": true}]}).to_string();
+    let team = serde_json::json!({"team": envelope::sign(&serde_json::to_vec(&serde_json::json!({"serial": 3, "members": []})).unwrap(), &k)}).to_string();
+    // (method, path, body, event, detail, status)
+    let steps: Vec<(&str, String, Vec<u8>, &str, serde_json::Value, u16)> = vec![
+        ("PUT", "/api/admin/policy".into(), policy_doc(&k, r#"{"serial":7,"issued_at":1}"#), "policy-publish", serde_json::json!({"serial": 7}), 204),
+        ("PUT", "/api/admin/policy".into(), policy_doc(&k, r#"{"serial":6,"issued_at":1}"#), "policy-publish", serde_json::json!({"serial": 6}), 409),
+        ("PUT", "/api/admin/server-keys".into(), keys_doc(&k, 2, &[&key_to_b64(&generate_key().verifying_key())]), "server-keys-publish", serde_json::json!({"serial": 2}), 204),
+        ("PUT", "/api/admin/team".into(), roster.into_bytes(), "team-publish", serde_json::json!({"plain_roster": true, "members": 1}), 204),
+        ("PUT", "/api/admin/team".into(), team.into_bytes(), "team-publish", serde_json::json!({"serial": 3}), 204),
+        ("PUT", "/api/admin/download-page".into(), b"<p>x</p>".to_vec(), "download-page-publish", serde_json::json!({"bytes": 8}), 204),
+        ("POST", "/api/admin/diag-ticket".into(), br#"{"note":"n","ticket":"K7Q2M9XD"}"#.to_vec(), "diag-ticket", serde_json::json!({"ticket": "K7Q2M9XD"}), 200),
+        ("POST", "/api/admin/diag/K7Q2M9XD/close".into(), Vec::new(), "diag-close", serde_json::json!({"ticket": "K7Q2M9XD"}), 204),
+        ("DELETE", "/api/admin/diag/K7Q2M9XD".into(), Vec::new(), "diag-delete", serde_json::json!({"ticket": "K7Q2M9XD"}), 204),
+        ("PUT", "/api/admin/custom/acme-1".into(), custom_body(&k, "acme-1", "ACME", &tok, 2_000_000_000), "custom-app-publish", serde_json::json!({"id": "acme-1", "channel": "stable", "expires": 2_000_000_000u64}), 400),
+        ("DELETE", "/api/admin/custom/acme-1".into(), Vec::new(), "custom-app-delete", serde_json::json!({"id": "acme-1"}), 404),
+        ("PUT", format!("{rel}/Tether_0.5.24_x64-setup.exe"), b"exe".to_vec(), "release-upload", serde_json::json!({"path": "stable/technician/windows-x86_64/Tether_0.5.24_x64-setup.exe"}), 204),
+        ("PUT", "/api/admin/release/stable/releases.json".into(), index_doc(&k, "stable", 5), "release-index-publish", serde_json::json!({"channel": "stable", "file": "releases.json", "serial": 5, "expires": 2_000_000_000u64}), 204),
+        ("DELETE", format!("{rel}/Tether_0.5.24_x64-setup.exe"), Vec::new(), "release-delete", serde_json::json!({"path": "stable/technician/windows-x86_64/Tether_0.5.24_x64-setup.exe"}), 409),
+        ("POST", "/api/admin/releases/prune".into(), br#"{"dry_run":true}"#.to_vec(), "release-prune", serde_json::json!({"dry_run": true}), 200),
+    ];
+    for (m, p, b, _, _, code) in &steps {
+        assert_eq!(s.admin(&k, m, p, b).status, *code, "{m} {p}");
+    }
+    // Refused before the signature: nobody to name, nothing recorded.
+    assert_eq!(s.req("PUT", "/api/admin/policy", &[], &policy_doc(&k, r#"{"serial":9,"issued_at":1}"#)).status, 401);
+    let recs = team_audit_records(&s, &k);
+    let got: Vec<(&str, serde_json::Value, u64)> = recs.iter().map(|r| (r["event"].as_str().unwrap(), r["detail"].clone(), r["result"].as_u64().unwrap())).collect();
+    let want: Vec<(&str, serde_json::Value, u64)> = steps.iter().map(|(_, _, _, e, d, c)| (*e, d.clone(), *c as u64)).collect();
+    assert_eq!(got, want);
+    assert!(recs.iter().all(|r| r["actor"] == serde_json::json!({"key_fingerprint": kid, "name": "admin"})));
+    // Never a document's contents: the page, the roster's names and keys, the custom link.
+    let log: String = std::fs::read_dir(s.dir.join("team-audit")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl")).map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
+    for secret in ["<p>", &key_to_b64(&member.verifying_key()), &tok, "\"note\""] {
+        assert!(!log.contains(secret), "{secret} in the log");
+    }
+}
+
+/// The nonces on disk: `nonces.json` (the last full write) and the lines appended to `nonces.log` since.
+fn stored_nonces(dir: &std::path::Path) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = std::fs::read(dir.join("nonces.json")).ok().map(|b| serde_json::from_slice::<std::collections::HashMap<String, u64>>(&b).unwrap().into_iter().collect()).unwrap_or_default();
+    v.extend(std::fs::read_to_string(dir.join("nonces.log")).unwrap_or_default().lines().map(|l| serde_json::from_str::<(String, u64)>(l).unwrap()));
+    v
+}
+
+/// A signed request appends its nonce to `nonces.log` (synced before the answer) instead of
+/// rewriting the whole nonce map in `nonces.json`; a restart reads both.
+#[test]
+fn nonces_are_appended_not_rewritten() {
+    let (s, k) = admin_server();
+    let sigs: Vec<String> = (0..3).map(|_| reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now())).collect();
+    for sig in &sigs {
+        assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, sig)], b"").status, 200);
+    }
+    assert!(!s.dir.join("nonces.json").exists(), "the whole map is not rewritten per request");
+    assert_eq!(stored_nonces(&s.dir).len(), 3);
+    for sig in &sigs {
+        assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, sig)], b"").status, 401, "replay");
+    }
+}
+
+/// Past `NONCE_LOG_MAX` lines the whole map goes to `nonces.json` and the log starts again; a
+/// restart reads both.
+#[test]
+fn the_nonce_log_is_compacted_into_nonces_json() {
+    let k = generate_key();
+    let keys = key_to_b64(&k.verifying_key());
+    let s = start_env(&keys, &[("TETHER_TEST_NONCE_LOG_MAX", "2")], |_| {});
+    let sigs: Vec<String> = (0..4).map(|_| reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now())).collect();
+    let get = |s: &Srv, sig: &String| s.req("GET", "/api/admin/status", &[(reqauth::HEADER, sig)], b"").status;
+    for sig in &sigs[..3] {
+        assert_eq!(get(&s, sig), 200);
+    }
+    assert!(!s.dir.join("nonces.log").exists());
+    assert_eq!(stored_nonces(&s.dir).len(), 3, "all three in nonces.json");
+    assert_eq!(get(&s, &sigs[3]), 200);
+    assert_eq!(std::fs::read_to_string(s.dir.join("nonces.log")).unwrap().lines().count(), 1);
+    // Another relay on a copy of both files (as after a restart).
+    let s2 = start_env(&keys, &[], |d| {
+        for f in ["nonces.json", "nonces.log"] {
+            std::fs::copy(s.dir.join(f), d.join(f)).unwrap();
+        }
+    });
+    for sig in &sigs {
+        assert_eq!(get(&s2, sig), 401, "replay after a restart");
+    }
+}
+
+/// The nonce map has a hard bound: when it is full of nonces still inside the replay window, a
+/// new signed request is refused `503` with `Retry-After` rather than the map growing.
+#[test]
+fn the_nonce_map_is_bounded() {
+    let k = generate_key();
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[("TETHER_TEST_NONCES_MAX", "5")], |_| {});
+    for i in 0..5 {
+        assert_eq!(s.admin(&k, "GET", "/api/admin/status", b"").status, 200, "request {i}");
+    }
+    let r = s.admin(&k, "GET", "/api/admin/status", b"");
+    assert_eq!((r.status, r.header("Retry-After")), (503, Some("60")));
+    assert_eq!(stored_nonces(&s.dir).len(), 5);
+}
+
+/// Publishes a roster of members `(name, key)` with the admin key `k`.
+fn members(s: &Srv, k: &SigningKey, m: &[(&str, &SigningKey)]) {
+    let m: Vec<serde_json::Value> = m.iter().map(|(n, key)| serde_json::json!({"name": n, "key": key_to_b64(&key.verifying_key()), "write": false, "audit": false})).collect();
+    assert_eq!(s.admin(k, "PUT", "/api/admin/team", serde_json::json!({"members": m}).to_string().as_bytes()).status, 204);
+}
+
+/// `GET /api/team/me` signed by a member key, from source address `ip`.
+fn member_me(s: &Srv, key: &SigningKey, ip: &str) -> Reply {
+    let sig = reqauth::sign_request(key, "GET", "/api/team/me", b"", now());
+    s.req("GET", "/api/team/me", &[(reqauth::HEADER, &sig), ("X-Forwarded-For", ip)], b"")
+}
+
+/// A member key over its limit (120 a minute) is refused before its nonce is kept: it holds at
+/// most its share of the nonce map, and another member's request still gets through.
+#[test]
+fn one_member_key_holds_at_most_its_share_of_nonces() {
+    let k = generate_key();
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[("TETHER_TEST_NONCES_MAX", "200")], |_| {});
+    let (anna, ben) = (generate_key(), generate_key());
+    members(&s, &k, &[("Anna", &anna), ("Ben", &ben)]);
+    let codes: Vec<u16> = (0..300).map(|_| member_me(&s, &anna, "198.51.100.10").status).collect();
+    assert!(codes[..120].iter().all(|&c| c == 200) && codes[120..].iter().all(|&c| c == 429), "{codes:?}");
+    let n = stored_nonces(&s.dir).len();
+    assert!(n <= 121, "{n} nonces stored (120 of Anna's and the roster's)");
+    assert_eq!(member_me(&s, &ben, "198.51.100.10").status, 200);
+}
+
+/// One source address holds at most `NONCES_PER_IP` live nonces of member requests, whatever
+/// keys sign them: then `429` with `Retry-After`; another address is not affected.
+#[test]
+fn one_address_holds_at_most_its_share_of_nonces() {
+    let k = generate_key();
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[("TETHER_TEST_NONCES_PER_IP", "5")], |_| {});
+    let keys: Vec<SigningKey> = (0..3).map(|_| generate_key()).collect();
+    members(&s, &k, &[("A", &keys[0]), ("B", &keys[1]), ("C", &keys[2])]);
+    for i in 0..5 {
+        assert_eq!(member_me(&s, &keys[i % 3], "198.51.100.11").status, 200, "request {i}");
+    }
+    let r = member_me(&s, &keys[2], "198.51.100.11");
+    assert_eq!((r.status, r.header("Retry-After")), (429, Some("60")));
+    assert_eq!(member_me(&s, &keys[2], "198.51.100.12").status, 200, "another address");
+    assert_eq!(stored_nonces(&s.dir).len(), 7, "the roster's, five and one");
+}
+
+/// A restart reads the whole `nonces.log` (here 20 001 lines), not only its first lines.
+#[test]
+fn a_restart_reads_the_whole_nonce_log() {
+    let k = generate_key();
+    let keys = key_to_b64(&k.verifying_key());
+    let s = start_env(&keys, &[], |_| {});
+    let sig = reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now());
+    assert_eq!(s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 200);
+    let last = std::fs::read_to_string(s.dir.join("nonces.log")).unwrap();
+    let s2 = start_env(&keys, &[], |d| {
+        let t = now();
+        let mut log: String = (0..20_000).map(|i| format!("[\"filler{i:016}\",{t}]\n")).collect();
+        log.push_str(&last);
+        std::fs::write(d.join("nonces.log"), log).unwrap();
+    });
+    assert_eq!(s2.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status, 401, "the last line's nonce is a replay");
+}
+
+/// When `nonces.json` cannot be written, the nonces of the request that tried go to the log
+/// (which stays in force) instead of being lost for a restart.
+#[test]
+fn a_failed_compaction_keeps_the_nonces_in_the_log() {
+    let k = generate_key();
+    let keys = key_to_b64(&k.verifying_key());
+    let s = start_env(&keys, &[("TETHER_TEST_NONCE_LOG_MAX", "2")], |d| std::fs::create_dir(d.join("nonces.json")).unwrap());
+    let sigs: Vec<String> = (0..5).map(|_| reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now())).collect();
+    let get = |s: &Srv, sig: &String| s.req("GET", "/api/admin/status", &[(reqauth::HEADER, sig)], b"").status;
+    for sig in &sigs {
+        assert_eq!(get(&s, sig), 200);
+    }
+    let s2 = start_env(&keys, &[], |d| { std::fs::copy(s.dir.join("nonces.log"), d.join("nonces.log")).unwrap(); });
+    for (i, sig) in sigs.iter().enumerate() {
+        assert_eq!(get(&s2, sig), 401, "request {i} replayed after a restart");
+    }
+}
+
+/// A torn last line in `nonces.log` (a crash while appending) is ended at start, so the next
+/// nonce is not glued to it and is still refused after a restart.
+#[test]
+fn a_torn_nonce_log_line_does_not_swallow_the_next() {
+    let k = generate_key();
+    let keys = key_to_b64(&k.verifying_key());
+    let s = start_env(&keys, &[], |d| std::fs::write(d.join("nonces.log"), "[\"torn").unwrap());
+    let sig = reqauth::sign_request(&k, "GET", "/api/admin/status", b"", now());
+    let get = |s: &Srv| s.req("GET", "/api/admin/status", &[(reqauth::HEADER, &sig)], b"").status;
+    assert_eq!(get(&s), 200);
+    let s2 = start_env(&keys, &[], |d| { std::fs::copy(s.dir.join("nonces.log"), d.join("nonces.log")).unwrap(); });
+    assert_eq!(get(&s2), 401, "replay after a restart");
+}
+
+/// `GET /api/admin/devices` (heartbeats with addresses) is recorded, folded per actor and hour.
+#[test]
+fn the_admin_device_list_is_recorded() {
+    let (s, k) = admin_server();
+    for _ in 0..2 {
+        assert_eq!(s.admin(&k, "GET", "/api/admin/devices", b"").status, 200);
+    }
+    let recs: Vec<serde_json::Value> = team_audit_records(&s, &k).into_iter().filter(|r| r["event"] == "device-list").collect();
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    assert_eq!(recs[0]["actor"]["name"], "admin");
+}
+
+/// A release proposal's document is at most 64 KiB; the list keeps each document as stored and
+/// names a file that cannot be read by its id (it counts toward the limit), which DELETE removes.
+#[test]
+fn proposals_list_raw_documents_and_unreadable_files() {
+    let (s, k) = admin_server();
+    let put = |doc: serde_json::Value| s.admin(&k, "PUT", "/api/admin/proposals/release", serde_json::json!({"note": "n", "doc": doc}).to_string().as_bytes());
+    assert_eq!(put(serde_json::json!({"files": "x".repeat(70_000)})).status, 400);
+    let r = put(serde_json::json!({"serial": 3, "files": [{"name": "a.exe", "sha256": "ab"}], "z": 1.50}));
+    assert_eq!(r.status, 200);
+    let id = r.json()["id"].as_str().unwrap().to_owned();
+    std::fs::write(s.dir.join("proposals/release/0123456789abcdef.json"), b"{not json").unwrap();
+    let list = s.admin(&k, "GET", "/api/admin/proposals/release", b"").json();
+    let p = list["proposals"].as_array().unwrap();
+    assert_eq!(p.len(), 2, "{list}");
+    assert_eq!(p[0], serde_json::json!({"id": "0123456789abcdef", "unreadable": true}));
+    assert_eq!((p[1]["id"].as_str(), p[1]["doc"]["files"][0]["name"].as_str()), (Some(id.as_str()), Some("a.exe")));
+    assert_eq!(s.admin(&k, "DELETE", "/api/admin/proposals/release/0123456789abcdef", b"").status, 204);
+    assert_eq!(s.admin(&k, "DELETE", "/api/admin/proposals/release/0123456789abcdef", b"").status, 404);
+    assert_eq!(s.admin(&k, "GET", "/api/admin/proposals/release", b"").json()["proposals"].as_array().unwrap().len(), 1);
+}
+
+/// One proposal list and one team-audit read at a time relay-wide: another is `429` with `Retry-After`.
+#[test]
+fn one_proposal_list_and_one_team_audit_read_at_a_time() {
+    let k = generate_key();
+    let s = start_env(&key_to_b64(&k.verifying_key()), &[("TETHER_TEST_ADMIN_READ_PAUSE", "1500")], |_| {});
+    for (path, retry) in [("/api/admin/proposals/policy", "1"), ("/api/admin/team-audit?limit=10", "2")] {
+        std::thread::scope(|sc| {
+            let first = sc.spawn(|| s.admin(&k, "GET", path, b"").status);
+            std::thread::sleep(Duration::from_millis(500));
+            let r = s.admin(&k, "GET", path, b"");
+            assert_eq!((r.status, r.header("Retry-After")), (429, Some(retry)), "{path}");
+            assert_eq!(first.join().unwrap(), 200, "{path}");
+        });
+        assert_eq!(s.admin(&k, "GET", path, b"").status, 200, "{path} after the first");
     }
 }

@@ -13,8 +13,10 @@ installed clients.
 | Ports | **TCP 443** (Caddy → `/ws/id`, `/ws/relay`; what Tether clients use) and **TCP 80**. `install.sh` only opens port 80; the front end listens there and answers with a redirect to https. On the production relays a firewalld forward of 80 to 443 was added by hand (step 4 below), which is what serves TLS on port 80 for the fallback route in [connection-resilience.md](connection-resilience.md); `install.sh` does not add it (its comment says never to forward 80 to the TLS port). Legacy TCP 21115–21117 and UDP 21116 are still open for stock RustDesk clients and can be closed. |
 | Services | `tether-hbbs`, `tether-hbbr` (patched for WebSocket hosts), `tether-https` (Caddy, Let's Encrypt), `tether-api` (policy, heartbeats, releases, download page, diagnostics; `MemoryMax=64M`), `tether-ddns.timer` (systemd, enabled at boot) |
 | Admin key | `ADMIN_PUB_KEY` in `/etc/tether/api.env`: the public half of the Tether Manage admin key (comma-separated to trust several during a rotation). Without it the admin endpoints answer 503. |
+| Device status | Optional health reports from a monitoring agent ([health.md](health.md)); on by default, needs `ADMIN_PUB_KEY`. Settings in `/etc/tether/api.env`: `STATUS=off` switches it off (every status route answers 503), `STATUS_TARGET_RPS` (default 10 posts per second the devices are paced to), `STATUS_MAX_DEVICES` (default 20000; more needs a larger `MemoryMax` in `tether-api.service`, [scaling.md](scaling.md)). Data in `/var/lib/tether-api/status/`: back up `keys.jsonl` and `revoked.json` with the rest of `/var/lib/tether-api`. Without `keys.jsonl` every device has to enrol again; without `revoked.json` revoked enrolment tokens work again until they expire. The other files there are reports and caches. An unreadable `keys.jsonl` or `revoked.json` locks only the status routes (503) until it is repaired and tether-api restarted ([health.md](health.md#the-locked-state)). Deploy order before the first monitor publish, on every relay: the new tether-api binary first, then the proxy configuration (Caddyfile or nginx.conf, which sends `monitor.json` to tether-api) ([updates.md](updates.md#device-status-agent-monitorjson-and-enrolment-tokens)). Agents that Tether installs enrol with a Tether proof, which tether-api checks against hbbs (`HBBS_PEER_URL`, default `http://127.0.0.1:21122`, fits a relay where both run on one server): [below](#update-the-agent-through-tether-070). |
 | Download page | `https://tether-desk.duckdns.org/` (published from Tether Manage; files under `/var/lib/tether-api/download/<channel>/…`) |
 | Data | `/var/lib/tether` (key pair `id_ed25519` + peer DB). Back up `id_ed25519`; losing it means a key rotation ([key-rotation.md](key-rotation.md)). |
+| Several organisations | One deployment (relay, keys, roster, builds) per organisation whose technicians must not see another's machines: [several-organisations.md](several-organisations.md). |
 | Server key rotation | `/etc/tether/keys.env` (`KEYS_ACCEPT=<old public key>` while a new key signs), read by hbbs and hbbr; `server/rotate-key.sh switch|retire|rollback`. Steps: [key-rotation.md](key-rotation.md#operator-steps). |
 
 ## Cost
@@ -46,7 +48,7 @@ No other paid resources were created.
      with its ACME module instead (same routes, same unit name, 2.7× less memory per device);
      why and how to switch and back: [proxy-benchmark.md](proxy-benchmark.md). The switch also works
      on a fresh node, and `server.env` (which names the proxy the next run keeps) is written only
-     after the new proxy config passed its test. nginx sends `releases.json` and `releases-v2.json`
+     after the new proxy config passed its test. nginx sends `releases.json`, `releases-v2.json` and `monitor.json`
      to tether-api and has no `gzip_static`.
 5. Relay API (`tether-api`, 0.3.0+): binary at `/usr/local/bin/tether-api` (`install`, not `mv`,
    so SELinux labels are right), user `tether-api`, data in `/var/lib/tether-api` (0750; Caddy's
@@ -113,6 +115,10 @@ npx tauri build --bundles nsis           # apps/desktop (technician installer)
 # apps/quick: same env, `npx tauri build` -> TetherQS.exe (portable, no installer)
 ```
 
+A technician app for a second organisation that must install beside this one on the same PC is
+built with `TETHER_INSTANCE` and the `--config` of `scripts/instance-config.sh`
+([several-organisations.md](several-organisations.md#two-organisations-on-one-pc)).
+
 Release builds refuse to compile without the four values. They are stored as GitHub Actions
 secrets in `fnpanic/tether` for the macOS and Windows CI builds. After a server key rotation
 (phase 2 of [key-rotation.md](key-rotation.md)) set `TETHER_PUB_KEY` (secret and
@@ -162,7 +168,8 @@ Rolled out on 2026-11-10 to Oracle relay 2 (backup) and then Hetzner (primary), 
 `scripts/deploy-relay-update.sh` rolls it out, one relay at a time, the backup first (its `RELAYS` default names both nodes and their SSH keys):
 
 ```bash
-# from the PC, Git Bash, in C:\installemote-support
+# from the PC, Git Bash, in C:\install
+emote-support
 bash scripts/deploy-relay-update.sh            # HBBR=1 also replaces hbbr (ends relayed sessions on that node)
 ```
 
@@ -181,3 +188,45 @@ Relayed sessions keep running unless `HBBR=1`. The replaced files stay beside th
 After both relays: update Tether Manage and the apps, and when every Manage and technician app is
 updated set `TETHER_SIG_V1=off` in `/etc/tether/api.env` and restart tether-api
 ([management.md](management.md), [api.md](api.md)).
+
+## Update: the agent through Tether (0.7.0)
+
+Tether 0.7.0 can install the health monitoring agent itself ([health.md](health.md#installing-the-agent-through-tether)).
+The agent enrols with a grant from the policy and a Tether proof; tether-api asks hbbs for the
+key of the Tether ID (`GET /peer-pk/<id>` on hbbs's health port) and checks the proof against it.
+
+- **Settings.** tether-api: `HBBS_PEER_URL` (`/etc/tether/api.env`; default
+  `http://127.0.0.1:21122`, comma-separated for several hbbs, tried in order, 2 s for all; only
+  plain `http://<host>:<port>`, since hbbs's health port has no TLS: keep it on loopback or a trusted
+  private network; `off` refuses proof enrolments with `503 tether proof needs HBBS_PEER_URL`).
+  hbbs: `PEER_LOOKUP_FROM` (comma-separated CIDRs, default empty: loopback only; a bad entry stops
+  hbbs at start; the health port listens on IPv4 only). On these relays, where tether-api and hbbs
+  run on the same VM, the defaults work and nothing is set. Where tether-api runs elsewhere (for
+  example in Kubernetes, [kubernetes.md](kubernetes.md)), set both, and keep `PEER_LOOKUP_FROM` narrow:
+  anyone inside it can look up any ID's key.
+- **No proxy route.** Caddy and nginx forward only `/rendezvous/pubkey` to the health port;
+  `/peer-pk` must never be reachable from outside through a broader route on the same host, or
+  every outside caller would arrive as loopback.
+- **Order.** 1. Every relay: the relay update of release 0.7.0 (tether-api and hbbs;
+  `scripts/deploy-relay-update.sh` replaces both). A relay has it when `GET /api/team/config` answers
+  `200` or `404 no sign-in configured`, not `404 not found` (the version number tether-api reports,
+  for example in Manage's Home, is not the release number). 2. The agent 0.2.0 or later to
+  `monitor.json`. 3. Tether Manage and the apps 0.7.0. 4. Last the policy with `health.agent`. A relay
+  without the update refuses to store that policy (`400 unknown feature "health.agent"`), the grant and
+  the proof field; an hbbs without it answers `404` to every lookup (`409 tether id unknown to this
+  relay`). Details: [updates.md](updates.md#relay-deploy-notes).
+- **Rollback after a signed team document.** When a relay accepts the first signed team document
+  it deletes `team/roster.json` (the plain roster is never read again). tether-api 0.6 knows only
+  that file: rolled back to 0.6 after a signed document was published, the relay admits no member at
+  all. Before publishing the first signed team document, back up `/var/lib/tether-api/team/roster.json`
+  on every relay; to roll back, stop tether-api, put that copy back (owner `tether-api`, mode
+  `0600`), install 0.6 and start it. Members added since then are not in it.
+- **Rollback and used nonces.** This relay appends each signed request's nonce to
+  `/var/lib/tether-api/nonces.log` and writes the whole set to `nonces.json` only every 10 000 lines.
+  tether-api 0.6 reads only `nonces.json`: rolled back to 0.6, up to 10 000 recent signed requests
+  (those in the log) can be replayed for at most 601 s after they were made. To close that, wait
+  601 s after stopping tether-api before starting 0.6.
+- **Check.** On the relay, `curl -s localhost:21122/peer-pk/<a Tether ID registered there>` prints
+  the key; from another address the same request gets `404`.
+- **Not tried yet:** none of this has been deployed to these relays or run against a real
+  installation.

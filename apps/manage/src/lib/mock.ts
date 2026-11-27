@@ -21,6 +21,8 @@ const FEATURES: Feature[] = [
   f("policy.fast-apply", "policy", "Fast apply (check every minute)", "bool", "N"),
   f("customer.title", "customer", "Window title / company name", "text", "Tether Support", ["customer"]),
   f("customer.close-after-session", "customer", "Quit when the session ends", "bool", "N", ["customer"]),
+  f("health.agent", "health", "Monitoring agent installed and removed by Tether (Windows; manual: as before)", "choice", "manual", undefined, ["manual", "on-request", "install", "remove"]),
+  f("health.enrol-grant", "health", "Enrolment grant for agents Tether installs (set by Tether Manage)", "text", ""),
   f("customer.elevate", "customer", "Admin access for UAC prompts (Elevate button, technician requests)", "bool", "Y", ["customer"]),
 ];
 
@@ -191,10 +193,9 @@ let custom: any[] = [
   { id: "p0x7n2", name: "Praxis Weber", token: "UHJheGlzLVdlYmVyLXByZXZpZXctdG9rZW4tMDAwMDAy", expires: now + 86400 * 4, channel: "stable", created: now - 86400 * 26, downloads: 1, last_download: now - 86400 * 20, local: null },
 ];
 
-// Team roster (team_load / team_publish): relay 2 has not got Ben yet.
+// Team roster entries (the first team document below is made from them).
 const TEAM_A = { name: "Anna Berger", key: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", write: true, audit: true };
 const TEAM_B = { name: "Ben Kraus", key: "fe8A7xTX72RJlJypn8aBxG3NZHHxygCLPQqCWxbeev8=", write: false, audit: false };
-let team: Record<string, { members: unknown[] }> = { [R1]: { members: [TEAM_A, TEAM_B] }, [R2]: { members: [TEAM_A] } };
 
 // Server key rotation: relay 2 still serves the previous list.
 const SK_OLD = "fe8A7xTX72RJlJypn8aBxG3NZHHxygCLPQqCWxbeev8=";
@@ -202,6 +203,28 @@ let skRotation: Record<string, unknown> = {};
 let skList: { serial: number; keys: { key: string; expires?: number }[] } = { serial: 1, keys: [{ key: SK_OLD }] };
 // hbbs signs with the new key on R1 once its list was announced; R2 stays on the old key.
 const skLive = () => servers.map((s) => ({ server: s, reachable: true, verified: true, signing: s === R1 && skList.keys.length > 1 ? skList.keys[1].key : SK_OLD, ...(s === R2 && skList.serial > 1 ? { serial: skList.serial - 1, keys: [{ key: SK_OLD }] } : skList) }));
+
+// Staff sign-in (`?signin=auditor|operator|policy-editor|publisher|key-holder`): offered by the relays;
+// with the parameter the person is signed in with that Tether Manage role.
+const asRole = typeof location !== "undefined" ? new URLSearchParams(location.search).get("signin") : null;
+let signin: Record<string, unknown> = { offered: true, problem: null, busy: false, signed_in: !!asRole, note: null, alarm: null, relays: [], manage: asRole ? [asRole] : [], ...(asRole ? { name: "Erika Editor", upn: "erika@example.com", roles: [`Tether.Manage.${asRole}`], exp: now + 3600 } : {}) };
+const signedIn = (role: string) => ({ ...signin, busy: false, signed_in: true, name: "Erika Editor", upn: "erika@example.com", roles: [`Tether.Manage.${role}`], manage: [role], exp: now + 3600, note: null });
+
+// The signed team document (team_load / team_publish); relay 2 still has the plain roster.
+let teamDoc: any = { serial: 0, oidc: null, roles: {}, deny: [], oidc_only: false, members: [TEAM_A, TEAM_B].map((m) => ({ ...m, sbom: true, agent: true, customers: ["*"], service: false })) };
+let teamSigned = false;
+// Proposals per kind; one policy proposal by another editor.
+let proposals: Record<string, any[]> = {
+  policy: [{ kind: "policy", author: { key_fingerprint: "9f3a12b0c4d177e2", name: "Paul Planner", oid: "o-7", upn: "paul@example.com" }, created: now - 5400, note: "Clipboard back on for the front desk", serial: 4, doc: { ...JSON.parse(JSON.stringify(liveBundle)), profiles: { ...liveBundle.profiles, technician: { ...liveBundle.profiles.technician, "permission.clipboard": { state: "on" } } } }, ids: { [R1]: "0123456789abcdef", [R2]: "fedcba9876543210" }, relays: [R1, R2], stale: [] }],
+  team: [],
+  release: [],
+};
+const activity = [
+  { ts: now - 60, event: "sign-in", actor: { key_fingerprint: "1a2b3c4d5e6f7a8b", name: "Anna Berger", oid: "o-1", upn: "anna@example.com" }, ip: "84.12.9.20", detail: { roles: ["Tether.Technician"], exp: now + 3540 }, result: 200, relay: R1 },
+  { ts: now - 300, event: "report", actor: { key_fingerprint: "1a2b3c4d5e6f7a8b", name: "Anna Berger", oid: "o-1", upn: "anna@example.com" }, ip: "84.12.9.20", target: { uuid: "a1b2c3d4-0001", tether_id: "482019337", customer: "4711" }, result: 200, relay: R1 },
+  { ts: now - 900, event: "policy-publish", actor: { key_fingerprint: "8263ec9e95b73cab", name: "admin" }, ip: "84.12.9.1", detail: { serial: 4 }, result: 204, relay: R2 },
+  { ts: now - 1800, event: "search", actor: { key_fingerprint: "77aa00bb11cc22dd", name: "Ben Kraus" }, ip: "91.4.77.3", detail: { q: "acrobat", hits: 12 }, result: 200, relay: R2 },
+];
 
 /** Page templates saved in this preview session (page_template_*). */
 const templates: Record<string, string> = {};
@@ -216,7 +239,29 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       settings: { server: servers.join(", "), release_folder: "C:/install/remote-support/dist", page_title: "Remote support", page_intro: "Download Tether to get help from our support team." },
       servers,
       data_dir: "C:\\Users\\you\\AppData\\Roaming\\Tether-Manage",
+      signin,
     }),
+    signin_status: () => signin,
+    signin_start: () => (signin = signedIn("policy-editor")),
+    signin_cancel: () => (signin = { ...signin, busy: false, note: "Sign-in cancelled." }),
+    signin_out: () => (signin = { offered: true, problem: null, busy: false, signed_in: false, note: "Signed out.", alarm: null, relays: [], manage: [] }),
+    proposals_list: () => ({ proposals: proposals[a.kind] ?? [], failed: [] }),
+    proposal_put: () => {
+      const ids = Object.fromEntries(servers.map((s, i) => [s, `${String(i).repeat(8)}${Date.now().toString(16).slice(-8)}`]));
+      proposals[a.kind] = [...(proposals[a.kind] ?? []), { kind: a.kind, author: { key_fingerprint: "e1e2e3e4e5e6e7e8", name: "Erika Editor", oid: "o-9", upn: "erika@example.com" }, created: Math.floor(Date.now() / 1000), note: a.note, serial: a.doc?.serial, doc: a.doc, ids, relays: servers, stale: [] }];
+      return servers.map((s) => ok(s, { id: ids[s] }));
+    },
+    proposal_delete: () => {
+      for (const k of Object.keys(proposals)) proposals[k] = proposals[k].filter((p) => JSON.stringify(p.ids) !== JSON.stringify(a.ids));
+      return servers.map((s) => ok(s));
+    },
+    team_check: () => (a.doc.oidc_only && !a.doc.oidc ? (() => { throw new Error("oidc_only needs the oidc part (people sign in with it)"); })() : null),
+    team_activity: () => ({
+      records: activity.filter((r) => (!a.filter?.actor || r.actor?.name.includes(a.filter.actor)) && (!a.filter?.event || r.event === a.filter.event)),
+      relays: servers.map((s) => ({ server: s, ok: true, head: "ab".repeat(32), more: false, broken: s === R2 && new URLSearchParams(location.search).has("rewritten"), chain: s === R2 && new URLSearchParams(location.search).has("rewritten") ? "broken" : "ok", warnings: s === R2 && new URLSearchParams(location.search).has("rewritten") ? [`${s}: the log no longer continues from the point this PC last read (5d41402abc4b…): records were removed or rewritten since. Compare with a copy kept elsewhere (the relay's journal), then accept the new state.`] : [] })),
+    }),
+    team_activity_accept: () => null,
+    audit_export: () => null,
     keys_unlock: () => (a.passphrase === "wrong" ? (() => { throw new Error("Wrong passphrase, or the key file is damaged."); })() : (unlocked = true)),
     serverkeys_live: () => ({ relays: skLive(), rotation: skRotation }),
     serverkeys_rotation_set: () => (skRotation = a.rotation),
@@ -238,6 +283,16 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
     policy_draft: () => draft,
     policy_save_draft: () => (draft = a.bundle),
     policy_check: () => null,
+    grant_create: () => `mockgrant${Date.now()}`,
+    grant_revoke: () => servers.map((s) => ok(s, { note: "Grant revoked" })),
+    grants_revoke_pending: () => [],
+    grants_info: () => {
+      const layers: Record<string, unknown> = {};
+      const each = (k: string, l: Layer) => l["health.enrol-grant"]?.value && (layers[k] = { status: "valid", id: "0123456789abcdef0123456789abcdef", exp: now + 300 * 86400, customer: null, made_here: true, renew: false, why: null });
+      Object.entries(a.bundle.profiles as Record<string, Layer>).forEach(([p, l]) => each(`profile:${p}`, l));
+      Object.entries(a.bundle.groups as Record<string, { overrides: Layer }>).forEach(([g, x]) => each(`group:${g}`, x.overrides));
+      return { layers, pending: [], live_revoked: [] };
+    },
     policy_preview: () => resolve(a.bundle, a.profile, a.device),
     policy_diff: () => diff(a.from, a.to),
     policy_live: () => {
@@ -282,6 +337,7 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       { kind: "technician", platform: "darwin-universal", version: "0.5.1", file: "dist/macos/Tether_0.5.1_universal.app.tar.gz", published: "0.4.0", newer: true, problem: null },
       { kind: "technician", platform: "windows-x86_64", version: "0.5.1", file: "dist/windows/Tether_0.5.1_x64-setup.exe", published: "0.4.0", newer: true, problem: null },
     ],
+    file_hashes: () => (a.paths as string[]).map((p) => ({ name: p.split(/[\\/]/).pop(), sha256: "ab".repeat(32) })),
     release_publish: () => {
       if (uploading) {
         const p = (dir: string, server: string, file: string, sent: number, total: number, done = false) => ({ dir, version: "0.5.1", server, file, sent, total, done, error: null });
@@ -360,13 +416,11 @@ export async function mockInvoke<T>(cmd: string, a: any = {}): Promise<T> {
       custom = custom.filter((c) => c.id !== a.id);
       return servers.map((s) => ok(s));
     },
-    team_load: () => {
-      const first = team[servers[0]] ?? { members: [] };
-      return { roster: first, differ: servers.slice(1).filter((s) => JSON.stringify(team[s] ?? { members: [] }) !== JSON.stringify(first)), failed: [] };
-    },
+    team_load: () => ({ doc: teamDoc, signed: teamSigned, differ: teamSigned ? [] : [R2], failed: [] }),
     team_publish: () => {
-      servers.forEach((s) => (team[s] = a.roster));
-      return servers.map((s) => ok(s));
+      teamDoc = { ...a.doc, serial: teamDoc.serial + 1 };
+      teamSigned = true;
+      return { serial: teamDoc.serial, relays: servers.map((s) => ok(s)) };
     },
     diag_list: () => {
       const all = admin["/api/admin/diag"] as { state: string }[];

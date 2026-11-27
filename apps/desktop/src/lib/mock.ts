@@ -20,6 +20,25 @@ let fleetCache: Promise<import("./mock-fleet").Fleet> | null = null;
 const fleet = () => (fleetCache ??= import("./mock-fleet").then((m) => m.fleet()));
 const team = { rev: 0, doc: null as unknown, by: "", at: 0 };
 
+// Staff sign-in (`?signin=offered|alarm|noroles`; none: no relay offers it). `?perm=sbom,agent,write,audit`:
+// what the signed-in person (or, without sign-in, the roster key) may do; default: everything.
+const signin = { signed: false, note: null as string | null };
+const q = (k: string) => new URLSearchParams(location.search).get(k);
+function perms() {
+  const p = q("perm");
+  const has = (x: string) => p === null || p.split(",").includes(x);
+  return { write: has("write") && q("team") !== "ro", audit: has("audit"), sbom: has("sbom"), agent: has("agent") };
+}
+function signinState() {
+  const mode = q("signin");
+  if (!mode) return { offered: false, busy: false, signed_in: false, relays: [] };
+  const relays = signin.signed ? [{ relay: "relay.example.com", ok: true, text: "Signed in." }, mode === "alarm" ? { relay: "relay2.example.com", ok: false, text: "This sign-in was already used at relay2.example.com: someone may have your sign-in. Sign out and tell your administrator." } : { relay: "relay2.example.com", ok: true, text: "Signed in." }] : [];
+  const s = { offered: true, busy: false, signed_in: signin.signed, relays, note: signin.note, alarm: signin.signed && mode === "alarm" ? relays[1].text : null };
+  if (!signin.signed) return s;
+  const roles = ["Tether.Technician", ...(perms().sbom ? ["Tether.Software"] : []), ...(perms().agent ? ["Tether.Agent"] : [])];
+  return { ...s, name: "Software Technician", upn: "software@tether.test", roles, exp: Math.floor(Date.now() / 1000) + 3600, customers: ["*"], ...perms() };
+}
+
 function emit(event: string, name: string, payload: unknown) {
   for (const cb of listeners[event] ?? []) cb({ name, payload });
 }
@@ -135,11 +154,55 @@ export const mock = {
       case "team_identity":
         return { key: "q2o5n0d6m7m3l1k8p4g2b7r9x0c5v8z1a3s6d9f2g4h=", fingerprint: "9F3A-12B0-C4D1-77E2" } as T;
       case "team_me":
+        if (signin.signed) return { name: "Software Technician", ...perms(), customers: ["*"], service: false } as T;
         if (new URLSearchParams(location.search).get("team") === "none") throw "not-member: This app is not in your organisation's team. Send its key to your administrator.";
         // `?team=ro`: a member without write permission.
-        return { name: "Anna (Helpdesk)", write: new URLSearchParams(location.search).get("team") !== "ro", audit: true } as T;
+        return { name: "Anna (Helpdesk)", write: new URLSearchParams(location.search).get("team") !== "ro", audit: true, ...(q("perm") === null ? {} : { sbom: perms().sbom, agent: perms().agent }) } as T;
+      case "team_permissions":
+        return { signed_in: signin.signed, ...perms() } as T;
+      case "team_audit_export":
+        return undefined as T;
+      case "team_signin_status":
+        return signinState() as T;
+      case "team_sign_in":
+        await new Promise((r) => setTimeout(r, 300));
+        if (q("signin") === "noroles") {
+          signin.note = "relay.example.com: Your account has no Tether role. Ask your administrator to assign one. · relay2.example.com: Your account has no Tether role. Ask your administrator to assign one.";
+          throw signin.note;
+        }
+        Object.assign(signin, { signed: true, note: null });
+        return signinState() as T;
+      case "team_sign_out":
+        Object.assign(signin, { signed: false, note: "Signed out." });
+        return signinState() as T;
+      case "team_signin_cancel":
+        return signinState() as T;
       case "team_devices":
         return (await fleet()).org as T;
+      case "team_status":
+        return [
+          { relay: "relay.example.com", hosts: (await fleet()).status },
+          { relay: "relay2.example.com", hosts: (await fleet()).second },
+        ] as T;
+      case "team_status_host":
+        return (await fleet()).report(String(a.uuid)) as T;
+      case "team_status_sbom":
+        return (await fleet()).sbom(String(a.uuid)) as T;
+      case "team_status_software":
+        return (await fleet()).software(String(a.relay), String(a.q), String(a.v ?? "")) as T;
+      case "team_status_find": {
+        const f = await fleet();
+        const all = [...f.status.map((s) => ({ ...s, relay: "relay.example.com" })), ...f.second.map((s) => ({ ...s, relay: "relay2.example.com" }))];
+        return all.filter((x) => x.tether_id === a.id) as T;
+      }
+      case "team_status_link":
+        return (await fleet()).link(String(a.uuid), String(a.tetherId)) as T;
+      case "team_status_unlink":
+        return (await fleet()).unlink(String(a.uuid)) as T;
+      case "team_status_allow_claim":
+        return (await fleet()).allowClaim(String(a.uuid)) as T;
+      case "team_status_remove":
+        return (await fleet()).remove(String(a.uuid)) as T;
       case "team_tags_get":
         return { rev: team.rev, doc: team.doc, updated_by: team.by, updated_at: team.at } as T;
       case "team_tags_put":
@@ -157,6 +220,32 @@ export const mock = {
           { ts: t - 86400 * 3, action: "login", id: a.device, peer_id: "402118736", peer_name: "ben", conn_type: "file_transfer", ip: "203.0.113.20" },
         ] as T;
       }
+      case "session_agent":
+      case "health_agent_status": {
+        // `?agent=<state>`: what the (remote, or for Settings this) computer answers to `status`;
+        // install and remove succeed after a moment. Without it Settings shows no agent line.
+        const want = new URLSearchParams(location.search).get("agent");
+        if (cmd === "health_agent_status" && !want) throw "unknown command";
+        const t = Math.floor(Date.now() / 1000);
+        await new Promise((r) => setTimeout(r, a.action === "status" || !a.action ? 300 : 1200));
+        if (a.action === "install") return { state: "installed", version: "0.2.0", installed_by: "session", detail: "installed 0.2.0, service running, linked to Tether ID 731204986 by proof", at: t } as T;
+        if (a.action === "remove") return { state: "removed-by-tether", version: "", installed_by: "session", detail: "removed", at: t } as T;
+        const st = want ?? "not-installed";
+        // The host's own reasons (agent_elevated.rs) for the states whose detail the dialog shows as its added line.
+        const detail: Record<string, string> = {
+          failed: "download refused: the file does not match the signed index",
+          "not-allowed": "Windows would not ask for confirmation on this computer; the person at the computer can install it there.",
+          busy: "The person at the computer said no a moment ago; ask again in 7 minutes.",
+        };
+        return { state: st, version: st.startsWith("installed") ? "0.2.0" : "", installed_by: st === "installed" ? "policy" : "", detail: Object.hasOwn(detail, st) ? detail[st] : "", at: st === "not-installed" ? 0 : t - 3 * 86400 } as T;
+      }
+      // `?agentcard=1`: the home view's Install card (policy install, Tether without its service);
+      // Install… ends as if the person declined the prompt.
+      case "health_agent_offer":
+        return (new URLSearchParams(location.search).get("agentcard") === "1") as T;
+      case "health_agent_install":
+        await new Promise((r) => setTimeout(r, 800));
+        return { state: "not-installed", version: "", installed_by: "", detail: "Administrator approval was not given (declined, or no administrator's name and password).", at: 0 } as T;
       case "session_keyboard":
         return { dir: "pc-mac", shortcuts: true, system_keys: true, alt_tab_remote: false, hook: true } as T;
       case "fs_home_dir":

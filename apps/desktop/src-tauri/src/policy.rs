@@ -377,17 +377,29 @@ fn apply_core(eff: &Effective, applied: &mut Vec<String>) {
 }
 
 /// GPO/MDM layer: a `Layer` JSON in `HKLM\SOFTWARE\Policies\Tether` `PolicyJson` (REG_SZ) or
-/// `/Library/Managed Preferences/net.tether.app.plist` key `PolicyJson`.
+/// `/Library/Managed Preferences/net.tether.app.plist` key `PolicyJson`. An instance build
+/// (`TETHER_INSTANCE`) reads `…\Policies\Tether-<i>` and `net.tether.app.<i>`.
 fn machine_layer() -> Option<Layer> {
     let raw = machine_json()?;
     serde_json::from_str(&raw).map_err(|e| log::error!("machine policy ignored: {e}")).ok()
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) const MACHINE_POLICY_KEY: &str = concat!("SOFTWARE\\Policies\\", env!("TETHER_APP_NAME"));
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn managed_preferences_domain() -> String {
+    match env!("TETHER_INSTANCE") {
+        "" => "net.tether.app".to_owned(),
+        i => format!("net.tether.app.{i}"),
+    }
 }
 
 #[cfg(windows)]
 fn machine_json() -> Option<String> {
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
     let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
-    let (key, name) = (wide("SOFTWARE\\Policies\\Tether"), wide("PolicyJson"));
+    let (key, name) = (wide(MACHINE_POLICY_KEY), wide("PolicyJson"));
     unsafe {
         let mut size = 0u32;
         let get = |buf: *mut std::ffi::c_void, size: &mut u32| {
@@ -410,7 +422,7 @@ fn machine_json() -> Option<String> {
     // shortcut: reads via `defaults`, no plist crate; fine for one string key. Upgrade (plist crate
     // or CFPreferences) when a second managed key or a non-string value is read.
     let out = std::process::Command::new("/usr/bin/defaults")
-        .args(["read", "/Library/Managed Preferences/net.tether.app", "PolicyJson"])
+        .args(["read", format!("/Library/Managed Preferences/{}", managed_preferences_domain()).as_str(), "PolicyJson"])
         .output()
         .ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
@@ -663,6 +675,11 @@ pub fn start(ui: bool) {
             Ok(_) => {}
             Err(e) => log::info!("policy check: {e}"),
         }
+        // The health agent: inert unless the policy asks and this is the LocalSystem service.
+        if !ui {
+            let eff = effective();
+            std::thread::spawn(move || crate::agent::tick(&eff, api_now()));
+        }
         // Dev builds without admin keys stay out of the production device list.
         if ui && ADMIN_KEYS.is_some_and(|k| !k.trim().is_empty()) {
             heartbeat();
@@ -678,6 +695,28 @@ pub fn start(ui: bool) {
 mod tests {
     use super::*;
     use tether_trust::policy::{Group, Rule, State as S};
+
+    #[test]
+    fn machine_policy_names_follow_the_app_name() {
+        assert_eq!(MACHINE_POLICY_KEY, format!("SOFTWARE\\Policies\\{}", crate::APP_NAME));
+        match env!("TETHER_INSTANCE") {
+            "" => {
+                assert_eq!(MACHINE_POLICY_KEY, "SOFTWARE\\Policies\\Tether");
+                assert_eq!(managed_preferences_domain(), "net.tether.app");
+                // The generated docs/policy.md text is today's, byte for byte.
+                assert!(render_doc().contains(
+                    "(`HKLM\\SOFTWARE\\Policies\\Tether` REG_SZ `PolicyJson`, or \
+                     `/Library/Managed Preferences/net.tether.app.plist` key `PolicyJson`,"
+                ));
+            }
+            i => {
+                assert_eq!(managed_preferences_domain(), format!("net.tether.app.{i}"));
+                let doc = render_doc();
+                assert!(doc.contains(&format!("`HKLM\\SOFTWARE\\Policies\\Tether-{i}` REG_SZ")));
+                assert!(doc.contains(&format!("`/Library/Managed Preferences/net.tether.app.{i}.plist`")));
+            }
+        }
+    }
 
     fn bundle_locking_everything() -> Bundle {
         let layer: Layer = FEATURES
@@ -837,7 +876,10 @@ mod tests {
              `/Library/Managed Preferences/net.tether.app.plist` key `PolicyJson`, both a `Layer` JSON such as \
              `{\"connect.outgoing\":{\"state\":\"off\"}}`). Core options in `FLOOR` (TLS, encryption, 443-only \
              networking, no silent recording) can never be set by policy.\n\n",
-        );
+        )
+        // An instance build (TETHER_INSTANCE) reads its own key and domain.
+        .replace("HKLM\\SOFTWARE\\Policies\\Tether", &format!("HKLM\\{MACHINE_POLICY_KEY}"))
+        .replace("net.tether.app.plist", &format!("{}.plist", managed_preferences_domain()));
         s.push_str("| Feature | Area | Description | Default | Profiles | Core option |\n| --- | --- | --- | --- | --- | --- |\n");
         for f in FEATURES {
             let def = if f.default.is_empty() { "–".to_owned() } else { format!("`{}`", f.default) };

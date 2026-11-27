@@ -1,7 +1,7 @@
 // Small pieces of the Advanced mode UI: tag chips, key hints, status dots, the tag input.
 import { useMemo, useRef, useState, type ReactNode } from "react";
-import { X } from "lucide-react";
-import { normTag, tagColor, type Online, type Store } from "../../lib/hosts/model";
+import { ChevronDown, ChevronRight, CircleCheck, CircleDashed, CircleDot, CircleX, Minus, TriangleAlert, Unlink2, X } from "lucide-react";
+import { normTag, tagColor, type HealthState, type Online, type Store } from "../../lib/hosts/model";
 
 export function TagDot({ tag, meta, size = 7 }: { tag: string; meta: Store["tags"]; size?: number }) {
   return <span aria-hidden className="inline-block shrink-0 rounded-full" style={{ width: size, height: size, background: `var(--tag-${tagColor(tag, meta)})` }} />;
@@ -47,6 +47,21 @@ export function Kbd({ children }: { children: ReactNode }) {
 export function OnlineDot({ s }: { s: Online }) {
   const [c, t] = s === "on" ? ["bg-ok", "Online"] : s === "off" ? ["bg-faint", "Offline"] : ["border border-faint", "Status unknown"];
   return <span role="img" aria-label={t} title={t} className={`inline-block h-2 w-2 shrink-0 rounded-full ${c}`} />;
+}
+
+/** Health of a row: shape and colour differ per state, and the label names it (never colour alone). */
+export const HEALTH_LABEL: Record<HealthState, string> = { crit: "Critical", warn: "Warning", stale: "Not reporting", setup: "Setup needed", ok: "OK", none: "No agent", conflict: "Link conflict" };
+const HEALTH_ICON = { crit: [CircleX, "text-danger"], warn: [TriangleAlert, "text-warn"], stale: [CircleDashed, "text-muted"], setup: [CircleDot, "text-muted"], ok: [CircleCheck, "text-ok"], none: [Minus, "text-faint"], conflict: [Unlink2, "text-danger"] } as const;
+
+/** `label`: another name for the same shape (a single check's state); "" when the control around it is named. */
+export function HealthDot({ s, size = 13, label }: { s: HealthState; size?: number; label?: string }) {
+  const [Icon, c] = HEALTH_ICON[s];
+  const t = label ?? `Health: ${HEALTH_LABEL[s]}`;
+  return (
+    <span {...(t ? { role: "img", "aria-label": t, title: t } : { "aria-hidden": true })} className={`inline-grid shrink-0 place-items-center ${c}`}>
+      <Icon size={size} strokeWidth={2.25} aria-hidden />
+    </span>
+  );
 }
 
 export function ago(t: number, now = Date.now() / 1000): string {
@@ -133,3 +148,17 @@ export function TagInput({ known, onAdd, placeholder = "Add tag", autoFocus, inp
     </div>
   );
 }
+
+/** A fold header: a button with a chevron, the label and, at the right, `extra`. */
+export function Fold({ label, open, onToggle, extra }: { label: string; open: boolean; onToggle: () => void; extra?: ReactNode }) {
+  return (
+    <button type="button" aria-expanded={open} onClick={onToggle} className="flex h-7 w-full items-center gap-1 rounded-md text-left text-footnote text-muted hover:text-ink">
+      {open ? <ChevronDown size={12} aria-hidden /> : <ChevronRight size={12} aria-hidden />}
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {extra}
+    </button>
+  );
+}
+
+/** A unix time as a medium local date and short time; "" for none. */
+export const day = (t: number | null | undefined) => (t ? new Date(t * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "");

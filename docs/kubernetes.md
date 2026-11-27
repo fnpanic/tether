@@ -71,6 +71,17 @@ Pods run as non-root (65532) with a read-only root filesystem, all capabilities 
 keeps `NET_BIND_SERVICE`, which its binary needs to start) and RuntimeDefault seccomp.
 Probes: `/readyz` (readiness, every 2 s) and `/healthz` (liveness) on the health ports
 21121/21122. Pods prefer to spread over nodes (soft anti-affinity).
+hbbs answers `/peer-pk/<id>` (the key it holds for an ID, read by tether-api for a Tether proof
+enrolment) only to loopback and to `PEER_LOOKUP_FROM` (comma-separated CIDRs, unset in the chart):
+tether-api runs in its own pod here, so set `PEER_LOOKUP_FROM` to the api pods' range for that
+enrolment, and keep it narrow, since anyone inside it can look up any ID's key. tether-api asks
+`HBBS_PEER_URL` (default `http://127.0.0.1:21122`, not set in the chart): point it at the hbbs
+pods' health port, several comma separated ([api.md](api.md#storage-limits-and-settings)); the first
+answer with a key wins. It is plain HTTP: keep that path on loopback or a trusted private network,
+since whoever can answer on it decides which ID a device is linked to. hbbs answers `404` to a relay
+outside `PEER_LOOKUP_FROM`, so a range that misses the api pods shows as `409 tether id unknown to
+this relay` on every such enrolment. The health port listens on IPv4 only, so an IPv6 range in
+`PEER_LOOKUP_FROM` never matches.
 
 The WebSocket ports (hbbs 21118, hbbr 21119) listen on 127.0.0.1 by default (`WS_BIND`), because
 hbbs and hbbr take the client IP from `X-Forwarded-For`/`X-Real-IP`. The proxy runs in its own pod

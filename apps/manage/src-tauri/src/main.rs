@@ -1,12 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod activity;
 mod api;
 mod cdn;
 mod diag;
+mod grants;
 mod keys;
 mod live;
 mod private;
+mod proposals;
 mod release;
+mod signin;
+// The desktop's staff sign-in (OpenID Connect), shared: it calls `crate::policy` and `crate::team`
+// (signin.rs) and is built for Manage with cfg `tether_manage` (build.rs).
+#[path = "../../../desktop/src-tauri/src/oidc.rs"]
+#[allow(dead_code)]
+mod oidc;
 
 use keys::Keys;
 use serde::{Deserialize, Serialize};
@@ -18,9 +27,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tether_trust::custom::{self, CustomProfile};
-use tether_trust::policy::{self, Bundle, Effective, Layer};
+use signin::{policy, team};
+use tether_trust::policy::{Bundle, Effective, Layer};
 use tether_trust::serverkeys::{KeyList, ServerKey};
-use tether_trust::team::Roster;
+use tether_trust::team::{Roster, TeamDoc, TeamMember};
 use tether_trust::{envelope, SigningKey, VerifyingKey};
 
 const DEFAULT_SERVER: &str = "https://tether-desk.duckdns.org";
@@ -71,21 +81,43 @@ impl App {
     /// Every relay node, in order (setting "server" may be a comma-separated list; see
     /// docs/relay-ha.md). The first one is used for reads.
     fn servers(&self) -> Vec<String> {
-        let list = self.settings()["server"].as_str().unwrap_or(DEFAULT_SERVER).to_owned();
-        let v: Vec<String> = list.split(',').map(|s| s.trim().trim_end_matches('/').to_owned()).filter(|s| !s.is_empty()).collect();
-        if v.is_empty() { vec![DEFAULT_SERVER.to_owned()] } else { v }
+        servers_in(&self.dir)
     }
+    /// The vault's admin key: everything that signs a document or an admin request as the admin.
+    /// While a person is signed in, only with the KeyHolder role (design 12.4); without sign-in
+    /// (vault only, the break-glass path) as before. The roles are asked from the relays now
+    /// (signin::signing_roles), not taken from the last renewal.
     fn admin_key(&self) -> R<SigningKey> {
-        self.keys.lock().unwrap().as_ref().map(|k| k.admin.clone()).ok_or_else(|| "Unlock the keys first.".to_owned())
+        let k = self.keys.lock().unwrap().as_ref().map(|k| k.admin.clone()).ok_or_else(|| "Unlock the keys first.".to_owned())?;
+        let roles = signin::signing_roles();
+        may_sign(roles.is_some(), &roles.unwrap_or_default())?;
+        Ok(k)
+    }
+    /// The key admin requests are signed with: the vault's admin key, else the sign-in session's
+    /// (the relay then allows what the person's Tether Manage role allows).
+    fn request_key(&self) -> R<SigningKey> {
+        match self.admin_key() {
+            Ok(k) => Ok(k),
+            Err(_) if oidc::signed_in() => Ok(signin::SESSION_KEY.clone()),
+            Err(e) => Err(e),
+        }
+    }
+    /// The admin keys live documents are verified with: the vault's, else the compiled-in ones and
+    /// the vault key remembered on this PC.
+    fn verify_keys(&self) -> Vec<VerifyingKey> {
+        match self.keys.lock().unwrap().as_ref() {
+            Some(k) => vec![k.admin.verifying_key()],
+            None => policy::admin_keys(),
+        }
     }
     /// Reads give up after [`api::QUICK`] (a relay that never answers must not hold up a view),
     /// small writes after [`api::WRITE`]. Diagnostics zips: [`api::admin_download`]; release files:
     /// [`api::admin_upload`].
     async fn call_on(&self, server: &str, method: &str, path: &str, body: Vec<u8>, ct: &str) -> R<Vec<u8>> {
         if method.eq_ignore_ascii_case("GET") {
-            return api::admin_quick(server, &self.admin_key()?, path).await;
+            return api::admin_quick(server, &self.request_key()?, path).await;
         }
-        api::admin(server, &self.admin_key()?, method, path, body, ct).await
+        api::admin(server, &self.request_key()?, method, path, body, ct).await
     }
     /// Reads ask every node at once and take the first in list order that answered; writes go to
     /// every node at once (each keeps a full copy of policy, releases, download page and tickets),
@@ -180,6 +212,25 @@ impl App {
     }
 }
 
+/// Every relay of the settings in `dir` (setting "server", comma-separated), in order.
+fn servers_in(dir: &std::path::Path) -> Vec<String> {
+    let s: Value = fs::read(dir.join("settings.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+    let list = s["server"].as_str().filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SERVER).to_owned();
+    let v: Vec<String> = list.split(',').map(|s| s.trim().trim_end_matches('/').to_owned()).filter(|s| !s.is_empty()).collect();
+    if v.is_empty() { vec![DEFAULT_SERVER.to_owned()] } else { v }
+}
+
+/// Whether the vault may sign: always without a sign-in (break-glass), with one only for KeyHolder.
+fn may_sign(signed_in: bool, roles: &[String]) -> R<()> {
+    if signed_in && !roles.iter().any(|r| r == "key-holder") {
+        return Err(NOT_KEY_HOLDER.into());
+    }
+    Ok(())
+}
+
+/// Signing while signed in without the KeyHolder role.
+const NOT_KEY_HOLDER: &str = "Your Tether Manage role does not include KeyHolder, so this app does not sign with the keys while you are signed in. A key holder signs and publishes; to use the keys alone (break-glass), sign out first.";
+
 /// Temp file next to `p`, unique per call (process id + counter): two writes of the same file at
 /// once never share one.
 fn tmp_path(p: &std::path::Path) -> PathBuf {
@@ -228,7 +279,50 @@ fn state(app: State<App>) -> Value {
         "settings": app.settings(),
         "servers": app.servers(),
         "data_dir": app.dir,
+        "signin": signin_json(),
     })
+}
+
+/// The sign-in as the UI shows it: the desktop module's status (no token) and the Manage roles.
+fn signin_json() -> Value {
+    let mut v = oidc::status_json();
+    v["manage"] = json!(signin::roles());
+    v
+}
+
+/// The relays' sign-in offer (asks them) and the live sign-in.
+#[tauri::command]
+async fn signin_status(check: bool) -> R<Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if check {
+            let _ = oidc::check();
+        }
+        signin_json()
+    })
+    .await
+    .map_err(err)
+}
+
+/// Sign-in in the system browser; returns when it is done, failed or cancelled.
+#[tauri::command]
+async fn signin_start() -> R<Value> {
+    tauri::async_runtime::spawn_blocking(|| oidc::sign_in().map(|_| signin_json())).await.map_err(err)?
+}
+
+#[tauri::command]
+fn signin_cancel() -> Value {
+    oidc::cancel();
+    signin_json()
+}
+
+#[tauri::command]
+async fn signin_out() -> R<Value> {
+    tauri::async_runtime::spawn_blocking(|| {
+        oidc::sign_out();
+        signin_json()
+    })
+    .await
+    .map_err(err)
 }
 
 #[tauri::command]
@@ -238,6 +332,7 @@ fn keys_create(app: State<App>, passphrase: String) -> R<()> {
     }
     let k = Keys::generate()?;
     app.write("keys.json", &k.seal(&passphrase)?)?;
+    signin::remember_admin(k.admin.verifying_key());
     *app.keys.lock().unwrap() = Some(k);
     Ok(())
 }
@@ -245,7 +340,9 @@ fn keys_create(app: State<App>, passphrase: String) -> R<()> {
 #[tauri::command]
 fn keys_unlock(app: State<App>, passphrase: String) -> R<()> {
     let data = fs::read(app.path("keys.json")).map_err(|_| "No keys yet.".to_owned())?;
-    *app.keys.lock().unwrap() = Some(Keys::open(&data, &passphrase)?);
+    let k = Keys::open(&data, &passphrase)?;
+    signin::remember_admin(k.admin.verifying_key());
+    *app.keys.lock().unwrap() = Some(k);
     Ok(())
 }
 
@@ -265,6 +362,7 @@ fn keys_import(app: State<App>, path: String, passphrase: String) -> R<()> {
     let data = fs::read(path).map_err(err)?;
     let k = Keys::open(&data, &passphrase)?;
     app.write("keys.json", &data)?;
+    signin::remember_admin(k.admin.verifying_key());
     *app.keys.lock().unwrap() = Some(k);
     Ok(())
 }
@@ -307,7 +405,7 @@ async fn admin(app: State<'_, App>, method: String, path: String, body: Option<V
 /// Health of every configured relay (`GET /api/admin/status` on each).
 #[tauri::command]
 async fn relays_check(app: State<'_, App>) -> R<Vec<RelayResult>> {
-    let key = app.admin_key()?;
+    let key = app.request_key()?;
     let servers = app.servers();
     let got = futures_util::future::join_all(servers.iter().map(|sv| api::admin_quick(sv, &key, "/api/admin/status"))).await;
     Ok(servers.iter().zip(got).map(|(sv, r)| RelayResult::of(sv, r.map(|b| serde_json::from_slice(&b).unwrap_or(Value::Null)))).collect())
@@ -338,7 +436,7 @@ async fn audit_all(app: State<'_, App>, since: u64, limit: u32) -> R<Value> {
     let (mut events, mut failed, mut truncated, mut answered) = (Vec::new(), Vec::new(), Vec::new(), 0);
     let servers = app.servers();
     let path = format!("/api/admin/audit?since={since}&limit={limit}");
-    let key = app.admin_key()?;
+    let key = app.request_key()?;
     // The relay cuts a large answer by size and says so in this header.
     let got = futures_util::future::join_all(servers.iter().map(|sv| api::admin_quick_flag(sv, &key, &path, "X-Audit-Truncated"))).await;
     for (sv, r) in servers.iter().zip(got) {
@@ -518,7 +616,13 @@ async fn serverkeys_publish(app: State<'_, App>, keys: Vec<ServerKey>, skip: Opt
 /// key file can be opened by the current user only (private.rs); delete it after installing.
 #[tauri::command]
 fn serverkeys_save_files(app: State<App>, public: String, folder: String) -> R<()> {
-    let (secret, public) = app.keys.lock().unwrap().as_ref().ok_or("Unlock the keys first.")?.server_key_files(&public).ok_or("This key was not generated on this PC.")?;
+    save_key_files(&app, &public, folder)
+}
+
+fn save_key_files(app: &App, public: &str, folder: String) -> R<()> {
+    // The server's secret key leaves the vault: a key holder's (or break-glass) action only.
+    app.admin_key()?;
+    let (secret, public) = app.keys.lock().unwrap().as_ref().ok_or("Unlock the keys first.")?.server_key_files(public).ok_or("This key was not generated on this PC.")?;
     let dir = PathBuf::from(folder);
     // Saving the same key again is fine; any other pair of that name (e.g. an SSH key) stays.
     if key_files_of(&dir).is_some_and(|k| k != public) {
@@ -561,7 +665,7 @@ fn serverkeys_delete_files(app: State<App>, folder: String) -> R<()> {
 
 #[tauri::command]
 fn features() -> Value {
-    json!(policy::FEATURES)
+    json!(tether_trust::policy::FEATURES)
 }
 
 #[tauri::command]
@@ -569,25 +673,57 @@ async fn policy_draft(app: State<'_, App>) -> R<Bundle> {
     if let Ok(b) = fs::read(app.path("policy/draft.json")) {
         return serde_json::from_slice(&b).map_err(err);
     }
-    // First run on this PC: start from what the server serves, but only if we signed it.
-    let key = app.admin_key()?.verifying_key();
+    // First run on this PC: start from what the server serves, but only if an admin key we trust signed it.
+    let keys = app.verify_keys();
     let raw = api::public_quick(&app.server(), "/api/policy").await.ok().flatten();
-    Ok(raw.and_then(|r| envelope::open_json(&r, &[key]).ok()).and_then(|p| Bundle::from_json(&p).ok()).unwrap_or_default())
+    Ok(raw.and_then(|r| envelope::open_json(&r, &keys).ok()).and_then(|p| Bundle::from_json(&p).ok()).unwrap_or_default())
 }
 
 #[tauri::command]
 fn policy_save_draft(app: State<App>, bundle: Bundle) -> R<()> {
-    app.write("policy/draft.json", &serde_json::to_vec_pretty(&bundle).unwrap())
+    save_draft(&app, &bundle)
+}
+
+/// The draft, and in the grant journal: a replaced grant the draft carries again while it is revoked
+/// nowhere is current again (a Renew whose draft was discarded), and the grants of a group the draft
+/// no longer has are revoked (sent to every relay with the next publish). A damaged journal does not
+/// stop the save.
+fn save_draft(app: &App, b: &Bundle) -> R<()> {
+    let before = fs::read(app.path("policy/draft.json")).ok().and_then(|raw| serde_json::from_slice::<Bundle>(&raw).ok());
+    app.write("policy/draft.json", &serde_json::to_vec_pretty(b).unwrap())?;
+    let _g = grants::LOCK.lock().unwrap();
+    if let Ok(mut j) = grant_journal(app) {
+        let mut changed = grants::restore(&mut j, b);
+        for (name, g) in before.iter().flat_map(|d| &d.groups).filter(|(n, _)| !b.groups.contains_key(*n)) {
+            changed |= grants::revoke_layer(&mut j, grants::grant_in(&g.overrides).unwrap_or(""), &format!("group:{name}"));
+        }
+        if changed {
+            app.write(grants::JOURNAL, &serde_json::to_vec_pretty(&j).unwrap())?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn policy_check(bundle: Bundle) -> R<()> {
-    bundle.validate()
+fn policy_check(app: State<App>, bundle: Bundle) -> R<()> {
+    publish_check(&app, &bundle)
+}
+
+/// What publishing needs: a bundle the relays accept, and for every layer whose `health.agent`
+/// needs one, an enrolment grant of this vault's admin key that is unexpired and not revoked.
+fn publish_check(app: &App, b: &Bundle) -> R<()> {
+    b.validate()?;
+    // Signed in without the keys (a proposal): the relay's checks; grants are the key holder's.
+    if app.admin_key().is_err() && oidc::signed_in() {
+        return Ok(());
+    }
+    let keys = [app.admin_key()?.verifying_key()];
+    grants::check(b, &keys, &grant_journal(app)?, api::now())
 }
 
 #[tauri::command]
 fn policy_preview(bundle: Bundle, profile: String, device: String) -> Effective {
-    policy::resolve(Some(&bundle), &profile, &device, None)
+    tether_trust::policy::resolve(Some(&bundle), &profile, &device, None)
 }
 
 /// What one relay serves at `GET /api/policy`.
@@ -609,13 +745,13 @@ fn unverified_header(raw: &[u8]) -> Option<(u64, u64)> {
     Some((v["serial"].as_u64()?, v["issued_at"].as_u64().unwrap_or(0)))
 }
 
-fn verified_policy(raw: &[u8], key: &VerifyingKey) -> R<Bundle> {
-    envelope::open_json(raw, &[*key]).and_then(|p| Bundle::from_json(&p))
+fn verified_policy(raw: &[u8], keys: &[VerifyingKey]) -> R<Bundle> {
+    envelope::open_json(raw, keys).and_then(|p| Bundle::from_json(&p))
 }
 
 const NO_POLICY: &str = "No policy published";
 
-async fn live_doc(server: &str, key: &VerifyingKey) -> LiveDoc {
+async fn live_doc(server: &str, key: &[VerifyingKey]) -> LiveDoc {
     let mut d = LiveDoc { raw: None, bundle: None, serial: None, issued_at: None, note: None };
     match api::public_quick(server, "/api/policy").await {
         Ok(None) => d.note = Some(NO_POLICY.into()),
@@ -647,8 +783,8 @@ async fn live_doc(server: &str, key: &VerifyingKey) -> LiveDoc {
 /// and relays the policy names that are not in this app's relay list.
 #[tauri::command]
 async fn policy_live(app: State<'_, App>) -> R<Value> {
-    let admin = app.admin_key()?;
-    let key = admin.verifying_key();
+    let admin = app.request_key()?;
+    let key = app.verify_keys();
     let servers = app.servers();
     let mut relays = Vec::new();
     let mut best: Option<Bundle> = None;
@@ -679,8 +815,8 @@ async fn policy_live(app: State<'_, App>) -> R<Value> {
         "serial": best.as_ref().map(|b| b.serial),
         "issued_at": best.as_ref().map(|b| b.issued_at),
         "effective": {
-            "technician": live::effective_rows(best.as_ref(), policy::PROFILE_TECHNICIAN),
-            "customer": live::effective_rows(best.as_ref(), policy::PROFILE_CUSTOMER),
+            "technician": live::effective_rows(best.as_ref(), tether_trust::policy::PROFILE_TECHNICIAN),
+            "customer": live::effective_rows(best.as_ref(), tether_trust::policy::PROFILE_CUSTOMER),
         },
         "unconfigured": live::unconfigured_hosts(&servers, &known),
         "bundle": best,
@@ -697,24 +833,33 @@ fn policy_diff(from: Option<Bundle>, to: Bundle) -> Vec<live::Change> {
 /// as done only when it serves the new serial.
 #[tauri::command]
 async fn policy_publish(app: State<'_, App>, bundle: Bundle, skip: Option<Vec<String>>) -> R<Value> {
+    publish(&app, bundle, skip).await
+}
+
+async fn publish(app: &App, bundle: Bundle, skip: Option<Vec<String>>) -> R<Value> {
     let mut b = bundle;
-    b.validate()?;
+    publish_check(app, &b)?;
     let key = app.admin_key()?;
     // An unreachable relay gets the document later (policy_sync); the serial only has to be above
     // every policy this admin key signed that a relay serves, and this PC's own published ones.
     // Not `/api/admin/status` policy_serial: that is whatever the relay claims (see next_serial).
     let vk = key.verifying_key();
     let (servers, left) = app.chosen(&skip)?;
-    let live: Vec<u64> = futures_util::future::join_all(servers.iter().map(|sv| live_doc(sv, &vk))).await.into_iter().filter_map(|d| d.bundle.map(|b| b.serial)).collect();
-    b.serial = next_serial(live.into_iter().chain(app.published().into_keys()), "policy")?;
+    let docs = futures_util::future::join_all(servers.iter().map(|sv| live_doc(sv, std::slice::from_ref(&vk)))).await;
+    b.serial = next_serial(docs.iter().filter_map(|d| d.bundle.as_ref().map(|b| b.serial)).chain(app.published().into_keys()), "policy")?;
     b.issued_at = api::now();
     let payload = serde_json::to_vec(&b).unwrap();
     let doc = serde_json::to_vec(&envelope::sign(&payload, &key)).unwrap();
-    let mut results = put_policy(&app, &servers, &doc, b.serial, &key.verifying_key()).await;
+    let mut results = put_policy(app, &servers, &doc, b.serial, &key.verifying_key()).await;
     if let Some(e) = none_ok(&results) {
         return Err(e);
     }
+    // What every relay of the list serves now: this policy, the one read before (publish failed), or
+    // not known (left out); renewed grants are revoked only once all of them are without it.
+    let before: BTreeMap<&String, &LiveDoc> = servers.iter().zip(&docs).collect();
+    let served = served_now(app, &results, &grants::ids_in(&b), |sv| before.get(sv).and_then(|d| d.bundle.as_ref()));
     results.extend(left);
+    revoke_and_note(app, served, &mut results).await;
     app.write(&format!("policy/published/{}.json", b.serial), &payload)?;
     app.write("policy/draft.json", &serde_json::to_vec_pretty(&b).unwrap())?;
     Ok(json!({ "serial": b.serial, "relays": results }))
@@ -727,7 +872,7 @@ async fn put_policy(app: &App, servers: &[String], doc: &[u8], serial: u64, key:
         let r = match app.call_on(sv, "PUT", "/api/admin/policy", doc.to_vec(), "application/json").await {
             Err(e) => Err(e),
             Ok(_) => {
-                let back = live_doc(sv, key).await;
+                let back = live_doc(sv, std::slice::from_ref(key)).await;
                 if back.bundle.as_ref().map(|b| b.serial) == Some(serial) {
                     Ok(json!({ "serial": serial }))
                 } else {
@@ -744,20 +889,174 @@ async fn put_policy(app: &App, servers: &[String], doc: &[u8], serial: u64, key:
 /// any relay serves, by PUTting that same signed document (docs/relay-ha.md).
 #[tauri::command]
 async fn policy_sync(app: State<'_, App>) -> R<Vec<RelayResult>> {
+    sync(&app).await
+}
+
+async fn sync(app: &App) -> R<Vec<RelayResult>> {
     let key = app.admin_key()?.verifying_key();
     let servers = app.servers();
-    let got = futures_util::future::join_all(servers.iter().map(|sv| live_doc(sv, &key))).await;
+    let got = futures_util::future::join_all(servers.iter().map(|sv| live_doc(sv, std::slice::from_ref(&key)))).await;
     let docs: Vec<(String, LiveDoc)> = servers.into_iter().zip(got).collect();
     let Some((serial, raw)) = docs.iter().filter_map(|(_, d)| Some((d.bundle.as_ref()?.serial, d.raw.clone()?))).max_by_key(|(s, _)| *s) else {
         let down = docs.iter().filter(|(_, d)| d.raw.is_none() && d.note.as_deref() != Some(NO_POLICY)).map(|(s, d)| format!("{s}: not reachable ({})", d.note.as_deref().unwrap_or(""))).collect();
         return Err(none_found("No relay serves a policy signed by this app's admin key. Publish one first.".into(), docs.len(), down));
     };
     let behind: Vec<String> = docs.iter().filter(|(_, d)| d.bundle.as_ref().map(|b| b.serial) != Some(serial)).map(|(s, _)| s.clone()).collect();
-    let mut out = put_policy(&app, &behind, &raw, serial, &key).await;
+    let mut out = put_policy(app, &behind, &raw, serial, &key).await;
     for (sv, _) in docs.iter().filter(|(s, _)| !behind.contains(s)) {
         out.push(RelayResult::of(sv, Ok(json!({ "serial": serial, "already": true }))));
     }
+    let ids = docs.iter().find_map(|(_, d)| d.bundle.as_ref().filter(|b| b.serial == serial)).map(grants::ids_in).unwrap_or_default();
+    let before: BTreeMap<&String, &LiveDoc> = docs.iter().map(|(s, d)| (s, d)).collect();
+    let served = served_now(app, &out, &ids, |sv| before.get(sv).and_then(|d| d.bundle.as_ref()));
+    revoke_and_note(app, served, &mut out).await;
     Ok(out)
+}
+
+/// Per relay of the list, the grant ids it serves now: `ids` where `results` says it took the
+/// policy, else those of what it served before (`None`: not known).
+fn served_now<'a>(app: &App, results: &[RelayResult], ids: &std::collections::BTreeSet<String>, before: impl Fn(&String) -> Option<&'a Bundle>) -> Vec<(String, Option<std::collections::BTreeSet<String>>)> {
+    let took = |sv: &String| results.iter().any(|r| r.ok && &r.server == sv);
+    app.servers().into_iter().map(|sv| { let got = if took(&sv) { Some(ids.clone()) } else { before(&sv).map(grants::ids_in) }; (sv, got) }).collect()
+}
+
+// ---- health monitoring agent: enrolment grants (grants.rs) ----
+
+fn grant_journal(app: &App) -> R<grants::Journal> {
+    grants::parse_journal(fs::read(app.path(grants::JOURNAL)).ok().as_deref())
+}
+
+/// A new grant for `layer` with the vault's admin key, journalled; with `old` (Renew) that grant
+/// is marked replaced. Answers the token, which goes only into the layer's draft.
+fn grant_new(app: &App, layer: &str, customer: &str, old: Option<&str>) -> R<String> {
+    let admin = app.admin_key()?;
+    let _g = grants::LOCK.lock().unwrap();
+    let mut j = grant_journal(app)?;
+    let (token, entry) = grants::create(layer, customer, &admin, api::now())?;
+    if let Some(old) = old {
+        grants::retire(&mut j, old, layer, grants::GrantState::Replaced);
+    }
+    j.push(entry);
+    app.write(grants::JOURNAL, &serde_json::to_vec_pretty(&j).unwrap())?;
+    Ok(token)
+}
+
+/// Create (`old` absent) or renew a layer's grant.
+#[tauri::command]
+fn grant_create(app: State<App>, layer: String, customer: String, old: Option<String>) -> R<String> {
+    grant_new(&app, &layer, &customer, old.as_deref())
+}
+
+/// Revoke a layer's grants on every relay now (Revoke without Renew): the current one and any it
+/// replaced that is not revoked everywhere yet; the editor then sets the layer's `health.agent` to manual.
+#[tauri::command]
+async fn grant_revoke(app: State<'_, App>, layer: String, token: String) -> R<Vec<RelayResult>> {
+    revoke_layer_now(&app, &layer, &token).await
+}
+
+async fn revoke_layer_now(app: &App, layer: &str, token: &str) -> R<Vec<RelayResult>> {
+    app.admin_key()?;
+    {
+        let _g = grants::LOCK.lock().unwrap();
+        let mut j = grant_journal(app)?;
+        if !grants::revoke_layer(&mut j, token, layer) {
+            return Err("This is not an enrolment grant; there is nothing to revoke.".into());
+        }
+        app.write(grants::JOURNAL, &serde_json::to_vec_pretty(&j).unwrap())?;
+    }
+    revoke_pending(app).await
+}
+
+/// The grant of each layer of `bundle` that carries one, the retired grants not yet revoked on
+/// every relay, and the layers of `live` (the published policy) whose grant is revoked here.
+#[tauri::command]
+fn grants_info(app: State<App>, bundle: Bundle, live: Option<Bundle>) -> R<Value> {
+    let keys = [app.admin_key()?.verifying_key()];
+    let j = grant_journal(&app)?;
+    let now = api::now();
+    let info = |b: &Bundle| -> BTreeMap<String, grants::Info> { grants::layers(b).into_iter().filter_map(|(k, l)| Some((k, grants::info(grants::grant_in(l)?, &keys, &j, now)))).collect() };
+    let live_revoked: Vec<String> = live.as_ref().map(info).unwrap_or_default().into_iter().filter(|(_, i)| i.status == "revoked").map(|(k, _)| k).collect();
+    Ok(json!({ "layers": info(&bundle), "pending": grants::pending(&j, &app.servers(), now), "live_revoked": live_revoked }))
+}
+
+/// Revoke again what is pending: each relay's live policy decides where a renewed grant may go.
+#[tauri::command]
+async fn grants_revoke_pending(app: State<'_, App>) -> R<Vec<RelayResult>> {
+    revoke_pending(&app).await
+}
+
+/// One result per relay and grant, with the grant's `id` in `detail`.
+async fn revoke_pending(app: &App) -> R<Vec<RelayResult>> {
+    let key = app.admin_key()?.verifying_key();
+    let servers = app.servers();
+    let docs = futures_util::future::join_all(servers.iter().map(|sv| live_doc(sv, std::slice::from_ref(&key)))).await;
+    let served = servers.into_iter().zip(docs).map(|(sv, d)| (sv, d.bundle.as_ref().map(grants::ids_in))).collect();
+    let (done, _) = revoke_grants(app, served).await?;
+    Ok(done
+        .into_iter()
+        .map(|(sv, id, r)| {
+            let mut res = RelayResult::of(&sv, r.map(|()| json!({ "note": format!("Grant {id} revoked") })).map_err(|e| format!("Grant {id} not revoked: {e}")));
+            res.detail["id"] = json!(id);
+            res
+        })
+        .collect())
+}
+
+/// Send the revocations [`grants::targets`] names (`POST /api/admin/status/revoke`) and record
+/// each relay that confirmed. One result per relay and grant, and the replaced grants held back
+/// with the relays still missing a policy without them.
+async fn revoke_grants(app: &App, served: Vec<(String, Option<std::collections::BTreeSet<String>>)>) -> R<(Vec<(String, String, R<()>)>, Vec<(String, Vec<String>)>)> {
+    let (targets, held) = {
+        let _g = grants::LOCK.lock().unwrap();
+        let mut j = grant_journal(app)?;
+        let now = api::now();
+        let t = grants::targets(&mut j, &served, now);
+        app.write(grants::JOURNAL, &serde_json::to_vec_pretty(&j).unwrap())?;
+        let held = j.iter().filter(|e| e.state == grants::GrantState::Replaced && e.exp > now && e.revoked_on.is_empty() && !e.waiting.is_empty()).map(|e| (e.id.clone(), e.waiting.clone())).collect();
+        (t, held)
+    };
+    let got = futures_util::future::join_all(targets.iter().map(|(sv, id, exp)| app.call_on(sv, "POST", "/api/admin/status/revoke", serde_json::to_vec(&json!({ "id": id, "exp": exp })).unwrap(), "application/json"))).await;
+    let out: Vec<(String, String, R<()>)> = targets.into_iter().zip(got).map(|((sv, id, _), r)| (sv, id, r.map(|_| ()))).collect();
+    if out.iter().any(|(_, _, r)| r.is_ok()) {
+        let _g = grants::LOCK.lock().unwrap();
+        let mut j = grant_journal(app)?;
+        for (sv, id, _) in out.iter().filter(|(_, _, r)| r.is_ok()) {
+            grants::mark_revoked_on(&mut j, sv, id);
+        }
+        app.write(grants::JOURNAL, &serde_json::to_vec_pretty(&j).unwrap())?;
+    }
+    Ok((out, held))
+}
+
+/// After a publish: revoke renewed grants on the relays that serve the new policy, and note the
+/// outcome on each relay's result (a failure is a warning: the policy itself is live there).
+async fn revoke_and_note(app: &App, served: Vec<(String, Option<std::collections::BTreeSet<String>>)>, results: &mut [RelayResult]) {
+    const AGAIN: &str = "Use Revoke again under Policy, Health monitoring.";
+    match revoke_grants(app, served).await {
+        Ok((done, held)) => {
+            for (id, waiting) in held {
+                let line = format!("Old enrolment grant {id} stays valid until every relay serves a policy without it; not yet on {}.", waiting.join(", "));
+                for res in results.iter_mut().filter(|r| r.ok) {
+                    let prev = res.detail["note"].as_str().map(|p| format!("{p}\n")).unwrap_or_default();
+                    res.detail["note"] = json!(format!("{prev}{line}"));
+                }
+            }
+            for (sv, id, r) in done {
+                let Some(res) = results.iter_mut().find(|x| x.server == sv) else { continue };
+                let (field, line) = match r {
+                    Ok(()) => ("note", format!("Old enrolment grant {id} revoked")),
+                    Err(e) => ("warning", format!("Old enrolment grant {id} not revoked: {e} {AGAIN}")),
+                };
+                let prev = res.detail[field].as_str().map(|p| format!("{p}\n")).unwrap_or_default();
+                res.detail[field] = json!(format!("{prev}{line}"));
+            }
+        }
+        Err(e) => {
+            for res in results.iter_mut().filter(|r| r.ok) {
+                res.detail["warning"] = json!(format!("Old enrolment grants were not revoked: {e} {AGAIN}"));
+            }
+        }
+    }
 }
 
 /// Server history merged with the local copies.
@@ -815,6 +1114,39 @@ struct ReleaseArgs {
     /// Security release: skips the ramp.
     #[serde(default)]
     security: bool,
+    /// A reviewed release proposal's files: each file read is signed only if its SHA-256 is one of them.
+    #[serde(default)]
+    expect: Vec<FileHash>,
+}
+
+/// A build file of a release proposal: its name and SHA-256 (lower-case hex).
+#[derive(Serialize, Deserialize, Clone)]
+struct FileHash {
+    name: String,
+    sha256: String,
+}
+
+/// The files' names and SHA-256, as a release proposal carries them.
+#[tauri::command]
+async fn file_hashes(paths: Vec<String>) -> R<Vec<FileHash>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths.iter().map(|p| {
+            let name = std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            Ok(FileHash { name, sha256: proposals::sha256_hex(&fs::read(p).map_err(|e| format!("{p}: {e}"))?) })
+        }).collect()
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Before signing a file of a reviewed proposal: its SHA-256 must be one the proposal names.
+fn expected(expect: &[FileHash], file: &str, data: &[u8]) -> R<()> {
+    let h = proposals::sha256_hex(data);
+    if expect.is_empty() || expect.iter().any(|f| f.sha256.eq_ignore_ascii_case(&h)) {
+        return Ok(());
+    }
+    let names: Vec<&str> = expect.iter().map(|f| f.name.as_str()).collect();
+    Err(format!("{file} is not a file of the proposal (its SHA-256 {h} is not that of {}): nothing was published.", names.join(", ")))
 }
 
 /// One release as it goes to a relay: its files (artifact first) and the manifest fields.
@@ -936,6 +1268,8 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs, 
         return Err(cancelled_msg());
     }
     let a = args;
+    // The KeyHolder gate before the update key signs anything (the uploads check it again).
+    app.admin_key()?;
     let targets = app.chosen(&skip)?;
     if !release::valid_channel(&a.channel) {
         return Err("Channel: use 1-32 lowercase letters, digits or dashes.".into());
@@ -952,6 +1286,7 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs, 
     let rollout = release::rollout(&a.rollout, if a.rollout_start == 0 { api::now() } else { a.rollout_start })?;
     let (dir, name) = release::target(&a.kind, &a.platform, &a.version)?;
     let data = fs::read(&a.file).map_err(|e| format!("Could not read the file: {e}"))?;
+    expected(&a.expect, &a.file, &data)?;
     let sign = |bytes: &[u8], file: &str| -> R<String> {
         // No server yet: the sheet shows "Signing <file>".
         emit(&ui, Progress { dir: dir.clone(), version: a.version.clone(), server: String::new(), file: file.to_owned(), sent: 0, total: bytes.len() as u64, done: false, error: None });
@@ -965,6 +1300,7 @@ async fn release_publish(app: State<'_, App>, ui: AppHandle, args: ReleaseArgs, 
         let dmg_name = release::dmg_name(&a.version);
         let path = std::path::Path::new(&a.file).with_file_name(&dmg_name);
         let bytes = fs::read(&path).map_err(|_| format!("Put {dmg_name} next to the .app.tar.gz (scripts/build-macos.sh writes both to dist/macos)."))?;
+        expected(&a.expect, &dmg_name, &bytes)?;
         let dmg_sig = sign(&bytes, &dmg_name)?;
         files.push((dmg_name.clone(), bytes));
         files.push((format!("{dmg_name}.sig"), dmg_sig.into_bytes()));
@@ -1292,7 +1628,11 @@ async fn fetch_indexes_why(app: &App, channel: &str, servers: &[String]) -> R<(V
 
 /// [`fetch_indexes_why`] for the index file `name` (releases.json or releases-v2.json).
 async fn fetch_named_indexes(app: &App, channel: &str, servers: &[String], name: &str) -> R<(Vec<(String, R<LiveIndex>)>, BTreeMap<String, String>)> {
-    let keys = trusted_admin_keys(app.admin_key()?.verifying_key(), TRUSTED_ADMIN_KEYS.unwrap_or(""));
+    // Signed in without the keys (a read-only view): the compiled-in keys and the remembered vault key.
+    let keys = match app.admin_key() {
+        Ok(k) => trusted_admin_keys(k.verifying_key(), TRUSTED_ADMIN_KEYS.unwrap_or("")),
+        Err(_) => app.verify_keys(),
+    };
     let path = format!("/download/{channel}/{name}");
     let raw = futures_util::future::join_all(servers.iter().map(|sv| api::public_quick(sv, &path))).await;
     let mut errors = BTreeMap::new();
@@ -2380,6 +2720,9 @@ fn custom_expiry(now: u64, days: u64) -> R<u64> {
 
 /// The `PUT /api/admin/custom/<id>` body (docs/api.md, "Custom apps").
 fn custom_body(p: &CustomProfile, key: &SigningKey, token: &str, expires: u64, channel: &str) -> R<Value> {
+    if let Some(id) = p.layer.keys().find(|id| id.starts_with("health.")) {
+        return Err(format!("A custom app cannot set {id}: its signed profile has no serial and cannot be revoked. Set the health monitoring agent in the policy (Policy, Health monitoring)."));
+    }
     p.validate()?;
     let doc = envelope::sign(&serde_json::to_vec(p).unwrap(), key);
     Ok(json!({ "profile": doc, "token": token, "expires": expires, "channel": channel }))
@@ -2492,40 +2835,90 @@ async fn custom_delete(app: State<'_, App>, id: String) -> R<Vec<RelayResult>> {
 
 // ---- team (technician access) ----
 
-/// The team roster of every relay (`GET /api/admin/team`): the first answer, plus the relays
-/// whose roster differs and those that failed.
+/// A relay's `GET /api/admin/team` answer as a team document: the signed upload opened with
+/// `keys` (the document and whether it is signed), or a plain roster as the first document it
+/// becomes (every entry keeps today's rights: `sbom`, `agent`, every customer; serial 0).
+fn team_doc_of(raw: &[u8], keys: &[VerifyingKey]) -> R<(TeamDoc, bool)> {
+    let v: Value = serde_json::from_slice(raw).map_err(|_| "unexpected team document".to_owned())?;
+    if v.get("team").is_some() {
+        let (doc, _) = tether_trust::team::open(raw, keys).map_err(|e| match e {
+            tether_trust::team::OpenError::Untrusted(e) => format!("The relay's team document is not signed by this app's admin key ({e})."),
+            tether_trust::team::OpenError::Bad(e) => format!("The relay's team document is not valid: {e}"),
+        })?;
+        return Ok((doc, true));
+    }
+    let r: Roster = serde_json::from_value(v).map_err(|_| "unexpected team roster".to_owned())?;
+    let members = r.members.iter().map(|m| TeamMember { name: m.name.clone(), key: m.key.clone(), write: m.write, audit: m.audit, sbom: true, agent: true, customers: vec!["*".into()], service: false }).collect();
+    Ok((TeamDoc { serial: 0, oidc: None, roles: BTreeMap::new(), deny: Vec::new(), oidc_only: false, members }, false))
+}
+
+/// The team document of every relay (`GET /api/admin/team`): the newest one (a plain roster is
+/// shown as the first document it would become), the hash of what each relay serves (what a
+/// proposal is based on), the relays whose document differs and those that failed.
 #[tauri::command]
 async fn team_load(app: State<'_, App>) -> R<Value> {
-    let (mut first, mut differ, mut failed) = (None::<Roster>, Vec::new(), Vec::new());
+    let keys = app.verify_keys();
     let servers = app.servers();
     let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", "/api/admin/team", Vec::new(), "application/json"))).await;
+    let (mut docs, mut failed) = (Vec::new(), Vec::new());
     for (sv, r) in servers.into_iter().zip(got) {
-        match r.and_then(|b| serde_json::from_slice::<Roster>(&b).map_err(|_| "unexpected team roster".to_owned())) {
-            Ok(r) => match &first {
-                None => first = Some(r),
-                Some(f) if *f != r => differ.push(sv),
-                Some(_) => {}
-            },
+        match r.and_then(|b| team_doc_of(&b, &keys).map(|d| (d, proposals::sha256_hex(&b)))) {
+            Ok(((d, signed), hash)) => docs.push((sv, d, signed, hash)),
             Err(e) => failed.push(format!("{sv}: {e}")),
         }
     }
-    let roster = first.ok_or_else(|| failed.join("; "))?;
-    Ok(json!({ "roster": roster, "differ": differ, "failed": failed }))
+    let best = docs.iter().max_by_key(|(_, d, _, _)| d.serial).ok_or_else(|| failed.join("; "))?;
+    let differ: Vec<&String> = docs.iter().filter(|(_, d, _, _)| d != &best.1).map(|(sv, ..)| sv).collect();
+    let hashes: BTreeMap<&String, &String> = docs.iter().map(|(sv, _, _, h)| (sv, h)).collect();
+    Ok(json!({ "doc": best.1, "signed": best.2, "differ": differ, "failed": failed, "live": hashes }))
 }
 
-/// `PUT /api/admin/team` to every relay (validated here first, the relays validate again).
+/// The relay's checks of a team document (tether_trust::team::TeamDoc::validate) before anything
+/// is signed or proposed.
 #[tauri::command]
-async fn team_publish(app: State<'_, App>, roster: Roster, skip: Option<Vec<String>>) -> R<Vec<RelayResult>> {
-    roster.validate()?;
-    let (servers, left) = app.chosen(&skip)?;
-    let mut out = app.fan_out_to(&servers, "PUT", "/api/admin/team", serde_json::to_vec(&roster).map_err(err)?, "application/json").await;
+fn team_check(doc: TeamDoc) -> R<()> {
+    let d = TeamDoc { serial: doc.serial.max(1), ..doc };
+    d.validate().map(|_| ())
+}
+
+/// Signs `doc` with the vault (serial: one above every relay's, whatever the draft or proposal
+/// says) and its `oidc` part as the config the relays serve, checks the upload exactly as a relay
+/// does, and `PUT /api/admin/team` to every relay. Needs the keys (and, while signed in, the
+/// KeyHolder role).
+#[tauri::command]
+async fn team_publish(app: State<'_, App>, doc: TeamDoc, skip: Option<Vec<String>>) -> R<Value> {
+    publish_team(&app, doc, skip).await
+}
+
+async fn publish_team(app: &App, doc: TeamDoc, skip: Option<Vec<String>>) -> R<Value> {
+    let admin = app.admin_key()?;
+    let keys = [admin.verifying_key()];
+    let servers = app.servers();
+    let got = futures_util::future::join_all(servers.iter().map(|sv| app.call_on(sv, "GET", "/api/admin/team", Vec::new(), "application/json"))).await;
+    let live = got.iter().filter_map(|r| r.as_ref().ok().and_then(|b| team_doc_of(b, &keys).ok())).map(|(d, _)| d.serial).max().unwrap_or(0);
+    // A proposal's serial is not taken: a huge one would leave no serial above it.
+    let doc = TeamDoc { serial: live.checked_add(1).ok_or("The relays' team document is at the highest serial.")?, ..doc };
+    let up = team_upload(&doc, &admin)?;
+    let (to, left) = app.chosen(&skip)?;
+    let mut out = app.fan_out_to(&to, "PUT", "/api/admin/team", up, "application/json").await;
     match none_ok(&out) {
         Some(e) => Err(e),
-        None => Ok({
+        None => {
             out.extend(left);
-            out
-        }),
+            Ok(json!({ "serial": doc.serial, "relays": out }))
+        }
     }
+}
+
+/// The signed upload of `doc` (tether_trust::team::Upload), opened again as a relay opens it.
+fn team_upload(doc: &TeamDoc, admin: &SigningKey) -> R<Vec<u8>> {
+    let payload = serde_json::to_vec(doc).map_err(err)?;
+    let config = doc.oidc.as_ref().map(|o| envelope::sign(&serde_json::to_vec(&tether_trust::team::Config { serial: doc.serial, oidc: o.clone() }).unwrap(), admin));
+    let up = serde_json::to_vec(&tether_trust::team::Upload { team: envelope::sign(&payload, admin), config }).map_err(err)?;
+    tether_trust::team::open(&up, &[admin.verifying_key()]).map_err(|e| match e {
+        tether_trust::team::OpenError::Bad(e) | tether_trust::team::OpenError::Untrusted(e) => e,
+    })?;
+    Ok(up)
 }
 
 // ---- diagnostics ----
@@ -2562,7 +2955,7 @@ async fn diag_open(app: State<'_, App>, ticket: String, relay: Option<String>) -
     if !diag::valid_ticket(&ticket) {
         return Err("invalid ticket".into());
     }
-    let key = app.admin_key()?;
+    let key = app.request_key()?;
     let path = format!("/api/admin/diag/{ticket}");
     let servers = match relay {
         // Only a configured relay gets this signed request.
@@ -2669,11 +3062,16 @@ fn main() {
                 None => app.path().data_dir()?.join("Tether-Manage"),
             };
             fs::create_dir_all(&dir)?;
+            let _ = signin::DIR.set(dir.clone());
             app.manage(App { dir, keys: Mutex::new(None), diag: Mutex::new(None) });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             state,
+            signin_status,
+            signin_start,
+            signin_cancel,
+            signin_out,
             keys_create,
             keys_unlock,
             keys_lock,
@@ -2700,9 +3098,14 @@ fn main() {
             policy_diff,
             policy_publish,
             policy_sync,
+            grant_create,
+            grant_revoke,
+            grants_info,
+            grants_revoke_pending,
             policy_history,
             policy_local,
             release_publish,
+            file_hashes,
             release_cancel,
             release_index,
             release_control,
@@ -2725,7 +3128,14 @@ fn main() {
             custom_list,
             custom_delete,
             team_load,
+            team_check,
             team_publish,
+            proposals::proposal_put,
+            proposals::proposals_list,
+            proposals::proposal_delete,
+            activity::team_activity,
+            activity::team_activity_accept,
+            activity::audit_export,
             diag_open,
             diag_list,
             diag_close,
@@ -2759,6 +3169,56 @@ mod server_list_tests {
         assert_eq!(a.server(), "https://a.example");
         let b = app_with(None);
         assert_eq!(b.servers(), vec![DEFAULT_SERVER]);
+    }
+
+    /// The vault signs without a sign-in (break-glass) and, while someone is signed in, only for a
+    /// KeyHolder: an Auditor, Operator, PolicyEditor or Publisher who knows the passphrase does not.
+    #[test]
+    fn the_vault_signs_only_for_a_key_holder_while_signed_in() {
+        let r = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(may_sign(false, &[]).is_ok());
+        assert!(may_sign(true, &r(&["key-holder"])).is_ok());
+        assert!(may_sign(true, &r(&["auditor", "key-holder"])).is_ok());
+        for roles in [r(&[]), r(&["auditor"]), r(&["operator"]), r(&["policy-editor"]), r(&["publisher"])] {
+            assert_eq!(may_sign(true, &roles), Err(NOT_KEY_HOLDER.to_owned()), "{roles:?}");
+        }
+        // Not signed in: the vault alone, as before; no key at all: the old message.
+        let a = app_with(None);
+        assert_eq!(a.admin_key().unwrap_err(), "Unlock the keys first.");
+        assert_eq!(a.request_key().unwrap_err(), "Unlock the keys first.");
+        *a.keys.lock().unwrap() = Some(Keys::generate().unwrap());
+        assert_eq!(a.request_key().unwrap().verifying_key(), a.admin_key().unwrap().verifying_key());
+        assert_eq!(a.verify_keys(), vec![a.admin_key().unwrap().verifying_key()]);
+    }
+
+    /// A plain roster becomes the first team document (today's rights); a signed one is opened with
+    /// the admin key; what is published is checked exactly as a relay checks it.
+    #[test]
+    fn team_documents_from_rosters_and_signed_uploads() {
+        let admin = tether_trust::generate_key();
+        let k = tether_trust::key_to_b64(&tether_trust::generate_key().verifying_key());
+        let roster = json!({"members": [{"name": "Anna", "key": k, "write": true, "audit": false}]}).to_string();
+        let (d, signed) = team_doc_of(roster.as_bytes(), &[admin.verifying_key()]).unwrap();
+        assert!(!signed);
+        assert_eq!((d.serial, d.members[0].write, d.members[0].sbom, d.members[0].agent, d.members[0].customers.clone(), d.members[0].service), (0, true, true, true, vec!["*".to_owned()], false));
+        let mut doc = TeamDoc { serial: 4, ..d };
+        doc.oidc = Some(tether_trust::team::Oidc { issuer: "https://login.example.com/t/v2.0".into(), tenant: "t".into(), audience: "api".into(), client_id: "app".into(), scope: "api://x/access".into() });
+        doc.roles.insert("Tether.Manage.KeyHolder".into(), serde_json::from_value(json!({"manage": "key-holder"})).unwrap());
+        let up = team_upload(&doc, &admin).unwrap();
+        let (back, signed) = team_doc_of(&up, &[admin.verifying_key()]).unwrap();
+        assert!(signed);
+        assert_eq!(back, doc);
+        // The config the relays serve says the same serial and provider.
+        let v: Value = serde_json::from_slice(&up).unwrap();
+        let cfg: tether_trust::team::Config = serde_json::from_slice(&envelope::open_json(&serde_json::to_vec(&v["config"]).unwrap(), &[admin.verifying_key()]).unwrap()).unwrap();
+        assert_eq!((cfg.serial, cfg.oidc), (4, doc.oidc.clone().unwrap()));
+        assert!(team_doc_of(&up, &[tether_trust::generate_key().verifying_key()]).unwrap_err().contains("not signed by this app's admin key"));
+        // The relay's validation: oidc_only without oidc, a Manage role with a team permission.
+        assert!(team_check(TeamDoc { oidc_only: true, oidc: None, ..doc.clone() }).is_err());
+        let mut bad = doc.clone();
+        bad.roles.insert("Tether.Manage.Operator".into(), serde_json::from_value(json!({"manage": "operator", "write": true})).unwrap());
+        assert!(team_check(bad.clone()).is_err() && team_upload(&bad, &admin).is_err());
+        assert!(team_check(TeamDoc { serial: 0, ..doc }).is_ok(), "a first document's serial is chosen at publish");
     }
 }
 
@@ -3074,13 +3534,316 @@ mod tests {
         let unsigned = serde_json::to_vec(&Bundle { serial: u64::MAX, ..Default::default() }).unwrap();
         let foreign = signed(u64::MAX, &tether_trust::generate_key());
         let ours = signed(4, &admin);
-        let live: Vec<u64> = [unsigned, foreign, ours].iter().filter_map(|raw| verified_policy(raw, &key).ok().map(|b| b.serial)).collect();
+        let live: Vec<u64> = [unsigned, foreign, ours].iter().filter_map(|raw| verified_policy(raw, &[key]).ok().map(|b| b.serial)).collect();
         assert_eq!(live, [4]);
         // This PC published up to 6: the next serial is 7.
         assert_eq!(next_serial(live.into_iter().chain([2, 6]), "policy").unwrap(), 7);
         // Only a document this admin key really signed with u64::MAX can exhaust it, with a clear error.
-        assert!(verified_policy(&signed(u64::MAX, &admin), &key).is_ok());
+        assert!(verified_policy(&signed(u64::MAX, &admin), &[key]).is_ok());
         assert!(next_serial([u64::MAX], "policy").unwrap_err().contains("policy serial is exhausted"));
+    }
+
+    #[test]
+    fn publish_check_needs_an_unrevoked_grant_of_the_vault_key() {
+        let app = temp_app("grants");
+        let mut b: Bundle = serde_json::from_str(r#"{"serial":1,"issued_at":0,"groups":{"monitored":{"profile":"technician","overrides":{"health.agent":{"state":"on","value":"install"}}}}}"#).unwrap();
+        // Locked: no grant check without the vault.
+        assert_eq!(publish_check(&app, &b).unwrap_err(), "Unlock the keys first.");
+        *app.keys.lock().unwrap() = Some(Keys::generate().unwrap());
+        assert!(publish_check(&app, &b).unwrap_err().contains("has no enrolment grant"));
+        let token = grant_new(&app, "group:monitored", "4711", None).unwrap();
+        let rule = tether_trust::policy::Rule { state: tether_trust::policy::State::On, value: Some(token.clone()) };
+        b.groups.get_mut("monitored").unwrap().overrides.insert(grants::GRANT.into(), rule);
+        publish_check(&app, &b).unwrap();
+        // Journalled without the token.
+        let j = fs::read_to_string(app.path(grants::JOURNAL)).unwrap();
+        assert!(j.contains("\"group:monitored\"") && j.contains("\"4711\"") && !j.contains(&token), "{j}");
+        // Renew: the old one is replaced, still valid while it is revoked nowhere (a discarded Renew
+        // publishes as before); once a relay revoked it, it blocks publish.
+        let renewed = grant_new(&app, "group:monitored", "", Some(&token)).unwrap();
+        publish_check(&app, &b).unwrap();
+        let mut j = grant_journal(&app).unwrap();
+        grants::mark_revoked_on(&mut j, "a", &grants::peek(&token).unwrap().id);
+        app.write(grants::JOURNAL, &serde_json::to_vec(&j).unwrap()).unwrap();
+        assert!(publish_check(&app, &b).unwrap_err().contains("was revoked"));
+        b.groups.get_mut("monitored").unwrap().overrides.get_mut(grants::GRANT).unwrap().value = Some(renewed);
+        publish_check(&app, &b).unwrap();
+        // A bundle the trust crate refuses is still refused first.
+        b.assignments.insert("u".into(), "nope".into());
+        assert!(publish_check(&app, &b).unwrap_err().contains("unknown group"));
+    }
+
+    /// A relay for the grant tests: serves the last policy PUT to it at `GET /api/policy`, answers
+    /// the PUT and `POST /api/admin/status/revoke` with the status codes in `codes` (changeable),
+    /// and records each request as "METHOD path body".
+    fn fake_relay() -> (String, std::sync::Arc<Mutex<(u16, u16)>>, std::sync::Arc<Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::Arc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let (codes, seen) = (Arc::new(Mutex::new((200u16, 200u16))), Arc::new(Mutex::new(Vec::new())));
+        let (c, log) = (codes.clone(), seen.clone());
+        std::thread::spawn(move || {
+            let mut policy: Option<Vec<u8>> = None;
+            for s in listener.incoming().flatten() {
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                if r.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = h.split_once(':') {
+                        if k.eq_ignore_ascii_case("content-length") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                let mut body = vec![0; len];
+                let _ = r.read_exact(&mut body);
+                let mut parts = line.split_whitespace();
+                let (method, path) = (parts.next().unwrap_or("").to_owned(), parts.next().unwrap_or("").to_owned());
+                log.lock().unwrap().push(format!("{method} {path} {}", String::from_utf8_lossy(&body)));
+                let (put, revoke) = *c.lock().unwrap();
+                let (code, text) = match (method.as_str(), path.as_str()) {
+                    ("GET", "/api/policy") => policy.clone().map_or((404, b"not found".to_vec()), |p| (200, p)),
+                    ("PUT", "/api/admin/policy") if put == 200 => {
+                        policy = Some(body);
+                        (200, b"{}".to_vec())
+                    }
+                    ("PUT", "/api/admin/policy") => (put, b"down".to_vec()),
+                    ("POST", "/api/admin/status/revoke") => (revoke, if revoke == 200 { b"{}".to_vec() } else { b"down".to_vec() }),
+                    _ => (404, b"not found".to_vec()),
+                };
+                let _ = write!(&s, "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", text.len());
+                let _ = (&s).write_all(&text);
+            }
+        });
+        (server, codes, seen)
+    }
+
+    fn revokes(seen: &Mutex<Vec<String>>) -> Vec<String> {
+        seen.lock().unwrap().iter().filter(|l| l.starts_with("POST /api/admin/status/revoke")).cloned().collect()
+    }
+
+    fn with_relays(name: &str, relays: &[&String]) -> App {
+        let app = temp_app(name);
+        app.write("settings.json", json!({ "server": relays.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",") }).to_string().as_bytes()).unwrap();
+        *app.keys.lock().unwrap() = Some(Keys::generate().unwrap());
+        app
+    }
+
+    /// A key holder publishes a team proposal through Manage's own code, with a fake relay: the
+    /// proposal is stored with the live document's hash, listed, signed with the vault at one above
+    /// the live serial (not the proposal's huge one), then removed with the person's session key
+    /// (`kid`: the relay's record names them); without a sign-in (break-glass) admin-signed.
+    #[test]
+    fn a_key_holder_publishes_a_proposal_and_removes_it_as_the_person() {
+        let roster = br#"{"members":[]}"#.to_vec();
+        let live = proposals::sha256_hex(&roster);
+        let stored: std::sync::Arc<Mutex<Vec<Value>>> = Default::default();
+        let (st, live_c) = (stored.clone(), live.clone());
+        let (a, seen) = api::tests::fake_relay(move |m, p, body| match (m, p) {
+            ("GET", "/api/admin/team") => (200, roster.clone()),
+            ("PUT", "/api/admin/proposals/team") => {
+                let mut v: Value = serde_json::from_slice(body).unwrap();
+                v["id"] = json!("0123456789abcdef");
+                v["author"] = json!({"key_fingerprint": "aa", "name": "Ed", "oid": "o1"});
+                v["created"] = json!(1);
+                st.lock().unwrap().push(v);
+                (200, br#"{"id":"0123456789abcdef"}"#.to_vec())
+            }
+            ("GET", "/api/admin/proposals/team") => (200, serde_json::to_vec(&json!({"live": live_c, "proposals": *st.lock().unwrap()})).unwrap()),
+            ("PUT", "/api/admin/team") | ("DELETE", "/api/admin/proposals/team/0123456789abcdef") => (204, Vec::new()),
+            _ => (404, b"not found".to_vec()),
+        });
+        let app = with_relays("propose-publish", &[&a]);
+        let doc = TeamDoc { serial: u64::MAX, oidc: None, roles: BTreeMap::new(), deny: Vec::new(), oidc_only: false, members: Vec::new() };
+        tauri::async_runtime::block_on(proposals::put(&app, "team", &serde_json::to_value(&doc).unwrap(), "why")).unwrap();
+        assert_eq!(stored.lock().unwrap()[0]["base"], json!(live), "based on what the relay serves");
+        let listed = tauri::async_runtime::block_on(proposals::list(&app, "team")).unwrap();
+        let p = &listed["proposals"][0];
+        assert_eq!((p["stale"].clone(), p["author"]["name"].clone()), (json!([]), json!("Ed")));
+        let out = tauri::async_runtime::block_on(publish_team(&app, serde_json::from_value(p["doc"].clone()).unwrap(), None)).unwrap();
+        assert_eq!(out["serial"], 1, "one above the live serial, not the proposal's");
+        let ids: BTreeMap<String, String> = serde_json::from_value(p["ids"].clone()).unwrap();
+        tauri::async_runtime::block_on(proposals::delete(&app, "team", &ids, true)).unwrap();
+        tauri::async_runtime::block_on(proposals::delete(&app, "team", &ids, false)).unwrap();
+        let seen = seen.lock().unwrap();
+        let put = seen.iter().find(|r| (r.0.as_str(), r.1.as_str()) == ("PUT", "/api/admin/team")).unwrap();
+        let admin = app.admin_key().unwrap().verifying_key();
+        assert_eq!(tether_trust::team::open(&put.3, &[admin]).unwrap().0.serial, 1, "signed with the vault");
+        assert_eq!(tether_trust::reqauth::header_kid(&put.2), None);
+        let dels: Vec<Option<&str>> = seen.iter().filter(|r| r.0 == "DELETE").map(|r| tether_trust::reqauth::header_kid(&r.2)).collect();
+        assert_eq!(dels, [Some(tether_trust::team::key_id(&signin::SESSION_KEY.verifying_key()).as_str()), None]);
+    }
+
+    /// While signed in without KeyHolder (roles as the relays state them now), the vault signs
+    /// nothing and does not hand out a server's secret key; with KeyHolder it does.
+    #[test]
+    fn without_key_holder_the_vault_does_not_hand_out_the_server_key() {
+        let app = temp_app("gate");
+        *app.keys.lock().unwrap() = Some(Keys::generate().unwrap());
+        let folder = app.path("out").to_string_lossy().into_owned();
+        signin::TEST_ROLES.with(|t| *t.borrow_mut() = Some(vec!["auditor".into()]));
+        assert_eq!(save_key_files(&app, "x", folder.clone()), Err(NOT_KEY_HOLDER.to_owned()));
+        assert_eq!(app.admin_key().unwrap_err(), NOT_KEY_HOLDER);
+        signin::TEST_ROLES.with(|t| *t.borrow_mut() = Some(vec!["key-holder".into()]));
+        assert_eq!(save_key_files(&app, "x", folder), Err("This key was not generated on this PC.".to_owned()));
+        signin::TEST_ROLES.with(|t| *t.borrow_mut() = None);
+    }
+
+    #[test]
+    fn a_proposals_files_are_checked_by_hash_before_signing() {
+        let f = vec![FileHash { name: "Tether_0.7.0_x64-setup.exe".into(), sha256: proposals::sha256_hex(b"build").to_uppercase() }];
+        assert!(expected(&f, "C:\\dist\\x.exe", b"build").is_ok());
+        assert!(expected(&[], "x.exe", b"other").is_ok(), "no proposal: nothing to compare");
+        let e = expected(&f, "x.exe", b"other").unwrap_err();
+        assert!(e.contains("Tether_0.7.0_x64-setup.exe") && e.contains(&proposals::sha256_hex(b"other")) && e.ends_with("nothing was published."), "{e}");
+    }
+
+    fn with_grant(token: &str) -> Bundle {
+        let mut b: Bundle = serde_json::from_str(r#"{"serial":0,"issued_at":0,"groups":{"monitored":{"profile":"technician","overrides":{"health.agent":{"state":"on","value":"install"}}}}}"#).unwrap();
+        b.groups.get_mut("monitored").unwrap().overrides.insert(grants::GRANT.into(), tether_trust::policy::Rule { state: tether_trust::policy::State::On, value: Some(token.into()) });
+        b
+    }
+
+    /// Renew, publish, a relay that failed, Bring up to date and Revoke again, with fake relays:
+    /// the old grant is revoked on all relays or on none, and what each step says.
+    #[test]
+    fn a_renewed_grant_is_revoked_only_once_every_relay_serves_the_new_policy() {
+        let _one = api::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let ((a, _, seen_a), (b, codes_b, seen_b)) = (fake_relay(), fake_relay());
+        let app = with_relays("renew-relays", &[&a, &b]);
+        let old = grant_new(&app, "group:monitored", "", None).unwrap();
+        tauri::async_runtime::block_on(publish(&app, with_grant(&old), None)).unwrap();
+        let new = grant_new(&app, "group:monitored", "", Some(&old)).unwrap();
+        let old_id = grants::peek(&old).unwrap().id;
+        // b refuses the new policy: a serves it, b still the old one, so the old grant is revoked nowhere.
+        codes_b.lock().unwrap().0 = 500;
+        let out = tauri::async_runtime::block_on(publish(&app, with_grant(&new), None)).unwrap();
+        assert!(revokes(&seen_a).is_empty() && revokes(&seen_b).is_empty(), "{:?}", revokes(&seen_a));
+        let note = out["relays"][0]["detail"]["note"].as_str().unwrap();
+        assert_eq!(note, format!("Old enrolment grant {old_id} stays valid until every relay serves a policy without it; not yet on {b}."));
+        let j = grant_journal(&app).unwrap();
+        assert_eq!(grants::pending(&j, &app.servers(), api::now())[0]["waiting"], json!([b]));
+        // Bring up to date: b takes it, the old grant goes to both at once.
+        codes_b.lock().unwrap().0 = 200;
+        let out = tauri::async_runtime::block_on(sync(&app)).unwrap();
+        assert_eq!((revokes(&seen_a).len(), revokes(&seen_b).len()), (1, 1));
+        assert!(revokes(&seen_b)[0].contains(&old_id), "{:?}", revokes(&seen_b));
+        let by = |sv: &String| out.iter().find(|r| &r.server == sv).unwrap().detail.clone();
+        assert_eq!(by(&a)["note"], json!(format!("Old enrolment grant {old_id} revoked")));
+        assert_eq!(by(&b)["note"], json!(format!("Old enrolment grant {old_id} revoked")));
+        assert!(grants::pending(&grant_journal(&app).unwrap(), &app.servers(), api::now()).is_empty());
+    }
+
+    /// The warning when a relay refuses the revoke, and Revoke again.
+    #[test]
+    fn a_refused_revoke_is_a_warning_and_revoke_again_finishes_it() {
+        let _one = api::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let ((a, codes_a, seen_a), (b, _, _)) = (fake_relay(), fake_relay());
+        let app = with_relays("revoke-warn", &[&a, &b]);
+        let old = grant_new(&app, "group:monitored", "", None).unwrap();
+        tauri::async_runtime::block_on(publish(&app, with_grant(&old), None)).unwrap();
+        let new = grant_new(&app, "group:monitored", "", Some(&old)).unwrap();
+        let old_id = grants::peek(&old).unwrap().id;
+        codes_a.lock().unwrap().1 = 500;
+        let out = tauri::async_runtime::block_on(publish(&app, with_grant(&new), None)).unwrap();
+        let warn = out["relays"][0]["detail"]["warning"].as_str().unwrap();
+        assert!(warn.starts_with(&format!("Old enrolment grant {old_id} not revoked: ")) && warn.ends_with("Use Revoke again under Policy, Health monitoring."), "{warn}");
+        assert_eq!(out["relays"][1]["detail"]["note"], json!(format!("Old enrolment grant {old_id} revoked")));
+        let p = grants::pending(&grant_journal(&app).unwrap(), &app.servers(), api::now());
+        assert_eq!(p[0]["relays"], json!([a]));
+        codes_a.lock().unwrap().1 = 200;
+        let again = tauri::async_runtime::block_on(revoke_pending(&app)).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!((again[0].server.as_str(), again[0].ok, again[0].detail["note"].as_str(), again[0].detail["id"].as_str()), (a.as_str(), true, Some(format!("Grant {old_id} revoked").as_str()), Some(old_id.as_str())));
+        assert_eq!(revokes(&seen_a).len(), 2);
+    }
+
+    /// Revoke after a Renew: the new grant and the old one (the one live on the relays), on every
+    /// relay at once; the results name each grant.
+    #[test]
+    fn revoke_after_renew_revokes_the_live_grant_too() {
+        let _one = api::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let ((a, _, seen_a), (b, codes_b, seen_b)) = (fake_relay(), fake_relay());
+        let app = with_relays("revoke-renew", &[&a, &b]);
+        let old = grant_new(&app, "group:monitored", "", None).unwrap();
+        tauri::async_runtime::block_on(publish(&app, with_grant(&old), None)).unwrap();
+        let new = grant_new(&app, "group:monitored", "", Some(&old)).unwrap();
+        codes_b.lock().unwrap().1 = 500;
+        let out = tauri::async_runtime::block_on(revoke_layer_now(&app, "group:monitored", &new)).unwrap();
+        let (old_id, new_id) = (grants::peek(&old).unwrap().id, grants::peek(&new).unwrap().id);
+        for id in [&old_id, &new_id] {
+            assert!(revokes(&seen_a).iter().any(|l| l.contains(id.as_str())) && revokes(&seen_b).iter().any(|l| l.contains(id.as_str())), "{id}");
+            let on_a = out.iter().find(|r| r.server == a && r.detail["id"] == json!(id)).unwrap();
+            assert_eq!(on_a.detail["note"], json!(format!("Grant {id} revoked")));
+            let on_b = out.iter().find(|r| r.server == b && r.detail["id"] == json!(id)).unwrap();
+            assert!(!on_b.ok && on_b.error.as_deref().unwrap().starts_with(&format!("Grant {id} not revoked: ")), "{on_b:?}");
+        }
+        assert_eq!(out.len(), 4);
+        // The published policy still carries the old grant: now revoked here, so it blocks publish.
+        assert!(publish_check(&app, &with_grant(&old)).unwrap_err().contains("was revoked"));
+    }
+
+    /// A policy that does not use the health features goes out byte for byte as before: the
+    /// signed body is the 0.6 serialisation with the new serial and time.
+    #[test]
+    fn a_policy_without_the_features_publishes_the_same_bytes() {
+        let _one = api::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (a, _, seen) = fake_relay();
+        let app = with_relays("same-bytes", &[&a]);
+        let old = r#"{"serial":7,"issued_at":1700000000,"profiles":{"technician":{"permission.clipboard":{"state":"off"}}},"groups":{"g":{"profile":"customer","overrides":{}}},"assignments":{"u1":"g"}}"#;
+        let out = tauri::async_runtime::block_on(publish(&app, serde_json::from_str(old).unwrap(), None)).unwrap();
+        let put = seen.lock().unwrap().iter().find(|l| l.starts_with("PUT /api/admin/policy ")).cloned().unwrap();
+        let doc: envelope::Signed = serde_json::from_str(put.trim_start_matches("PUT /api/admin/policy ")).unwrap();
+        use base64::Engine;
+        let body = base64::engine::general_purpose::STANDARD.decode(&doc.payload).unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["serial"], out["serial"]);
+        let want = old.replace("\"serial\":7,\"issued_at\":1700000000", &format!("\"serial\":{},\"issued_at\":{}", v["serial"], v["issued_at"]));
+        assert_eq!(String::from_utf8(body).unwrap(), want);
+        assert!(revokes(&seen).is_empty());
+    }
+
+    #[test]
+    fn a_custom_app_cannot_set_the_health_features() {
+        let key = tether_trust::generate_key();
+        for id in [grants::AGENT, grants::GRANT] {
+            let p = CustomProfile { id: "x".into(), name: "X".into(), accent: String::new(), welcome: String::new(), logo_png: String::new(), layer: Layer::from([(id.to_owned(), tether_trust::policy::Rule { state: tether_trust::policy::State::On, value: Some("install".into()) })]), issued_at: 0 };
+            let e = custom_body(&p, &key, "t", 1, "stable").unwrap_err();
+            assert!(e.starts_with(&format!("A custom app cannot set {id}: its signed profile has no serial and cannot be revoked.")), "{e}");
+        }
+    }
+
+    #[test]
+    fn saving_a_draft_with_the_old_grant_again_restores_it() {
+        let app = with_relays("restore", &[&"http://127.0.0.1:9".to_owned()]);
+        let old = grant_new(&app, "group:monitored", "", None).unwrap();
+        let _new = grant_new(&app, "group:monitored", "", Some(&old)).unwrap();
+        save_draft(&app, &with_grant(&old)).unwrap();
+        let j = grant_journal(&app).unwrap();
+        assert_eq!((j[0].state, j[1].state), (grants::GrantState::Active, grants::GrantState::Replaced));
+    }
+
+    #[test]
+    fn deleting_a_group_revokes_its_grants_for_the_next_publish() {
+        let app = with_relays("group-gone", &[&"http://127.0.0.1:9".to_owned()]);
+        let token = grant_new(&app, "group:monitored", "", None).unwrap();
+        grant_new(&app, "profile:technician", "", None).unwrap();
+        save_draft(&app, &with_grant(&token)).unwrap();
+        assert_eq!(grant_journal(&app).unwrap().iter().map(|e| e.state).collect::<Vec<_>>(), [grants::GrantState::Active, grants::GrantState::Active]);
+        // The group leaves the draft: its grant is revoked (pending on every relay), the profile's one is not.
+        save_draft(&app, &Bundle::default()).unwrap();
+        let j = grant_journal(&app).unwrap();
+        assert_eq!(j.iter().map(|e| e.state).collect::<Vec<_>>(), [grants::GrantState::Revoked, grants::GrantState::Active]);
+        let p = grants::pending(&j, &app.servers(), api::now());
+        assert_eq!((p.len(), p[0]["id"].as_str(), p[0]["layer"].as_str()), (1, Some(grants::peek(&token).unwrap().id.as_str()), Some("group:monitored")));
     }
 
     #[test]

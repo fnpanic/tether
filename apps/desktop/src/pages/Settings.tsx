@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import qrcode from "qrcode-generator";
 import { Activity, Info, KeyRound, Lock, Monitor, Moon, Network, Palette, Shield, Sun, Video, X } from "lucide-react";
-import { api, type Status } from "../lib/ipc";
+import { api, invoke, type Status } from "../lib/ipc";
+import { practiceLine, type AgentAnswer } from "../lib/agent";
 import { errorText, isHidden, isLocked, isOn, usePolicy } from "../lib/policy";
 import { Diagnostics } from "./Diagnostics";
 import { updateApi, updateLine, type UpdateStatus } from "../components/UpdateCard";
@@ -106,8 +107,24 @@ function Security() {
       <BoolOption k="enable-clipboard" f="permission.clipboard" title="Allow clipboard" />
       <BoolOption k="enable-file-transfer" f="permission.file-transfer" title="Allow file transfer" />
       <BoolOption k="enable-audio" f="permission.audio" title="Share audio" />
+      <HealthAgentLine />
     </>
   );
+}
+
+/** Spec 7.3: read-only, only when Tether installed the health monitoring agent on this computer
+ *  (the practice removes it the Windows way). Nothing when the backend has no answer. */
+function HealthAgentLine() {
+  const [a, setA] = useState<AgentAnswer | null>(null);
+  useEffect(() => {
+    invoke<AgentAnswer>("health_agent_status").then(setA, () => {});
+  }, []);
+  const line = practiceLine(a);
+  return line ? (
+    <div data-testid="health-agent-line" className="border-b border-hairline py-4 text-caption leading-relaxed text-muted last:border-0">
+      {line}
+    </div>
+  ) : null;
 }
 
 function Access({ status }: { status: Status | null }) {

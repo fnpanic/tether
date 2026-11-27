@@ -1724,7 +1724,7 @@ index 0000000..b660d01
 +    }
 +}
 diff --git a/src/common.rs b/src/common.rs
-index 9c76f41..2d35c1d 100644
+index 9c76f41..79c08d7 100644
 --- a/src/common.rs
 +++ b/src/common.rs
 @@ -105,11 +105,33 @@ pub fn now() -> u64 {
@@ -1776,7 +1776,7 @@ index 9c76f41..2d35c1d 100644
                  let s = base64::encode(&sk);
                  if f.write_all(s.as_bytes()).is_ok() {
                      log::info!("Private/public key written to {}/{}", sk_file, pub_file);
-@@ -215,4 +243,282 @@ async fn check_software_update_() -> hbb_common::ResultType<()> {
+@@ -215,4 +243,402 @@ async fn check_software_update_() -> hbb_common::ResultType<()> {
         log::info!("new version is available: {}", latest_release_version);
      }
      Ok(())
@@ -1839,10 +1839,40 @@ index 9c76f41..2d35c1d 100644
 +    hbb_common::tcp::new_listener(addr, true).await
 +}
 +
++/// Tether: `/peer-pk/<id>` on hbbs's health endpoint, read by tether-api for an enrolment with a
++/// Tether proof: the key hbbs holds for the ID. Answered only to loopback and to the CIDRs in
++/// `from` (`PEER_LOOKUP_FROM`), so the port is no ID-enumeration oracle where it is reachable.
++pub struct PeerLookup {
++    pub from: Vec<ipnetwork::IpNetwork>,
++    /// The key held for an ID, None when the ID is unknown.
++    pub pk: Box<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<u8>>> + Send>> + Send + Sync>,
++}
++
++/// Tether: `PEER_LOOKUP_FROM`, comma-separated CIDRs (a bare address is a /32 or /128).
++#[allow(dead_code)] // hbbr has no lookup
++pub fn parse_peer_lookup_from(v: &str) -> Result<Vec<ipnetwork::IpNetwork>, String> {
++    v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(|s| s.parse().map_err(|e| format!("{s}: {e}"))).collect()
++}
++
++/// Tether: the TCP peer of the health connection, never a header: the proxies in front
++/// (server/caddy, server/nginx, the Helm chart) forward only `/rendezvous/pubkey` to this port.
++/// An IPv4-mapped IPv6 address counts as its IPv4 address.
++fn peer_lookup_allowed(peer: std::net::IpAddr, from: &[ipnetwork::IpNetwork]) -> bool {
++    let peer = peer.to_canonical();
++    peer.is_loopback() || from.iter().any(|n| n.contains(peer))
++}
++
++/// Tether: the ID rule of the clients (RustDesk's custom IDs, numeric generated IDs): 6 to 16
++/// of `A-Z a-z 0-9 _ -`. Anything else is not looked up.
++fn lookup_id_ok(id: &str) -> bool {
++    (6..=16).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
++}
++
 +/// Plain HTTP health endpoint on HEALTH_PORT (default `default_port`, 0 = off), for Kubernetes
 +/// probes and for hbbs checking its relays: `/healthz` is 200 while the process runs, `/readyz`
-+/// is 200 `ready sessions=N` or 503 `draining sessions=N`, `/pubkey` (hbbs) the signing public key.
-+pub async fn serve_health(default_port: u16, sessions: fn() -> usize) {
++/// is 200 `ready sessions=N` or 503 `draining sessions=N`, `/pubkey` (hbbs) the signing public key,
++/// `/peer-pk/<id>` (hbbs, Tether) the key held for an ID, see [`PeerLookup`].
++pub async fn serve_health(default_port: u16, sessions: fn() -> usize, lookup: Option<PeerLookup>) {
 +    let port: u16 = std::env::var("HEALTH_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(default_port);
 +    if port == 0 {
 +        return;
@@ -1854,8 +1884,10 @@ index 9c76f41..2d35c1d 100644
 +            return;
 +        }
 +    };
-+    log::info!("Health endpoint on http :{port} (/healthz, /readyz, /pubkey)");
-+    while let Ok((mut stream, _)) = listener.accept().await {
++    log::info!("Health endpoint on http :{port} (/healthz, /readyz, /pubkey{})", if lookup.is_some() { ", /peer-pk" } else { "" });
++    let lookup = std::sync::Arc::new(lookup);
++    while let Ok((mut stream, peer)) = listener.accept().await {
++        let lookup = lookup.clone();
 +        tokio::spawn(async move {
 +            use hbb_common::tokio::io::{AsyncReadExt, AsyncWriteExt};
 +            let mut buf = [0u8; 1024];
@@ -1865,7 +1897,7 @@ index 9c76f41..2d35c1d 100644
 +            };
 +            let req = String::from_utf8_lossy(&buf[..n]);
 +            let path = req.split_whitespace().nth(1).unwrap_or("");
-+            let (code, body) = health_response(path, is_draining(), sessions(), SIGNING_PUB_KEY.get().map(String::as_str));
++            let (code, body) = health_response(path, is_draining(), sessions(), SIGNING_PUB_KEY.get().map(String::as_str), peer.ip(), lookup.as_ref().as_ref()).await;
 +            let res = format!(
 +                "HTTP/1.1 {code}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
 +                body.len()
@@ -1875,8 +1907,17 @@ index 9c76f41..2d35c1d 100644
 +    }
 +}
 +
-+fn health_response(path: &str, draining: bool, sessions: usize, pubkey: Option<&str>) -> (&'static str, String) {
-+    match path.split('?').next().unwrap_or("") {
++async fn health_response(path: &str, draining: bool, sessions: usize, pubkey: Option<&str>, peer: std::net::IpAddr, lookup: Option<&PeerLookup>) -> (&'static str, String) {
++    let path = path.split('?').next().unwrap_or("");
++    // Tether: everything refused here falls through to the 404 below.
++    if let (Some(id), Some(l)) = (path.strip_prefix("/peer-pk/"), lookup) {
++        if peer_lookup_allowed(peer, &l.from) && lookup_id_ok(id) {
++            if let Some(pk) = (l.pk)(id.to_owned()).await.filter(|pk| !pk.is_empty()) {
++                return ("200 OK", format!("{}\n", base64::encode(pk)));
++            }
++        }
++    }
++    match path {
 +        "/pubkey" if pubkey.is_some() => ("200 OK", format!("{}\n", pubkey.unwrap_or_default())),
 +        "/healthz" => ("200 OK", "ok\n".to_owned()),
 +        "/readyz" if draining => ("503 Service Unavailable", format!("draining sessions={sessions}\n")),
@@ -1887,20 +1928,99 @@ index 9c76f41..2d35c1d 100644
 +
 +#[cfg(test)]
 +mod health_tests {
-+    use super::health_response;
++    use super::{health_response, parse_peer_lookup_from, PeerLookup};
++    use hbb_common::tokio;
++    use std::net::IpAddr;
 +
-+    #[test]
-+    fn readyz_reflects_drain_and_load() {
-+        assert_eq!(health_response("/readyz", false, 3, None), ("200 OK", "ready sessions=3\n".to_owned()));
-+        assert_eq!(health_response("/readyz", true, 1, None).0, "503 Service Unavailable");
-+        assert_eq!(health_response("/healthz", true, 0, None).0, "200 OK");
-+        assert_eq!(health_response("/x", false, 0, None).0, "404 Not Found");
++    fn ip(s: &str) -> IpAddr {
++        s.parse().unwrap()
++    }
++
++    /// A peer map holding one ID, `123456789`, with the key bytes 1, 2, 3 (base64 `AQID`).
++    fn one_peer(from: &str) -> PeerLookup {
++        PeerLookup { from: parse_peer_lookup_from(from).unwrap(), pk: Box::new(|id| Box::pin(async move { (id == "123456789").then(|| vec![1u8, 2, 3]) })) }
++    }
++
++    /// A peer map that has a key for whatever ID it is asked about.
++    fn any_peer() -> PeerLookup {
++        PeerLookup { from: vec![], pk: Box::new(|_| Box::pin(async { Some(vec![1u8, 2, 3]) })) }
++    }
++
++    async fn get(path: &str, peer: &str, lookup: Option<&PeerLookup>) -> (&'static str, String) {
++        health_response(path, false, 0, None, ip(peer), lookup).await
++    }
++
++    const KEY: (&str, &str) = ("200 OK", "AQID\n");
++
++    #[tokio::test]
++    async fn readyz_reflects_drain_and_load() {
++        let lo = ip("127.0.0.1");
++        assert_eq!(health_response("/readyz", false, 3, None, lo, None).await, ("200 OK", "ready sessions=3\n".to_owned()));
++        assert_eq!(health_response("/readyz", true, 1, None, lo, None).await.0, "503 Service Unavailable");
++        assert_eq!(health_response("/healthz", true, 0, None, lo, None).await.0, "200 OK");
++        assert_eq!(health_response("/x", false, 0, None, lo, None).await.0, "404 Not Found");
++        // The lookup does not change the other paths.
++        let l = one_peer("");
++        assert_eq!(health_response("/readyz", false, 3, None, lo, Some(&l)).await, ("200 OK", "ready sessions=3\n".to_owned()));
++        assert_eq!(health_response("/pubkey", false, 0, Some("AAAA="), ip("10.0.0.5"), Some(&l)).await, ("200 OK", "AAAA=\n".to_owned()));
++        assert_eq!(health_response("/x", false, 0, None, lo, Some(&l)).await.0, "404 Not Found");
++    }
++
++    #[tokio::test]
++    async fn pubkey_only_where_a_signing_key_is_set() {
++        let lo = ip("127.0.0.1");
++        assert_eq!(health_response("/pubkey", false, 0, Some("AAAA="), lo, None).await, ("200 OK", "AAAA=\n".to_owned()));
++        assert_eq!(health_response("/pubkey", false, 0, None, lo, None).await.0, "404 Not Found");
++    }
++
++    #[tokio::test]
++    async fn peer_pk_answers_loopback_with_the_key_held_for_the_id() {
++        let l = one_peer("");
++        let (code, body) = get("/peer-pk/123456789", "127.0.0.1", Some(&l)).await;
++        assert_eq!((code, body.as_str()), KEY);
++        assert_eq!(get("/peer-pk/123456789", "::1", Some(&l)).await.0, "200 OK");
++        assert_eq!(get("/peer-pk/123456789", "::ffff:127.0.0.1", Some(&l)).await.0, "200 OK");
++        assert_eq!(get("/peer-pk/123456789?x=1", "127.0.0.1", Some(&l)).await.0, "200 OK");
++        assert_eq!(get("/peer-pk/987654321", "127.0.0.1", Some(&l)).await, ("404 Not Found", "not found\n".to_owned()));
++        // hbbr has no peer map.
++        assert_eq!(get("/peer-pk/123456789", "127.0.0.1", None).await.0, "404 Not Found");
++        // A peer entry without a key is no key.
++        let empty = PeerLookup { from: vec![], pk: Box::new(|_| Box::pin(async { Some(vec![]) })) };
++        assert_eq!(get("/peer-pk/123456789", "127.0.0.1", Some(&empty)).await.0, "404 Not Found");
++    }
++
++    #[tokio::test]
++    async fn peer_pk_from_elsewhere_only_inside_peer_lookup_from() {
++        assert_eq!(get("/peer-pk/123456789", "10.0.0.5", Some(&one_peer(""))).await, ("404 Not Found", "not found\n".to_owned()));
++        let l = one_peer("10.0.0.0/8");
++        let (code, body) = get("/peer-pk/123456789", "10.0.0.5", Some(&l)).await;
++        assert_eq!((code, body.as_str()), KEY);
++        assert_eq!(get("/peer-pk/123456789", "::ffff:10.0.0.5", Some(&l)).await.0, "200 OK");
++        assert_eq!(get("/peer-pk/123456789", "11.0.0.5", Some(&l)).await.0, "404 Not Found");
++        assert_eq!(get("/peer-pk/123456789", "::ffff:11.0.0.5", Some(&l)).await.0, "404 Not Found");
++        assert_eq!(get("/peer-pk/123456789", "fd00::5", Some(&l)).await.0, "404 Not Found");
++        let l = one_peer(" 192.0.2.7 , fd00::/8");
++        assert_eq!(get("/peer-pk/123456789", "192.0.2.7", Some(&l)).await.0, "200 OK");
++        assert_eq!(get("/peer-pk/123456789", "192.0.2.8", Some(&l)).await.0, "404 Not Found");
++        assert_eq!(get("/peer-pk/123456789", "fd00::5", Some(&l)).await.0, "200 OK");
++    }
++
++    #[tokio::test]
++    async fn peer_pk_refuses_ids_outside_the_id_rule() {
++        let l = any_peer();
++        assert_eq!(get("/peer-pk/abc_DEF-12", "127.0.0.1", Some(&l)).await.0, "200 OK");
++        for path in ["/peer-pk/", "/peer-pk/12345", "/peer-pk/12345678901234567", "/peer-pk/123456789/", "/peer-pk/1234567%2F", "/peer-pk/../pubkey", "/peer-pk/12345678.", "/peer-pk/1234567\u{e9}", "/peer-pk//123456789"] {
++            assert_eq!(get(path, "127.0.0.1", Some(&l)).await.0, "404 Not Found", "{path}");
++        }
 +    }
 +
 +    #[test]
-+    fn pubkey_only_where_a_signing_key_is_set() {
-+        assert_eq!(health_response("/pubkey", false, 0, Some("AAAA=")), ("200 OK", "AAAA=\n".to_owned()));
-+        assert_eq!(health_response("/pubkey", false, 0, None).0, "404 Not Found");
++    fn peer_lookup_from_is_a_list_of_cidrs() {
++        assert!(parse_peer_lookup_from("").unwrap().is_empty());
++        assert!(parse_peer_lookup_from(" , ").unwrap().is_empty());
++        assert_eq!(parse_peer_lookup_from("10.0.0.0/8, fd00::/8,192.0.2.7").unwrap().len(), 3);
++        assert!(parse_peer_lookup_from("10.0.0.0/33").is_err());
++        assert!(parse_peer_lookup_from("10.0.0.0/8,tether-api").is_err());
 +    }
 +}
 +
@@ -2678,7 +2798,7 @@ index 4ca87cf..7efd9c5 100644
      pub(crate) async fn is_in_memory(&self, id: &str) -> bool {
          self.map.read().await.contains_key(id)
 diff --git a/src/relay_server.rs b/src/relay_server.rs
-index 0ec190a..77f09ca 100644
+index 0ec190a..b93a1c7 100644
 --- a/src/relay_server.rs
 +++ b/src/relay_server.rs
 @@ -42,12 +42,19 @@ static DOWNGRADE_START_CHECK: AtomicUsize = AtomicUsize::new(1_800_000); // in m
@@ -2715,7 +2835,7 @@ index 0ec190a..77f09ca 100644
          }
      };
 -    let listen_signal = crate::common::listen_signal();
-+    tokio::spawn(crate::common::serve_health(HEALTH_PORT, || SESSIONS.load(Ordering::SeqCst)));
++    tokio::spawn(crate::common::serve_health(HEALTH_PORT, || SESSIONS.load(Ordering::SeqCst), None));
 +    tokio::spawn(crate::metrics::serve(21124, || async { crate::metrics::render_hbbr(crate::common::is_draining()) }));
 +    let listen_signal = crate::common::listen_signal_and_drain(|| {
 +        SESSIONS.load(Ordering::SeqCst) == 0 && PEERS.try_lock().map_or(false, |p| p.is_empty())
@@ -2828,7 +2948,7 @@ index 0ec190a..77f09ca 100644
      }
  
 diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
-index dff45eb..581239a 100644
+index dff45eb..32e06bd 100644
 --- a/src/rendezvous_server.rs
 +++ b/src/rendezvous_server.rs
 @@ -44,10 +44,23 @@ use std::{
@@ -2959,7 +3079,7 @@ index dff45eb..581239a 100644
      relay_servers0: Arc<RelayServers>,
      rendezvous_servers: Arc<Vec<String>>,
      inner: Arc<Inner>,
-@@ -101,6 +185,10 @@ impl RendezvousServer {
+@@ -101,6 +185,17 @@ impl RendezvousServer {
      #[tokio::main(flavor = "multi_thread")]
      pub async fn start(port: i32, serial: i32, key: &str, rmem: usize) -> ResultType<()> {
          let (key, sk) = Self::get_server_sk(key);
@@ -2967,10 +3087,17 @@ index dff45eb..581239a 100644
 +            crate::common::SIGNING_PUB_KEY.set(key.clone()).ok();
 +        }
 +        crate::common::log_keys_accept();
++        // Tether: who besides loopback may read /peer-pk/<id> (crate::common::PeerLookup).
++        let lookup_from = crate::common::parse_peer_lookup_from(&std::env::var("PEER_LOOKUP_FROM").unwrap_or_default()).unwrap_or_else(|e| {
++            // don't use log here, since it is async
++            println!("Fatal error: PEER_LOOKUP_FROM: {e} (comma-separated CIDRs)");
++            std::process::exit(1);
++        });
++        log::info!("PEER_LOOKUP_FROM={:?} (and loopback)", lookup_from);
          let nat_port = port - 1;
          let ws_port = port + 2;
          let pm = PeerMap::new().await?;
-@@ -108,8 +196,15 @@ impl RendezvousServer {
+@@ -108,8 +203,15 @@ impl RendezvousServer {
          let rendezvous_servers = get_servers(&get_arg("rendezvous-servers"), "rendezvous-servers");
          log::info!("Listening on tcp/udp :{}", port);
          log::info!("Listening on tcp :{}, extra port for NAT test", nat_port);
@@ -2987,11 +3114,12 @@ index dff45eb..581239a 100644
          let (tx, mut rx) = mpsc::unbounded_channel::<Data>();
          let software_url = get_arg("software-url");
          let version = hbb_common::get_version_from_url(&software_url);
-@@ -147,9 +242,10 @@ impl RendezvousServer {
+@@ -147,9 +249,11 @@ impl RendezvousServer {
          log::info!("local-ip: {:?}", rs.inner.local_ip);
          std::env::set_var("PORT_FOR_API", port.to_string());
          rs.parse_relay_servers(&get_arg("relay-servers"));
 +        let pm_metrics = rs.pm.clone();
++        let pm_lookup = rs.pm.clone();
          let mut listener = create_tcp_listener(port).await?;
          let mut listener2 = create_tcp_listener(nat_port).await?;
 -        let mut listener3 = create_tcp_listener(ws_port).await?;
@@ -2999,7 +3127,7 @@ index dff45eb..581239a 100644
          let test_addr = std::env::var("TEST_HBBS").unwrap_or_default();
          if std::env::var("ALWAYS_USE_RELAY")
              .unwrap_or_default()
-@@ -216,12 +312,20 @@ impl RendezvousServer {
+@@ -216,12 +320,32 @@ impl RendezvousServer {
                      }
                      LoopFailure::Listener3 => {
                          drop(listener3);
@@ -3010,7 +3138,19 @@ index dff45eb..581239a 100644
              }
          };
 -        let listen_signal = listen_signal();
-+        tokio::spawn(serve_health(HEALTH_PORT, || TCP_PEERS.try_lock().map_or(0, |p| p.len())));
++        // Tether: /peer-pk/<id> reads the peer map, falling back to the database as a punch request does.
++        let lookup = crate::common::PeerLookup {
++            from: lookup_from,
++            pk: Box::new(move |id| {
++                let pm = pm_lookup.clone();
++                Box::pin(async move {
++                    let peer = pm.get(&id).await?;
++                    let pk = peer.read().await.pk.to_vec();
++                    Some(pk)
++                })
++            }),
++        };
++        tokio::spawn(serve_health(HEALTH_PORT, || TCP_PEERS.try_lock().map_or(0, |p| p.len()), Some(lookup)));
 +        tokio::spawn(watch_release_generation());
 +        tokio::spawn(crate::metrics::serve(21123, move || {
 +            let pm = pm_metrics.clone();
@@ -3022,7 +3162,7 @@ index dff45eb..581239a 100644
          tokio::select!(
              res = main_task => res,
              res = listen_signal => res,
-@@ -237,10 +341,14 @@ impl RendezvousServer {
+@@ -237,10 +361,14 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> LoopFailure {
@@ -3037,7 +3177,7 @@ index dff45eb..581239a 100644
                      if self.relay_servers0.len() > 1 {
                          let rs = self.relay_servers0.clone();
                          let tx = self.tx.clone();
-@@ -251,9 +359,25 @@ impl RendezvousServer {
+@@ -251,9 +379,25 @@ impl RendezvousServer {
                  }
                  Some(data) = rx.recv() => {
                      match data {
@@ -3065,7 +3205,7 @@ index dff45eb..581239a 100644
                      }
                  }
                  res = socket.next() => {
-@@ -321,10 +445,24 @@ impl RendezvousServer {
+@@ -321,10 +465,24 @@ impl RendezvousServer {
          socket: &mut FramedSocket,
          key: &str,
      ) -> ResultType<()> {
@@ -3090,13 +3230,15 @@ index dff45eb..581239a 100644
                      if !rp.id.is_empty() {
                          log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
                          self.update_addr(rp.id, addr, socket).await?;
-@@ -340,89 +478,9 @@ impl RendezvousServer {
+@@ -340,89 +498,9 @@ impl RendezvousServer {
                      }
                  }
                  Some(rendezvous_message::Union::RegisterPk(rk)) => {
 -                    if rk.uuid.is_empty() || rk.pk.is_empty() {
 -                        return Ok(());
--                    }
++                    if let Some(msg_out) = self.register_pk(rk, addr, true).await {
++                        socket.send(&msg_out, addr).await?
+                     }
 -                    let id = rk.id;
 -                    let ip = addr.ip().to_string();
 -                    if id.len() < 6 {
@@ -3170,9 +3312,7 @@ index dff45eb..581239a 100644
 -                    }
 -                    if changed {
 -                        self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
-+                    if let Some(msg_out) = self.register_pk(rk, addr, true).await {
-+                        socket.send(&msg_out, addr).await?
-                     }
+-                    }
 -                    let mut msg_out = RendezvousMessage::new();
 -                    msg_out.set_register_pk_response(RegisterPkResponse {
 -                        result: register_pk_response::Result::OK.into(),
@@ -3182,7 +3322,7 @@ index dff45eb..581239a 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                      // UDP PunchHoleRequest is intentionally unsupported.
-@@ -479,13 +537,41 @@ impl RendezvousServer {
+@@ -479,13 +557,41 @@ impl RendezvousServer {
          addr: SocketAddr,
          key: &str,
          ws: bool,
@@ -3225,7 +3365,7 @@ index dff45eb..581239a 100644
                      }
                      allow_err!(self.handle_tcp_punch_hole_request(addr, ph, key, ws).await);
                      return true;
-@@ -493,7 +579,7 @@ impl RendezvousServer {
+@@ -493,7 +599,7 @@ impl RendezvousServer {
                  Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
                      // there maybe several attempt, so sink can be none
                      if let Some(sink) = sink.take() {
@@ -3234,7 +3374,7 @@ index dff45eb..581239a 100644
                      }
                      if let Some(peer) = self.pm.get_in_memory(&rf.id).await {
                          let mut msg_out = RendezvousMessage::new();
-@@ -521,8 +607,18 @@ impl RendezvousServer {
+@@ -521,8 +627,18 @@ impl RendezvousServer {
                              rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
                          }
                      }
@@ -3254,7 +3394,7 @@ index dff45eb..581239a 100644
                  }
                  Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
                      allow_err!(self.handle_hole_sent(phs, addr, None).await);
-@@ -545,14 +641,31 @@ impl RendezvousServer {
+@@ -545,14 +661,31 @@ impl RendezvousServer {
                      msg_out.set_test_nat_response(res);
                      Self::send_to_sink(sink, msg_out).await;
                  }
@@ -3294,7 +3434,7 @@ index dff45eb..581239a 100644
                  }
                  _ => {}
              }
-@@ -567,7 +680,19 @@ impl RendezvousServer {
+@@ -567,7 +700,19 @@ impl RendezvousServer {
          socket_addr: SocketAddr,
          socket: &mut FramedSocket,
      ) -> ResultType<()> {
@@ -3314,7 +3454,7 @@ index dff45eb..581239a 100644
              let mut old = old.write().await;
              let ip = socket_addr.ip();
              let ip_change = if old.socket_addr.port() != 0 {
-@@ -576,7 +701,7 @@ impl RendezvousServer {
+@@ -576,7 +721,7 @@ impl RendezvousServer {
                  ip.to_string() != old.info.ip
              } && !ip.is_loopback();
              let request_pk = old.pk.is_empty() || ip_change;
@@ -3323,7 +3463,7 @@ index dff45eb..581239a 100644
                  old.socket_addr = socket_addr;
                  old.last_reg_time = Instant::now();
              }
-@@ -601,7 +726,128 @@ impl RendezvousServer {
+@@ -601,7 +746,128 @@ impl RendezvousServer {
              request_pk,
              ..Default::default()
          });
@@ -3453,7 +3593,7 @@ index dff45eb..581239a 100644
      }
  
      #[inline]
-@@ -620,17 +866,25 @@ impl RendezvousServer {
+@@ -620,17 +886,25 @@ impl RendezvousServer {
              &addr
          );
          let mut msg_out = RendezvousMessage::new();
@@ -3480,7 +3620,7 @@ index dff45eb..581239a 100644
              socket.send(&msg_out, addr_a).await?;
          } else {
              self.send_to_tcp(msg_out, addr_a).await;
-@@ -658,6 +912,7 @@ impl RendezvousServer {
+@@ -658,6 +932,7 @@ impl RendezvousServer {
              socket_addr: la.local_addr.clone(),
              pk: self.get_pk(&la.version, la.id).await,
              relay_server: la.relay_server,
@@ -3488,7 +3628,7 @@ index dff45eb..581239a 100644
              ..Default::default()
          };
          p.set_is_local(true);
-@@ -679,8 +934,9 @@ impl RendezvousServer {
+@@ -679,8 +954,9 @@ impl RendezvousServer {
          ws: bool,
      ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
          let mut ph = ph;
@@ -3499,7 +3639,7 @@ index dff45eb..581239a 100644
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
                  failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
-@@ -700,6 +956,7 @@ impl RendezvousServer {
+@@ -700,6 +976,7 @@ impl RendezvousServer {
                  (r.last_reg_time.elapsed().as_millis() as i64, r.socket_addr)
              };
              if elapsed >= REG_TIMEOUT {
@@ -3507,7 +3647,7 @@ index dff45eb..581239a 100644
                  let mut msg_out = RendezvousMessage::new();
                  msg_out.set_punch_hole_response(PunchHoleResponse {
                      failure: punch_hole_response::Failure::OFFLINE.into(),
-@@ -721,7 +978,12 @@ impl RendezvousServer {
+@@ -721,7 +998,12 @@ impl RendezvousServer {
                          break;
                      }
                  }
@@ -3521,7 +3661,7 @@ index dff45eb..581239a 100644
              }
  
              let mut msg_out = RendezvousMessage::new();
-@@ -744,6 +1006,7 @@ impl RendezvousServer {
+@@ -744,6 +1026,7 @@ impl RendezvousServer {
                      }
                  });
              let socket_addr = AddrMangle::encode(addr).into();
@@ -3529,7 +3669,7 @@ index dff45eb..581239a 100644
              if same_intranet {
                  log::debug!(
                      "Fetch local addr {:?} {:?} request from {:?}",
-@@ -754,6 +1017,7 @@ impl RendezvousServer {
+@@ -754,6 +1037,7 @@ impl RendezvousServer {
                  msg_out.set_fetch_local_addr(FetchLocalAddr {
                      socket_addr,
                      relay_server,
@@ -3537,7 +3677,7 @@ index dff45eb..581239a 100644
                      ..Default::default()
                  });
              } else {
-@@ -763,15 +1027,29 @@ impl RendezvousServer {
+@@ -763,15 +1047,29 @@ impl RendezvousServer {
                      peer_addr,
                      addr
                  );
@@ -3567,7 +3707,7 @@ index dff45eb..581239a 100644
              let mut msg_out = RendezvousMessage::new();
              msg_out.set_punch_hole_response(PunchHoleResponse {
                  failure: punch_hole_response::Failure::ID_NOT_EXIST.into(),
-@@ -787,6 +1065,13 @@ impl RendezvousServer {
+@@ -787,6 +1085,13 @@ impl RendezvousServer {
          stream: &mut FramedStream,
          peers: Vec<String>,
      ) -> ResultType<()> {
@@ -3581,7 +3721,7 @@ index dff45eb..581239a 100644
          let mut states = BytesMut::zeroed((peers.len() + 7) / 8);
          for (i, peer_id) in peers.iter().enumerate() {
              if let Some(peer) = self.pm.get_in_memory(peer_id).await {
-@@ -805,32 +1090,82 @@ impl RendezvousServer {
+@@ -805,32 +1110,82 @@ impl RendezvousServer {
              states: states.into(),
              ..Default::default()
          });
@@ -3681,7 +3821,7 @@ index dff45eb..581239a 100644
          }
      }
  
-@@ -840,8 +1175,7 @@ impl RendezvousServer {
+@@ -840,8 +1195,7 @@ impl RendezvousServer {
          msg: RendezvousMessage,
          addr: SocketAddr,
      ) -> ResultType<()> {
@@ -3691,7 +3831,7 @@ index dff45eb..581239a 100644
          Ok(())
      }
  
-@@ -880,6 +1214,17 @@ impl RendezvousServer {
+@@ -880,6 +1234,17 @@ impl RendezvousServer {
          Ok(())
      }
  
@@ -3709,7 +3849,7 @@ index dff45eb..581239a 100644
      async fn check_ip_blocker(&self, ip: &str, id: &str) -> bool {
          let mut lock = IP_BLOCKER.lock().await;
          let now = Instant::now();
-@@ -887,7 +1232,8 @@ impl RendezvousServer {
+@@ -887,7 +1252,8 @@ impl RendezvousServer {
              let counter = &mut old.0;
              if counter.1.elapsed().as_secs() > IP_BLOCK_DUR {
                  counter.0 = 0;
@@ -3719,7 +3859,7 @@ index dff45eb..581239a 100644
                  return false;
              }
              counter.0 += 1;
-@@ -897,7 +1243,10 @@ impl RendezvousServer {
+@@ -897,7 +1263,10 @@ impl RendezvousServer {
              let is_new = counter.0.get(id).is_none();
              if counter.1.elapsed().as_secs() > DAY_SECONDS {
                  counter.0.clear();
@@ -3731,7 +3871,7 @@ index dff45eb..581239a 100644
                  return !is_new;
              }
              if is_new {
-@@ -905,25 +1254,55 @@ impl RendezvousServer {
+@@ -905,25 +1274,55 @@ impl RendezvousServer {
              }
              counter.1 = now;
          } else {
@@ -3796,7 +3936,7 @@ index dff45eb..581239a 100644
      }
  
      async fn check_cmd(&self, cmd: &str) -> String {
-@@ -948,8 +1327,9 @@ impl RendezvousServer {
+@@ -948,8 +1347,9 @@ impl RendezvousServer {
                  if let Some(rs) = fds.next() {
                      self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                  } else {
@@ -3808,7 +3948,7 @@ index dff45eb..581239a 100644
                      }
                  }
              }
-@@ -1110,6 +1490,7 @@ impl RendezvousServer {
+@@ -1110,6 +1510,7 @@ impl RendezvousServer {
          let stream = FramedStream::from(stream, addr);
          tokio::spawn(async move {
              let mut stream = stream;
@@ -3816,7 +3956,7 @@ index dff45eb..581239a 100644
              if let Some(Ok(bytes)) = stream.next_timeout(30_000).await {
                  if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
                      match msg_in.union {
-@@ -1148,43 +1529,136 @@ impl RendezvousServer {
+@@ -1148,43 +1549,136 @@ impl RendezvousServer {
          key: &str,
          ws: bool,
      ) -> ResultType<()> {
@@ -3970,7 +4110,7 @@ index dff45eb..581239a 100644
          if sink.is_none() {
              self.tcp_punch.lock().await.remove(&try_into_v4(addr));
          }
-@@ -1233,6 +1707,7 @@ impl RendezvousServer {
+@@ -1233,6 +1727,7 @@ impl RendezvousServer {
  
          if key.is_empty() || key == "-" || key == "_" {
              let (pk, sk) = crate::common::gen_sk(0);
@@ -3978,7 +4118,7 @@ index dff45eb..581239a 100644
              out_sk = sk;
              if !key.is_empty() {
                  key = pk;
-@@ -1268,24 +1743,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
+@@ -1268,24 +1763,51 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
      let mut futs = Vec::new();
      let rs = Arc::new(Mutex::new(Vec::new()));
      for x in rs0.iter() {
@@ -4036,7 +4176,7 @@ index dff45eb..581239a 100644
      if !rs.is_empty() {
          tx.send(Data::RelayServers(rs)).ok();
      }
-@@ -1329,18 +1831,29 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
+@@ -1329,18 +1851,29 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
      }
  }
  
@@ -4072,7 +4212,7 @@ index dff45eb..581239a 100644
  }
  
  async fn create_udp_listener(port: i32, rmem: usize) -> ResultType<FramedSocket> {
-@@ -1361,3 +1874,716 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
+@@ -1361,3 +1894,716 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
      log::debug!("listen on tcp {:?}", s.local_addr());
      Ok(s)
  }

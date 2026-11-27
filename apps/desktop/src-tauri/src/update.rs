@@ -37,7 +37,7 @@ use tether_trust::{
 use crate::policy;
 
 /// Minisign public key (as `tauri signer generate` prints it); release builds require it.
-const UPDATER_KEY: Option<&str> = option_env!("TETHER_UPDATER_PUB_KEY");
+pub(crate) const UPDATER_KEY: Option<&str> = option_env!("TETHER_UPDATER_PUB_KEY");
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Legacy `latest.json` (clients up to 0.5.23 read only this).
@@ -231,7 +231,7 @@ pub fn status() -> Value {
 // ----------------------------------------------------------------------------- check
 
 /// One relay's document at `path`; 304 answers come from the remembered copy. `Ok(None)`: 404.
-fn fetch_doc(host: &str, path: &str, limit: usize) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn fetch_doc(host: &str, path: &str, limit: usize) -> Result<Option<Vec<u8>>, String> {
     let key = format!("{host}{path}");
     let etag = ETAGS.lock().unwrap().get(&key).map(|e| e.0.clone());
     let r = policy::api_via(&[host.to_owned()], |c, base| {
@@ -376,10 +376,24 @@ fn unpack(encoding: &str, data: &[u8], max: u64) -> Result<Vec<u8>, String> {
 }
 
 /// Every source in turn (the packed copy first), then the verified bytes.
-fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
+    download_within(c, key, None)
+}
+
+/// `within`: every source together (the health agent); None: up to 30 minutes per source.
+pub(crate) fn download_within(c: &Candidate, key: &str, within: Option<Duration>) -> Result<Vec<u8>, String> {
+    const PER_SOURCE: Duration = Duration::from_secs(1800);
+    let end = within.map(|w| (std::time::Instant::now() + w, w));
     let mut last = String::from("no download URL");
     for (url, packed) in c.sources() {
-        match download_one(&url, c, packed).and_then(|b| c.accept(b, packed, key, unpack)) {
+        let timeout = match end {
+            None => PER_SOURCE,
+            Some((end, w)) => match end.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero()) {
+                Some(left) => left.min(PER_SOURCE),
+                None => return Err(format!("the download did not finish within {} s", w.as_secs())),
+            },
+        };
+        match download_one(&url, c, packed, timeout).and_then(|b| c.accept(b, packed, key, unpack)) {
             Ok(b) => return Ok(b),
             Err(e) => {
                 log::warn!("update download {url}: {e}");
@@ -390,8 +404,8 @@ fn download(c: &Candidate, key: &str) -> Result<Vec<u8>, String> {
     Err(last)
 }
 
-fn download_one(url: &str, c: &Candidate, packed: bool) -> Result<Vec<u8>, String> {
-    let mut r = policy::fetch(url, Duration::from_secs(1800))?;
+fn download_one(url: &str, c: &Candidate, packed: bool, timeout: Duration) -> Result<Vec<u8>, String> {
+    let mut r = policy::fetch(url, timeout)?;
     let limit = c.limit(packed);
     let total = if c.signed() { limit } else { r.content_length().unwrap_or(0) };
     let mut bytes = Vec::with_capacity(total.min(release::MAX_ARTIFACT) as usize);

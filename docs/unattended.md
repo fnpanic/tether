@@ -139,6 +139,17 @@ Added after the runs above (not part of them; unit tests in `apps/desktop/src-ta
   resume, where the connection window runs (`sink::enforce_permission_locks` and `revoke_locked`,
   in the `--cm` process). A running file-transfer connection is closed when file transfer is
   locked off.
+- The service also manages the health monitoring agent when the policy feature `health.agent` asks
+  for it (0.7.0, Windows): after each policy check its `--server` process, and only that process
+  running as LocalSystem, installs the organisation's signed agent from `monitor.json`, keeps it at
+  the index's minimum version, enrols it again and removes it by policy; on a technician's request
+  in a session it installs or removes it at once. Nobody at the computer is asked: the policy (or the
+  technician with control in the session) decides, the connection window says what was done, and a
+  machine policy `health.agent` = `manual` blocks it. The proof that links the agent to this host is
+  signed with the service's own identity key, the one it registers with hbbs. A group's setting
+  reaches the service only after a user has opened Tether (above). Without the service, Tether asks
+  the person at the computer and uses the Windows elevation prompt instead
+  ([health.md](health.md#installing-the-agent-through-tether)). Not run on the test VM yet.
 
 ## Open
 
@@ -183,6 +194,22 @@ node apps/desktop/e2e/unattended-drive.mjs restart
 Logs in the VM: service/server `C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\Tether\log\server\`,
 settings import `…\log\import-config\`, installer CLI `C:\Users\<user>\AppData\Roaming\Tether\log\install-service\`,
 user app and CM `C:\Users\<user>\AppData\Roaming\Tether\log\` (`cm\`).
+
+## Instance builds
+
+An instance build (`TETHER_INSTANCE=north`,
+[several-organisations.md](several-organisations.md#two-organisations-on-one-pc)) installs its own
+service beside the default build's. Every name on this page follows the product name
+`Tether-north`, because the core takes them from the app name: the Windows service `Tether-north`
+(`sc create Tether-north`, `vendor/rustdesk/src/platform/windows.rs`), its settings and logs under
+`…\LocalService\AppData\Roaming\Tether-north\` and `%APPDATA%\Tether-north\`, and on macOS
+`/Library/LaunchDaemons/app.tether.Tether-north_service.plist`,
+`/Library/LaunchAgents/app.tether.Tether-north_server.plist` and
+`~/Library/Preferences/app.tether.Tether-north/` (`get_full_name`, `vendor/rustdesk/src/common.rs`),
+running `/Applications/Tether-north.app/Contents/MacOS/tether-north`. The installer's hooks use the
+product name too (`apps/desktop/src-tauri/windows/hooks.nsh`), so uninstalling one build leaves the
+other's service alone. None of this was tried on a real machine: no instance build has been
+installed yet.
 
 ## macOS
 

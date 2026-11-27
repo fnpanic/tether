@@ -35,6 +35,9 @@ in the middle. You run the relay; the apps talk only to it.
   installer, no admin rights. You can brand it: [docs/quick-support.md](docs/quick-support.md).
 - **Hundreds of hosts.** Tags, saved searches, bulk actions and a command palette:
   [docs/advanced.md](docs/advanced.md).
+- **Health of supported machines.** A separate monitoring agent reports to your relay, and the host
+  list shows which machines need attention, with no inbound port on the machine:
+  [docs/health.md](docs/health.md).
 - **Central management.** Tether Manage signs policies and releases on the administrator's PC;
   the relay only serves them: [docs/management.md](docs/management.md).
 - **Also included:** unattended access, file transfer, recording with consent, 2FA, signed
@@ -108,11 +111,13 @@ If Tether is useful to you, a star helps others find it.
   [docs/connection-resilience.md](docs/connection-resilience.md).
 - **Management:** Tether Manage (`apps/manage`) signs policies and releases; the relay API
   serves them. Customer module TetherQS (`apps/quick`): portable, no admin rights. See
-  [docs/management.md](docs/management.md), [docs/policy.md](docs/policy.md),
+  [docs/management.md](docs/management.md), [docs/sign-in.md](docs/sign-in.md) (staff sign-in), [docs/policy.md](docs/policy.md),
   [docs/updates.md](docs/updates.md), [docs/quick-support.md](docs/quick-support.md),
   [docs/recording.md](docs/recording.md), [docs/cli.md](docs/cli.md),
   [docs/troubleshooting.md](docs/troubleshooting.md), [docs/api.md](docs/api.md),
   [docs/key-rotation.md](docs/key-rotation.md), [docs/upstream.md](docs/upstream.md) (RustDesk pin and upstream review), [docs/download-page.md](docs/download-page.md) (custom download page templates).
+- **Several organisations:** one deployment each; no tenants inside a relay:
+  [docs/several-organisations.md](docs/several-organisations.md).
 - **Scale and HA:** several relays and Kubernetes: [docs/relay-ha.md](docs/relay-ha.md),
   [docs/kubernetes.md](docs/kubernetes.md); performance: [docs/performance.md](docs/performance.md);
   macOS build: [docs/macos.md](docs/macos.md); Mac builds from the PC while the Mac is locked (signed

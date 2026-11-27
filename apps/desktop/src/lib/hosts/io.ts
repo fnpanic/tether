@@ -1,15 +1,20 @@
 // Import/export of the host store (docs/advanced.md#import-and-export). Exports leave out notes
 // unless asked (they may hold passwords or customer details); nothing else in the store is secret.
-import { cleanRule, cleanSearch, cleanTagMeta, cleanTags, MAX_NAME, MAX_NOTES, newId, normTag, STORE_VERSION, type HostEntry, type Store } from "./model";
+import { cleanRule, cleanSearch, cleanTagMeta, cleanTags, label, MAX_NAME, MAX_NOTES, newId, normTag, STORE_VERSION, type Host, type HostEntry, type Store } from "./model";
 
 export interface ExportOpts {
   notes: boolean;
   /** Only these IDs (a selection); all when absent. */
   ids?: string[];
+  /** The host rows: adds their health fields (export only; an import ignores them). */
+  hosts?: Map<string, Host>;
 }
 
+const iso = (t: number) => new Date(t * 1000).toISOString();
+const products = (h: Host) => (h.status?.products ?? []).map((p) => [p.name, p.version, p.role && `(${p.role})`].filter(Boolean).join(" ")).join("; ");
+
 function pick(store: Store, o: ExportOpts): [string, HostEntry][] {
-  return o.ids ? o.ids.map((id) => [id, store.hosts[id] ?? {}]) : Object.entries(store.hosts);
+  return o.ids ? o.ids.map((id) => [id, (Object.hasOwn(store.hosts, id) && store.hosts[id]) || {}]) : Object.entries(store.hosts);
 }
 
 export function exportJson(store: Store, o: ExportOpts): string {
@@ -21,7 +26,9 @@ export function exportJson(store: Store, o: ExportOpts): string {
     if (e.pinned) out.pinned = true;
     if (e.added) out.added = e.added;
     if (o.notes && e.notes) out.notes = e.notes;
-    if (Object.keys(out).length || o.ids) hosts[id] = out;
+    const st = o.hosts?.get(id)?.status;
+    const health = st && { state: o.hosts!.get(id)!.health, counts: st.counts, products: st.products, agent: st.agent, customer: st.customer ?? undefined, reported: iso(st.last_seen), faults: st.faults };
+    if (Object.keys(out).length || o.ids) hosts[id] = health ? { ...out, health } as HostEntry : out;
   }
   return JSON.stringify({ format: "tether-hosts", v: STORE_VERSION, hosts, tags: store.tags, rules: store.rules, searches: store.searches }, null, 2);
 }
@@ -33,13 +40,25 @@ function cell(s: string): string {
 }
 
 export function exportCsv(store: Store, o: ExportOpts): string {
-  const cols = ["id", "name", "tags", "pinned", ...(o.notes ? ["notes"] : [])];
+  const cols = ["id", "name", "tags", "pinned", ...(o.notes ? ["notes"] : []), ...(o.hosts ? ["health", "crit", "warn", "unknown", "setup", "products", "agent", "customer", "reported"] : [])];
   const rows = [cols.join(",")];
   for (const [id, e] of pick(store, o)) {
     const r = [id, e.name ?? "", (e.tags ?? []).join(" "), e.pinned ? "yes" : ""];
     if (o.notes) r.push(e.notes ?? "");
+    if (o.hosts) {
+      const h = o.hosts.get(id);
+      const st = h?.status;
+      r.push(h?.health ?? "", ...(st ? [st.counts.crit, st.counts.warn, st.counts.unknown, st.counts.setup].map(String) : ["", "", "", ""]), h ? products(h) : "", st?.agent ?? "", st?.customer ?? "", st ? iso(st.last_seen) : "");
+    }
     rows.push(r.map(cell).join(","));
   }
+  return rows.join("\r\n") + "\r\n";
+}
+
+/** One row per failing check of the given hosts (the summary's `faults`). */
+export function exportFaultsCsv(hosts: Host[]): string {
+  const rows = ["id,name,uuid,check,state,since"];
+  for (const h of hosts) for (const f of h.status?.faults ?? []) rows.push([h.id, label(h), h.status!.uuid, f.id, f.state, f.since ?? ""].map(cell).join(","));
   return rows.join("\r\n") + "\r\n";
 }
 

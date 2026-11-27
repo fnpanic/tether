@@ -52,14 +52,15 @@ export function ChangeList({ changes, empty = "No changes." }: { changes: Change
   return (
     <ul className="flex flex-col divide-y divide-hairline rounded-xl border border-hairline">
       {changes.map((c, i) => (
-        <li key={i} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-caption">
+        <li key={i} className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-caption ${c.risk ? "border-l-4 border-l-warn text-warn" : ""}`}>
+          {c.risk && <Badge tone="warn">security</Badge>}
           <Badge>{c.scope}</Badge>
           {c.label ? (
             <>
               <span className="min-w-0 flex-1">{c.label}</span>
-              <span className="text-muted line-through">{c.from}</span>
+              <span className="select-text font-mono text-muted line-through">{c.from}</span>
               <span className="text-muted">→</span>
-              <span className="font-semibold">{c.to}</span>
+              <span className="select-text font-mono font-semibold">{c.to}</span>
             </>
           ) : (
             <span className="min-w-0 flex-1">{c.text.replace(`${c.scope} `, "").replace(/^./, (x) => x.toUpperCase())}</span>

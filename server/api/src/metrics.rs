@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::Mutex;
 use std::time::Duration;
 
-pub const ENDPOINTS: [&str; 12] = [
+pub const ENDPOINTS: [&str; 14] = [
     "policy", "server_keys", "heartbeat", "audit_conn", "audit_file", "audit_alarm", "diag_upload", "custom_download", "admin",
-    "metrics", "other", "release_index",
+    "metrics", "other", "release_index", "status", "team",
 ];
 /// `tether_api_devices_by_version` series at most (largest groups; the rest is `version="other"`).
 pub const MAX_VERSION_SERIES: usize = 30;
@@ -57,6 +57,8 @@ pub fn endpoint(method: &str, url: &str) -> usize {
         (_, p) if p.starts_with("/api/admin/") => 8,
         ("GET", "/metrics") => METRICS,
         ("GET", p) if p.starts_with("/download/") && p.ends_with("/releases.json") => 11,
+        (_, p) if p == "/api/status" || p.starts_with("/api/status/") => 12,
+        (_, p) if p.starts_with("/api/team/") => 13,
         _ => OTHER,
     }
 }
@@ -91,11 +93,19 @@ pub struct Now {
     pub release_generation: u64,
     /// (channel, serial, expires)
     pub indexes: Vec<(String, u64, u64)>,
+    /// (channel, expires) of the stored `monitor.json` (the device-status agent's index).
+    pub monitor_expires: Vec<(String, u64)>,
     /// ((profile, version), active devices)
     pub by_version: Vec<((String, String), u64)>,
     pub update_states: Vec<(String, u64)>,
     /// ((profile, version), devices that staged it)
     pub downloads: Vec<((String, String), u64)>,
+    /// (state, hosts) for ok, warn, crit, stale.
+    pub status_hosts: [(&'static str, u64); 4],
+    /// Stored software lists: (files, bytes).
+    pub status_sbom: (u64, u64),
+    /// Team audit records written, dropped with the queue full, with the log full, not written (write failed).
+    pub team_audit: [u64; 4],
 }
 
 /// The `n` largest groups; the rest summed per profile as version "other" (bounded label sets:
@@ -147,6 +157,18 @@ pub fn render(now: &Now, data_dir: &Path) -> String {
         ("tether_api_workers_max", "gauge", "Requests served at once (MAX_WORKERS); more get 503.", now.max_workers as f64),
         ("tether_api_busy_rejected_total", "counter", "Requests answered 503 busy at MAX_WORKERS.", BUSY_REJECTED.load(Relaxed) as f64),
         ("tether_api_body_timeouts_total", "counter", "Request bodies that did not arrive in time.", BODY_TIMEOUTS.load(Relaxed) as f64),
+        ("tether_api_status_write_errors", "counter", "Failed background writes of the device status store since start.", crate::status::WRITE_ERRORS.load(Relaxed) as f64),
+        ("tether_api_status_summary_builds_total", "counter", "Team summary builds (any member scope, plain file and gzip copy) since start.", crate::status::SUMMARY_BUILDS.load(Relaxed) as f64),
+        ("tether_api_status_summary_build_seconds_total", "counter", "Time spent building team summaries since start.", crate::status::SUMMARY_BUILD_US.load(Relaxed) as f64 / 1e6),
+        ("tether_api_status_summary_build_seconds_max", "gauge", "The longest team summary build since start.", crate::status::SUMMARY_BUILD_MAX_US.load(Relaxed) as f64 / 1e6),
+        ("tether_api_status_software_searches_total", "counter", "Software searches run since start (answers from the cache not counted).", crate::status::SEARCHES.load(Relaxed) as f64),
+        ("tether_api_status_software_search_seconds_total", "counter", "Time spent in software searches since start.", crate::status::SEARCH_US.load(Relaxed) as f64 / 1e6),
+        ("tether_api_status_software_search_seconds_max", "gauge", "The longest software search since start.", crate::status::SEARCH_MAX_US.load(Relaxed) as f64 / 1e6),
+        ("tether_api_status_sbom_files", "gauge", "Software lists stored (status/<uuid>.sbom.json).", now.status_sbom.0 as f64),
+        ("tether_api_status_sbom_bytes", "gauge", "Bytes of the software lists stored (counted against STATUS_SBOM_MAX_TOTAL_MB).", now.status_sbom.1 as f64),
+        ("tether_api_team_audit_records_total", "counter", "Team audit records written since start.", now.team_audit[0] as f64),
+        ("tether_api_team_audit_dropped_total", "counter", "Team audit records dropped since start (queue full, TEAM_AUDIT_MAX_MB reached or a failed write; each drop is also a dropped record in the log).", (now.team_audit[1] + now.team_audit[2] + now.team_audit[3]) as f64),
+        ("tether_api_team_audit_write_failed_total", "counter", "Team audit records that could not be written (disk full, folder not writable; counted in the dropped total too).", now.team_audit[3] as f64),
         ("tether_api_devices", "gauge", "Devices in the device list (heartbeat within 180 days).", now.devices as f64),
         ("tether_api_devices_active_24h", "gauge", "Devices with a heartbeat within 24 h.", now.devices_24h as f64),
         ("tether_api_data_bytes", "gauge", "Size of the data directory (releases, audit, diagnostics, state).", du as f64),
@@ -166,6 +188,9 @@ pub fn render(now: &Now, data_dir: &Path) -> String {
     for (c, _, e) in &now.indexes {
         let _ = writeln!(o, "tether_api_release_index_expires_timestamp{{channel=\"{}\"}} {e}", label(c));
     }
+    for (c, e) in &now.monitor_expires {
+        let _ = writeln!(o, "tether_api_release_index_expires_timestamp{{channel=\"{}\",index=\"monitor\"}} {e}", label(c));
+    }
     header(&mut o, "tether_api_devices_by_version", "gauge", "Devices with a heartbeat within 24 h, by profile and installed version.");
     for ((p, v), n) in &now.by_version {
         let _ = writeln!(o, "tether_api_devices_by_version{{profile=\"{}\",version=\"{}\"}} {n}", label(p), label(v));
@@ -177,6 +202,10 @@ pub fn render(now: &Now, data_dir: &Path) -> String {
     header(&mut o, "tether_api_release_downloads_total", "counter", "Devices that reported a newly downloaded (staged) update, by profile and version, since start.");
     for ((p, v), n) in &now.downloads {
         let _ = writeln!(o, "tether_api_release_downloads_total{{profile=\"{}\",version=\"{}\"}} {n}", label(p), label(v));
+    }
+    header(&mut o, "tether_api_status_hosts", "gauge", "Hosts with a status report, by state (stale: overdue for 3 intervals; unknown counts as ok).");
+    for (s, n) in &now.status_hosts {
+        let _ = writeln!(o, "tether_api_status_hosts{{state=\"{s}\"}} {n}");
     }
     let (rel_bytes, rel_versions) = crate::prune::usage(data_dir);
     header(&mut o, "tether_api_release_bytes", "gauge", "Bytes of release files below download/<channel>/, by channel.");
@@ -276,6 +305,11 @@ mod tests {
         assert_eq!(ENDPOINTS[endpoint("GET", "/anything/else")], "other");
         assert_eq!(ENDPOINTS[endpoint("GET", "/download/stable/releases.json")], "release_index");
         assert_eq!(ENDPOINTS[endpoint("GET", "/download/stable/technician/windows-x86_64/latest.json")], "other");
+        assert_eq!(ENDPOINTS[endpoint("POST", "/api/status")], "status");
+        assert_eq!(ENDPOINTS[endpoint("POST", "/api/status/enroll")], "status");
+        assert_eq!(ENDPOINTS[endpoint("GET", "/api/statusx")], "other");
+        assert_eq!(ENDPOINTS[endpoint("GET", "/api/team/status")], "team");
+        assert_eq!(ENDPOINTS[endpoint("DELETE", "/api/admin/status/dev-0001")], "admin");
     }
 
     #[test]
@@ -293,9 +327,13 @@ mod tests {
             devices_24h: 2,
             release_generation: 7,
             indexes: vec![("stable".into(), 57, 1_765_119_600)],
+            monitor_expires: vec![],
             by_version: top(versions, 2),
             update_states: vec![("staged".into(), 4)],
             downloads: vec![(("customer".into(), "0.5.24".into()), 3)],
+            status_hosts: [("ok", 4), ("warn", 0), ("crit", 1), ("stale", 2)],
+            status_sbom: (2, 81_920),
+            team_audit: [7, 2, 1, 4],
         };
         let before = render(&now, &dir);
         observe(2, 204, Duration::from_millis(3));
@@ -323,6 +361,9 @@ mod tests {
         assert_eq!(value(&t, "tether_api_devices_by_version{profile=\"technician\",version=\"other\"}"), 2.);
         assert_eq!(value(&t, "tether_api_devices_update_state{state=\"staged\"}"), 4.);
         assert_eq!(value(&t, "tether_api_release_downloads_total{profile=\"customer\",version=\"0.5.24\"}"), 3.);
+        assert_eq!(value(&t, "tether_api_status_hosts{state=\"stale\"}"), 2.);
+        assert_eq!((value(&t, "tether_api_status_sbom_files"), value(&t, "tether_api_status_sbom_bytes")), (2., 81_920.));
+        assert_eq!((value(&t, "tether_api_team_audit_records_total"), value(&t, "tether_api_team_audit_dropped_total"), value(&t, "tether_api_team_audit_write_failed_total")), (7., 7., 4.));
         assert!(!t.contains("x\"}"), "label values are filtered");
         let _ = std::fs::remove_dir_all(&dir);
     }

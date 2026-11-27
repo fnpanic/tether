@@ -9,7 +9,7 @@ use std::{
 
 use crate::{diag, policy, security, update};
 
-pub const HELP: &str = "\
+const HELP: &str = "\
 Usage: tether [command]
 
   (no command)                      start Tether
@@ -66,19 +66,29 @@ pub enum Cmd {
     PolicyRefresh,
 }
 
-const URI_PREFIX: &str = "tether://";
+/// `--help`: an instance build names its own binary and link scheme (`tether-<i>`).
+pub fn help() -> String {
+    let bin = crate::APP_NAME.to_lowercase();
+    HELP.replace("Usage: tether ", &format!("Usage: {bin} ")).replace("  tether://", &format!("  {}", uri_prefix()))
+}
+
+/// `tether://`, `tether-<i>://` for an instance build (its deep-link scheme, scripts/instance-config.sh).
+fn uri_prefix() -> String {
+    format!("{}://", crate::APP_NAME.to_lowercase())
+}
 
 /// `tether://connect/<id>` (optional trailing `/`). Nothing else: no query, no password.
 pub fn parse_uri(uri: &str) -> Result<Connect, String> {
+    let prefix = uri_prefix();
     let rest = uri
-        .get(..URI_PREFIX.len())
-        .filter(|p| p.eq_ignore_ascii_case(URI_PREFIX))
-        .map(|_| &uri[URI_PREFIX.len()..])
-        .ok_or("not a tether:// link")?;
+        .get(..prefix.len())
+        .filter(|p| p.eq_ignore_ascii_case(&prefix))
+        .map(|_| &uri[prefix.len()..])
+        .ok_or_else(|| format!("not a {prefix} link"))?;
     let peer = rest
         .strip_prefix("connect/")
         .map(|p| p.strip_suffix('/').unwrap_or(p))
-        .ok_or("only tether://connect/<id> links are supported")?;
+        .ok_or_else(|| format!("only {prefix}connect/<id> links are supported"))?;
     security::check_peer_id(peer)?;
     Ok(Connect { peer: peer.to_owned(), conn: "default".into(), ..Default::default() })
 }
@@ -86,9 +96,10 @@ pub fn parse_uri(uri: &str) -> Result<Connect, String> {
 /// `None`: not a Tether command, the core handles it.
 pub fn parse(args: &[String]) -> Option<Result<Cmd, String>> {
     let first = args.first()?;
-    if first.len() >= URI_PREFIX.len() && first[..URI_PREFIX.len()].eq_ignore_ascii_case(URI_PREFIX) {
+    let prefix = uri_prefix();
+    if first.get(..prefix.len()).is_some_and(|p| p.eq_ignore_ascii_case(&prefix)) {
         if args.len() > 1 {
-            return Some(Err("a tether:// link takes no other arguments".into()));
+            return Some(Err(format!("a {prefix} link takes no other arguments")));
         }
         return Some(parse_uri(first).map(Cmd::Connect));
     }
@@ -236,7 +247,7 @@ pub fn run(args: &[String]) -> Option<ExitCode> {
         Ok(c) => c,
         Err(e) => {
             console();
-            eprintln!("{e}\n\n{HELP}");
+            eprintln!("{e}\n\n{}", help());
             return Some(ExitCode::from(2));
         }
     };
@@ -244,7 +255,7 @@ pub fn run(args: &[String]) -> Option<ExitCode> {
         console();
     }
     let result: Result<String, String> = match cmd {
-        Cmd::Help => Ok(HELP.into()),
+        Cmd::Help => Ok(help()),
         Cmd::Version => Ok(update::VERSION.into()),
         Cmd::GetId => Ok(librustdesk::ipc::get_id()),
         Cmd::Diagnostics(out) => diag::export_to(&out).map(|_| format!("wrote {}", out.display())),
@@ -384,18 +395,36 @@ mod tests {
     }
 
     #[test]
-    fn uris() {
-        assert_eq!(connect("tether://connect/123456789").peer, "123456789");
-        assert_eq!(connect("TETHER://connect/123456789/").peer, "123456789");
-        for bad in [
-            "tether://connect/123456789?password=x",
-            "tether://connect/123456789/x",
-            "tether://file-transfer/123456789",
-            "tether://connect/",
-            "tether://connect/1@2#3",
-        ] {
-            assert!(matches!(p(bad), Some(Err(_))), "{bad} accepted");
+    fn uri_prefix_follows_the_app_name() {
+        assert_eq!(uri_prefix(), format!("{}://", crate::APP_NAME.to_lowercase()));
+        if env!("TETHER_INSTANCE").is_empty() {
+            assert_eq!(uri_prefix(), "tether://");
+            assert_eq!(help(), HELP);
+        } else {
+            let i = env!("TETHER_INSTANCE");
+            assert!(help().starts_with(&format!("Usage: tether-{i} [command]\n")));
+            assert!(help().contains(&format!("\n  tether-{i}://connect/<id>   ")));
+            assert!(!help().contains(" tether://"));
         }
-        assert!(matches!(p("tether://connect/123456789 pw"), Some(Err(_))));
+    }
+
+    #[test]
+    fn uris() {
+        let u = |rest: &str| format!("{}{rest}", uri_prefix());
+        assert_eq!(connect(&u("connect/123456789")).peer, "123456789");
+        assert_eq!(connect(&format!("{}connect/123456789/", uri_prefix().to_uppercase())).peer, "123456789");
+        for bad in [
+            u("connect/123456789?password=x"),
+            u("connect/123456789/x"),
+            u("file-transfer/123456789"),
+            u("connect/"),
+            u("connect/1@2#3"),
+        ] {
+            assert!(matches!(p(&bad), Some(Err(_))), "{bad} accepted");
+        }
+        assert!(matches!(p(&u("connect/123456789 pw")), Some(Err(_))));
+        // Another build's scheme is not this app's link.
+        let other = if env!("TETHER_INSTANCE").is_empty() { "tether-north://" } else { "tether://" };
+        assert!(parse_uri(&format!("{other}connect/123456789")).is_err());
     }
 }

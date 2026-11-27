@@ -33,6 +33,13 @@ import { mouseMask, MOUSE, wheelSteps, lockModes, remoteKey } from "../lib/input
 import { classify, onFailure, reconnectMinutes, type Series } from "../lib/reconnect";
 import { passwordWhy, RESUME_GRACE_MS } from "../lib/login";
 import { errorText, isOn, usePolicy } from "../lib/policy";
+import { buildHosts, emptyStore, label, type Host, type StatusSummary } from "../lib/hosts/model";
+import { uiLang } from "../lib/hosts/health";
+import { HealthDot, HEALTH_LABEL } from "../components/hosts/bits";
+import { HealthSection, useStatusHost } from "../components/hosts/Health";
+import { AgentDialog } from "../components/AgentDialog";
+import { AGENT_MENU, agentMenu } from "../lib/agent";
+import { loadPerms, usePerms } from "../lib/signin";
 import { ADMIN_ON, elevationError, hostNote, NOTE_TEXT, UAC_SETTLE_MS, uacOutcome, type HostNote } from "../lib/elevation";
 
 interface Display {
@@ -138,6 +145,18 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
   const barRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(false);
   const [chat, setChat] = useState<{ open: boolean; unread: number; msgs: { me: boolean; text: string }[] }>({ open: false, unread: 0, msgs: [] });
+  // Health of this peer from the host list's last summary (no request, no team key for non-team users).
+  const [health, setHealth] = useState<{ h: Host; open: boolean } | null>(null);
+  useEffect(() => {
+    // Every device linked to this ID: two or more are a link conflict (shown as such, no device's health).
+    invoke<StatusSummary[]>("team_status_find", { id: peer }).then(
+      (list) => {
+        const h = list?.length ? buildHosts(emptyStore(), [], [], null, Date.now() / 1000, list).find((x) => x.id === peer) : undefined;
+        if (h) setHealth({ h, open: false });
+      },
+      () => {},
+    );
+  }, [peer]);
   const [cursor, setCursor] = useState("default");
   const [kbd, setKbd] = useState<KbdSettings | null>(null);
   // The person at the remote computer turned "Control mouse and keyboard" off.
@@ -203,6 +222,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
   /** Every toolbar action either works or says why not. */
   const act = (p: Promise<unknown>) => p.catch((e) => toast.show(errorText(e)));
   const [ask, setAsk] = useState<"lock" | "restart" | null>(null);
+  const [agentOpen, setAgentOpen] = useState(false);
   // Local keyboard (docs/keyboard.md): after Ctrl+Alt+Home the keys work this window's toolbar,
   // menus and dialogs instead of going to the remote computer, until Escape or a click into the picture.
   const [local, setLocal] = useState(false);
@@ -222,8 +242,12 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
     invoke("session_keyboard", { key, pause: false }).catch(() => {});
   };
   useEffect(() => {
-    if (local && toolbar && !ask && !barRef.current?.contains(document.activeElement)) barRef.current?.querySelector("button")?.focus();
-  }, [local, toolbar, ask]);
+    if (local && toolbar && !ask && !agentOpen && !barRef.current?.contains(document.activeElement)) barRef.current?.querySelector("button")?.focus();
+  }, [local, toolbar, ask, agentOpen]);
+  // A reconnect must not bring the dialog back: it asked about the connection that ended.
+  useEffect(() => {
+    if (phase.kind !== "connected") setAgentOpen(false);
+  }, [phase.kind]);
   /** What the host said is missing (a Mac without Screen Recording / Accessibility). */
   const [hostMissing, setHostMissing] = useState<string[]>([]);
 
@@ -554,6 +578,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
         e.preventDefault();
         const menu = barRef.current?.querySelector<HTMLElement>('[aria-expanded="true"]');
         if (ask) setAsk(null);
+        else if (agentOpen) setAgentOpen(false);
         else if (menu) (menu.click(), menu.focus());
         else leaveLocal(e.code);
         return;
@@ -596,7 +621,7 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
       document.removeEventListener("focusin", fin);
       document.removeEventListener("focusout", fout);
     };
-  }, [phase.kind, key, toRemote, chat.open, useGl, viewOnly, local, ask]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [phase.kind, key, toRemote, chat.open, useGl, viewOnly, local, ask, agentOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keyboard settings; asked again once the peer's platform is known (PC/Mac mapping).
   useEffect(() => {
@@ -707,6 +732,10 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
 
   const name = info?.hostname || formatId(peer);
   const connected = phase.kind === "connected";
+  const agentAllowed = usePerms((p) => p.agent);
+  useEffect(() => {
+    if (connected) void loadPerms();
+  }, [connected]);
   const delay = quality.delay;
   const latencyColor = delay == null ? "bg-muted" : delay < 40 ? "bg-ok" : delay < 120 ? "bg-warn" : "bg-danger";
 
@@ -838,6 +867,11 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
           <TB label="Statistics" active={showStats} onClick={() => setShowStats(!showStats)}>
             <Activity size={17} />
           </TB>
+          {health && (
+            <TB label={`Health: ${HEALTH_LABEL[health.h.health]}`} active={health.open} onClick={() => setHealth({ ...health, open: !health.open })}>
+              <HealthDot s={health.h.health} size={17} label="" />
+            </TB>
+          )}
           <Sep />
           {(chatOn || chat.msgs.length > 0) && (
             <TB label={chat.unread ? `Chat (${chat.unread} unread)` : "Chat"} active={chat.open} onClick={() => setChat((c) => ({ ...c, open: !c.open, unread: 0 }))}>
@@ -868,7 +902,9 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
             adminOn={adminOn}
             onCad={() => act(invoke("session_ctrl_alt_del", { key }))}
             onElevate={() => act(invoke("session_elevate", { key }))}
-            onAsk={setAsk}
+            onAsk={(a) => (setAgentOpen(false), setAsk(a))}
+            agent={agentMenu(viewOnly, controlOff, agentAllowed)}
+            onAgent={() => (setAsk(null), setAgentOpen(true))}
           />
           <Sep />
           <TB label={fullscreen ? "Exit full screen" : "Full screen"} onClick={toggleFullscreen}>
@@ -904,6 +940,8 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
         />
       )}
 
+      {agentOpen && connected && <AgentDialog sessionKey={key} onClose={() => setAgentOpen(false)} />}
+
       {showStats && connected && (
         <div className="animate-fade pointer-events-none absolute bottom-3 left-3 z-10 rounded-xl border border-white/10 bg-black/70 px-3.5 py-2.5 font-mono text-footnote leading-[1.7] text-white/85 backdrop-blur">
           <Stat k="fps" v={vstats ? `${vstats.fps} shown / ${vstats.inFps} recv` : "–"} />
@@ -920,6 +958,8 @@ function RemoteView({ sessionKey: key, peer, viewOnly }: { sessionKey: string; p
           {fingerprint && <Stat k="fingerprint" v={fingerprint.slice(0, 23)} />}
         </div>
       )}
+
+      {health?.open && <HealthPanel h={health.h} shifted={chat.open} onClose={() => setHealth({ ...health, open: false })} />}
 
       {chat.open && (
         <ChatPanel
@@ -1026,7 +1066,7 @@ function KeyboardMenu({ kbd, mac, onChange, onForceQuit }: { kbd: KbdSettings; m
 }
 
 /** Ctrl+Alt+Del, lock and restart: disruptive, so grouped, explained and (lock, restart) confirmed. */
-function ActionsMenu({ windows, service, adminOn, onCad, onElevate, onAsk }: { windows: boolean; service: boolean; adminOn: boolean | null; onCad: () => void; onElevate: () => void; onAsk: (a: "lock" | "restart") => void }) {
+function ActionsMenu({ windows, service, adminOn, onCad, onElevate, onAsk, agent, onAgent }: { windows: boolean; service: boolean; adminOn: boolean | null; onCad: () => void; onElevate: () => void; onAsk: (a: "lock" | "restart") => void; agent: { disabled: boolean; hint: string }; onAgent: () => void }) {
   const [open, setOpen] = useState(false);
   const item = (label: string, hint: string, run: () => void, disabled = false) => (
     <button
@@ -1068,6 +1108,7 @@ function ActionsMenu({ windows, service, adminOn, onCad, onElevate, onAsk }: { w
             )}
           {item("Lock screen…", service ? "Locks the remote computer" : "You will not be able to sign back in", () => onAsk("lock"))}
           {item("Restart…", "Ends the session", () => onAsk("restart"))}
+          {item(AGENT_MENU, agent.hint, onAgent, agent.disabled)}
         </div>
       )}
     </div>
@@ -1303,6 +1344,30 @@ function RecPill({ since }: { since: number }) {
       <span className="h-2 w-2 animate-pulse rounded-full bg-danger" />
       <span className="font-semibold text-danger">REC</span>
       <span className="text-white/80">{mmss}</span>
+    </div>
+  );
+}
+
+/** The host list's Health section in a floating panel (same frame as the chat; left of it when both are open). */
+function HealthPanel({ h, shifted, onClose }: { h: Host; shifted: boolean; onClose: () => void }) {
+  const reply = useStatusHost(h);
+  return (
+    <div role="dialog" aria-label="Health" className={`animate-rise absolute bottom-3 z-20 flex h-[min(560px,calc(100%-72px))] w-[340px] flex-col overflow-hidden rounded-2xl border border-white/10 glass shadow-float ${shifted ? "right-[344px]" : "right-3"}`}>
+      <div className="flex items-center justify-between border-b border-white/10 px-4 py-2.5">
+        <span className="min-w-0 truncate text-caption font-normal">Health · {label(h)}</span>
+        <IconButton label="Close health" onClick={onClose} className="!text-white/60 hover:!bg-white/10">
+          <X size={16} />
+        </IconButton>
+      </div>
+      <div className="flex-1 overflow-y-auto px-4 pb-4 [&>section]:mt-2">
+        {h.status ? (
+          <HealthSection h={h} reply={reply} lang={uiLang()} />
+        ) : (
+          <p data-testid="session-health-conflict" role="alert" className="mt-3 text-caption text-white/80">
+            Health link conflict: two devices are linked to this host on different relays, so no health is shown. Resolve it in the host list (unlink or remove the one that is not this computer).
+          </p>
+        )}
+      </div>
     </div>
   );
 }
